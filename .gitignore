@@ -1,0 +1,6 @@
+build/
+ext/
+*.o
+*.a
+*.dSYM/
+.DS_Store
