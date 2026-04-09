@@ -341,6 +341,12 @@ Worth exploring:
 - **Wider NEON partition**: Process 16 indices at a time using two
   TBL instructions, reducing loop iterations by 2x. Requires a 64KB
   shuffle table (for 16-bit masks) or a two-pass approach.
+- **Replace `compress_popcnt` table with `__builtin_popcount`**: Tested,
+  showed no improvement (~1% slower consistently on M4, reason unclear —
+  possibly the table load fuses with the TBL shuffle load in the
+  load-store unit, or the compiler schedules it earlier). Worth
+  re-testing on other microarchitectures. On x86 `popcnt` is 1-cycle
+  and may win.
 
 ## Building & Running
 
