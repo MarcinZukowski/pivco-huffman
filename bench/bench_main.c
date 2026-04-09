@@ -15,6 +15,18 @@ extern const uint64_t *bench_dist_freq(int idx);
 extern void         bench_generate_symbols(int dist_idx, uint8_t *symbols,
                                            int n_symbols, uint64_t seed);
 
+/* From bench_rans.cpp — ryg's alias rANS */
+extern void  *rans_alias_create(const uint64_t *freq256);
+extern void   rans_alias_destroy(void *ctx);
+extern size_t rans_alias_encode(void *ctx, const uint8_t *symbols, size_t n,
+                                uint8_t *out, size_t out_cap);
+extern size_t rans_alias_decode(void *ctx, const uint8_t *in, size_t in_len,
+                                uint8_t *symbols, size_t n);
+extern size_t rans_alias_encode_x2(void *ctx, const uint8_t *symbols, size_t n,
+                                   uint8_t *out, size_t out_cap);
+extern size_t rans_alias_decode_x2(void *ctx, const uint8_t *in, size_t in_len,
+                                   uint8_t *symbols, size_t n);
+
 static double now_sec(void)
 {
     struct timespec ts;
@@ -40,12 +52,13 @@ int main(int argc, char **argv)
     printf("=== PIVCO-Huffman Benchmarks ===\n");
     printf("Block size: %d symbols, Iterations: %d\n\n", N, ITERATIONS);
 
-    printf("%-13s | %7s %7s | %7s %7s | %7s %7s | %7s\n",
+    printf("%-13s | %7s %7s | %7s %7s | %7s %7s | %7s %7s | %7s\n",
            "DECODE M/s", "pivco_s", "pivco_n",
            "trad_1s", "trad_4s",
-           "huf0_1s", "huf0_4s", "ratio");
+           "huf0_1s", "huf0_4s",
+           "rans_1", "rans_2", "ratio");
     printf("--------------|-----------------|-----------------|------"
-           "-----------|--------\n");
+           "-----------|-----------------|--------\n");
 
     for (int d = 0; d < n_dist; d++) {
         const char *name = bench_dist_name(d);
@@ -94,6 +107,15 @@ int main(int argc, char **argv)
                                                  symbols, N, 255, 11);
         int huf0_1s_ok = !HUF_isError(huf0_1s_enc_len) && huf0_1s_enc_len > 0;
 
+        /* ---- Pre-encode: rANS alias ---- */
+        void *rans_ctx = rans_alias_create(freq);
+        uint8_t rans_enc[N * 4];
+        size_t rans_enc_len = rans_alias_encode(rans_ctx, symbols, N,
+                                                 rans_enc, sizeof(rans_enc));
+        uint8_t rans_x2_enc[N * 4];
+        size_t rans_x2_enc_len = rans_alias_encode_x2(rans_ctx, symbols, N,
+                                                       rans_x2_enc, sizeof(rans_x2_enc));
+
         /* ---- Verify correctness ---- */
         {
             uint8_t dec[N];
@@ -103,12 +125,14 @@ int main(int argc, char **argv)
             rc = pivco_huffman_decode_scalar(pivco_enc, pivco_enc_len, &table, dec, &consumed);
             if (rc != PIVCO_OK || memcmp(symbols, dec, N) != 0) {
                 printf("%-13s ERROR: pivco scalar roundtrip failed\n", name);
+                rans_alias_destroy(rans_ctx);
                 continue;
             }
             /* Trad 4-stream */
             rc = trad_huffman_decode_4s(trad_4s_enc, trad_4s_enc_len, &table, dec, N);
             if (rc != PIVCO_OK || memcmp(symbols, dec, N) != 0) {
                 printf("%-13s ERROR: trad 4-stream roundtrip failed\n", name);
+                rans_alias_destroy(rans_ctx);
                 continue;
             }
             /* huff0 */
@@ -118,6 +142,19 @@ int main(int argc, char **argv)
                     printf("%-13s ERROR: huf0 roundtrip failed\n", name);
                     huf0_ok = 0;
                 }
+            }
+            /* rANS alias */
+            rans_alias_decode(rans_ctx, rans_enc, rans_enc_len, dec, N);
+            if (memcmp(symbols, dec, N) != 0) {
+                printf("%-13s ERROR: rANS alias roundtrip failed\n", name);
+                rans_alias_destroy(rans_ctx);
+                continue;
+            }
+            rans_alias_decode_x2(rans_ctx, rans_x2_enc, rans_x2_enc_len, dec, N);
+            if (memcmp(symbols, dec, N) != 0) {
+                printf("%-13s ERROR: rANS alias x2 roundtrip failed\n", name);
+                rans_alias_destroy(rans_ctx);
+                continue;
             }
         }
 
@@ -194,28 +231,50 @@ int main(int argc, char **argv)
             }
         }
 
+        /* ---- rANS alias 1-stream decode ---- */
+        double r_dec_1 = 0;
+        t0 = now_sec();
+        for (int iter = 0; iter < ITERATIONS; iter++)
+            rans_alias_decode(rans_ctx, rans_enc, rans_enc_len, dec_buf, N);
+        t1 = now_sec();
+        r_dec_1 = THROUGHPUT(ITERATIONS, t1 - t0);
+
+        /* ---- rANS alias 2-stream decode ---- */
+        double r_dec_2 = 0;
+        t0 = now_sec();
+        for (int iter = 0; iter < ITERATIONS; iter++)
+            rans_alias_decode_x2(rans_ctx, rans_x2_enc, rans_x2_enc_len, dec_buf, N);
+        t1 = now_sec();
+        r_dec_2 = THROUGHPUT(ITERATIONS, t1 - t0);
+
+        rans_alias_destroy(rans_ctx);
+
         /* Best PIVCO decode */
         double p_best = p_dec_n > p_dec_s ? p_dec_n : p_dec_s;
-        /* Best traditional */
+        /* Best traditional/other */
         double t_best = h_dec_4s;
         if (t_dec_4s > t_best) t_best = t_dec_4s;
         if (t_dec_1s > t_best) t_best = t_dec_1s;
         if (h_dec_1s > t_best) t_best = h_dec_1s;
+        if (r_dec_1 > t_best) t_best = r_dec_1;
+        if (r_dec_2 > t_best) t_best = r_dec_2;
 
         double ratio = t_best > 0 ? p_best / t_best : 0;
 
-        printf("%-13s | %7.0f %7.0f | %7.0f %7.0f | %7.0f %7.0f | %5.2fx\n",
+        printf("%-13s | %7.0f %7.0f | %7.0f %7.0f | %7.0f %7.0f | %7.0f %7.0f | %5.2fx\n",
                name,
                p_dec_s, p_dec_n,
                t_dec_1s, t_dec_4s,
                h_dec_1s, h_dec_4s,
+               r_dec_1, r_dec_2,
                ratio);
     }
 
     printf("\n  All values: decode throughput in M/s (millions of symbols/sec)\n");
     printf("  pivco_s/n = PIVCO scalar/NEON, trad_1s/4s = our trad impl\n");
     printf("  huf0_1s/4s = actual huff0 (cyan4973/FiniteStateEntropy)\n");
-    printf("  ratio = best_pivco / best_trad_or_huf0\n");
+    printf("  rans_1/2 = ryg_rans alias method (rygorous/ryg_rans), 1/2-stream\n");
+    printf("  ratio = best_pivco / best_other\n");
 
     return 0;
 }

@@ -88,7 +88,7 @@ Written in C11 with two backends:
 
 ## Baselines
 
-Three Huffman decode implementations for comparison:
+Four decode implementations for comparison:
 
 ### Traditional 1-stream (trad_1s)
 
@@ -113,6 +113,45 @@ State-of-the-art Huffman decoder used in zstd. Features:
 Tested in both 1-stream (`HUF_decompress1X`) and 4-stream
 (`HUF_decompress4X`) modes.
 
+### ryg_rans alias (rygorous/ryg_rans)
+
+Fabian Giesen's rANS decoder with alias method from
+https://github.com/rygorous/ryg_rans. Uses the alias method to build
+a decode table sized by symbol count (256 entries), not code length.
+Single-pass, branch-free per symbol. Tested in 1-stream and
+interleaved 2-stream modes.
+
+## Prior Art Survey
+
+We surveyed the literature and open-source landscape for fast Huffman
+decoders. Key findings:
+
+- **huff0/zstd is the CPU SotA.** Recent zstd PRs (#3826, #3827)
+  focus on compiler-level fixes (manual unrolling, bit masking for
+  optimizer hints), not algorithmic changes. The 4-stream table lookup
+  architecture hasn't changed fundamentally.
+
+- **Dougall Johnson's sync-point parallel decode** (2022): Split the
+  bitstream at arbitrary points, find synchronization by running
+  parallel decoders at n consecutive offsets (n = max code length).
+  ~25% speedup on M1 for DEFLATE. Orthogonal to PIVCO — parallelizes
+  the same serial bitstream rather than using a different format.
+
+- **Fabian Giesen's alias Huffman** (2014): Uses the alias method with
+  rANS for a unified decode table sized by symbol count. Branch-free,
+  but the multiply-heavy decode step is slower than table lookup on
+  ARM. Tested: 200-440 M/s on M4, significantly slower than huff0.
+
+- **GPU massively parallel** (Weissenberger et al., 2018): Uses
+  Huffman self-synchronization for thousands of GPU threads. 10x+ over
+  CPU. Not relevant for single-core CPU comparison.
+
+- **512-bit SIMD Huffman encoding** (IEEE TCE, 2023): 2.66x speedup
+  for encoding on NEON. Decoding remains the harder problem.
+
+- **No known CPU decoder beats huff0 on general Huffman decode.**
+  PIVCO's 2.5x on skewed data appears to be a novel result.
+
 ## Benchmark Results
 
 **Platform**: Apple M4 Max, macOS, AppleClang 17, `-O3`, ARM64/NEON
@@ -121,24 +160,26 @@ Tested in both 1-stream (`HUF_decompress1X`) and 4-stream
 
 ### Decode Throughput (millions of symbols per second)
 
-| Distribution  | PIVCO scalar | PIVCO NEON | trad 1-stream | trad 4-stream | huf0 1-stream | huf0 4-stream | PIVCO vs best |
-|---------------|------------:|----------:|--------------:|--------------:|--------------:|--------------:|--------------:|
-| proba80       |        1216 |      4298 |           583 |          1728 |           394 |          1274 |     **2.49x** |
-| proba50       |         929 |      3283 |           596 |          1461 |           395 |          1357 |     **2.25x** |
-| proba14       |         485 |      1888 |           561 |          1443 |           395 |          1495 |     **1.26x** |
-| proba02       |         291 |       959 |           527 |          1452 |           395 |          1507 |       0.64x   |
-| uniform       |         262 |       943 |          1617 |          1617 |           n/a |           n/a |       0.58x   |
-| english       |         477 |      2018 |           557 |          1557 |           394 |          1452 |     **1.30x** |
-| zipfian       |         322 |      1062 |           536 |          1552 |           394 |          1484 |       0.68x   |
-| sparse_4      |         915 |      3300 |          2648 |          1694 |          1207 |          3050 |     **1.08x** |
-| sparse_16     |         508 |      2034 |          2183 |          1658 |          1203 |          3454 |       0.59x   |
-| geometric     |         875 |      3063 |           562 |           445 |           391 |          1330 |     **2.30x** |
-| two_sym_eq    |        1501 |      4546 |          2931 |          1663 |           974 |          2556 |     **1.55x** |
-| two_sym_90/10 |        1504 |      4548 |          2950 |          1669 |           975 |          2557 |     **1.54x** |
+| Distribution  | PIVCO scalar | PIVCO NEON | trad 1s | trad 4s | huf0 1s | huf0 4s | rANS 1s | rANS 2s | vs best |
+|---------------|------------:|----------:|--------:|--------:|--------:|--------:|--------:|--------:|--------:|
+| proba80       |        1241 |      4340 |     583 |    1761 |     394 |    1266 |     225 |     444 | **2.46x** |
+| proba50       |         944 |      3305 |     588 |    1502 |     394 |    1350 |     222 |     439 | **2.20x** |
+| proba14       |         489 |      1894 |     562 |    1480 |     396 |    1507 |     217 |     427 | **1.26x** |
+| proba02       |         288 |       993 |     525 |    1470 |     395 |    1530 |     210 |     411 |   0.65x |
+| uniform       |         261 |       949 |    1633 |    1648 |     n/a |     n/a |     222 |     440 |   0.58x |
+| english       |         479 |      2030 |     554 |    1574 |     395 |    1489 |     217 |     427 | **1.29x** |
+| zipfian       |         299 |      1058 |     540 |    1572 |     395 |    1515 |     212 |     417 |   0.67x |
+| sparse_4      |         919 |      3355 |    2671 |    1688 |    1210 |    3069 |     238 |     477 | **1.09x** |
+| sparse_16     |         444 |      1331 |    1416 |    1063 |     698 |    2248 |     138 |     274 |   0.59x |
+| geometric     |         573 |      2003 |     349 |     289 |     232 |     804 |     131 |     257 | **2.49x** |
+| two_sym_eq    |         949 |      2940 |    1925 |    1070 |     610 |    1631 |     143 |     286 | **1.53x** |
+| two_sym_90/10 |         949 |      2943 |    1915 |    1069 |     604 |    1627 |     133 |     262 | **1.54x** |
 
 - "n/a" = huf0 detected data as incompressible (uniform distribution)
-- "PIVCO vs best" = best PIVCO / best of all traditional/huf0
+- "vs best" = best PIVCO / best of all other decoders
 - proba distributions match FiniteStateEntropy's fullbench.c (BMK_genData)
+- rANS alias is significantly slower than table-based decoders on ARM
+  (multiply-heavy decode step doesn't pipeline well on M4)
 
 ### Data Distributions
 

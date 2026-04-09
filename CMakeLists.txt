@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(pivco_huffman C)
+project(pivco_huffman C CXX)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -65,7 +65,8 @@ if(BUILD_BENCH)
     add_executable(pivco_huffman_bench
         bench/bench_main.c
         bench/bench_distributions.c
+        bench/bench_rans.cpp
     )
     target_link_libraries(pivco_huffman_bench pivco_huffman huf0)
-    target_include_directories(pivco_huffman_bench PRIVATE ext/fse/lib)
+    target_include_directories(pivco_huffman_bench PRIVATE ext/fse/lib ext/ryg_rans)
 endif()
