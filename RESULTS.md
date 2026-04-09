@@ -123,18 +123,18 @@ Tested in both 1-stream (`HUF_decompress1X`) and 4-stream
 
 | Distribution  | PIVCO scalar | PIVCO NEON | trad 1-stream | trad 4-stream | huf0 1-stream | huf0 4-stream | PIVCO vs best |
 |---------------|------------:|----------:|--------------:|--------------:|--------------:|--------------:|--------------:|
-| proba80       |         819 |      1735 |           344 |          1067 |           232 |           747 |     **1.63x** |
-| proba50       |         590 |      1456 |           349 |           918 |           231 |           793 |     **1.59x** |
-| proba14       |         311 |       914 |           330 |           919 |           232 |           881 |     **0.99x** |
-| proba02       |         186 |       562 |           309 |           921 |           232 |           895 |       0.61x   |
-| uniform       |         170 |       555 |          1049 |          1042 |           n/a |           n/a |       0.53x   |
-| english       |         307 |       966 |           328 |           988 |           233 |           881 |     **0.98x** |
-| zipfian       |         209 |       590 |           317 |           988 |           232 |           896 |       0.60x   |
-| sparse_4      |         592 |      1494 |          1726 |          1070 |           714 |          2052 |       0.73x   |
-| sparse_16     |         328 |       991 |          1426 |          1069 |           676 |          2255 |       0.44x   |
-| geometric     |         579 |      1381 |           350 |           292 |           232 |           807 |     **1.71x** |
-| two_sym_eq    |         956 |      1862 |          1926 |          1072 |           577 |          1652 |     **0.97x** |
-| two_sym_90/10 |         956 |      1840 |          1917 |          1070 |           574 |          1655 |     **0.96x** |
+| proba80       |        1216 |      4298 |           583 |          1728 |           394 |          1274 |     **2.49x** |
+| proba50       |         929 |      3283 |           596 |          1461 |           395 |          1357 |     **2.25x** |
+| proba14       |         485 |      1888 |           561 |          1443 |           395 |          1495 |     **1.26x** |
+| proba02       |         291 |       959 |           527 |          1452 |           395 |          1507 |       0.64x   |
+| uniform       |         262 |       943 |          1617 |          1617 |           n/a |           n/a |       0.58x   |
+| english       |         477 |      2018 |           557 |          1557 |           394 |          1452 |     **1.30x** |
+| zipfian       |         322 |      1062 |           536 |          1552 |           394 |          1484 |       0.68x   |
+| sparse_4      |         915 |      3300 |          2648 |          1694 |          1207 |          3050 |     **1.08x** |
+| sparse_16     |         508 |      2034 |          2183 |          1658 |          1203 |          3454 |       0.59x   |
+| geometric     |         875 |      3063 |           562 |           445 |           391 |          1330 |     **2.30x** |
+| two_sym_eq    |        1501 |      4546 |          2931 |          1663 |           974 |          2556 |     **1.55x** |
+| two_sym_90/10 |        1504 |      4548 |          2950 |          1669 |           975 |          2557 |     **1.54x** |
 
 - "n/a" = huf0 detected data as incompressible (uniform distribution)
 - "PIVCO vs best" = best PIVCO / best of all traditional/huf0
@@ -208,35 +208,42 @@ Key observations:
 
 ## Profiling
 
-Profiled with macOS `sample` on zipfian decode (1M iterations, N=4096).
-Time breakdown for `decode_node_neon`:
+Profiled with macOS `sample` on zipfian decode (10M iterations, N=4096).
+Self-time extracted from 25K weighted leaf samples in the call tree.
 
-| Region              | Source lines | % of self-time | Description |
-|---------------------|-------------|---------------:|-------------|
-| Recursion overhead  | 156, 193-197 |           29% | Function call/return, DFS stack save/restore |
-| SIMD partition      | 177-182      |           20% | TBL-based partition_8 loop |
-| Tree traversal      | 158-159      |           12% | Node lookup + leaf check |
-| Leaf scatter-write  | 162-163      |           12% | `symbols[indices[j]] = sym` |
-| Scalar remainder    | 185-186      |            7% | Leftover < 8 indices |
-| Stream advance      | 170-171      |            7% | Bitmap pointer read |
-| Other               |              |           13% | |
+**After NEON scatter optimization:**
 
-The actual SIMD partition is only 20% of total time. **Recursion overhead
-(29%) is the largest single cost** — register saves/restores and branch
-targets for each of the ~511 tree nodes. This suggests two optimization
-paths:
+| Region                          | % of self-time | Description |
+|---------------------------------|---------------:|-------------|
+| SIMD partition (TBL core)       |          44.4% | `partition_8` — the actual useful work |
+| Function prologue (reg saves)   |          14.1% | 6 stp instructions per recursive call |
+| Leaf scatter NEON (vld+lane+strb) |        12.3% | Bulk-load 8 indices, 8 scalar stores |
+| Leaf scatter scalar remainder   |           9.5% | Tail loop for n % 8 != 0 |
+| n==0 + leaf check               |           6.5% | Per-node early-exit tests |
+| Partition loop bookkeeping      |           4.1% | Loop control, n_left/n_right updates |
+| Partition scalar remainder      |           3.5% | Leftover < 8 indices per partition |
+| Recursive calls                 |           2.2% | Argument setup (mov x0..x6, bl) |
+| Stream advance                  |           2.0% | Bitmap pointer read |
+| Other                           |           1.4% | |
 
-1. **Iterative work-queue**: Convert recursive DFS to an explicit stack,
-   eliminating function call overhead per tree node.
-2. **Leaf cutoff**: Once the index count drops below a threshold (e.g. 32),
-   switch to scalar/table-based decode instead of continuing the tree walk.
-   Most deep nodes have very few indices.
+The SIMD partition dominates at 44% — this is the core work and
+expected to be the largest cost. The function prologue at 14% looks
+like a target, but **an iterative DFS with explicit stack showed no
+measurable improvement** (~1% within noise on M4). The stp/ldp
+instructions pipeline perfectly with the partition work — they occupy
+execution slots but don't stall the critical path. The M4's deep OoO
+window hides the latency completely.
+
+**Profiling lesson**: "occupies 14% of execution slots" is not the same
+as "removing it would be 14% faster." On an OoO core, non-critical-path
+work is essentially free if it doesn't compete for the bottleneck
+resource (in this case, the NEON execution units doing TBL shuffles).
 
 ## Analysis
 
 ### Where PIVCO Wins
 
-**Skewed distributions (proba80, proba50, geometric): 1.6-1.7x over SotA.**
+**Skewed distributions (proba80, proba50, geometric): 2.2-2.5x over SotA.**
 When a few symbols dominate, the Huffman tree has short codes for common
 symbols. PIVCO terminates large groups of indices at shallow tree levels
 where the SIMD partition processes thousands of elements per node. The
@@ -245,27 +252,31 @@ levels.
 
 For proba80, ~80% of symbols have 1-3 bit codes. The root partition
 processes 4096 indices, and the most common symbol's leaf gets ~3200
-of them in one scatter-write. Traditional decoders still do 4096
+of them in one NEON scatter-write. Traditional decoders still do 4096
 individual table lookups regardless.
 
-**Near-parity on moderate skew (proba14, english): ~1.0x.**
-PIVCO matches the best traditional decoder. The tree is moderately
-deep (9-10 levels), and the partition costs roughly balance the ILP
-gains of 4-stream decode.
+**Moderate skew (proba14, english): 1.3x over SotA.**
+PIVCO beats the best traditional decoder by 26-30%. The tree is
+moderately deep (9-10 levels), but the NEON scatter and partition
+still outperform 4-stream table lookup.
+
+**Two-symbol / sparse_4: 1.1-1.5x over SotA.**
+Even simple distributions with very short codes (1-2 bits) favor
+PIVCO — the tree is shallow (1-2 levels) and virtually all work is
+in a single massive scatter-write at the leaf.
 
 ### Where PIVCO Loses
 
-**Near-uniform (proba02, uniform): 0.5-0.6x.** All codes are similar
+**Near-uniform (proba02, uniform): 0.6x.** All codes are similar
 length (8-12 bits), so the tree is deep with no early termination.
 Every level does a full partition of all indices with almost no leaf
 writes until the bottom. Traditional decoders do O(1) per symbol
 regardless of code length distribution.
 
-**Sparse equal-weight (sparse_4, sparse_16): 0.4-0.7x.** Few symbols
-with equal frequency = tiny lookup table that fits in registers.
-huff0 4-stream achieves 2000+ M/s — essentially limited only by
-output memory bandwidth. PIVCO can't compete because it still does
-O(depth) partition passes.
+**Sparse equal-weight (sparse_16): 0.6x.** 16 symbols with equal
+frequency = tiny lookup table that fits in L1. huff0 4-stream
+achieves 3454 M/s. PIVCO still does well (2034 M/s) but the
+O(depth) partition passes can't beat the constant-time lookup.
 
 ### The Core Tradeoff
 
@@ -279,8 +290,8 @@ any distribution in O(1) per symbol, but its throughput is fixed.
 PIVCO has no serial dependency — all symbols are processed in parallel.
 Its throughput is **distribution-dependent**: skewed data terminates
 early (most work at the top, few indices at the bottom), while uniform
-data forces full-depth traversal. The crossover point is around
-proba14 (~14% skew).
+data forces full-depth traversal. PIVCO wins on all but the most
+uniform distributions (proba02, uniform, sparse_16).
 
 ### SIMD Width Scaling
 
@@ -298,19 +309,38 @@ scales directly with SIMD capabilities, suggesting that on AVX-512
 hardware the crossover point would shift further toward uniform
 distributions.
 
-## Future Work
+## Ideas That Can Make Things Faster
 
-- **Iterative DFS**: Replace recursion with explicit stack to eliminate
-  the 29% function-call overhead.
-- **Leaf cutoff**: Switch to table-based decode for subtrees with fewer
-  than ~32 indices, avoiding deep-tree partition overhead on tiny groups.
-- **AVX-512 port**: `vpcompressw` + `vpscatterd` for the partition and
-  leaf-write hot paths.
-- **Hybrid decoder**: Use PIVCO for skewed blocks, traditional for
-  uniform blocks, selected per-block based on the Huffman table shape.
+Tested and discarded:
+
+- **Iterative DFS with explicit stack**: Tested, showed ~1% improvement
+  on M4 despite the function prologue occupying 14% of execution slots.
+  The stp/ldp register saves pipeline perfectly with partition work —
+  they don't stall the critical path. The OoO engine hides the latency.
+  Not worth the code complexity. May matter on in-order cores.
+
+Worth exploring:
+
+- **AVX-512 port**: `vpcompressw` does the partition in ONE instruction
+  (no shuffle table). `vpscatterd` vectorizes leaf writes. This would
+  eliminate the two biggest costs (44% partition + 12% scatter) and
+  replace them with single instructions. Expected 2-4x improvement
+  over current NEON, potentially beating huff0 on all distributions.
+- **SVE/SVE2**: Scalable vector compress/scatter with predication.
+  Similar benefits to AVX-512, width-agnostic.
+- **Leaf cutoff**: For subtrees with < 16 indices, switch to scalar
+  table-based decode. Avoids partition overhead on tiny groups deep in
+  the tree. The 9.5% scalar scatter remainder suggests many leaf nodes
+  have n < 8.
+- **Hybrid decoder**: Select PIVCO or traditional per-block based on
+  the Huffman table shape (e.g., max code length or entropy). Uniform
+  blocks get table lookup, skewed blocks get tree walk.
 - **Encode optimization**: The encoder's bitmap construction is still
   scalar. NEON comparison + movemask could help, as could encoding
   multiple blocks in parallel.
+- **Wider NEON partition**: Process 16 indices at a time using two
+  TBL instructions, reducing loop iterations by 2x. Requires a 64KB
+  shuffle table (for 16-bit masks) or a two-pass approach.
 
 ## Building & Running
 

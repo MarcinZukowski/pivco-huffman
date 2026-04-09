@@ -144,44 +144,70 @@ int pivco_huffman_encode_neon(const uint8_t *symbols,
     return PIVCO_OK;
 }
 
-/* ---------- NEON Decode (Iterative DFS with SIMD Partition) ----------
- *
- * Replaces recursive DFS with an explicit stack to eliminate function
- * call overhead (was 14% of self-time: 6 stp/ldp register saves per call).
- * Stack depth bounded by tree depth (max PIVCO_MAX_CODE_LEN = 15).
- *
- * DFS order: push right child first, then left. Popping processes
- * left before right, matching the bitstream's DFS encoding order.
- */
+/* ---------- NEON Decode (Tree-Walk with SIMD Partition) ---------- */
 
-typedef struct {
-    int16_t   node_id;
-    uint16_t *indices;
-    int       n;
-    uint16_t *tmp;
-} decode_frame_t;
-
-/* Leaf scatter-write (NEON-assisted) — extracted as inline to keep
-   the main loop body small. */
-static inline void scatter_write_neon(uint8_t *symbols,
-                                       const uint16_t *indices, int n,
-                                       uint8_t sym)
+static void decode_node_neon(const pivco_huffman_table_t *table,
+                              int16_t node_id,
+                              uint16_t *indices, int n,
+                              uint8_t *symbols,
+                              const uint8_t **in_ptr,
+                              uint16_t *tmp)
 {
+    if (n == 0) return;
+
+    const pivco_tree_node_t *node = &table->tree[node_id];
+    if (node->symbol >= 0) {
+        /* Leaf — NEON-assisted scatter-write: bulk-load 8 indices
+           per vector, extract lanes, do 8 scalar byte stores.
+           Eliminates per-element index load and loop control overhead. */
+        uint8_t sym = (uint8_t)node->symbol;
+        int j = 0;
+        for (; j + 8 <= n; j += 8) {
+            uint16x8_t idx = vld1q_u16(indices + j);
+            symbols[vgetq_lane_u16(idx, 0)] = sym;
+            symbols[vgetq_lane_u16(idx, 1)] = sym;
+            symbols[vgetq_lane_u16(idx, 2)] = sym;
+            symbols[vgetq_lane_u16(idx, 3)] = sym;
+            symbols[vgetq_lane_u16(idx, 4)] = sym;
+            symbols[vgetq_lane_u16(idx, 5)] = sym;
+            symbols[vgetq_lane_u16(idx, 6)] = sym;
+            symbols[vgetq_lane_u16(idx, 7)] = sym;
+        }
+        for (; j < n; j++) {
+            symbols[indices[j]] = sym;
+        }
+        return;
+    }
+
+    /* Read n code bits */
+    int nbytes = bitmap_bytes(n);
+    const uint8_t *bm = *in_ptr;
+    *in_ptr += nbytes;
+
+    /* SIMD partition in-place */
+    int n_left = 0, n_right = 0;
     int j = 0;
+
     for (; j + 8 <= n; j += 8) {
-        uint16x8_t idx = vld1q_u16(indices + j);
-        symbols[vgetq_lane_u16(idx, 0)] = sym;
-        symbols[vgetq_lane_u16(idx, 1)] = sym;
-        symbols[vgetq_lane_u16(idx, 2)] = sym;
-        symbols[vgetq_lane_u16(idx, 3)] = sym;
-        symbols[vgetq_lane_u16(idx, 4)] = sym;
-        symbols[vgetq_lane_u16(idx, 5)] = sym;
-        symbols[vgetq_lane_u16(idx, 6)] = sym;
-        symbols[vgetq_lane_u16(idx, 7)] = sym;
+        uint8_t mask = bm[j >> 3];
+        int nr = partition_8(indices + j, mask,
+                             indices + n_left, tmp + n_right);
+        n_right += nr;
+        n_left += (8 - nr);
     }
+    /* Scalar remainder */
     for (; j < n; j++) {
-        symbols[indices[j]] = sym;
+        if (bitmap_get(bm, j)) {
+            tmp[n_right++] = indices[j];
+        } else {
+            indices[n_left++] = indices[j];
+        }
     }
+
+    decode_node_neon(table, node->left, indices, n_left,
+                     symbols, in_ptr, tmp + n_right);
+    decode_node_neon(table, node->right, tmp, n_right,
+                     symbols, in_ptr, tmp + n_right);
 }
 
 int pivco_huffman_decode_neon(const uint8_t *in, size_t in_len,
@@ -201,80 +227,8 @@ int pivco_huffman_decode_neon(const uint8_t *in, size_t in_len,
     uint16_t tmp[PIVCO_BLOCK_SIZE];
     const uint8_t *ptr = in;
 
-    /* Explicit DFS stack — max depth = tree depth + 1 */
-    decode_frame_t stack[PIVCO_MAX_CODE_LEN + 2];
-    int sp = 0;
-
-    /* Current frame — left child is processed immediately without
-       pushing to the stack, only right child gets pushed. */
-    int16_t   node_id = table->tree_root;
-    uint16_t *cur_idx = indices;
-    int       cur_n   = N;
-    uint16_t *cur_tmp = tmp;
-
-    for (;;) {
-        /* Skip empty nodes */
-        while (cur_n == 0) {
-            if (sp == 0) goto done;
-            --sp;
-            node_id = stack[sp].node_id;
-            cur_idx = stack[sp].indices;
-            cur_n   = stack[sp].n;
-            cur_tmp = stack[sp].tmp;
-        }
-
-        const pivco_tree_node_t *node = &table->tree[node_id];
-
-        if (node->symbol >= 0) {
-            /* Leaf */
-            scatter_write_neon(symbols, cur_idx, cur_n,
-                               (uint8_t)node->symbol);
-            /* Pop next from stack */
-            if (sp == 0) goto done;
-            --sp;
-            node_id = stack[sp].node_id;
-            cur_idx = stack[sp].indices;
-            cur_n   = stack[sp].n;
-            cur_tmp = stack[sp].tmp;
-            continue;
-        }
-
-        /* Internal node: read code bits and partition */
-        int nbytes = bitmap_bytes(cur_n);
-        const uint8_t *bm = ptr;
-        ptr += nbytes;
-
-        int n_left = 0, n_right = 0;
-        int j = 0;
-        for (; j + 8 <= cur_n; j += 8) {
-            uint8_t mask = bm[j >> 3];
-            int nr = partition_8(cur_idx + j, mask,
-                                 cur_idx + n_left, cur_tmp + n_right);
-            n_right += nr;
-            n_left += (8 - nr);
-        }
-        for (; j < cur_n; j++) {
-            if (bitmap_get(bm, j)) {
-                cur_tmp[n_right++] = cur_idx[j];
-            } else {
-                cur_idx[n_left++] = cur_idx[j];
-            }
-        }
-
-        /* Push right child to stack */
-        stack[sp].node_id = node->right;
-        stack[sp].indices = cur_tmp;
-        stack[sp].n       = n_right;
-        stack[sp].tmp     = cur_tmp + n_right;
-        sp++;
-
-        /* Continue immediately with left child (no push) */
-        node_id = node->left;
-        /* cur_idx already holds left partition in-place */
-        cur_n   = n_left;
-        cur_tmp = cur_tmp + n_right;
-    }
-done:
+    decode_node_neon(table, table->tree_root, indices, N,
+                     symbols, &ptr, tmp);
 
     *consumed = (size_t)(ptr - in);
     return PIVCO_OK;
