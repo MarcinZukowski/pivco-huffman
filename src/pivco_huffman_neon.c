@@ -157,9 +157,23 @@ static void decode_node_neon(const pivco_huffman_table_t *table,
 
     const pivco_tree_node_t *node = &table->tree[node_id];
     if (node->symbol >= 0) {
-        /* Leaf — scatter-write symbol to all indices */
+        /* Leaf — NEON-assisted scatter-write: bulk-load 8 indices
+           per vector, extract lanes, do 8 scalar byte stores.
+           Eliminates per-element index load and loop control overhead. */
         uint8_t sym = (uint8_t)node->symbol;
-        for (int j = 0; j < n; j++) {
+        int j = 0;
+        for (; j + 8 <= n; j += 8) {
+            uint16x8_t idx = vld1q_u16(indices + j);
+            symbols[vgetq_lane_u16(idx, 0)] = sym;
+            symbols[vgetq_lane_u16(idx, 1)] = sym;
+            symbols[vgetq_lane_u16(idx, 2)] = sym;
+            symbols[vgetq_lane_u16(idx, 3)] = sym;
+            symbols[vgetq_lane_u16(idx, 4)] = sym;
+            symbols[vgetq_lane_u16(idx, 5)] = sym;
+            symbols[vgetq_lane_u16(idx, 6)] = sym;
+            symbols[vgetq_lane_u16(idx, 7)] = sym;
+        }
+        for (; j < n; j++) {
             symbols[indices[j]] = sym;
         }
         return;
