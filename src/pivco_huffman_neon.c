@@ -205,22 +205,23 @@ int pivco_huffman_decode_neon(const uint8_t *in, size_t in_len,
     decode_frame_t stack[PIVCO_MAX_CODE_LEN + 2];
     int sp = 0;
 
-    /* Push root */
-    stack[sp].node_id = table->tree_root;
-    stack[sp].indices = indices;
-    stack[sp].n = N;
-    stack[sp].tmp = tmp;
-    sp++;
+    /* Current frame — left child is processed immediately without
+       pushing to the stack, only right child gets pushed. */
+    int16_t   node_id = table->tree_root;
+    uint16_t *cur_idx = indices;
+    int       cur_n   = N;
+    uint16_t *cur_tmp = tmp;
 
-    while (sp > 0) {
-        /* Pop */
-        --sp;
-        int16_t   node_id   = stack[sp].node_id;
-        uint16_t *cur_idx   = stack[sp].indices;
-        int       cur_n     = stack[sp].n;
-        uint16_t *cur_tmp   = stack[sp].tmp;
-
-        if (cur_n == 0) continue;
+    for (;;) {
+        /* Skip empty nodes */
+        while (cur_n == 0) {
+            if (sp == 0) goto done;
+            --sp;
+            node_id = stack[sp].node_id;
+            cur_idx = stack[sp].indices;
+            cur_n   = stack[sp].n;
+            cur_tmp = stack[sp].tmp;
+        }
 
         const pivco_tree_node_t *node = &table->tree[node_id];
 
@@ -228,6 +229,13 @@ int pivco_huffman_decode_neon(const uint8_t *in, size_t in_len,
             /* Leaf */
             scatter_write_neon(symbols, cur_idx, cur_n,
                                (uint8_t)node->symbol);
+            /* Pop next from stack */
+            if (sp == 0) goto done;
+            --sp;
+            node_id = stack[sp].node_id;
+            cur_idx = stack[sp].indices;
+            cur_n   = stack[sp].n;
+            cur_tmp = stack[sp].tmp;
             continue;
         }
 
@@ -253,20 +261,20 @@ int pivco_huffman_decode_neon(const uint8_t *in, size_t in_len,
             }
         }
 
-        /* Push right child first (processed second) */
+        /* Push right child to stack */
         stack[sp].node_id = node->right;
         stack[sp].indices = cur_tmp;
         stack[sp].n       = n_right;
         stack[sp].tmp     = cur_tmp + n_right;
         sp++;
 
-        /* Push left child (processed first — on top of stack) */
-        stack[sp].node_id = node->left;
-        stack[sp].indices = cur_idx;
-        stack[sp].n       = n_left;
-        stack[sp].tmp     = cur_tmp + n_right;
-        sp++;
+        /* Continue immediately with left child (no push) */
+        node_id = node->left;
+        /* cur_idx already holds left partition in-place */
+        cur_n   = n_left;
+        cur_tmp = cur_tmp + n_right;
     }
+done:
 
     *consumed = (size_t)(ptr - in);
     return PIVCO_OK;
