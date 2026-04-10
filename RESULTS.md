@@ -150,7 +150,8 @@ decoders. Key findings:
   for encoding on NEON. Decoding remains the harder problem.
 
 - **No known CPU decoder beats huff0 on general Huffman decode.**
-  PIVCO's 2.5x on skewed data appears to be a novel result.
+  PIVCO's 1.4x on skewed data with a realistic workload appears
+  to be a novel result for a single-core CPU Huffman decoder.
 
 ## Benchmark Results
 
@@ -181,9 +182,8 @@ chunks (its maximum), rANS decodes the full 4M at once.
 - "n/a" = huf0 detected data as incompressible (uniform distribution)
 - "vs best" = best PIVCO / best of all other decoders
 - proba distributions match FiniteStateEntropy's fullbench.c (BMK_genData)
-- huf0's large 128KB chunks give it a significant amortization advantage
-  over PIVCO's 8KB blocks; on a per-block-size basis PIVCO is faster
-  across more distributions
+- Each codec uses its natural block size (PIVCO: 8192 symbols,
+  huf0: 128KB, rANS: full 4M)
 - rANS alias is 3-5x slower than table-based decoders on ARM
   (multiply-heavy decode step doesn't pipeline well on M4)
 
@@ -215,7 +215,8 @@ overhead being byte-alignment rounding at each tree node.
 
 ### Block Size Sweep
 
-PIVCO NEON decode throughput (M/s) by block size, realistic 4M workload:
+PIVCO NEON decode throughput (M/s) by block size. Measured with the
+4M realistic workload (each block size is recompiled and re-benchmarked):
 
 | N     | proba80 | proba50 | proba14 | proba02 | english | geometric |
 |------:|--------:|--------:|--------:|--------:|--------:|----------:|
@@ -224,15 +225,12 @@ PIVCO NEON decode throughput (M/s) by block size, realistic 4M workload:
 | 16384 |    4120 |    3345 |    1948 |    1034 |    1953 |      3194 |
 | 65536 |    3525 |    2958 |    1818 |    1215 |    1812 |      2895 |
 
-Key observations:
-- **N=8192 is the sweet spot**: best on the most skewed distributions
-  (proba80, geometric) where PIVCO's advantage is largest. 16KB index
-  array fits comfortably in M4's 128KB L1D.
-- 16384 is slightly better on moderate distributions (proba14, proba02)
-  but loses on the most skewed ones.
-- 65536 regresses everywhere — 128KB index arrays start spilling L1.
-- proba02/uniform losses do not improve enough with block size — the
-  fundamental issue is tree depth, not SIMD utilization.
+- **N=8192 is the default**: best on highly skewed distributions
+  (proba80, geometric) where PIVCO's advantage is largest. 16KB
+  index array fits comfortably in M4's 128KB L1D.
+- 16384 is slightly better on moderate distributions (proba14,
+  proba02) but loses on the most skewed ones.
+- 65536 regresses — index arrays start spilling L1.
 
 ## Profiling
 
@@ -280,36 +278,32 @@ a single table lookup.
 
 ### Where PIVCO Loses
 
-**Moderate and uniform distributions: 0.5-0.8x.** huf0 4-stream at
-128KB achieves 2500-5000 M/s on english, zipfian, sparse, and
-two-symbol distributions. PIVCO at 8KB can't match this because:
-1. huf0's larger block size amortizes per-block overhead 16x better
-2. On non-skewed distributions, PIVCO's tree is deep with few
-   early terminations, negating the SIMD partition advantage
-3. huf0's 4-stream ILP is very effective on OoO cores
+**Moderate and uniform distributions: 0.5-0.8x.** huf0 4-stream
+achieves 2500-5000 M/s on english, zipfian, sparse, and two-symbol
+distributions. On non-skewed data, PIVCO's tree is deep with few
+early terminations, so the SIMD partition does full-depth traversal
+without the benefit of large early leaf writes.
 
 **Sparse equal-weight (sparse_4/16, two_sym): 0.4-0.9x.** huf0
 achieves 5000+ M/s — essentially memory-bandwidth limited — because
-the tiny decode table fits in L1 and 128KB blocks minimize overhead.
+the tiny decode table fits in L1 and the data is trivially regular.
 
 ### The Core Tradeoff
 
-**Block size × algorithm:**
+PIVCO's throughput is **distribution-dependent**: skewed data
+terminates early in the tree (most work at top levels with large
+groups), while uniform data forces full-depth traversal. Its
+per-symbol cost scales with tree depth.
 
-PIVCO's throughput is distribution-dependent: skewed data terminates
-early in the tree (most work at top levels with large groups),
-while uniform data forces full-depth traversal. Its per-symbol
-cost scales with tree depth.
+huf0's throughput is **mostly distribution-independent**. Its
+per-symbol cost is constant (one table lookup). It excels when
+the decode table fits in L1 and the data is regular.
 
-huf0's throughput is mostly distribution-independent at a given
-block size. Its per-symbol cost is constant (one table lookup),
-but per-block overhead matters — 128KB blocks amortize this much
-better than 8KB.
-
-The crossover depends on both distribution skew AND block size.
-With equal block sizes, PIVCO wins on most distributions. With
-huf0 at 128KB vs PIVCO at 8KB, PIVCO only wins on highly skewed
-data (proba80, proba50, geometric).
+PIVCO uses small blocks (8192 symbols) because that's optimal for
+its tree-walk architecture — larger blocks spill L1 cache. huf0
+uses large blocks (128KB) because that's optimal for its 4-stream
+architecture. The throughput comparison is between two algorithms
+each at their natural operating point.
 
 ### SIMD Width Scaling
 
