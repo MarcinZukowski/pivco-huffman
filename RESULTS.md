@@ -273,14 +273,10 @@ resource (in this case, the NEON execution units doing TBL shuffles).
 
 **Highly skewed distributions: 1.2-1.4x over huf0 4-stream at 128KB.**
 On proba80 (3996 vs 2835 = 1.41x), proba50 (3198 vs 2705 = 1.18x),
-and geometric (3106 vs 2626 = 1.18x), PIVCO beats huf0 despite huf0
-processing 16x more symbols per block. The tree's early-exit property
-means most of PIVCO's 8192-symbol block is decoded in the first 2-3
-tree levels via large NEON scatter-writes.
-
-Note: huf0's 128KB chunks give it a major amortization advantage.
-On a per-block-size basis (both at 8KB), PIVCO wins on many more
-distributions.
+and geometric (3106 vs 2626 = 1.18x). The tree's early-exit property
+means most symbols are decoded in the first 2-3 tree levels via
+large NEON scatter-writes — the per-symbol cost drops well below
+a single table lookup.
 
 ### Where PIVCO Loses
 
