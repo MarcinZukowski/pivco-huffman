@@ -34,23 +34,21 @@ static double now_sec(void)
     return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
 }
 
-#define ITERS       20000
-#define RUNS        5
-#define DROP_WORST  2
-#define MAX_SPREAD  0.05
-#define N           PIVCO_BLOCK_SIZE
-#define SEED        0xBEEFCAFE12345678ULL
-
-#define THROUGHPUT(iters, elapsed) \
-    ((double)((size_t)N * (iters)) / (elapsed) / 1e6)
+/* ---- Configuration ---- */
+#define TOTAL_SYMBOLS (4 * 1024 * 1024)  /* 4M symbol sequence */
+#define DEFAULT_REPEATS 100              /* passes over 4M per timed run */
+#define BLK           PIVCO_BLOCK_SIZE   /* our block size */
+#define NBLOCKS       (TOTAL_SYMBOLS / BLK)
+#define RUNS          5
+#define DROP_WORST    2
+#define MAX_SPREAD    0.05
+#define SEED          0xBEEFCAFE12345678ULL
 
 static int dbl_cmp_desc(const void *a, const void *b) {
     double da = *(const double *)a, db = *(const double *)b;
     return (da < db) - (da > db);
 }
 
-/* Run a timed block RUNS times, drop DROP_WORST slowest, return median of kept.
-   Warn on stderr if kept runs spread > MAX_SPREAD. */
 static double stable_median(double *results, const char *label)
 {
     qsort(results, RUNS, sizeof(double), dbl_cmp_desc);
@@ -63,7 +61,15 @@ static double stable_median(double *results, const char *label)
     return results[kept / 2];
 }
 
-/* CPU freq baseline */
+/* Simple FNV-1a checksum over buffer */
+static uint64_t fnv1a(const uint8_t *data, size_t len)
+{
+    uint64_t h = 0xcbf29ce484222325ULL;
+    for (size_t i = 0; i < len; i++)
+        h = (h ^ data[i]) * 0x100000001b3ULL;
+    return h;
+}
+
 static double cpu_freq_check(void)
 {
     volatile uint64_t x = 0;
@@ -75,15 +81,19 @@ static double cpu_freq_check(void)
 
 int main(int argc, char **argv)
 {
-    (void)argc; (void)argv;
+    int repeats = DEFAULT_REPEATS;
+    if (argc > 1) repeats = atoi(argv[1]);
+    if (repeats < 1) repeats = 1;
 
     bench_init();
     int n_dist = bench_num_distributions();
     double freq_before = cpu_freq_check();
 
     printf("=== PIVCO-Huffman Benchmarks ===\n");
-    printf("Block size: %d, Iters: %d, Runs: %d (drop %d slowest)\n\n",
-           N, ITERS, RUNS, DROP_WORST);
+    printf("Sequence: %dM, Repeats: %d (%dM/run), Block: %d, Runs: %d (drop %d)\n\n",
+           TOTAL_SYMBOLS / (1024*1024), repeats,
+           (int)((size_t)TOTAL_SYMBOLS * repeats / (1024*1024)),
+           BLK, RUNS, DROP_WORST);
 
     printf("%-13s | %7s %7s | %7s %7s | %7s %7s | %7s %7s | %7s\n",
            "DECODE M/s", "pivco_s", "pivco_n",
@@ -104,148 +114,245 @@ int main(int argc, char **argv)
             continue;
         }
 
-        uint8_t *symbols = (uint8_t *)malloc(N);
-        bench_generate_symbols(d, symbols, N, SEED);
+        /* Generate full 4M symbol sequence */
+        uint8_t *symbols = (uint8_t *)malloc(TOTAL_SYMBOLS);
+        bench_generate_symbols(d, symbols, TOTAL_SYMBOLS, SEED);
 
-        /* ---- Pre-encode all formats ---- */
-        uint8_t *pivco_enc = (uint8_t *)malloc(PIVCO_MAX_ENCODED_SIZE);
-        size_t pivco_enc_len;
-        pivco_huffman_encode_scalar(symbols, &table, pivco_enc, &pivco_enc_len);
+        /* ---- Pre-encode: PIVCO (NBLOCKS × BLK) ---- */
+        /* Each block's encoded data is variable-size; store offsets */
+        uint8_t *pivco_enc_buf = (uint8_t *)malloc((size_t)NBLOCKS * PIVCO_MAX_ENCODED_SIZE);
+        size_t  *pivco_enc_off = (size_t *)malloc((size_t)(NBLOCKS + 1) * sizeof(size_t));
+        pivco_enc_off[0] = 0;
+        for (int b = 0; b < NBLOCKS; b++) {
+            size_t len;
+            pivco_huffman_encode_scalar(symbols + (size_t)b * BLK, &table,
+                                        pivco_enc_buf + pivco_enc_off[b], &len);
+            pivco_enc_off[b + 1] = pivco_enc_off[b] + len;
+        }
 
 #ifdef PIVCO_HAS_NEON
-        uint8_t *neon_enc = (uint8_t *)malloc(PIVCO_MAX_ENCODED_SIZE);
-        size_t neon_enc_len;
-        pivco_huffman_encode_neon(symbols, &table, neon_enc, &neon_enc_len);
+        uint8_t *neon_enc_buf = (uint8_t *)malloc((size_t)NBLOCKS * PIVCO_MAX_ENCODED_SIZE);
+        size_t  *neon_enc_off = (size_t *)malloc((size_t)(NBLOCKS + 1) * sizeof(size_t));
+        neon_enc_off[0] = 0;
+        for (int b = 0; b < NBLOCKS; b++) {
+            size_t len;
+            pivco_huffman_encode_neon(symbols + (size_t)b * BLK, &table,
+                                      neon_enc_buf + neon_enc_off[b], &len);
+            neon_enc_off[b + 1] = neon_enc_off[b] + len;
+        }
 #endif
 
-        uint8_t *trad_enc = (uint8_t *)malloc(N * 4 + 8);
-        size_t trad_enc_len, trad_enc_bits;
-        trad_huffman_encode(symbols, N, &table, trad_enc, &trad_enc_len, &trad_enc_bits);
-        memset(trad_enc + trad_enc_len, 0, 8);
+        /* ---- Pre-encode: trad 1-stream (chunked at BLK) ---- */
+        #define TRAD_BLK BLK  /* trad uses same block size as PIVCO */
+        int trad_nblocks = TOTAL_SYMBOLS / TRAD_BLK;
+        uint8_t *trad_enc = (uint8_t *)malloc((size_t)trad_nblocks * TRAD_BLK * 2 + 8);
+        size_t  *trad_enc_off  = (size_t *)calloc((size_t)(trad_nblocks + 1), sizeof(size_t));
+        size_t  *trad_enc_bits_arr = (size_t *)calloc((size_t)trad_nblocks, sizeof(size_t));
+        for (int b = 0; b < trad_nblocks; b++) {
+            size_t len, bits;
+            trad_huffman_encode(symbols + (size_t)b * TRAD_BLK, TRAD_BLK, &table,
+                                trad_enc + trad_enc_off[b], &len, &bits);
+            trad_enc_bits_arr[b] = bits;
+            trad_enc_off[b + 1] = trad_enc_off[b] + len;
+        }
+        memset(trad_enc + trad_enc_off[trad_nblocks], 0, 8);
 
-        uint8_t *trad_4s_enc = (uint8_t *)malloc(N * 4 + 16);
-        size_t trad_4s_enc_len;
-        trad_huffman_encode_4s(symbols, N, &table, trad_4s_enc, &trad_4s_enc_len);
+        /* ---- Pre-encode: trad 4-stream (chunked at BLK) ---- */
+        uint8_t *trad_4s_enc = (uint8_t *)malloc((size_t)trad_nblocks * TRAD_BLK * 2 + 16);
+        size_t  *trad_4s_off = (size_t *)calloc((size_t)(trad_nblocks + 1), sizeof(size_t));
+        for (int b = 0; b < trad_nblocks; b++) {
+            size_t len;
+            trad_huffman_encode_4s(symbols + (size_t)b * TRAD_BLK, TRAD_BLK, &table,
+                                   trad_4s_enc + trad_4s_off[b], &len);
+            trad_4s_off[b + 1] = trad_4s_off[b] + len;
+        }
 
-        uint8_t *huf0_enc = (uint8_t *)malloc(N * 2 + 1024);
-        size_t huf0_enc_len = HUF_compress(huf0_enc, N * 2 + 1024, symbols, N);
-        int huf0_ok = !HUF_isError(huf0_enc_len) && huf0_enc_len > 0;
+        /* ---- Pre-encode: huff0 (full 4M, huf0 picks its own blocking) ---- */
+        /* HUF_BLOCKSIZE_MAX is 128KB, so huf0 handles one 4M block fine
+           since HUF_compress will process it. But actually HUF_compress
+           may not accept > 128KB. Let's chunk at 128KB. */
+        #define HUF0_CHUNK (128 * 1024)
+        int huf0_nchunks = (TOTAL_SYMBOLS + HUF0_CHUNK - 1) / HUF0_CHUNK;
+        uint8_t *huf0_enc = (uint8_t *)malloc((size_t)huf0_nchunks * (HUF0_CHUNK + 1024));
+        size_t  *huf0_enc_off = (size_t *)calloc((size_t)(huf0_nchunks + 1), sizeof(size_t));
+        int huf0_ok = 1;
+        for (int c = 0; c < huf0_nchunks && huf0_ok; c++) {
+            size_t chunk_sz = (c < huf0_nchunks - 1) ? HUF0_CHUNK
+                             : TOTAL_SYMBOLS - (size_t)c * HUF0_CHUNK;
+            size_t r = HUF_compress(huf0_enc + huf0_enc_off[c],
+                                    chunk_sz + 1024,
+                                    symbols + (size_t)c * HUF0_CHUNK,
+                                    chunk_sz);
+            if (HUF_isError(r) || r == 0) { huf0_ok = 0; break; }
+            huf0_enc_off[c + 1] = huf0_enc_off[c] + r;
+        }
 
-        uint8_t *huf0_1s_enc = (uint8_t *)malloc(N * 2 + 1024);
-        size_t huf0_1s_enc_len = HUF_compress1X(huf0_1s_enc, N * 2 + 1024,
-                                                  symbols, N, 255, 11);
-        int huf0_1s_ok = !HUF_isError(huf0_1s_enc_len) && huf0_1s_enc_len > 0;
+        /* huf0 1-stream (same chunking) */
+        uint8_t *huf0_1s_enc = (uint8_t *)malloc((size_t)huf0_nchunks * (HUF0_CHUNK + 1024));
+        size_t  *huf0_1s_off = (size_t *)calloc((size_t)(huf0_nchunks + 1), sizeof(size_t));
+        int huf0_1s_ok = 1;
+        for (int c = 0; c < huf0_nchunks && huf0_1s_ok; c++) {
+            size_t chunk_sz = (c < huf0_nchunks - 1) ? HUF0_CHUNK
+                             : TOTAL_SYMBOLS - (size_t)c * HUF0_CHUNK;
+            size_t r = HUF_compress1X(huf0_1s_enc + huf0_1s_off[c],
+                                       chunk_sz + 1024,
+                                       symbols + (size_t)c * HUF0_CHUNK,
+                                       chunk_sz, 255, 11);
+            if (HUF_isError(r) || r == 0) { huf0_1s_ok = 0; break; }
+            huf0_1s_off[c + 1] = huf0_1s_off[c] + r;
+        }
 
+        /* ---- Pre-encode: rANS alias (full 4M, single stream) ---- */
         void *rans_ctx = rans_alias_create(freq);
-        uint8_t *rans_enc = (uint8_t *)malloc(N * 4);
-        size_t rans_enc_len = rans_alias_encode(rans_ctx, symbols, N,
-                                                 rans_enc, N * 4);
-        uint8_t *rans_x2_enc = (uint8_t *)malloc(N * 4);
-        size_t rans_x2_enc_len = rans_alias_encode_x2(rans_ctx, symbols, N,
-                                                       rans_x2_enc, N * 4);
+        uint8_t *rans_enc = (uint8_t *)malloc(TOTAL_SYMBOLS * 2);
+        size_t rans_enc_len = rans_alias_encode(rans_ctx, symbols, TOTAL_SYMBOLS,
+                                                 rans_enc, TOTAL_SYMBOLS * 2);
+        uint8_t *rans_x2_enc = (uint8_t *)malloc(TOTAL_SYMBOLS * 2);
+        size_t rans_x2_enc_len = rans_alias_encode_x2(rans_ctx, symbols, TOTAL_SYMBOLS,
+                                                       rans_x2_enc, TOTAL_SYMBOLS * 2);
 
-        /* ---- Verify correctness ---- */
+        /* ---- Verify correctness (first block / chunk only) ---- */
         {
-            uint8_t *dec = (uint8_t *)malloc(N);
+            uint8_t *dec = (uint8_t *)malloc(TOTAL_SYMBOLS);
             size_t consumed;
-            rc = pivco_huffman_decode_scalar(pivco_enc, pivco_enc_len, &table, dec, &consumed);
-            if (rc != PIVCO_OK || memcmp(symbols, dec, N) != 0) {
+
+            /* PIVCO scalar — first block */
+            rc = pivco_huffman_decode_scalar(pivco_enc_buf, pivco_enc_off[1],
+                                             &table, dec, &consumed);
+            if (rc != PIVCO_OK || memcmp(symbols, dec, BLK) != 0) {
                 printf("%-13s ERROR: pivco roundtrip failed\n", name);
                 free(dec); goto cleanup;
             }
-            rc = trad_huffman_decode_4s(trad_4s_enc, trad_4s_enc_len, &table, dec, N);
-            if (rc != PIVCO_OK || memcmp(symbols, dec, N) != 0) {
-                printf("%-13s ERROR: trad 4s roundtrip failed\n", name);
-                free(dec); goto cleanup;
-            }
+
+            /* huf0 4-stream — first chunk */
             if (huf0_ok) {
-                size_t dr = HUF_decompress(dec, N, huf0_enc, huf0_enc_len);
-                if (HUF_isError(dr) || memcmp(symbols, dec, N) != 0) {
+                size_t dr = HUF_decompress(dec, HUF0_CHUNK,
+                                           huf0_enc, huf0_enc_off[1]);
+                if (HUF_isError(dr) || memcmp(symbols, dec, HUF0_CHUNK) != 0) {
                     printf("%-13s ERROR: huf0 roundtrip failed\n", name);
                     huf0_ok = 0;
                 }
             }
-            rans_alias_decode(rans_ctx, rans_enc, rans_enc_len, dec, N);
-            if (memcmp(symbols, dec, N) != 0) {
+
+            /* rANS — full sequence */
+            rans_alias_decode(rans_ctx, rans_enc, rans_enc_len, dec, TOTAL_SYMBOLS);
+            if (memcmp(symbols, dec, TOTAL_SYMBOLS) != 0) {
                 printf("%-13s ERROR: rANS roundtrip failed\n", name);
                 free(dec); goto cleanup;
             }
             free(dec);
         }
 
-        /* ---- Benchmark with stability ---- */
-        uint8_t *dec_buf = (uint8_t *)malloc(N);
-        double runs[RUNS];
+        /* ---- Benchmark ---- */
+        uint8_t *dec_buf = (uint8_t *)malloc(TOTAL_SYMBOLS);
+        double runs_arr[RUNS];
         double t0, t1;
-        size_t consumed;
         char label[64];
 
-        /* Build huf0 DTables once (outside timing) */
-        HUF_DTable *dtable_1s = NULL, *dtable_4s = NULL;
-        size_t huf0_1s_body_off = 0, huf0_4s_body_off = 0;
-        if (huf0_1s_ok) {
-            dtable_1s = (HUF_DTable *)malloc(HUF_DTABLE_SIZE(HUF_TABLELOG_MAX) * sizeof(HUF_DTable));
-            dtable_1s[0] = (HUF_DTable)((U32)HUF_TABLELOG_MAX * 0x01000001);
-            size_t hs = HUF_readDTableX1(dtable_1s, huf0_1s_enc, huf0_1s_enc_len);
-            if (HUF_isError(hs)) { huf0_1s_ok = 0; free(dtable_1s); dtable_1s = NULL; }
-            else huf0_1s_body_off = hs;
-        }
-        if (huf0_ok) {
-            dtable_4s = (HUF_DTable *)malloc(HUF_DTABLE_SIZE(HUF_TABLELOG_MAX) * sizeof(HUF_DTable));
-            dtable_4s[0] = (HUF_DTable)((U32)HUF_TABLELOG_MAX * 0x01000001);
-            size_t hs = HUF_readDTableX1(dtable_4s, huf0_enc, huf0_enc_len);
-            if (HUF_isError(hs)) { huf0_ok = 0; free(dtable_4s); dtable_4s = NULL; }
-            else huf0_4s_body_off = hs;
-        }
-
-#define BENCH(var, code, lbl) do { \
+/* Macro: time repeats passes over the 4M decode.
+   Each run = repeats × 4M = 400M symbols, giving ~100ms per run.
+   Checksums first and last run to verify consistency. */
+#define BENCH(var, block, lbl) do { \
     snprintf(label, sizeof(label), "%s/%s", name, lbl); \
+    uint64_t cksum_first = 0, cksum_last = 0; \
     for (int r = 0; r < RUNS; r++) { \
         t0 = now_sec(); \
-        for (int iter = 0; iter < ITERS; iter++) { code; } \
+        for (int rep = 0; rep < repeats; rep++) { block; } \
         t1 = now_sec(); \
-        runs[r] = THROUGHPUT(ITERS, t1 - t0); \
+        runs_arr[r] = (double)TOTAL_SYMBOLS * repeats / (t1 - t0) / 1e6; \
+        if (r == 0) cksum_first = fnv1a(dec_buf, TOTAL_SYMBOLS); \
+        if (r == RUNS - 1) cksum_last = fnv1a(dec_buf, TOTAL_SYMBOLS); \
     } \
-    var = stable_median(runs, label); \
+    if (cksum_first != cksum_last) \
+        fprintf(stderr, "  ERROR: %s checksum mismatch between runs!\n", label); \
+    if (cksum_first != expected_cksum && expected_cksum != 0) \
+        fprintf(stderr, "  ERROR: %s checksum differs from reference!\n", label); \
+    if (expected_cksum == 0) expected_cksum = cksum_first; \
+    var = stable_median(runs_arr, label); \
 } while(0)
 
         double p_dec_s, p_dec_n = 0, t_dec_1s, t_dec_4s;
         double h_dec_1s = 0, h_dec_4s = 0, r_dec_1, r_dec_2;
+        uint64_t expected_cksum = 0; /* set by first BENCH, checked by rest */
 
-        BENCH(p_dec_s,
-              pivco_huffman_decode_scalar(pivco_enc, pivco_enc_len, &table, dec_buf, &consumed),
-              "pivco_s");
+        /* PIVCO scalar: decode NBLOCKS blocks */
+        BENCH(p_dec_s, {
+            for (int b = 0; b < NBLOCKS; b++) {
+                size_t consumed;
+                pivco_huffman_decode_scalar(
+                    pivco_enc_buf + pivco_enc_off[b],
+                    pivco_enc_off[b+1] - pivco_enc_off[b],
+                    &table, dec_buf + (size_t)b * BLK, &consumed);
+            }
+        }, "pivco_s");
+
 #ifdef PIVCO_HAS_NEON
-        BENCH(p_dec_n,
-              pivco_huffman_decode_neon(neon_enc, neon_enc_len, &table, dec_buf, &consumed),
-              "pivco_n");
+        BENCH(p_dec_n, {
+            for (int b = 0; b < NBLOCKS; b++) {
+                size_t consumed;
+                pivco_huffman_decode_neon(
+                    neon_enc_buf + neon_enc_off[b],
+                    neon_enc_off[b+1] - neon_enc_off[b],
+                    &table, dec_buf + (size_t)b * BLK, &consumed);
+            }
+        }, "pivco_n");
 #endif
-        BENCH(t_dec_1s,
-              trad_huffman_decode(trad_enc, trad_enc_bits, &table, dec_buf, N),
-              "trad_1s");
-        BENCH(t_dec_4s,
-              trad_huffman_decode_4s(trad_4s_enc, trad_4s_enc_len, &table, dec_buf, N),
-              "trad_4s");
+
+        /* Trad 1-stream: decode blocks */
+        BENCH(t_dec_1s, {
+            for (int b = 0; b < trad_nblocks; b++) {
+                trad_huffman_decode(trad_enc + trad_enc_off[b],
+                                    trad_enc_bits_arr[b], &table,
+                                    dec_buf + (size_t)b * TRAD_BLK, TRAD_BLK);
+            }
+        }, "trad_1s");
+
+        /* Trad 4-stream: decode blocks */
+        BENCH(t_dec_4s, {
+            for (int b = 0; b < trad_nblocks; b++) {
+                trad_huffman_decode_4s(trad_4s_enc + trad_4s_off[b],
+                                       trad_4s_off[b+1] - trad_4s_off[b], &table,
+                                       dec_buf + (size_t)b * TRAD_BLK, TRAD_BLK);
+            }
+        }, "trad_4s");
+
+        /* huf0 1-stream: decode chunks */
         if (huf0_1s_ok) {
-            const uint8_t *body = huf0_1s_enc + huf0_1s_body_off;
-            size_t blen = huf0_1s_enc_len - huf0_1s_body_off;
-            BENCH(h_dec_1s,
-                  HUF_decompress1X_usingDTable(dec_buf, N, body, blen, dtable_1s),
-                  "huf0_1s");
+            BENCH(h_dec_1s, {
+                for (int c = 0; c < huf0_nchunks; c++) {
+                    size_t chunk_sz = (c < huf0_nchunks - 1) ? HUF0_CHUNK
+                                     : TOTAL_SYMBOLS - (size_t)c * HUF0_CHUNK;
+                    HUF_decompress1X1(dec_buf + (size_t)c * HUF0_CHUNK, chunk_sz,
+                                      huf0_1s_enc + huf0_1s_off[c],
+                                      huf0_1s_off[c+1] - huf0_1s_off[c]);
+                }
+            }, "huf0_1s");
         }
+
+        /* huf0 4-stream: decode chunks */
         if (huf0_ok) {
-            const uint8_t *body = huf0_enc + huf0_4s_body_off;
-            size_t blen = huf0_enc_len - huf0_4s_body_off;
-            BENCH(h_dec_4s,
-                  HUF_decompress4X_usingDTable(dec_buf, N, body, blen, dtable_4s),
-                  "huf0_4s");
+            BENCH(h_dec_4s, {
+                for (int c = 0; c < huf0_nchunks; c++) {
+                    size_t chunk_sz = (c < huf0_nchunks - 1) ? HUF0_CHUNK
+                                     : TOTAL_SYMBOLS - (size_t)c * HUF0_CHUNK;
+                    HUF_decompress(dec_buf + (size_t)c * HUF0_CHUNK, chunk_sz,
+                                   huf0_enc + huf0_enc_off[c],
+                                   huf0_enc_off[c+1] - huf0_enc_off[c]);
+                }
+            }, "huf0_4s");
         }
-        BENCH(r_dec_1,
-              rans_alias_decode(rans_ctx, rans_enc, rans_enc_len, dec_buf, N),
-              "rans_1");
-        BENCH(r_dec_2,
-              rans_alias_decode_x2(rans_ctx, rans_x2_enc, rans_x2_enc_len, dec_buf, N),
-              "rans_2");
+
+        /* rANS 1-stream: full 4M at once */
+        BENCH(r_dec_1, {
+            rans_alias_decode(rans_ctx, rans_enc, rans_enc_len,
+                              dec_buf, TOTAL_SYMBOLS);
+        }, "rans_1");
+
+        /* rANS 2-stream: full 4M at once */
+        BENCH(r_dec_2, {
+            rans_alias_decode_x2(rans_ctx, rans_x2_enc, rans_x2_enc_len,
+                                  dec_buf, TOTAL_SYMBOLS);
+        }, "rans_2");
 #undef BENCH
 
         double p_best = p_dec_n > p_dec_s ? p_dec_n : p_dec_s;
@@ -263,22 +370,28 @@ int main(int argc, char **argv)
 
 cleanup:
         free(dec_buf);
-        free(dtable_1s); free(dtable_4s);
         rans_alias_destroy(rans_ctx);
-        free(symbols); free(pivco_enc); free(trad_enc); free(trad_4s_enc);
-        free(huf0_enc); free(huf0_1s_enc); free(rans_enc); free(rans_x2_enc);
+        free(symbols); free(pivco_enc_buf); free(pivco_enc_off);
+        free(trad_enc); free(trad_enc_off); free(trad_enc_bits_arr);
+        free(trad_4s_enc); free(trad_4s_off);
+        free(huf0_enc); free(huf0_enc_off);
+        free(huf0_1s_enc); free(huf0_1s_off);
+        free(rans_enc); free(rans_x2_enc);
 #ifdef PIVCO_HAS_NEON
-        free(neon_enc);
+        free(neon_enc_buf); free(neon_enc_off);
 #endif
     }
 
     double freq_after = cpu_freq_check();
     double drift = (freq_after - freq_before) / freq_before;
 
-    printf("\n  %d runs/measurement, drop %d slowest, warn if spread > %.0f%%\n",
-           RUNS, DROP_WORST, MAX_SPREAD * 100);
-    printf("  pivco_s/n = PIVCO scalar/NEON, trad_1s/4s = our trad impl\n");
-    printf("  huf0_1s/4s = actual huff0, rans_1/2 = ryg_rans alias\n");
+    printf("\n  %d runs of %dM symbols each (%dx %dM), drop %d slowest, warn if spread > %.0f%%\n",
+           RUNS, (int)((size_t)TOTAL_SYMBOLS * repeats / (1024*1024)),
+           repeats, TOTAL_SYMBOLS / (1024*1024),
+           DROP_WORST, MAX_SPREAD * 100);
+    printf("  PIVCO/trad decode in %d-symbol blocks\n", BLK);
+    printf("  huf0 uses 128KB chunks (its max block size)\n");
+    printf("  rANS decodes full 4M at once\n");
     if (drift < -0.05)
         printf("  WARNING: CPU freq dropped %.1f%% (throttling?)\n", drift * -100);
     else

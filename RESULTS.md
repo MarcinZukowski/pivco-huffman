@@ -155,30 +155,36 @@ decoders. Key findings:
 ## Benchmark Results
 
 **Platform**: Apple M4 Max, macOS, AppleClang 17, `-O3`, ARM64/NEON
-**Block size**: 4096 × uint8_t symbols (default)
-**Iterations**: 100,000 per measurement
+**Methodology**: Decode a 4M-symbol sequence, repeated 50 times per
+timed run (200M symbols/run). 5 runs, drop 2 slowest, report median
+of 3 best. Warn if spread > 5%. Each codec uses its natural block
+size: PIVCO and our trad use 8192-symbol blocks, huf0 uses 128KB
+chunks (its maximum), rANS decodes the full 4M at once.
 
 ### Decode Throughput (millions of symbols per second)
 
 | Distribution  | PIVCO scalar | PIVCO NEON | trad 1s | trad 4s | huf0 1s | huf0 4s | rANS 1s | rANS 2s | vs best |
 |---------------|------------:|----------:|--------:|--------:|--------:|--------:|--------:|--------:|--------:|
-| proba80       |        1241 |      4340 |     583 |    1761 |     394 |    1266 |     225 |     444 | **2.46x** |
-| proba50       |         944 |      3305 |     588 |    1502 |     394 |    1350 |     222 |     439 | **2.20x** |
-| proba14       |         489 |      1894 |     562 |    1480 |     396 |    1507 |     217 |     427 | **1.26x** |
-| proba02       |         288 |       993 |     525 |    1470 |     395 |    1530 |     210 |     411 |   0.65x |
-| uniform       |         261 |       949 |    1633 |    1648 |     n/a |     n/a |     222 |     440 |   0.58x |
-| english       |         479 |      2030 |     554 |    1574 |     395 |    1489 |     217 |     427 | **1.29x** |
-| zipfian       |         299 |      1058 |     540 |    1572 |     395 |    1515 |     212 |     417 |   0.67x |
-| sparse_4      |         919 |      3355 |    2671 |    1688 |    1210 |    3069 |     238 |     477 | **1.09x** |
-| sparse_16     |         444 |      1331 |    1416 |    1063 |     698 |    2248 |     138 |     274 |   0.59x |
-| geometric     |         573 |      2003 |     349 |     289 |     232 |     804 |     131 |     257 | **2.49x** |
-| two_sym_eq    |         949 |      2940 |    1925 |    1070 |     610 |    1631 |     143 |     286 | **1.53x** |
-| two_sym_90/10 |         949 |      2943 |    1915 |    1069 |     604 |    1627 |     133 |     262 | **1.54x** |
+| proba80       |        1301 |      3996 |     563 |    1677 |     390 |    2835 |     200 |     344 | **1.41x** |
+| proba50       |         903 |      3198 |     536 |    1524 |     388 |    2705 |     181 |     286 | **1.18x** |
+| proba14       |         478 |      1827 |     467 |    1512 |     390 |    2561 |     180 |     292 |   0.71x |
+| proba02       |         281 |       846 |     424 |    1509 |     392 |    1397 |     175 |     288 |   0.56x |
+| uniform       |         259 |       858 |    1575 |    1608 |     n/a |     n/a |     220 |     414 |   0.53x |
+| english       |         481 |      1925 |     460 |    1572 |     386 |    2489 |     182 |     298 |   0.77x |
+| zipfian       |         310 |       891 |     398 |    1557 |     385 |    1843 |     154 |     239 |   0.48x |
+| sparse_4      |         908 |      3238 |    2658 |    1625 |    1097 |    5133 |     237 |     454 |   0.63x |
+| sparse_16     |         512 |      2044 |    2160 |    1634 |    1131 |    4587 |     230 |     436 |   0.45x |
+| geometric     |         882 |      3106 |     512 |     692 |     388 |    2626 |     177 |     281 | **1.18x** |
+| two_sym_eq    |        1469 |      4406 |    2947 |    1640 |     850 |    5352 |     242 |     463 |   0.82x |
+| two_sym_90/10 |        1474 |      4412 |    2910 |    1631 |     850 |    5096 |     210 |     372 |   0.87x |
 
 - "n/a" = huf0 detected data as incompressible (uniform distribution)
 - "vs best" = best PIVCO / best of all other decoders
 - proba distributions match FiniteStateEntropy's fullbench.c (BMK_genData)
-- rANS alias is significantly slower than table-based decoders on ARM
+- huf0's large 128KB chunks give it a significant amortization advantage
+  over PIVCO's 8KB blocks; on a per-block-size basis PIVCO is faster
+  across more distributions
+- rANS alias is 3-5x slower than table-based decoders on ARM
   (multiply-heavy decode step doesn't pipeline well on M4)
 
 ### Data Distributions
@@ -209,43 +215,24 @@ overhead being byte-alignment rounding at each tree node.
 
 ### Block Size Sweep
 
-PIVCO NEON decode throughput (M/s) by block size:
+PIVCO NEON decode throughput (M/s) by block size, realistic 4M workload:
 
-| N     | proba80 | proba50 | proba14 | proba02 |
-|------:|--------:|--------:|--------:|--------:|
-|   128 |    1216 |     879 |     350 |     113 |
-|   256 |    1324 |    1072 |     478 |     157 |
-|   512 |    1552 |    1213 |     666 |     241 |
-|  1024 |    1555 |    1266 |     751 |     326 |
-|  2048 |    1664 |    1355 |     858 |     467 |
-|  4096 |    1735 |    1456 |     914 |     562 |
-|  8192 |    1725 |    1483 |     981 |     637 |
-| 16384 |    1769 |    1501 |    1030 |     686 |
-
-PIVCO vs best SotA ratio by block size:
-
-| N     | proba80 | proba50 | proba14 | proba02 |
-|------:|--------:|--------:|--------:|--------:|
-|   128 |   1.28x |   1.45x |   0.64x |   0.33x |
-|   256 |   1.31x |   2.87x |   0.68x |   0.48x |
-|   512 |   1.49x |   2.61x |   0.84x |   0.27x |
-|  1024 |   1.48x |   1.96x |   0.89x |   0.36x |
-|  2048 |   1.57x |   1.68x |   0.99x |   0.52x |
-|  4096 |   1.63x |   1.59x |   0.99x |   0.61x |
-|  8192 |   1.62x |   1.54x |   1.00x |   0.65x |
-| 16384 |   1.66x |   1.46x |   1.00x |   0.67x |
+| N     | proba80 | proba50 | proba14 | proba02 | english | geometric |
+|------:|--------:|--------:|--------:|--------:|--------:|----------:|
+|  4096 |    4149 |    3158 |    1583 |     645 |    1787 |      3048 |
+|  8192 |    4271 |    3277 |    1777 |     851 |    1938 |      3259 |
+| 16384 |    4120 |    3345 |    1948 |    1034 |    1953 |      3194 |
+| 65536 |    3525 |    2958 |    1818 |    1215 |    1812 |      2895 |
 
 Key observations:
-- PIVCO throughput scales with block size up to ~4096, then diminishes.
-  More indices = better SIMD utilization at the top tree levels.
-- proba80 improves 45% from N=128 to N=16384 (1216 → 1769 M/s).
-- Diminishing returns past N=4096 — the SIMD partition is already
-  well-utilized (512 iterations of 8-wide at the root).
-- The competitive ratio peaks around N=4096-8192 for skewed distributions.
-- proba02/uniform losses do not improve with block size — the fundamental
-  issue is tree depth (many layers, no early termination), not SIMD width.
-- **N=4096 is a good default**: near-peak throughput, reasonable memory
-  usage (8KB indices + 8KB scratch).
+- **N=8192 is the sweet spot**: best on the most skewed distributions
+  (proba80, geometric) where PIVCO's advantage is largest. 16KB index
+  array fits comfortably in M4's 128KB L1D.
+- 16384 is slightly better on moderate distributions (proba14, proba02)
+  but loses on the most skewed ones.
+- 65536 regresses everywhere — 128KB index arrays start spilling L1.
+- proba02/uniform losses do not improve enough with block size — the
+  fundamental issue is tree depth, not SIMD utilization.
 
 ## Profiling
 
@@ -284,55 +271,49 @@ resource (in this case, the NEON execution units doing TBL shuffles).
 
 ### Where PIVCO Wins
 
-**Skewed distributions (proba80, proba50, geometric): 2.2-2.5x over SotA.**
-When a few symbols dominate, the Huffman tree has short codes for common
-symbols. PIVCO terminates large groups of indices at shallow tree levels
-where the SIMD partition processes thousands of elements per node. The
-tree's early-exit property means most work is done in the first 2-3
-levels.
+**Highly skewed distributions: 1.2-1.4x over huf0 4-stream at 128KB.**
+On proba80 (3996 vs 2835 = 1.41x), proba50 (3198 vs 2705 = 1.18x),
+and geometric (3106 vs 2626 = 1.18x), PIVCO beats huf0 despite huf0
+processing 16x more symbols per block. The tree's early-exit property
+means most of PIVCO's 8192-symbol block is decoded in the first 2-3
+tree levels via large NEON scatter-writes.
 
-For proba80, ~80% of symbols have 1-3 bit codes. The root partition
-processes 4096 indices, and the most common symbol's leaf gets ~3200
-of them in one NEON scatter-write. Traditional decoders still do 4096
-individual table lookups regardless.
-
-**Moderate skew (proba14, english): 1.3x over SotA.**
-PIVCO beats the best traditional decoder by 26-30%. The tree is
-moderately deep (9-10 levels), but the NEON scatter and partition
-still outperform 4-stream table lookup.
-
-**Two-symbol / sparse_4: 1.1-1.5x over SotA.**
-Even simple distributions with very short codes (1-2 bits) favor
-PIVCO — the tree is shallow (1-2 levels) and virtually all work is
-in a single massive scatter-write at the leaf.
+Note: huf0's 128KB chunks give it a major amortization advantage.
+On a per-block-size basis (both at 8KB), PIVCO wins on many more
+distributions.
 
 ### Where PIVCO Loses
 
-**Near-uniform (proba02, uniform): 0.6x.** All codes are similar
-length (8-12 bits), so the tree is deep with no early termination.
-Every level does a full partition of all indices with almost no leaf
-writes until the bottom. Traditional decoders do O(1) per symbol
-regardless of code length distribution.
+**Moderate and uniform distributions: 0.5-0.8x.** huf0 4-stream at
+128KB achieves 2500-5000 M/s on english, zipfian, sparse, and
+two-symbol distributions. PIVCO at 8KB can't match this because:
+1. huf0's larger block size amortizes per-block overhead 16x better
+2. On non-skewed distributions, PIVCO's tree is deep with few
+   early terminations, negating the SIMD partition advantage
+3. huf0's 4-stream ILP is very effective on OoO cores
 
-**Sparse equal-weight (sparse_16): 0.6x.** 16 symbols with equal
-frequency = tiny lookup table that fits in L1. huff0 4-stream
-achieves 3454 M/s. PIVCO still does well (2034 M/s) but the
-O(depth) partition passes can't beat the constant-time lookup.
+**Sparse equal-weight (sparse_4/16, two_sym): 0.4-0.9x.** huf0
+achieves 5000+ M/s — essentially memory-bandwidth limited — because
+the tiny decode table fits in L1 and 128KB blocks minimize overhead.
 
 ### The Core Tradeoff
 
-**Table lookup with ILP (traditional) vs SIMD tree partitioning (PIVCO):**
+**Block size × algorithm:**
 
-Traditional Huffman has a serial dependency per stream (must know
-current symbol's length before starting the next), but 4-stream
-interleaving hides the latency on OoO CPUs. The lookup table handles
-any distribution in O(1) per symbol, but its throughput is fixed.
+PIVCO's throughput is distribution-dependent: skewed data terminates
+early in the tree (most work at top levels with large groups),
+while uniform data forces full-depth traversal. Its per-symbol
+cost scales with tree depth.
 
-PIVCO has no serial dependency — all symbols are processed in parallel.
-Its throughput is **distribution-dependent**: skewed data terminates
-early (most work at the top, few indices at the bottom), while uniform
-data forces full-depth traversal. PIVCO wins on all but the most
-uniform distributions (proba02, uniform, sparse_16).
+huf0's throughput is mostly distribution-independent at a given
+block size. Its per-symbol cost is constant (one table lookup),
+but per-block overhead matters — 128KB blocks amortize this much
+better than 8KB.
+
+The crossover depends on both distribution skew AND block size.
+With equal block sizes, PIVCO wins on most distributions. With
+huf0 at 128KB vs PIVCO at 8KB, PIVCO only wins on highly skewed
+data (proba80, proba50, geometric).
 
 ### SIMD Width Scaling
 
@@ -379,9 +360,12 @@ Worth exploring:
 - **Encode optimization**: The encoder's bitmap construction is still
   scalar. NEON comparison + movemask could help, as could encoding
   multiple blocks in parallel.
-- **Wider NEON partition**: Process 16 indices at a time using two
-  TBL instructions, reducing loop iterations by 2x. Requires a 64KB
-  shuffle table (for 16-bit masks) or a two-pass approach.
+- **Wider NEON partition**: Tested: process 16 indices via two
+  TBL instructions per iteration. 34% regression on M4 — the 10
+  memory ops (6 loads + 4 stores) per iteration saturate the
+  load/store units. The OoO engine already overlaps consecutive
+  8-wide iterations effectively. May help on architectures with
+  wider load/store throughput.
 - **Replace `compress_popcnt` table with `__builtin_popcount`**: Tested,
   showed no improvement (~1% slower consistently on M4, reason unclear —
   possibly the table load fuses with the TBL shuffle load in the
@@ -392,18 +376,17 @@ Worth exploring:
 ## Building & Running
 
 ```sh
+git clone --depth 1 https://github.com/cyan4973/FiniteStateEntropy.git ext/fse
+git clone --depth 1 https://github.com/rygorous/ryg_rans.git ext/ryg_rans
 cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES=arm64
 cmake --build build
-./build/pivco_huffman_tests   # run tests
-./build/pivco_huffman_bench   # run benchmarks
-```
-
-huff0 baseline requires cloning FiniteStateEntropy:
-```sh
-git clone --depth 1 https://github.com/cyan4973/FiniteStateEntropy.git ext/fse
+./build/pivco_huffman_tests        # run tests
+./build/pivco_huffman_bench        # run benchmarks (default 100 repeats)
+./build/pivco_huffman_bench 10     # quick run (10 repeats)
+./build/pivco_huffman_bench 200    # thorough run (200 repeats)
 ```
 
 Custom block size:
 ```sh
-cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_FLAGS="-DPIVCO_BLOCK_SIZE=8192"
+cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_FLAGS="-DPIVCO_BLOCK_SIZE=16384"
 ```

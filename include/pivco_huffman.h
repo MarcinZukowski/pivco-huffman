@@ -11,7 +11,7 @@ extern "C" {
 /* ---------- Constants ---------- */
 
 #ifndef PIVCO_BLOCK_SIZE
-#define PIVCO_BLOCK_SIZE 4096
+#define PIVCO_BLOCK_SIZE 8192
 #endif
 
 #define PIVCO_MAX_SYMBOLS   256
