@@ -189,6 +189,26 @@ static void decode_node_neon(const pivco_huffman_table_t *table,
            Eliminates per-element index load and loop control overhead. */
         uint8_t sym = (uint8_t)node->symbol;
         int j = 0;
+        for (; j + 16 <= n; j += 16) {
+            uint16x8_t i0 = vld1q_u16(indices + j);
+            uint16x8_t i1 = vld1q_u16(indices + j + 8);
+            symbols[vgetq_lane_u16(i0, 0)] = sym;
+            symbols[vgetq_lane_u16(i0, 1)] = sym;
+            symbols[vgetq_lane_u16(i0, 2)] = sym;
+            symbols[vgetq_lane_u16(i0, 3)] = sym;
+            symbols[vgetq_lane_u16(i0, 4)] = sym;
+            symbols[vgetq_lane_u16(i0, 5)] = sym;
+            symbols[vgetq_lane_u16(i0, 6)] = sym;
+            symbols[vgetq_lane_u16(i0, 7)] = sym;
+            symbols[vgetq_lane_u16(i1, 0)] = sym;
+            symbols[vgetq_lane_u16(i1, 1)] = sym;
+            symbols[vgetq_lane_u16(i1, 2)] = sym;
+            symbols[vgetq_lane_u16(i1, 3)] = sym;
+            symbols[vgetq_lane_u16(i1, 4)] = sym;
+            symbols[vgetq_lane_u16(i1, 5)] = sym;
+            symbols[vgetq_lane_u16(i1, 6)] = sym;
+            symbols[vgetq_lane_u16(i1, 7)] = sym;
+        }
         for (; j + 8 <= n; j += 8) {
             uint16x8_t idx = vld1q_u16(indices + j);
             symbols[vgetq_lane_u16(idx, 0)] = sym;
@@ -211,10 +231,23 @@ static void decode_node_neon(const pivco_huffman_table_t *table,
     const uint8_t *bm = *in_ptr;
     *in_ptr += nbytes;
 
-    /* SIMD partition in-place */
+    /* SIMD partition in-place, unrolled 2x */
     int n_left = 0, n_right = 0;
     int j = 0;
 
+    for (; j + 16 <= n; j += 16) {
+        uint8_t m0 = bm[j >> 3];
+        int nr0 = partition_8(indices + j, m0,
+                              indices + n_left, tmp + n_right);
+        n_right += nr0;
+        n_left += (8 - nr0);
+
+        uint8_t m1 = bm[(j >> 3) + 1];
+        int nr1 = partition_8(indices + j + 8, m1,
+                              indices + n_left, tmp + n_right);
+        n_right += nr1;
+        n_left += (8 - nr1);
+    }
     for (; j + 8 <= n; j += 8) {
         uint8_t mask = bm[j >> 3];
         int nr = partition_8(indices + j, mask,
