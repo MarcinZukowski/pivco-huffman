@@ -14,27 +14,39 @@
  * shuffle that packs selected uint16_t elements to the front.
  * pshufb (_mm_shuffle_epi8) is the x86 equivalent of NEON TBL.
  */
-static uint8_t compress_shuf[256][16] __attribute__((aligned(16)));
-static uint8_t compress_popcnt[256];
+/* Combined shuffle table: [256][32] where bytes 0-15 are the shuffle
+   for mask (right) and bytes 16-31 are for ~mask (left).
+   Loaded as two aligned 16-byte loads from contiguous memory. */
+static uint8_t compress_tab[256][32] __attribute__((aligned(32)));
+static uint8_t compress_popcnt[256] __attribute__((aligned(64)));
 static int     compress_table_ready = 0;
 
 static void init_compress_table(void)
 {
     if (compress_table_ready) return;
     for (int mask = 0; mask < 256; mask++) {
-        int out = 0;
+        int out_r = 0;
         for (int i = 0; i < 8; i++) {
             if (mask & (1 << i)) {
-                compress_shuf[mask][out * 2]     = (uint8_t)(i * 2);
-                compress_shuf[mask][out * 2 + 1] = (uint8_t)(i * 2 + 1);
-                out++;
+                compress_tab[mask][out_r * 2]     = (uint8_t)(i * 2);
+                compress_tab[mask][out_r * 2 + 1] = (uint8_t)(i * 2 + 1);
+                out_r++;
             }
         }
-        compress_popcnt[mask] = (uint8_t)out;
-        /* pshufb: bytes with high bit set produce 0 */
-        for (int j = out * 2; j < 16; j++) {
-            compress_shuf[mask][j] = 0x80;
+        compress_popcnt[mask] = (uint8_t)out_r;
+        for (int j = out_r * 2; j < 16; j++)
+            compress_tab[mask][j] = 0x80;
+
+        int out_l = 0;
+        for (int i = 0; i < 8; i++) {
+            if (!(mask & (1 << i))) {
+                compress_tab[mask][16 + out_l * 2]     = (uint8_t)(i * 2);
+                compress_tab[mask][16 + out_l * 2 + 1] = (uint8_t)(i * 2 + 1);
+                out_l++;
+            }
         }
+        for (int j = out_l * 2; j < 16; j++)
+            compress_tab[mask][16 + j] = 0x80;
     }
     compress_table_ready = 1;
 }
@@ -50,16 +62,17 @@ static inline int partition_8_sse(const uint16_t *src,
 {
     __m128i data = _mm_loadu_si128((const __m128i *)src);
 
-    /* Right (bit=1) */
-    __m128i shuf_r = _mm_load_si128((const __m128i *)compress_shuf[mask]);
-    __m128i right = _mm_shuffle_epi8(data, shuf_r);
-    int n_right = compress_popcnt[mask];
-    _mm_storeu_si128((__m128i *)right_out, right);
+    /* Load both shuffle patterns from combined table (contiguous) */
+    const uint8_t *tab = compress_tab[mask];
+    __m128i shuf_r = _mm_load_si128((const __m128i *)tab);
+    __m128i shuf_l = _mm_load_si128((const __m128i *)(tab + 16));
 
-    /* Left (bit=0) */
-    uint8_t inv = (uint8_t)~mask;
-    __m128i shuf_l = _mm_load_si128((const __m128i *)compress_shuf[inv]);
-    __m128i left = _mm_shuffle_epi8(data, shuf_l);
+    __m128i right = _mm_shuffle_epi8(data, shuf_r);
+    __m128i left  = _mm_shuffle_epi8(data, shuf_l);
+
+    int n_right = compress_popcnt[mask];
+
+    _mm_storeu_si128((__m128i *)right_out, right);
     _mm_storeu_si128((__m128i *)left_out, left);
 
     return n_right;

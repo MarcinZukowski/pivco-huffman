@@ -32,10 +32,16 @@ if(TARGET_ARCH STREQUAL "arm64" OR TARGET_ARCH STREQUAL "aarch64")
     # handles 4 × uint32 per instruction vs TBL's 8 × uint16. SVE would
     # help at 256-bit+ vector lengths (e.g. Fujitsu A64FX).
 elseif(TARGET_ARCH STREQUAL "x86_64" OR TARGET_ARCH STREQUAL "amd64")
-    # Check for AVX-512 VBMI2 (vpcompressw) at compile time
+    # Check for AVX-512 VBMI2 (vpcompressw) — compiler support AND CPU support
     include(CheckCCompilerFlag)
-    check_c_compiler_flag("-mavx512vbmi2" HAS_AVX512_VBMI2)
-    if(HAS_AVX512_VBMI2)
+    check_c_compiler_flag("-mavx512vbmi2" COMPILER_HAS_AVX512_VBMI2)
+    if(COMPILER_HAS_AVX512_VBMI2)
+        # Check if the CPU actually has avx512vbmi2
+        execute_process(COMMAND grep -c avx512_vbmi2 /proc/cpuinfo
+                        OUTPUT_VARIABLE CPU_HAS_AVX512 OUTPUT_STRIP_TRAILING_WHITESPACE
+                        ERROR_QUIET)
+    endif()
+    if(COMPILER_HAS_AVX512_VBMI2 AND CPU_HAS_AVX512 AND NOT CPU_HAS_AVX512 STREQUAL "0")
         message(STATUS "x86_64 detected — enabling AVX-512 VBMI2 + SSE4.1")
         list(APPEND PIVCO_SOURCES src/pivco_huffman_avx512.c src/pivco_huffman_x86.c)
         add_compile_definitions(PIVCO_HAS_AVX512=1 PIVCO_HAS_SSE4=1)

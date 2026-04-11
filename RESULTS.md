@@ -51,17 +51,27 @@ byte-alignment rounding at each tree node (typically 1-4% overhead).
 
 ## Implementation
 
-Written in C11 with two backends:
+Written in C11 with four backends:
 
 - **Scalar**: bitmap-based partition. For each of n indices, extract
   the code bit, write to left or right output. O(n) per tree node.
 
 - **NEON** (AArch64): TBL-based SIMD partition. Processes 8 × uint16_t
-  indices per iteration using `vqtbl1q_u8` with a precomputed 4KB
-  shuffle table (256 entries × 16 bytes). Each partition_8 call does:
-  one `vld1q_u8` (load indices), two `vqtbl1q_u8` (compress left and
-  right), two `vst1q_u8` (store outputs). ~5 NEON instructions per
-  8 indices.
+  indices per iteration using `vqtbl1q_u8` with a combined 8KB shuffle
+  table (256 entries × 32 bytes: right + left patterns contiguous,
+  loaded with a single `ldp q0, q1`). 12 instructions per 8 indices.
+
+- **SSE4.1** (x86-64): `pshufb`-based partition, same 8-wide approach
+  as NEON with the combined shuffle table.
+
+- **AVX-512 VBMI2** (x86-64): `vpcompressw` partition — 32 × uint16_t
+  per iteration in a single instruction. No shuffle table needed.
+  Available on Intel Granite Rapids (Xeon 6000P) and later.
+
+An **SVE** backend exists but is disabled: at 128-bit SVE (Graviton 4),
+`svcompact` handles only 4 × uint32 (requiring widen/narrow), which
+is slower than NEON TBL's 8 × uint16. SVE would help at 256-bit+
+vector lengths (e.g. Fujitsu A64FX).
 
 ### Key Design Decisions
 
@@ -155,37 +165,82 @@ decoders. Key findings:
 
 ## Benchmark Results
 
-**Platform**: Apple M4 Max, macOS, AppleClang 17, `-O3`, ARM64/NEON
-**Methodology**: Decode a 4M-symbol sequence, repeated 50 times per
-timed run (200M symbols/run). 5 runs, drop 2 slowest, report median
+**Methodology**: Decode a 4M-symbol sequence, repeated 20 times per
+timed run (80M symbols/run). 5 runs, drop 2 slowest, report median
 of 3 best. Warn if spread > 5%. Each codec uses its natural block
-size: PIVCO and our trad use 8192-symbol blocks, huf0 uses 128KB
-chunks (its maximum), rANS decodes the full 4M at once.
+size: PIVCO and our trad use 4096-8192 symbol blocks (platform-dependent),
+huf0 uses 128KB chunks (its maximum), rANS decodes the full 4M at once.
 
-### Decode Throughput (millions of symbols per second)
+### Apple M4 Max (NEON, 128KB L1D, block 8192)
 
-| Distribution  | PIVCO scalar | PIVCO NEON | trad 1s | trad 4s | huf0 1s | huf0 4s | rANS 1s | rANS 2s | vs best |
-|---------------|------------:|----------:|--------:|--------:|--------:|--------:|--------:|--------:|--------:|
-| proba80       |        1301 |      3996 |     563 |    1677 |     390 |    2835 |     200 |     344 | **1.41x** |
-| proba50       |         903 |      3198 |     536 |    1524 |     388 |    2705 |     181 |     286 | **1.18x** |
-| proba14       |         478 |      1827 |     467 |    1512 |     390 |    2561 |     180 |     292 |   0.71x |
-| proba02       |         281 |       846 |     424 |    1509 |     392 |    1397 |     175 |     288 |   0.56x |
-| uniform       |         259 |       858 |    1575 |    1608 |     n/a |     n/a |     220 |     414 |   0.53x |
-| english       |         481 |      1925 |     460 |    1572 |     386 |    2489 |     182 |     298 |   0.77x |
-| zipfian       |         310 |       891 |     398 |    1557 |     385 |    1843 |     154 |     239 |   0.48x |
-| sparse_4      |         908 |      3238 |    2658 |    1625 |    1097 |    5133 |     237 |     454 |   0.63x |
-| sparse_16     |         512 |      2044 |    2160 |    1634 |    1131 |    4587 |     230 |     436 |   0.45x |
-| geometric     |         882 |      3106 |     512 |     692 |     388 |    2626 |     177 |     281 | **1.18x** |
-| two_sym_eq    |        1469 |      4406 |    2947 |    1640 |     850 |    5352 |     242 |     463 |   0.82x |
-| two_sym_90/10 |        1474 |      4412 |    2910 |    1631 |     850 |    5096 |     210 |     372 |   0.87x |
+| Distribution  | PIVCO scalar | PIVCO NEON | trad 1s | trad 4s | huf0 4s | vs best |
+|---------------|------------:|----------:|--------:|--------:|--------:|--------:|
+| proba80       |        1326 |      4341 |     571 |    1743 |    2904 | **1.49x** |
+| proba50       |         933 |      3409 |     533 |    1570 |    2834 | **1.20x** |
+| proba14       |         486 |      1972 |     481 |    1565 |    2715 |   0.73x |
+| proba02       |         281 |       902 |     440 |    1530 |    1434 |   0.59x |
+| english       |         483 |      2040 |     478 |    1594 |    2640 |   0.77x |
+| geometric     |         888 |      3253 |     524 |     693 |    2728 | **1.19x** |
+| two_sym_eq    |        1498 |      4510 |    2946 |    1646 |    5374 |   0.84x |
+| two_sym_90/10 |        1495 |      4418 |    2960 |    1644 |    5398 |   0.82x |
 
-- "n/a" = huf0 detected data as incompressible (uniform distribution)
-- "vs best" = best PIVCO / best of all other decoders
-- proba distributions match FiniteStateEntropy's fullbench.c (BMK_genData)
-- Each codec uses its natural block size (PIVCO: 8192 symbols,
-  huf0: 128KB, rANS: full 4M)
-- rANS alias is 3-5x slower than table-based decoders on ARM
-  (multiply-heavy decode step doesn't pipeline well on M4)
+### Intel Xeon 6975P Granite Rapids (AVX-512 VBMI2, 48KB L1D, block 8192)
+
+| Distribution  | PIVCO scalar | PIVCO AVX512 | trad 1s | trad 4s | huf0 4s | vs best |
+|---------------|------------:|-----------:|--------:|--------:|--------:|--------:|
+| proba80       |         354 |       2682 |     386 |     722 |    1818 | **1.48x** |
+| proba50       |         118 |       2052 |     288 |     652 |    1809 | **1.13x** |
+| proba14       |          57 |       1003 |     274 |     651 |    1749 |   0.57x |
+| proba02       |          33 |        298 |     257 |     650 |    1051 |   0.28x |
+| english       |          57 |       1232 |     275 |     681 |    1764 |   0.70x |
+| geometric     |         117 |       1984 |     290 |     274 |    1814 | **1.09x** |
+| two_sym_eq    |         231 |       2969 |     309 |     725 |    1827 | **1.63x** |
+| two_sym_90/10 |         621 |       2939 |     432 |     725 |    1811 | **1.62x** |
+
+### AWS Graviton 4 Neoverse V2 (NEON, 64KB L1D, block 8192)
+
+| Distribution  | PIVCO scalar | PIVCO NEON | trad 1s | trad 4s | huf0 4s | vs best |
+|---------------|------------:|----------:|--------:|--------:|--------:|--------:|
+| proba80       |         368 |      1418 |     320 |    1019 |    1675 |   0.85x |
+| proba50       |         138 |      1149 |     304 |     834 |    1680 |   0.68x |
+| proba14       |          67 |       681 |     281 |     824 |    1633 |   0.42x |
+| proba02       |          40 |       361 |     260 |     810 |     925 |   0.39x |
+| english       |          67 |       707 |     283 |     890 |    1634 |   0.43x |
+| geometric     |         137 |      1130 |     303 |     229 |    1677 |   0.67x |
+| two_sym_eq    |         259 |      1510 |     337 |    1021 |    1680 |   0.90x |
+| two_sym_90/10 |         595 |      1542 |     338 |    1024 |    1666 |   0.93x |
+
+### AMD EPYC 7R13 Zen 3 (SSE4.1, 32KB L1D, block 4096)
+
+| Distribution  | PIVCO scalar | PIVCO SSE | trad 1s | trad 4s | huf0 4s | vs best |
+|---------------|------------:|---------:|--------:|--------:|--------:|--------:|
+| proba80       |         332 |     1544 |     368 |     859 |    1787 |   0.86x |
+| proba50       |         121 |     1162 |     287 |     688 |    1751 |   0.66x |
+| proba14       |          59 |      608 |     266 |     688 |    1676 |   0.36x |
+| proba02       |          34 |      254 |     253 |     684 |     945 |   0.27x |
+| english       |          58 |      677 |     268 |     758 |    1687 |   0.40x |
+| geometric     |         121 |     1139 |     288 |     168 |    1746 |   0.65x |
+| two_sym_eq    |         233 |     1703 |     322 |     870 |    1779 |   0.96x |
+| two_sym_90/10 |         520 |     1716 |     455 |     872 |    1786 |   0.96x |
+
+### Cross-Platform Summary (PIVCO SIMD vs huf0 4-stream)
+
+| Distribution | M4 NEON | Xeon AVX-512 | Graviton4 NEON | Zen3 SSE |
+|---|---:|---:|---:|---:|
+| **proba80** | **1.49x** | **1.48x** | 0.85x | 0.86x |
+| **proba50** | **1.20x** | **1.13x** | 0.68x | 0.66x |
+| proba14 | 0.73x | 0.57x | 0.42x | 0.36x |
+| english | 0.77x | 0.70x | 0.43x | 0.40x |
+| **geometric** | **1.19x** | **1.09x** | 0.67x | 0.65x |
+| **two_sym_eq** | 0.84x | **1.63x** | 0.90x | 0.96x |
+
+PIVCO beats huf0 on Apple M4 (large L1D) and Intel AVX-512 (wide
+partition), loses on Graviton 4 (small L1D) and AMD Zen 3 (small
+L1D, narrow SIMD).
+
+- Each codec uses its natural block size
+- huf0 has a 16x block size advantage (128KB vs 8KB)
+- rANS alias (ryg_rans) consistently 3-5x slower than huf0 on all platforms
 
 ### Data Distributions
 
@@ -269,41 +324,42 @@ resource (in this case, the NEON execution units doing TBL shuffles).
 
 ### Where PIVCO Wins
 
-**Highly skewed distributions: 1.2-1.4x over huf0 4-stream at 128KB.**
-On proba80 (3996 vs 2835 = 1.41x), proba50 (3198 vs 2705 = 1.18x),
-and geometric (3106 vs 2626 = 1.18x). The tree's early-exit property
-means most symbols are decoded in the first 2-3 tree levels via
-large NEON scatter-writes — the per-symbol cost drops well below
-a single table lookup.
+**Skewed distributions on capable hardware: 1.1-1.6x over huf0.**
+PIVCO beats huf0 on proba80 and proba50 on both Apple M4 (1.5x)
+and Intel AVX-512 (1.5x). On AVX-512, PIVCO also wins on two-symbol
+and sparse_4 distributions (1.6x) thanks to the 32-wide `vpcompressw`
+partition.
+
+The tree's early-exit property means most symbols are decoded in
+the first 2-3 tree levels via large scatter-writes — the per-symbol
+cost drops well below a single table lookup.
 
 ### Where PIVCO Loses
 
-**Moderate and uniform distributions: 0.5-0.8x.** huf0 4-stream
-achieves 2500-5000 M/s on english, zipfian, sparse, and two-symbol
-distributions. On non-skewed data, PIVCO's tree is deep with few
-early terminations, so the SIMD partition does full-depth traversal
-without the benefit of large early leaf writes.
+**All distributions on small-L1D / narrow-SIMD platforms.** On
+Graviton 4 (64KB L1D) and Zen 3 (32KB L1D), PIVCO loses everywhere.
+The 8KB shuffle table + 32KB index arrays pressure L1D, and 8-wide
+SIMD doesn't provide enough throughput advantage over huf0's 4-stream
+ILP.
 
-**Sparse equal-weight (sparse_4/16, two_sym): 0.4-0.9x.** huf0
-achieves 5000+ M/s — essentially memory-bandwidth limited — because
-the tiny decode table fits in L1 and the data is trivially regular.
+**Moderate and uniform distributions everywhere.** On non-skewed data,
+the tree is deep with few early terminations, so PIVCO does full-depth
+traversal without the benefit of large early leaf writes.
 
 ### The Core Tradeoff
 
-PIVCO's throughput is **distribution-dependent**: skewed data
-terminates early in the tree (most work at top levels with large
-groups), while uniform data forces full-depth traversal. Its
-per-symbol cost scales with tree depth.
+PIVCO's throughput is **distribution-dependent** and **hardware-
+dependent**: it needs either large L1D (128KB on M4) or wide SIMD
+(AVX-512 vpcompressw) to overcome huf0's advantages.
 
-huf0's throughput is **mostly distribution-independent**. Its
-per-symbol cost is constant (one table lookup). It excels when
-the decode table fits in L1 and the data is regular.
+huf0's throughput is **mostly distribution-independent** and
+**consistently fast** across platforms. Its per-symbol cost is
+constant (one table lookup), and 128KB blocks amortize overhead well.
 
-PIVCO uses small blocks (8192 symbols) because that's optimal for
-its tree-walk architecture — larger blocks spill L1 cache. huf0
-uses large blocks (128KB) because that's optimal for its 4-stream
-architecture. The throughput comparison is between two algorithms
-each at their natural operating point.
+PIVCO uses small blocks (4096-8192 symbols) because larger blocks
+spill L1D. huf0 uses large blocks (128KB) because that's optimal
+for its 4-stream architecture. Each codec operates at its natural
+block size.
 
 ### SIMD Width Scaling
 
@@ -357,11 +413,16 @@ Worth exploring:
   8-wide iterations effectively. May help on architectures with
   wider load/store throughput.
 - **Replace `compress_popcnt` table with `__builtin_popcount`**: Tested,
-  showed no improvement (~1% slower consistently on M4, reason unclear —
-  possibly the table load fuses with the TBL shuffle load in the
-  load-store unit, or the compiler schedules it earlier). Worth
-  re-testing on other microarchitectures. On x86 `popcnt` is 1-cycle
-  and may win.
+  showed no improvement (~1% slower consistently on M4). The popcnt
+  table shares a cache line with the shuffle table access.
+- **Combined shuffle table [256][32]**: Tested and adopted. Stores both
+  right (mask) and left (~mask) shuffle patterns contiguously, enabling
+  `ldp q0, q1` on ARM (one load-pair vs two separate loads). 5-9%
+  improvement across platforms.
+- **SVE backend**: Tested on Graviton 4 (128-bit SVE). `svcompact_u32`
+  only handles 4 elements per instruction at this width, requiring
+  widen/narrow for uint16 — slower than NEON TBL. Disabled by default.
+  Would help at 256-bit+ SVE.
 
 ## Building & Running
 

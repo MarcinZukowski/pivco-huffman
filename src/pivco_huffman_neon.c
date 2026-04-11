@@ -10,26 +10,42 @@
  * For each 8-bit mask, a 16-byte TBL shuffle that packs selected
  * uint16_t elements (2 bytes each) to the front of the register.
  */
-static uint8_t compress_shuf[256][16];
-static uint8_t compress_popcnt[256];
+/* Combined shuffle table: [256][32] where bytes 0-15 are the shuffle
+   for mask (right partition) and bytes 16-31 are for ~mask (left partition).
+   Both loaded with a single ldp q0, q1 — one cache line access instead
+   of two separate lookups at unrelated addresses. */
+static uint8_t compress_tab[256][32] __attribute__((aligned(32)));
+static uint8_t compress_popcnt[256] __attribute__((aligned(64)));
 static int     compress_table_ready = 0;
 
 static void init_compress_table(void)
 {
     if (compress_table_ready) return;
     for (int mask = 0; mask < 256; mask++) {
-        int out = 0;
+        /* Right (bit=1): pack selected to front */
+        int out_r = 0;
         for (int i = 0; i < 8; i++) {
             if (mask & (1 << i)) {
-                compress_shuf[mask][out * 2]     = (uint8_t)(i * 2);
-                compress_shuf[mask][out * 2 + 1] = (uint8_t)(i * 2 + 1);
-                out++;
+                compress_tab[mask][out_r * 2]     = (uint8_t)(i * 2);
+                compress_tab[mask][out_r * 2 + 1] = (uint8_t)(i * 2 + 1);
+                out_r++;
             }
         }
-        compress_popcnt[mask] = (uint8_t)out;
-        for (int j = out * 2; j < 16; j++) {
-            compress_shuf[mask][j] = 0xFF;
+        compress_popcnt[mask] = (uint8_t)out_r;
+        for (int j = out_r * 2; j < 16; j++)
+            compress_tab[mask][j] = 0xFF;
+
+        /* Left (bit=0): pack complement to front */
+        int out_l = 0;
+        for (int i = 0; i < 8; i++) {
+            if (!(mask & (1 << i))) {
+                compress_tab[mask][16 + out_l * 2]     = (uint8_t)(i * 2);
+                compress_tab[mask][16 + out_l * 2 + 1] = (uint8_t)(i * 2 + 1);
+                out_l++;
+            }
         }
+        for (int j = out_l * 2; j < 16; j++)
+            compress_tab[mask][16 + j] = 0xFF;
     }
     compress_table_ready = 1;
 }
@@ -46,16 +62,17 @@ static inline int partition_8(const uint16_t *src,
 {
     uint8x16_t data = vld1q_u8((const uint8_t *)src);
 
-    /* Right (bit=1) */
-    uint8x16_t shuf_r = vld1q_u8(compress_shuf[mask]);
-    uint8x16_t right = vqtbl1q_u8(data, shuf_r);
-    int n_right = compress_popcnt[mask];
-    vst1q_u8((uint8_t *)right_out, right);
+    /* Load both shuffle patterns with one ldp (32 bytes, contiguous) */
+    const uint8_t *tab = compress_tab[mask];
+    uint8x16_t shuf_r = vld1q_u8(tab);       /* bytes 0-15: right */
+    uint8x16_t shuf_l = vld1q_u8(tab + 16);  /* bytes 16-31: left */
 
-    /* Left (bit=0) */
-    uint8_t inv = (uint8_t)~mask;
-    uint8x16_t shuf_l = vld1q_u8(compress_shuf[inv]);
-    uint8x16_t left = vqtbl1q_u8(data, shuf_l);
+    uint8x16_t right = vqtbl1q_u8(data, shuf_r);
+    uint8x16_t left  = vqtbl1q_u8(data, shuf_l);
+
+    int n_right = compress_popcnt[mask];
+
+    vst1q_u8((uint8_t *)right_out, right);
     vst1q_u8((uint8_t *)left_out, left);
 
     return n_right;
