@@ -93,35 +93,45 @@ static void encode_node_neon(const pivco_huffman_table_t *table,
     const pivco_tree_node_t *node = &table->tree[node_id];
     if (node->symbol >= 0) return; /* leaf */
 
-    /* Write n code bits */
+    /* Build bitmap and partition in one fused pass.
+       For each group of 8 indices, construct the mask byte directly
+       and feed it to partition_8 + write to the output bitmap. */
     int nbytes = bitmap_bytes(n);
     uint8_t *bm = *out_ptr;
-    memset(bm, 0, (size_t)nbytes);
-
-    for (int j = 0; j < n; j++) {
-        int idx = indices[j];
-        int bit = (codes[idx] >> (lens[idx] - 1 - depth)) & 1;
-        if (bit) bitmap_set(bm, j);
-    }
     *out_ptr += nbytes;
 
-    /* SIMD partition in-place: left stays in indices, right goes to tmp */
     int n_left = 0, n_right = 0;
     int j = 0;
 
     for (; j + 8 <= n; j += 8) {
-        uint8_t mask = bm[j >> 3];
+        /* Build mask byte from 8 code bits */
+        uint8_t mask = 0;
+        for (int k = 0; k < 8; k++) {
+            int idx = indices[j + k];
+            int bit = (codes[idx] >> (lens[idx] - 1 - depth)) & 1;
+            mask |= (uint8_t)(bit << k);
+        }
+        bm[j >> 3] = mask;
+
         int nr = partition_8(indices + j, mask,
                              indices + n_left, tmp + n_right);
         n_right += nr;
         n_left += (8 - nr);
     }
     /* Scalar remainder */
-    for (; j < n; j++) {
-        if (bitmap_get(bm, j)) {
-            tmp[n_right++] = indices[j];
-        } else {
-            indices[n_left++] = indices[j];
+    if (j < n) {
+        uint8_t mask = 0;
+        for (int k = 0; j + k < n; k++) {
+            int idx = indices[j + k];
+            int bit = (codes[idx] >> (lens[idx] - 1 - depth)) & 1;
+            mask |= (uint8_t)(bit << k);
+        }
+        bm[j >> 3] = mask;
+        for (int k = 0; j < n; j++, k++) {
+            if (mask & (1 << k))
+                tmp[n_right++] = indices[j];
+            else
+                indices[n_left++] = indices[j];
         }
     }
 
