@@ -13,6 +13,8 @@ extern "C" {
 #ifndef PIVCO_BLOCK_SIZE
 #if defined(__aarch64__)
 #define PIVCO_BLOCK_SIZE 8192   /* 128KB L1D on Apple M-series */
+#elif defined(__AVX512F__)
+#define PIVCO_BLOCK_SIZE 8192   /* 48KB+ L1D on Intel Granite Rapids etc. */
 #else
 #define PIVCO_BLOCK_SIZE 4096   /* 32KB L1D on x86 (Zen, etc.) */
 #endif
@@ -126,6 +128,16 @@ int pivco_huffman_encode_x86(const uint8_t *symbols,
 int pivco_huffman_decode_x86(const uint8_t *in, size_t in_len,
                               const pivco_huffman_table_t *table,
                               uint8_t *symbols, size_t *consumed);
+#endif
+
+#ifdef PIVCO_HAS_AVX512
+int pivco_huffman_encode_avx512(const uint8_t *symbols,
+                                 const pivco_huffman_table_t *table,
+                                 uint8_t *out, size_t *out_len);
+
+int pivco_huffman_decode_avx512(const uint8_t *in, size_t in_len,
+                                 const pivco_huffman_table_t *table,
+                                 uint8_t *symbols, size_t *consumed);
 #endif
 
 /* ---------- Traditional Huffman encode/decode (for comparison) ---------- */
