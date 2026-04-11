@@ -1,6 +1,7 @@
 #include "pivco_huffman.h"
 #include <string.h>
 #include <stdlib.h>
+#include <math.h>
 
 /* ---------- PRNG ---------- */
 
@@ -48,6 +49,9 @@ static distribution_t distributions[] = {
     { .name = "proba50" },
     { .name = "proba14" },
     { .name = "proba02" },
+    { .name = "bell_s10" },
+    { .name = "bell_s30" },
+    { .name = "bell_s80" },
     { .name = "uniform" },
     { .name = "english" },
     { .name = "zipfian" },
@@ -108,13 +112,43 @@ static void init_distributions(void)
     /* proba02 — FSE benchmark: 2% probability (near-uniform) */
     make_fse_proba(distributions[3].freq, 0.02);
 
+    /* bell_s10 — narrow bell curve (σ=10), ~60 effective symbols */
+    {
+        uint64_t *f = distributions[4].freq;
+        memset(f, 0, PIVCO_MAX_SYMBOLS * sizeof(uint64_t));
+        for (int i = 0; i < PIVCO_MAX_SYMBOLS; i++) {
+            double x = (double)(i - 128) / 10.0;
+            f[i] = (uint64_t)(10000.0 * exp(-0.5 * x * x)) + 1;
+        }
+    }
+
+    /* bell_s30 — medium bell curve (σ=30), ~180 effective symbols */
+    {
+        uint64_t *f = distributions[5].freq;
+        memset(f, 0, PIVCO_MAX_SYMBOLS * sizeof(uint64_t));
+        for (int i = 0; i < PIVCO_MAX_SYMBOLS; i++) {
+            double x = (double)(i - 128) / 30.0;
+            f[i] = (uint64_t)(10000.0 * exp(-0.5 * x * x)) + 1;
+        }
+    }
+
+    /* bell_s80 — wide bell curve (σ=80), nearly all 256 symbols */
+    {
+        uint64_t *f = distributions[6].freq;
+        memset(f, 0, PIVCO_MAX_SYMBOLS * sizeof(uint64_t));
+        for (int i = 0; i < PIVCO_MAX_SYMBOLS; i++) {
+            double x = (double)(i - 128) / 80.0;
+            f[i] = (uint64_t)(10000.0 * exp(-0.5 * x * x)) + 1;
+        }
+    }
+
     /* uniform */
     for (int i = 0; i < PIVCO_MAX_SYMBOLS; i++)
-        distributions[4].freq[i] = 100;
+        distributions[7].freq[i] = 100;
 
     /* english */
     {
-        uint64_t *f = distributions[5].freq;
+        uint64_t *f = distributions[8].freq;
         memset(f, 0, PIVCO_MAX_SYMBOLS * sizeof(uint64_t));
         f[' '] = 1830; f['e'] = 1270; f['t'] = 910;
         f['a'] = 820;  f['o'] = 750;  f['i'] = 700;
@@ -130,38 +164,38 @@ static void init_distributions(void)
 
     /* zipfian */
     for (int i = 0; i < PIVCO_MAX_SYMBOLS; i++) {
-        distributions[6].freq[i] = (uint64_t)(10000.0 / (double)(i + 1));
-        if (distributions[6].freq[i] == 0) distributions[6].freq[i] = 1;
+        distributions[9].freq[i] = (uint64_t)(10000.0 / (double)(i + 1));
+        if (distributions[9].freq[i] == 0) distributions[9].freq[i] = 1;
     }
 
     /* sparse_4 */
-    memset(distributions[7].freq, 0, sizeof(distributions[7].freq));
-    distributions[7].freq[0] = 100;
-    distributions[7].freq[1] = 100;
-    distributions[7].freq[2] = 100;
-    distributions[7].freq[3] = 100;
+    memset(distributions[10].freq, 0, sizeof(distributions[10].freq));
+    distributions[10].freq[0] = 100;
+    distributions[10].freq[1] = 100;
+    distributions[10].freq[2] = 100;
+    distributions[10].freq[3] = 100;
 
     /* sparse_16 */
-    memset(distributions[8].freq, 0, sizeof(distributions[8].freq));
+    memset(distributions[11].freq, 0, sizeof(distributions[11].freq));
     for (int i = 0; i < 16; i++)
-        distributions[8].freq[i] = 100;
+        distributions[11].freq[i] = 100;
 
     /* geometric */
     for (int i = 0; i < PIVCO_MAX_SYMBOLS; i++) {
         int shift = i < 30 ? 30 - i : 0;
-        distributions[9].freq[i] = (uint64_t)1 << shift;
-        if (distributions[9].freq[i] == 0) distributions[9].freq[i] = 1;
+        distributions[12].freq[i] = (uint64_t)1 << shift;
+        if (distributions[12].freq[i] == 0) distributions[12].freq[i] = 1;
     }
 
     /* two_sym_eq */
-    memset(distributions[10].freq, 0, sizeof(distributions[10].freq));
-    distributions[10].freq[0] = 500;
-    distributions[10].freq[1] = 500;
+    memset(distributions[13].freq, 0, sizeof(distributions[13].freq));
+    distributions[13].freq[0] = 500;
+    distributions[13].freq[1] = 500;
 
     /* two_sym_90/10 */
-    memset(distributions[11].freq, 0, sizeof(distributions[11].freq));
-    distributions[11].freq[0] = 900;
-    distributions[11].freq[1] = 100;
+    memset(distributions[14].freq, 0, sizeof(distributions[14].freq));
+    distributions[14].freq[0] = 900;
+    distributions[14].freq[1] = 100;
 }
 
 /* ---------- Public API ---------- */
