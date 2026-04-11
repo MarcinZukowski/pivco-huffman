@@ -107,8 +107,8 @@ int main(int argc, char **argv)
         const char *name = bench_dist_name(d);
         const uint64_t *freq = bench_dist_freq(d);
 
-        pivco_huffman_table_t table;
-        int rc = pivco_huffman_build_table(freq, &table);
+        pivco_huffman_table_t *table = (pivco_huffman_table_t *)malloc(sizeof(pivco_huffman_table_t));
+        int rc = pivco_huffman_build_table(freq, table);
         if (rc != PIVCO_OK) {
             printf("%-13s ERROR: build_table returned %d\n", name, rc);
             continue;
@@ -125,18 +125,18 @@ int main(int argc, char **argv)
         pivco_enc_off[0] = 0;
         for (int b = 0; b < NBLOCKS; b++) {
             size_t len;
-            pivco_huffman_encode_scalar(symbols + (size_t)b * BLK, &table,
+            pivco_huffman_encode_scalar(symbols + (size_t)b * BLK, table,
                                         pivco_enc_buf + pivco_enc_off[b], &len);
             pivco_enc_off[b + 1] = pivco_enc_off[b] + len;
         }
 
-#ifdef PIVCO_HAS_NEON
+#if defined(PIVCO_HAS_NEON) || defined(PIVCO_HAS_SSE4)
         uint8_t *neon_enc_buf = (uint8_t *)malloc((size_t)NBLOCKS * PIVCO_MAX_ENCODED_SIZE);
         size_t  *neon_enc_off = (size_t *)malloc((size_t)(NBLOCKS + 1) * sizeof(size_t));
         neon_enc_off[0] = 0;
         for (int b = 0; b < NBLOCKS; b++) {
             size_t len;
-            pivco_huffman_encode_neon(symbols + (size_t)b * BLK, &table,
+            pivco_huffman_encode(symbols + (size_t)b * BLK, table,
                                       neon_enc_buf + neon_enc_off[b], &len);
             neon_enc_off[b + 1] = neon_enc_off[b] + len;
         }
@@ -150,7 +150,7 @@ int main(int argc, char **argv)
         size_t  *trad_enc_bits_arr = (size_t *)calloc((size_t)trad_nblocks, sizeof(size_t));
         for (int b = 0; b < trad_nblocks; b++) {
             size_t len, bits;
-            trad_huffman_encode(symbols + (size_t)b * TRAD_BLK, TRAD_BLK, &table,
+            trad_huffman_encode(symbols + (size_t)b * TRAD_BLK, TRAD_BLK, table,
                                 trad_enc + trad_enc_off[b], &len, &bits);
             trad_enc_bits_arr[b] = bits;
             trad_enc_off[b + 1] = trad_enc_off[b] + len;
@@ -162,7 +162,7 @@ int main(int argc, char **argv)
         size_t  *trad_4s_off = (size_t *)calloc((size_t)(trad_nblocks + 1), sizeof(size_t));
         for (int b = 0; b < trad_nblocks; b++) {
             size_t len;
-            trad_huffman_encode_4s(symbols + (size_t)b * TRAD_BLK, TRAD_BLK, &table,
+            trad_huffman_encode_4s(symbols + (size_t)b * TRAD_BLK, TRAD_BLK, table,
                                    trad_4s_enc + trad_4s_off[b], &len);
             trad_4s_off[b + 1] = trad_4s_off[b] + len;
         }
@@ -218,7 +218,7 @@ int main(int argc, char **argv)
 
             /* PIVCO scalar — first block */
             rc = pivco_huffman_decode_scalar(pivco_enc_buf, pivco_enc_off[1],
-                                             &table, dec, &consumed);
+                                             table, dec, &consumed);
             if (rc != PIVCO_OK || memcmp(symbols, dec, BLK) != 0) {
                 printf("%-13s ERROR: pivco roundtrip failed\n", name);
                 free(dec); goto cleanup;
@@ -282,18 +282,18 @@ int main(int argc, char **argv)
                 pivco_huffman_decode_scalar(
                     pivco_enc_buf + pivco_enc_off[b],
                     pivco_enc_off[b+1] - pivco_enc_off[b],
-                    &table, dec_buf + (size_t)b * BLK, &consumed);
+                    table, dec_buf + (size_t)b * BLK, &consumed);
             }
         }, "pivco_s");
 
-#ifdef PIVCO_HAS_NEON
+#if defined(PIVCO_HAS_NEON) || defined(PIVCO_HAS_SSE4)
         BENCH(p_dec_n, {
             for (int b = 0; b < NBLOCKS; b++) {
                 size_t consumed;
-                pivco_huffman_decode_neon(
+                pivco_huffman_decode(
                     neon_enc_buf + neon_enc_off[b],
                     neon_enc_off[b+1] - neon_enc_off[b],
-                    &table, dec_buf + (size_t)b * BLK, &consumed);
+                    table, dec_buf + (size_t)b * BLK, &consumed);
             }
         }, "pivco_n");
 #endif
@@ -302,7 +302,7 @@ int main(int argc, char **argv)
         BENCH(t_dec_1s, {
             for (int b = 0; b < trad_nblocks; b++) {
                 trad_huffman_decode(trad_enc + trad_enc_off[b],
-                                    trad_enc_bits_arr[b], &table,
+                                    trad_enc_bits_arr[b], table,
                                     dec_buf + (size_t)b * TRAD_BLK, TRAD_BLK);
             }
         }, "trad_1s");
@@ -311,7 +311,7 @@ int main(int argc, char **argv)
         BENCH(t_dec_4s, {
             for (int b = 0; b < trad_nblocks; b++) {
                 trad_huffman_decode_4s(trad_4s_enc + trad_4s_off[b],
-                                       trad_4s_off[b+1] - trad_4s_off[b], &table,
+                                       trad_4s_off[b+1] - trad_4s_off[b], table,
                                        dec_buf + (size_t)b * TRAD_BLK, TRAD_BLK);
             }
         }, "trad_4s");
@@ -371,13 +371,14 @@ int main(int argc, char **argv)
 cleanup:
         free(dec_buf);
         rans_alias_destroy(rans_ctx);
+        free(table);
         free(symbols); free(pivco_enc_buf); free(pivco_enc_off);
         free(trad_enc); free(trad_enc_off); free(trad_enc_bits_arr);
         free(trad_4s_enc); free(trad_4s_off);
         free(huf0_enc); free(huf0_enc_off);
         free(huf0_1s_enc); free(huf0_1s_off);
         free(rans_enc); free(rans_x2_enc);
-#ifdef PIVCO_HAS_NEON
+#if defined(PIVCO_HAS_NEON) || defined(PIVCO_HAS_SSE4)
         free(neon_enc_buf); free(neon_enc_off);
 #endif
     }

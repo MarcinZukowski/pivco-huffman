@@ -11,7 +11,11 @@ extern "C" {
 /* ---------- Constants ---------- */
 
 #ifndef PIVCO_BLOCK_SIZE
-#define PIVCO_BLOCK_SIZE 8192
+#if defined(__aarch64__)
+#define PIVCO_BLOCK_SIZE 8192   /* 128KB L1D on Apple M-series */
+#else
+#define PIVCO_BLOCK_SIZE 4096   /* 32KB L1D on x86 (Zen, etc.) */
+#endif
 #endif
 
 #define PIVCO_MAX_SYMBOLS   256
@@ -110,6 +114,16 @@ int pivco_huffman_encode_neon(const uint8_t *symbols,
                               uint8_t *out, size_t *out_len);
 
 int pivco_huffman_decode_neon(const uint8_t *in, size_t in_len,
+                              const pivco_huffman_table_t *table,
+                              uint8_t *symbols, size_t *consumed);
+#endif
+
+#ifdef PIVCO_HAS_SSE4
+int pivco_huffman_encode_x86(const uint8_t *symbols,
+                              const pivco_huffman_table_t *table,
+                              uint8_t *out, size_t *out_len);
+
+int pivco_huffman_decode_x86(const uint8_t *in, size_t in_len,
                               const pivco_huffman_table_t *table,
                               uint8_t *symbols, size_t *consumed);
 #endif

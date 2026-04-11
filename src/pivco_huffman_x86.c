@@ -2,15 +2,19 @@
 #include "pivco_huffman_common.h"
 #include <string.h>
 
-#ifdef PIVCO_HAS_NEON
-#include <arm_neon.h>
+#ifdef PIVCO_HAS_SSE4
+#include <smmintrin.h>  /* SSE4.1 */
+#ifdef PIVCO_HAS_AVX2
+#include <immintrin.h>  /* AVX2 */
+#endif
 
-/* ---------- SIMD Compress Shuffle Table ----------
+/* ---------- SSE4.1 Compress Shuffle Table ----------
  *
- * For each 8-bit mask, a 16-byte TBL shuffle that packs selected
- * uint16_t elements (2 bytes each) to the front of the register.
+ * Identical to the NEON version: for each 8-bit mask, a 16-byte
+ * shuffle that packs selected uint16_t elements to the front.
+ * pshufb (_mm_shuffle_epi8) is the x86 equivalent of NEON TBL.
  */
-static uint8_t compress_shuf[256][16];
+static uint8_t compress_shuf[256][16] __attribute__((aligned(16)));
 static uint8_t compress_popcnt[256];
 static int     compress_table_ready = 0;
 
@@ -27,43 +31,66 @@ static void init_compress_table(void)
             }
         }
         compress_popcnt[mask] = (uint8_t)out;
+        /* pshufb: bytes with high bit set produce 0 */
         for (int j = out * 2; j < 16; j++) {
-            compress_shuf[mask][j] = 0xFF;
+            compress_shuf[mask][j] = 0x80;
         }
     }
     compress_table_ready = 1;
 }
 
-/* Partition 8 uint16_t by an 8-bit mask.
+/* Partition 8 uint16_t by an 8-bit mask using SSE4.1 pshufb.
    bit=1 → right_out, bit=0 → left_out.
-   Source is loaded into register first, so left_out may overlap src
-   as long as left_out <= src (which holds when n_left <= j).
+   Source is loaded first, so left_out may overlap src (n_left <= j).
    Returns count of right (bit=1) elements. */
-static inline int partition_8(const uint16_t *src,
-                               uint8_t mask,
-                               uint16_t *left_out,
-                               uint16_t *right_out)
+static inline int partition_8_sse(const uint16_t *src,
+                                   uint8_t mask,
+                                   uint16_t *left_out,
+                                   uint16_t *right_out)
 {
-    uint8x16_t data = vld1q_u8((const uint8_t *)src);
+    __m128i data = _mm_loadu_si128((const __m128i *)src);
 
     /* Right (bit=1) */
-    uint8x16_t shuf_r = vld1q_u8(compress_shuf[mask]);
-    uint8x16_t right = vqtbl1q_u8(data, shuf_r);
+    __m128i shuf_r = _mm_load_si128((const __m128i *)compress_shuf[mask]);
+    __m128i right = _mm_shuffle_epi8(data, shuf_r);
     int n_right = compress_popcnt[mask];
-    vst1q_u8((uint8_t *)right_out, right);
+    _mm_storeu_si128((__m128i *)right_out, right);
 
     /* Left (bit=0) */
     uint8_t inv = (uint8_t)~mask;
-    uint8x16_t shuf_l = vld1q_u8(compress_shuf[inv]);
-    uint8x16_t left = vqtbl1q_u8(data, shuf_l);
-    vst1q_u8((uint8_t *)left_out, left);
+    __m128i shuf_l = _mm_load_si128((const __m128i *)compress_shuf[inv]);
+    __m128i left = _mm_shuffle_epi8(data, shuf_l);
+    _mm_storeu_si128((__m128i *)left_out, left);
 
     return n_right;
 }
 
-/* ---------- NEON Encode (Tree-Walk) ---------- */
+/* ---------- Leaf scatter-write (SSE4.1) ---------- */
 
-static void encode_node_neon(const pivco_huffman_table_t *table,
+static inline void scatter_write_sse(uint8_t *symbols,
+                                      const uint16_t *indices, int n,
+                                      uint8_t sym)
+{
+    int j = 0;
+    for (; j + 8 <= n; j += 8) {
+        __m128i idx = _mm_loadu_si128((const __m128i *)(indices + j));
+        symbols[_mm_extract_epi16(idx, 0)] = sym;
+        symbols[_mm_extract_epi16(idx, 1)] = sym;
+        symbols[_mm_extract_epi16(idx, 2)] = sym;
+        symbols[_mm_extract_epi16(idx, 3)] = sym;
+        symbols[_mm_extract_epi16(idx, 4)] = sym;
+        symbols[_mm_extract_epi16(idx, 5)] = sym;
+        symbols[_mm_extract_epi16(idx, 6)] = sym;
+        symbols[_mm_extract_epi16(idx, 7)] = sym;
+    }
+    for (; j < n; j++) {
+        symbols[indices[j]] = sym;
+    }
+}
+
+/* ---------- x86 Encode (Tree-Walk) ---------- */
+
+static void encode_node_x86(const pivco_huffman_table_t *table,
                               int16_t node_id,
                               uint16_t *indices, int n,
                               int depth,
@@ -88,18 +115,17 @@ static void encode_node_neon(const pivco_huffman_table_t *table,
     }
     *out_ptr += nbytes;
 
-    /* SIMD partition in-place: left stays in indices, right goes to tmp */
+    /* SSE partition in-place */
     int n_left = 0, n_right = 0;
     int j = 0;
 
     for (; j + 8 <= n; j += 8) {
         uint8_t mask = bm[j >> 3];
-        int nr = partition_8(indices + j, mask,
-                             indices + n_left, tmp + n_right);
+        int nr = partition_8_sse(indices + j, mask,
+                                  indices + n_left, tmp + n_right);
         n_right += nr;
         n_left += (8 - nr);
     }
-    /* Scalar remainder */
     for (; j < n; j++) {
         if (bitmap_get(bm, j)) {
             tmp[n_right++] = indices[j];
@@ -108,13 +134,13 @@ static void encode_node_neon(const pivco_huffman_table_t *table,
         }
     }
 
-    encode_node_neon(table, node->left, indices, n_left,
+    encode_node_x86(table, node->left, indices, n_left,
                      depth + 1, codes, lens, out_ptr, tmp + n_right);
-    encode_node_neon(table, node->right, tmp, n_right,
+    encode_node_x86(table, node->right, tmp, n_right,
                      depth + 1, codes, lens, out_ptr, tmp + n_right);
 }
 
-int pivco_huffman_encode_neon(const uint8_t *symbols,
+int pivco_huffman_encode_x86(const uint8_t *symbols,
                               const pivco_huffman_table_t *table,
                               uint8_t *out, size_t *out_len)
 {
@@ -137,16 +163,16 @@ int pivco_huffman_encode_neon(const uint8_t *symbols,
     uint16_t tmp[PIVCO_BLOCK_SIZE * 2];
     uint8_t *ptr = out;
 
-    encode_node_neon(table, table->tree_root, indices, N,
+    encode_node_x86(table, table->tree_root, indices, N,
                      0, codes, lens, &ptr, tmp);
 
     *out_len = (size_t)(ptr - out);
     return PIVCO_OK;
 }
 
-/* ---------- NEON Decode (Tree-Walk with SIMD Partition) ---------- */
+/* ---------- x86 Decode (Tree-Walk with SSE Partition) ---------- */
 
-static void decode_node_neon(const pivco_huffman_table_t *table,
+static void decode_node_x86(const pivco_huffman_table_t *table,
                               int16_t node_id,
                               uint16_t *indices, int n,
                               uint8_t *symbols,
@@ -157,25 +183,8 @@ static void decode_node_neon(const pivco_huffman_table_t *table,
 
     const pivco_tree_node_t *node = &table->tree[node_id];
     if (node->symbol >= 0) {
-        /* Leaf — NEON-assisted scatter-write: bulk-load 8 indices
-           per vector, extract lanes, do 8 scalar byte stores.
-           Eliminates per-element index load and loop control overhead. */
-        uint8_t sym = (uint8_t)node->symbol;
-        int j = 0;
-        for (; j + 8 <= n; j += 8) {
-            uint16x8_t idx = vld1q_u16(indices + j);
-            symbols[vgetq_lane_u16(idx, 0)] = sym;
-            symbols[vgetq_lane_u16(idx, 1)] = sym;
-            symbols[vgetq_lane_u16(idx, 2)] = sym;
-            symbols[vgetq_lane_u16(idx, 3)] = sym;
-            symbols[vgetq_lane_u16(idx, 4)] = sym;
-            symbols[vgetq_lane_u16(idx, 5)] = sym;
-            symbols[vgetq_lane_u16(idx, 6)] = sym;
-            symbols[vgetq_lane_u16(idx, 7)] = sym;
-        }
-        for (; j < n; j++) {
-            symbols[indices[j]] = sym;
-        }
+        /* Leaf — SSE scatter-write */
+        scatter_write_sse(symbols, indices, n, (uint8_t)node->symbol);
         return;
     }
 
@@ -184,18 +193,17 @@ static void decode_node_neon(const pivco_huffman_table_t *table,
     const uint8_t *bm = *in_ptr;
     *in_ptr += nbytes;
 
-    /* SIMD partition in-place */
+    /* SSE partition in-place */
     int n_left = 0, n_right = 0;
     int j = 0;
 
     for (; j + 8 <= n; j += 8) {
         uint8_t mask = bm[j >> 3];
-        int nr = partition_8(indices + j, mask,
-                             indices + n_left, tmp + n_right);
+        int nr = partition_8_sse(indices + j, mask,
+                                  indices + n_left, tmp + n_right);
         n_right += nr;
         n_left += (8 - nr);
     }
-    /* Scalar remainder */
     for (; j < n; j++) {
         if (bitmap_get(bm, j)) {
             tmp[n_right++] = indices[j];
@@ -204,13 +212,13 @@ static void decode_node_neon(const pivco_huffman_table_t *table,
         }
     }
 
-    decode_node_neon(table, node->left, indices, n_left,
+    decode_node_x86(table, node->left, indices, n_left,
                      symbols, in_ptr, tmp + n_right);
-    decode_node_neon(table, node->right, tmp, n_right,
+    decode_node_x86(table, node->right, tmp, n_right,
                      symbols, in_ptr, tmp + n_right);
 }
 
-int pivco_huffman_decode_neon(const uint8_t *in, size_t in_len,
+int pivco_huffman_decode_x86(const uint8_t *in, size_t in_len,
                               const pivco_huffman_table_t *table,
                               uint8_t *symbols, size_t *consumed)
 {
@@ -227,11 +235,11 @@ int pivco_huffman_decode_neon(const uint8_t *in, size_t in_len,
     uint16_t tmp[PIVCO_BLOCK_SIZE * 2];
     const uint8_t *ptr = in;
 
-    decode_node_neon(table, table->tree_root, indices, N,
+    decode_node_x86(table, table->tree_root, indices, N,
                      symbols, &ptr, tmp);
 
     *consumed = (size_t)(ptr - in);
     return PIVCO_OK;
 }
 
-#endif /* PIVCO_HAS_NEON */
+#endif /* PIVCO_HAS_SSE4 */

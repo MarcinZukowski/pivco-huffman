@@ -22,13 +22,18 @@ set(PIVCO_SOURCES
     src/traditional_huffman.c
 )
 
-# NEON support for ARM64
+# SIMD support
 if(TARGET_ARCH STREQUAL "arm64" OR TARGET_ARCH STREQUAL "aarch64")
     message(STATUS "ARM64 detected — enabling NEON")
     list(APPEND PIVCO_SOURCES src/pivco_huffman_neon.c)
     add_compile_definitions(PIVCO_HAS_NEON=1)
+elseif(TARGET_ARCH STREQUAL "x86_64" OR TARGET_ARCH STREQUAL "amd64")
+    message(STATUS "x86_64 detected — enabling SSE4.1")
+    list(APPEND PIVCO_SOURCES src/pivco_huffman_x86.c)
+    add_compile_definitions(PIVCO_HAS_SSE4=1)
+    add_compile_options(-msse4.1)
 else()
-    message(STATUS "Architecture: ${TARGET_ARCH} — NEON disabled")
+    message(STATUS "Architecture: ${TARGET_ARCH} — SIMD disabled")
 endif()
 
 # huff0/FSE library (for baseline comparison)

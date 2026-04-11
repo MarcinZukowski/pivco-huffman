@@ -86,7 +86,7 @@ int pivco_huffman_encode_scalar(const uint8_t *symbols,
     uint16_t indices[PIVCO_BLOCK_SIZE];
     for (int i = 0; i < N; i++) indices[i] = (uint16_t)i;
 
-    uint16_t tmp[PIVCO_BLOCK_SIZE];
+    uint16_t tmp[PIVCO_BLOCK_SIZE * 2];
     uint8_t *ptr = out;
 
     encode_node(table, table->tree_root, indices, N,
@@ -159,7 +159,7 @@ int pivco_huffman_decode_scalar(const uint8_t *in, size_t in_len,
     uint16_t indices[PIVCO_BLOCK_SIZE];
     for (int i = 0; i < N; i++) indices[i] = (uint16_t)i;
 
-    uint16_t tmp[PIVCO_BLOCK_SIZE];
+    uint16_t tmp[PIVCO_BLOCK_SIZE * 2];
     const uint8_t *ptr = in;
 
     decode_node(table, table->tree_root, indices, N,
