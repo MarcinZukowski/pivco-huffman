@@ -27,6 +27,10 @@ if(TARGET_ARCH STREQUAL "arm64" OR TARGET_ARCH STREQUAL "aarch64")
     message(STATUS "ARM64 detected — enabling NEON")
     list(APPEND PIVCO_SOURCES src/pivco_huffman_neon.c)
     add_compile_definitions(PIVCO_HAS_NEON=1)
+    # Note: SVE backend exists (pivco_huffman_sve.c) but svcompact at
+    # 128-bit SVE (Graviton 4) is slower than NEON TBL because it only
+    # handles 4 × uint32 per instruction vs TBL's 8 × uint16. SVE would
+    # help at 256-bit+ vector lengths (e.g. Fujitsu A64FX).
 elseif(TARGET_ARCH STREQUAL "x86_64" OR TARGET_ARCH STREQUAL "amd64")
     # Check for AVX-512 VBMI2 (vpcompressw) at compile time
     include(CheckCCompilerFlag)

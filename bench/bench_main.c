@@ -130,7 +130,7 @@ int main(int argc, char **argv)
             pivco_enc_off[b + 1] = pivco_enc_off[b] + len;
         }
 
-#if defined(PIVCO_HAS_NEON) || defined(PIVCO_HAS_SSE4) || defined(PIVCO_HAS_AVX512)
+#if defined(PIVCO_HAS_NEON) || defined(PIVCO_HAS_SSE4) || defined(PIVCO_HAS_AVX512) || defined(PIVCO_HAS_SVE)
         uint8_t *neon_enc_buf = (uint8_t *)malloc((size_t)NBLOCKS * PIVCO_MAX_ENCODED_SIZE);
         size_t  *neon_enc_off = (size_t *)malloc((size_t)(NBLOCKS + 1) * sizeof(size_t));
         neon_enc_off[0] = 0;
@@ -286,7 +286,7 @@ int main(int argc, char **argv)
             }
         }, "pivco_s");
 
-#if defined(PIVCO_HAS_NEON) || defined(PIVCO_HAS_SSE4) || defined(PIVCO_HAS_AVX512)
+#if defined(PIVCO_HAS_NEON) || defined(PIVCO_HAS_SSE4) || defined(PIVCO_HAS_AVX512) || defined(PIVCO_HAS_SVE)
         BENCH(p_dec_n, {
             for (int b = 0; b < NBLOCKS; b++) {
                 size_t consumed;
@@ -378,7 +378,7 @@ cleanup:
         free(huf0_enc); free(huf0_enc_off);
         free(huf0_1s_enc); free(huf0_1s_off);
         free(rans_enc); free(rans_x2_enc);
-#if defined(PIVCO_HAS_NEON) || defined(PIVCO_HAS_SSE4) || defined(PIVCO_HAS_AVX512)
+#if defined(PIVCO_HAS_NEON) || defined(PIVCO_HAS_SSE4) || defined(PIVCO_HAS_AVX512) || defined(PIVCO_HAS_SVE)
         free(neon_enc_buf); free(neon_enc_off);
 #endif
     }

@@ -17,6 +17,8 @@ static pivco_impl_t resolve_impl(void)
     if (g_impl != PIVCO_IMPL_AUTO) return g_impl;
 #ifdef PIVCO_HAS_AVX512
     return PIVCO_IMPL_NEON; /* reuse enum — best SIMD path */
+#elif defined(PIVCO_HAS_SVE)
+    return PIVCO_IMPL_NEON;
 #elif defined(PIVCO_HAS_NEON)
     return PIVCO_IMPL_NEON;
 #elif defined(PIVCO_HAS_SSE4)
@@ -34,6 +36,8 @@ int pivco_huffman_encode(const uint8_t *symbols,
     case PIVCO_IMPL_NEON:
 #ifdef PIVCO_HAS_AVX512
         return pivco_huffman_encode_avx512(symbols, table, out, out_len);
+#elif defined(PIVCO_HAS_SVE)
+        return pivco_huffman_encode_sve(symbols, table, out, out_len);
 #elif defined(PIVCO_HAS_NEON)
         return pivco_huffman_encode_neon(symbols, table, out, out_len);
 #elif defined(PIVCO_HAS_SSE4)
@@ -52,6 +56,8 @@ int pivco_huffman_decode(const uint8_t *in, size_t in_len,
     case PIVCO_IMPL_NEON:
 #ifdef PIVCO_HAS_AVX512
         return pivco_huffman_decode_avx512(in, in_len, table, symbols, consumed);
+#elif defined(PIVCO_HAS_SVE)
+        return pivco_huffman_decode_sve(in, in_len, table, symbols, consumed);
 #elif defined(PIVCO_HAS_NEON)
         return pivco_huffman_decode_neon(in, in_len, table, symbols, consumed);
 #elif defined(PIVCO_HAS_SSE4)
