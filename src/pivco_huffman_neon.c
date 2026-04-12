@@ -14,11 +14,11 @@
    for mask (right partition) and bytes 16-31 are for ~mask (left partition).
    Both loaded with a single ldp q0, q1 — one cache line access instead
    of two separate lookups at unrelated addresses. */
-static uint8_t compress_tab[256][32] __attribute__((aligned(32)));
-static uint8_t compress_popcnt[256] __attribute__((aligned(64)));
-static int     compress_table_ready = 0;
+uint8_t compress_tab[256][32] __attribute__((aligned(32)));
+uint8_t compress_popcnt[256] __attribute__((aligned(64)));
+int compress_table_ready = 0;
 
-static void init_compress_table(void)
+void init_compress_table(void)
 {
     if (compress_table_ready) return;
     for (int mask = 0; mask < 256; mask++) {
