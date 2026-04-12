@@ -389,13 +389,12 @@ Tested and discarded:
 
 Worth exploring:
 
-- **AVX-512 port**: `vpcompressw` does the partition in ONE instruction
-  (no shuffle table). `vpscatterd` vectorizes leaf writes. This would
-  eliminate the two biggest costs (44% partition + 12% scatter) and
-  replace them with single instructions. Expected 2-4x improvement
-  over current NEON, potentially beating huff0 on all distributions.
-- **SVE/SVE2**: Scalable vector compress/scatter with predication.
-  Similar benefits to AVX-512, width-agnostic.
+- **AVX-512 port**: Implemented and tested on Xeon 6975P. `vpcompressw`
+  does the partition in ONE instruction (no shuffle table), 32 elements
+  per iteration. Beats huf0 on 6 of 12 distributions. See results above.
+- **SVE at 256-bit+**: Untested. `svcompact` on wider SVE (e.g. A64FX
+  at 512-bit) would handle 16+ uint32 per instruction, potentially
+  matching AVX-512 performance.
 - **Leaf cutoff**: For subtrees with < 16 indices, switch to scalar
   table-based decode. Avoids partition overhead on tiny groups deep in
   the tree. The 9.5% scalar scatter remainder suggests many leaf nodes
@@ -423,6 +422,24 @@ Worth exploring:
   only handles 4 elements per instruction at this width, requiring
   widen/narrow for uint16 — slower than NEON TBL. Disabled by default.
   Would help at 256-bit+ SVE.
+- **4-way fused partition (neon2)**: At double-internal nodes, read 2
+  bits per symbol and partition into 4 groups in one pass, skipping one
+  tree level. Partition_8_4way works correctly, but the DFS
+  encode/decode order and scratch management have bugs when multiple
+  4-way levels nest. Code exists as WIP (`pivco_huffman_neon2.c`).
+- **uint8 level-0 partition**: At level 0, indices are contiguous
+  [0..N-1], so within 256-element windows we can partition uint8_t
+  positions (16 per TBL) instead of uint16_t indices (8 per TBL),
+  then widen back cheaply. Tested two variants:
+  - *Split lo/hi with 256-entry uint8 table + add-8*: 25% regression.
+    4 TBL per 16 elements (same as 2 TBL per 8 uint16) plus combine
+    overhead. No TBL throughput gain.
+  - *64K-entry full 16-bit mask table (2MB)*: 1 TBL per 16 elements
+    (genuine 2x partition speedup) but massive cache thrashing. Net
+    25% regression on proba80 (3333 vs 4488 M/s).
+  The widen-convert step and window management overhead outweigh the
+  partition speedup. Might revisit if a way to avoid the gather is
+  found (e.g. carry uint8 positions through multiple tree levels).
 
 ## Building & Running
 
