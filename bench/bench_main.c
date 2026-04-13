@@ -95,13 +95,13 @@ int main(int argc, char **argv)
            (int)((size_t)TOTAL_SYMBOLS * repeats / (1024*1024)),
            BLK, RUNS, DROP_WORST);
 
-    printf("%-13s | %7s %7s | %7s %7s | %7s %7s | %7s %7s | %7s\n",
+    printf("%-13s | %7s %7s | %7s %7s | %7s %7s %7s | %7s %7s | %7s\n",
            "DECODE M/s", "pivco_s", "pivco_n",
            "trad_1s", "trad_4s",
-           "huf0_1s", "huf0_4s",
+           "huf0_1s", "huf0_x1", "huf0_x2",
            "rans_1", "rans_2", "ratio");
     printf("--------------|-----------------|-----------------|------"
-           "-----------|-----------------|--------\n");
+           "----------------------|-----------------|--------\n");
 
     for (int d = 0; d < n_dist; d++) {
         const char *name = bench_dist_name(d);
@@ -329,17 +329,31 @@ int main(int argc, char **argv)
             }, "huf0_1s");
         }
 
-        /* huf0 4-stream: decode chunks */
+        /* huf0 4-stream X1: decode chunks (single-symbol per lookup) */
         if (huf0_ok) {
             BENCH(h_dec_4s, {
                 for (int c = 0; c < huf0_nchunks; c++) {
                     size_t chunk_sz = (c < huf0_nchunks - 1) ? HUF0_CHUNK
                                      : TOTAL_SYMBOLS - (size_t)c * HUF0_CHUNK;
-                    HUF_decompress(dec_buf + (size_t)c * HUF0_CHUNK, chunk_sz,
-                                   huf0_enc + huf0_enc_off[c],
-                                   huf0_enc_off[c+1] - huf0_enc_off[c]);
+                    HUF_decompress4X1(dec_buf + (size_t)c * HUF0_CHUNK, chunk_sz,
+                                      huf0_enc + huf0_enc_off[c],
+                                      huf0_enc_off[c+1] - huf0_enc_off[c]);
                 }
             }, "huf0_4s");
+        }
+
+        /* huf0 4-stream X2: decode chunks (double-symbol per lookup) */
+        double h_dec_x2 = 0;
+        if (huf0_ok) {
+            BENCH(h_dec_x2, {
+                for (int c = 0; c < huf0_nchunks; c++) {
+                    size_t chunk_sz = (c < huf0_nchunks - 1) ? HUF0_CHUNK
+                                     : TOTAL_SYMBOLS - (size_t)c * HUF0_CHUNK;
+                    HUF_decompress4X2(dec_buf + (size_t)c * HUF0_CHUNK, chunk_sz,
+                                      huf0_enc + huf0_enc_off[c],
+                                      huf0_enc_off[c+1] - huf0_enc_off[c]);
+                }
+            }, "huf0_x2");
         }
 
         /* rANS 1-stream: full 4M at once */
@@ -357,6 +371,7 @@ int main(int argc, char **argv)
 
         double p_best = p_dec_n > p_dec_s ? p_dec_n : p_dec_s;
         double t_best = h_dec_4s;
+        if (h_dec_x2 > t_best)  t_best = h_dec_x2;
         if (t_dec_4s > t_best) t_best = t_dec_4s;
         if (t_dec_1s > t_best) t_best = t_dec_1s;
         if (h_dec_1s > t_best) t_best = h_dec_1s;
@@ -364,9 +379,9 @@ int main(int argc, char **argv)
         if (r_dec_2 > t_best)  t_best = r_dec_2;
         double ratio = t_best > 0 ? p_best / t_best : 0;
 
-        printf("%-13s | %7.0f %7.0f | %7.0f %7.0f | %7.0f %7.0f | %7.0f %7.0f | %5.2fx\n",
+        printf("%-13s | %7.0f %7.0f | %7.0f %7.0f | %7.0f %7.0f %7.0f | %7.0f %7.0f | %5.2fx\n",
                name, p_dec_s, p_dec_n, t_dec_1s, t_dec_4s,
-               h_dec_1s, h_dec_4s, r_dec_1, r_dec_2, ratio);
+               h_dec_1s, h_dec_4s, h_dec_x2, r_dec_1, r_dec_2, ratio);
 
 cleanup:
         free(dec_buf);
