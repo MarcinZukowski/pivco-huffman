@@ -165,82 +165,84 @@ decoders. Key findings:
 
 ## Benchmark Results
 
-**Methodology**: Decode a 4M-symbol sequence, repeated 20 times per
-timed run (80M symbols/run). 5 runs, drop 2 slowest, report median
-of 3 best. Warn if spread > 5%. Each codec uses its natural block
-size: PIVCO and our trad use 4096-8192 symbol blocks (platform-dependent),
-huf0 uses 128KB chunks (its maximum), rANS decodes the full 4M at once.
+**Methodology**: Decode a 4M-symbol sequence, repeated 25 times per
+timed run (100M symbols/run). 5 runs, drop 2 slowest, report median
+of 3 best. Each codec uses its natural block size: PIVCO/trad use
+4096-8192 symbol blocks, huf0 uses 128KB chunks, rANS decodes full 4M.
+
+Baselines include huf0 X1 (single-symbol lookup) and X2 (double-symbol
+lookup). "vs best" = best PIVCO / best of all other decoders.
+
+Full detailed results with system info in `results/` directory.
 
 ### Apple M4 Max (NEON, 128KB L1D, block 8192)
 
-| Distribution  | PIVCO scalar | PIVCO NEON | trad 1s | trad 4s | huf0 4s | vs best |
-|---------------|------------:|----------:|--------:|--------:|--------:|--------:|
-| proba80       |        1326 |      4341 |     571 |    1743 |    2904 | **1.49x** |
-| proba50       |         933 |      3409 |     533 |    1570 |    2834 | **1.20x** |
-| proba14       |         486 |      1972 |     481 |    1565 |    2715 |   0.73x |
-| proba02       |         281 |       902 |     440 |    1530 |    1434 |   0.59x |
-| english       |         483 |      2040 |     478 |    1594 |    2640 |   0.77x |
-| geometric     |         888 |      3253 |     524 |     693 |    2728 | **1.19x** |
-| two_sym_eq    |        1498 |      4510 |    2946 |    1646 |    5374 |   0.84x |
-| two_sym_90/10 |        1495 |      4418 |    2960 |    1644 |    5398 |   0.82x |
+| Distribution  | PIVCO NEON | huf0 X1 | huf0 X2 | trad 4s | vs best |
+|---------------|----------:|--------:|--------:|--------:|--------:|
+| proba80       |      4381 |    1453 |    2807 |    1727 | **1.56x** |
+| proba50       |      3399 |    1461 |    2776 |    1551 | **1.22x** |
+| proba14       |      1987 |    1455 |    2697 |    1531 |   0.74x |
+| english       |      2109 |    1391 |    2537 |    1569 |   0.83x |
+| geometric     |      3300 |    1406 |    2620 |     678 | **1.26x** |
+| bell_s10      |      1482 |    1437 |    2438 |     678 |   0.61x |
+| uniform       |       922 |       0 |       0 |    1612 |   0.57x |
+| two_sym_eq    |      4576 |    3434 |    5285 |    1614 |   0.87x |
 
 ### Intel Xeon 6975P Granite Rapids (AVX-512 VBMI2, 48KB L1D, block 8192)
 
-| Distribution  | PIVCO scalar | PIVCO AVX512 | trad 1s | trad 4s | huf0 4s | vs best |
-|---------------|------------:|-----------:|--------:|--------:|--------:|--------:|
-| proba80       |         354 |       2682 |     386 |     722 |    1818 | **1.48x** |
-| proba50       |         118 |       2052 |     288 |     652 |    1809 | **1.13x** |
-| proba14       |          57 |       1003 |     274 |     651 |    1749 |   0.57x |
-| proba02       |          33 |        298 |     257 |     650 |    1051 |   0.28x |
-| english       |          57 |       1232 |     275 |     681 |    1764 |   0.70x |
-| geometric     |         117 |       1984 |     290 |     274 |    1814 | **1.09x** |
-| two_sym_eq    |         231 |       2969 |     309 |     725 |    1827 | **1.63x** |
-| two_sym_90/10 |         621 |       2939 |     432 |     725 |    1811 | **1.62x** |
+| Distribution  | PIVCO AVX512 | huf0 X1 | huf0 X2 | trad 4s | vs best |
+|---------------|------------:|--------:|--------:|--------:|--------:|
+| proba80       |        2650 |    1059 |    1810 |     719 | **1.46x** |
+| proba50       |        2051 |    1060 |    1811 |     649 | **1.13x** |
+| proba14       |         994 |    1060 |    1744 |     646 |   0.57x |
+| english       |        1233 |    1055 |    1753 |     675 |   0.70x |
+| geometric     |        1974 |    1059 |    1807 |     273 | **1.09x** |
+| bell_s10      |         692 |    1048 |    1610 |     273 |   0.43x |
+| uniform       |         288 |       0 |       0 |     689 |   0.42x |
+| two_sym_eq    |        2942 |    1060 |    1819 |     724 | **1.62x** |
 
 ### AWS Graviton 4 Neoverse V2 (NEON, 64KB L1D, block 8192)
 
-| Distribution  | PIVCO scalar | PIVCO NEON | trad 1s | trad 4s | huf0 4s | vs best |
-|---------------|------------:|----------:|--------:|--------:|--------:|--------:|
-| proba80       |         368 |      1418 |     320 |    1019 |    1675 |   0.85x |
-| proba50       |         138 |      1149 |     304 |     834 |    1680 |   0.68x |
-| proba14       |          67 |       681 |     281 |     824 |    1633 |   0.42x |
-| proba02       |          40 |       361 |     260 |     810 |     925 |   0.39x |
-| english       |          67 |       707 |     283 |     890 |    1634 |   0.43x |
-| geometric     |         137 |      1130 |     303 |     229 |    1677 |   0.67x |
-| two_sym_eq    |         259 |      1510 |     337 |    1021 |    1680 |   0.90x |
-| two_sym_90/10 |         595 |      1542 |     338 |    1024 |    1666 |   0.93x |
+| Distribution  | PIVCO NEON | huf0 X1 | huf0 X2 | trad 4s | vs best |
+|---------------|----------:|--------:|--------:|--------:|--------:|
+| proba80       |      1437 |     939 |    1680 |    1020 |   0.86x |
+| proba50       |      1166 |     934 |    1684 |     840 |   0.69x |
+| proba14       |       701 |     935 |    1637 |     837 |   0.43x |
+| english       |       732 |     932 |    1639 |     912 |   0.45x |
+| geometric     |      1146 |     933 |    1681 |     230 |   0.68x |
+| bell_s10      |       540 |     927 |    1517 |     229 |   0.36x |
+| uniform       |       373 |       0 |       0 |     981 |   0.38x |
+| two_sym_eq    |      1536 |     937 |    1685 |    1021 |   0.91x |
 
 ### AMD EPYC 7R13 Zen 3 (SSE4.1, 32KB L1D, block 4096)
 
-| Distribution  | PIVCO scalar | PIVCO SSE | trad 1s | trad 4s | huf0 4s | vs best |
-|---------------|------------:|---------:|--------:|--------:|--------:|--------:|
-| proba80       |         332 |     1544 |     368 |     859 |    1787 |   0.86x |
-| proba50       |         121 |     1162 |     287 |     688 |    1751 |   0.66x |
-| proba14       |          59 |      608 |     266 |     688 |    1676 |   0.36x |
-| proba02       |          34 |      254 |     253 |     684 |     945 |   0.27x |
-| english       |          58 |      677 |     268 |     758 |    1687 |   0.40x |
-| geometric     |         121 |     1139 |     288 |     168 |    1746 |   0.65x |
-| two_sym_eq    |         233 |     1703 |     322 |     870 |    1779 |   0.96x |
-| two_sym_90/10 |         520 |     1716 |     455 |     872 |    1786 |   0.96x |
+| Distribution  | PIVCO SSE | huf0 X1 | huf0 X2 | trad 4s | vs best |
+|---------------|----------:|--------:|--------:|--------:|--------:|
+| proba80       |      1525 |     960 |    1736 |     862 |   0.88x |
+| proba50       |      1186 |     956 |    1705 |     695 |   0.70x |
+| proba14       |       623 |     956 |    1638 |     693 |   0.38x |
+| english       |       690 |     951 |    1653 |     758 |   0.42x |
+| geometric     |      1158 |     955 |    1699 |     169 |   0.68x |
+| bell_s10      |       470 |     946 |    1516 |     170 |   0.31x |
+| uniform       |       254 |       0 |       0 |     819 |   0.31x |
+| two_sym_eq    |      1718 |     959 |    1729 |     874 |   0.99x |
 
-### Cross-Platform Summary (PIVCO SIMD vs huf0 4-stream)
+### Cross-Platform Summary (PIVCO SIMD vs best other decoder)
 
 | Distribution | M4 NEON | Xeon AVX-512 | Graviton4 NEON | Zen3 SSE |
 |---|---:|---:|---:|---:|
-| **proba80** | **1.49x** | **1.48x** | 0.85x | 0.86x |
-| **proba50** | **1.20x** | **1.13x** | 0.68x | 0.66x |
-| proba14 | 0.73x | 0.57x | 0.42x | 0.36x |
-| english | 0.77x | 0.70x | 0.43x | 0.40x |
-| **geometric** | **1.19x** | **1.09x** | 0.67x | 0.65x |
-| **two_sym_eq** | 0.84x | **1.63x** | 0.90x | 0.96x |
+| **proba80** | **1.56x** | **1.46x** | 0.86x | 0.88x |
+| **proba50** | **1.22x** | **1.13x** | 0.69x | 0.70x |
+| proba14 | 0.74x | 0.57x | 0.43x | 0.38x |
+| english | 0.83x | 0.70x | 0.45x | 0.42x |
+| **geometric** | **1.26x** | **1.09x** | 0.68x | 0.68x |
+| bell_s10 | 0.61x | 0.43x | 0.36x | 0.31x |
+| **two_sym_eq** | 0.87x | **1.62x** | 0.91x | 0.99x |
 
-PIVCO beats huf0 on Apple M4 (large L1D) and Intel AVX-512 (wide
-partition), loses on Graviton 4 (small L1D) and AMD Zen 3 (small
-L1D, narrow SIMD).
-
-- Each codec uses its natural block size
-- huf0 has a 16x block size advantage (128KB vs 8KB)
-- rANS alias (ryg_rans) consistently 3-5x slower than huf0 on all platforms
+PIVCO beats huf0 X2 on Apple M4 (large L1D) and Intel AVX-512 (wide
+partition) for skewed distributions. Loses on Graviton 4 (64KB L1D)
+and AMD Zen 3 (32KB L1D). Bell curves are the hardest case across
+all platforms.
 
 ### Data Distributions
 

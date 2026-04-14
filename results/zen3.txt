@@ -1,0 +1,82 @@
+-- The C compiler identification is GNU 11.5.0
+-- The CXX compiler identification is GNU 11.5.0
+-- Detecting C compiler ABI info
+-- Detecting C compiler ABI info - done
+-- Check for working C compiler: /usr/bin/cc - skipped
+-- Detecting C compile features
+-- Detecting C compile features - done
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Check for working CXX compiler: /usr/bin/c++ - skipped
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+-- Performing Test COMPILER_HAS_AVX512_VBMI2
+-- Performing Test COMPILER_HAS_AVX512_VBMI2 - Success
+-- x86_64 detected — enabling SSE4.1
+-- Configuring done
+-- Generating done
+-- Build files have been written to: /home/ec2-user/pivco-huffman/build
+[  4%] Building C object CMakeFiles/huf0.dir/ext/fse/lib/entropy_common.c.o
+[  9%] Building C object CMakeFiles/huf0.dir/ext/fse/lib/huf_compress.c.o
+[ 14%] Building C object CMakeFiles/huf0.dir/ext/fse/lib/huf_decompress.c.o
+[ 19%] Building C object CMakeFiles/huf0.dir/ext/fse/lib/hist.c.o
+[ 23%] Building C object CMakeFiles/huf0.dir/ext/fse/lib/fse_compress.c.o
+[ 28%] Building C object CMakeFiles/huf0.dir/ext/fse/lib/fse_decompress.c.o
+[ 33%] Building C object CMakeFiles/huf0.dir/ext/fse/lib/debug.c.o
+[ 38%] Linking C static library libhuf0.a
+[ 38%] Built target huf0
+[ 42%] Building C object CMakeFiles/pivco_huffman.dir/src/huffman_table.c.o
+[ 47%] Building C object CMakeFiles/pivco_huffman.dir/src/pivco_huffman.c.o
+[ 52%] Building C object CMakeFiles/pivco_huffman.dir/src/pivco_huffman_scalar.c.o
+[ 57%] Building C object CMakeFiles/pivco_huffman.dir/src/traditional_huffman.c.o
+[ 61%] Building C object CMakeFiles/pivco_huffman.dir/src/pivco_huffman_x86.c.o
+[ 66%] Linking C static library libpivco_huffman.a
+[ 66%] Built target pivco_huffman
+[ 71%] Building C object CMakeFiles/pivco_huffman_tests.dir/test/test_main.c.o
+[ 76%] Building C object CMakeFiles/pivco_huffman_tests.dir/test/test_roundtrip.c.o
+[ 80%] Linking C executable pivco_huffman_tests
+[ 80%] Built target pivco_huffman_tests
+[ 85%] Building C object CMakeFiles/pivco_huffman_bench.dir/bench/bench_main.c.o
+[ 90%] Building C object CMakeFiles/pivco_huffman_bench.dir/bench/bench_distributions.c.o
+[ 95%] Building CXX object CMakeFiles/pivco_huffman_bench.dir/bench/bench_rans.cpp.o
+[100%] Linking CXX executable pivco_huffman_bench
+[100%] Built target pivco_huffman_bench
+=== ALL PASSED (0 failures) ===
+=== PIVCO-Huffman Benchmark Results ===
+Date: 2026-04-14 04:18:47 UTC
+Host: ip-172-31-18-88.us-west-1.compute.internal
+Platform: AMD EPYC 7R13 (Zen 3)
+Architecture: x86_64
+OS: Amazon Linux 2023.11.20260406
+Compiler: gcc (GCC) 11.5.0 20240719 (Red Hat 11.5.0-5)
+SIMD: SSE4.1
+L1D cache: 32KB
+Block size: 4096
+
+=== PIVCO-Huffman Benchmarks ===
+Sequence: 4M, Repeats: 25 (100M/run), Block: 4096, Runs: 5 (drop 2)
+
+DECODE M/s    | pivco_s pivco_n | trad_1s trad_4s | huf0_1s huf0_x1 huf0_x2 | rans_x2 |   ratio
+--------------|-----------------|-----------------|----------------------------|---------|--------
+proba80       |     323    1525 |     357     862 |     353     960    1736 |     261 |  0.88x
+proba50       |     122    1186 |     283     695 |     353     956    1705 |     223 |  0.70x
+proba14       |      59     623 |     263     693 |     353     956    1638 |     229 |  0.38x
+proba02       |      34     256 |     247     693 |     350     945     990 |     225 |  0.26x
+bell_s10      |      46     470 |     266     170 |     352     946    1516 |     236 |  0.31x
+bell_s30      |      35     295 |     253     170 |     350     943     935 |     230 |  0.31x
+bell_s80      |      31     249 |     258     772 |       0       0       0 |     277 |  0.32x
+uniform       |      30     254 |     272     819 |       0       0       0 |     313 |  0.31x
+english       |      59     690 |     265     758 |     352     951    1653 |     238 |  0.42x
+zipfian       |      39     266 |     237     757 |     350     944    1191 |     189 |  0.22x
+sparse_4      |     122    1278 |     301     872 |     353     961    1730 |     307 |  0.74x
+sparse_16     |      62     781 |     290     864 |     353     961    1724 |     315 |  0.45x
+geometric     |     121    1158 |     282     169 |     352     955    1699 |     222 |  0.68x
+two_sym_eq    |     233    1718 |     309     874 |     354     959    1729 |     304 |  0.99x
+two_sym_90/10 |     490    1694 |     443     874 |     353     960    1739 |     286 |  0.97x
+
+  5 runs of 100M symbols each (25x 4M), drop 2 slowest, warn if spread > 5%
+  PIVCO/trad decode in 4096-symbol blocks
+  huf0 uses 128KB chunks (its max block size)
+  rANS decodes full 4M at once
+  CPU freq drift: +1.8% (OK)
+  Total wall time: 264.9 seconds

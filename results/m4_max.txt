@@ -1,0 +1,40 @@
+=== PIVCO-Huffman Benchmark Results ===
+Date: 2026-04-14 04:10:05 UTC
+Host: MBP14-M4.local
+Platform: Apple M4 Max
+Architecture: arm64
+OS: macOS 26.3.1
+Compiler: Apple clang version 17.0.0 (clang-1700.4.4.1)
+SIMD: NEON (128-bit)
+L1D cache: 128KB
+Block size: 8192
+Git commit: bc205ec
+
+  WARNING: proba14/pivco_n spread 6.1% (1975..2103)
+=== PIVCO-Huffman Benchmarks ===
+Sequence: 4M, Repeats: 25 (100M/run), Block: 8192, Runs: 5 (drop 2)
+
+DECODE M/s    | pivco_s pivco_n | trad_1s trad_4s | huf0_1s huf0_x1 huf0_x2 | rans_x2 |   ratio
+--------------|-----------------|-----------------|----------------------------|---------|--------
+proba80       |    1303    4381 |     564    1727 |     384    1453    2807 |     348 |  1.56x
+proba50       |     911    3399 |     523    1551 |     384    1461    2776 |     294 |  1.22x
+proba14       |     476    1987 |     474    1531 |     384    1455    2697 |     299 |  0.74x
+proba02       |     277     885 |     432    1520 |     383    1438    1580 |     292 |  0.56x
+bell_s10      |     369    1482 |     483     678 |     382    1437    2438 |     303 |  0.61x
+bell_s30      |     284     976 |     442     686 |     383    1416    1476 |     294 |  0.66x
+bell_s80      |     256     884 |     458    1599 |       0       0       0 |     357 |  0.55x
+uniform       |     255     922 |    1545    1612 |       0       0       0 |     421 |  0.57x
+english       |     475    2109 |     468    1569 |     382    1391    2537 |     302 |  0.83x
+zipfian       |     304     927 |     401    1556 |     381    1390    1854 |     242 |  0.50x
+sparse_4      |     900    3499 |    2603    1633 |    1144    3501    5204 |     456 |  0.67x
+sparse_16     |     501    2264 |    2139    1634 |    1126    3157    4431 |     441 |  0.51x
+geometric     |     862    3300 |     502     678 |     380    1406    2620 |     281 |  1.26x
+two_sym_eq    |    1451    4576 |    2893    1614 |     848    3434    5285 |     461 |  0.87x
+two_sym_90/10 |    1455    4613 |    2837    1622 |     846    3454    4961 |     371 |  0.93x
+
+  5 runs of 100M symbols each (25x 4M), drop 2 slowest, warn if spread > 5%
+  PIVCO/trad decode in 8192-symbol blocks
+  huf0 uses 128KB chunks (its max block size)
+  rANS decodes full 4M at once
+  CPU freq drift: +36.7% (OK)
+  Total wall time: 89.3 seconds
