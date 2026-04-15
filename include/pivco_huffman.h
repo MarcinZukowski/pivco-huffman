@@ -74,6 +74,11 @@ typedef struct {
     uint8_t  max_len;
     uint8_t  min_len;
     uint16_t num_symbols;
+
+    /* Most frequent symbol (shortest code). PIVCO decode prefills the
+       output with this symbol via memset and skips its leaf scatter. */
+    uint8_t  prefill_sym;
+    int16_t  prefill_node;      /* tree node ID of the prefill leaf */
 } pivco_huffman_table_t;
 
 /* ---------- Implementation selection ---------- */

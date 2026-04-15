@@ -191,14 +191,14 @@ Full detailed results with system info in `results/` directory.
 
 | Distribution  | PIVCO NEON | huf0 X1 | huf0 X2 | trad 4s | vs best |
 |---------------|----------:|--------:|--------:|--------:|--------:|
-| proba80       |      4423 |    1448 |    2843 |    1684 | **1.56x** |
-| proba50       |      3571 |    1449 |    2740 |    1556 | **1.30x** |
-| proba14       |      2248 |    1441 |    2687 |    1513 |   0.84x |
-| english       |      2323 |    1428 |    2529 |    1578 |   0.92x |
-| geometric     |      3373 |    1413 |    2679 |     681 | **1.26x** |
-| bell_s10      |      1729 |    1429 |    2406 |     636 |   0.72x |
-| uniform       |      1104 |       0 |       0 |    1622 |   0.68x |
-| two_sym_eq    |      5394 |    3329 |    5064 |    1629 | **1.07x** |
+| proba80       |      8301 |    1406 |    2627 |    1633 | **3.16x** |
+| proba50       |      4673 |    1401 |    2647 |    1479 | **1.77x** |
+| proba14       |      2329 |    1384 |    2525 |    1496 |   0.92x |
+| english       |      2422 |    1416 |    2548 |    1567 |   0.95x |
+| geometric     |      4466 |    1351 |    2571 |     684 | **1.74x** |
+| bell_s10      |      1766 |    1403 |    2346 |     666 |   0.75x |
+| uniform       |      1172 |       0 |       0 |    1603 |   0.73x |
+| two_sym_eq    |     25867 |    3448 |    5281 |    1642 | **4.90x** |
 
 ### Intel Xeon 6975P Granite Rapids (AVX-512 VBMI2, 48KB L1D, block 8192)
 
@@ -243,19 +243,20 @@ Full detailed results with system info in `results/` directory.
 
 | Distribution | M4 NEON | Xeon AVX-512 | Graviton4 NEON | Zen3 SSE |
 |---|---:|---:|---:|---:|
-| **proba80** | **1.56x** | **1.48x** | 0.86x | 0.84x |
-| **proba50** | **1.30x** | **1.13x** | 0.69x | 0.66x |
-| proba14 | 0.84x | 0.57x | 0.50x | 0.41x |
-| english | 0.92x | 0.70x | 0.53x | 0.44x |
-| **geometric** | **1.26x** | **1.08x** | 0.69x | 0.65x |
-| bell_s10 | 0.72x | 0.44x | 0.42x | 0.34x |
-| **two_sym_eq** | **1.07x** | **1.59x** | **1.26x** | **1.01x** |
+| **proba80** | **3.16x** | **1.48x** | 0.86x | 0.84x |
+| **proba50** | **1.77x** | **1.13x** | 0.69x | 0.66x |
+| proba14 | 0.92x | 0.57x | 0.50x | 0.41x |
+| english | 0.95x | 0.70x | 0.53x | 0.44x |
+| **geometric** | **1.74x** | **1.08x** | 0.69x | 0.65x |
+| bell_s10 | 0.75x | 0.44x | 0.42x | 0.34x |
+| **two_sym_eq** | **4.90x** | **1.59x** | **1.26x** | **1.01x** |
 
 PIVCO beats huf0 X2 on Apple M4 (large L1D) and Intel AVX-512 (wide
-partition) for skewed distributions. With stage fusion, two_sym_eq now
-wins on all four platforms. Loses on Graviton 4 (64KB L1D) and AMD
-Zen 3 (32KB L1D) for moderate/deep distributions. Bell curves are
-the hardest case across all platforms.
+partition) for skewed distributions. On M4, prefill memset + root
+identity optimization push proba80 to 3.2x and two_sym_eq to 4.9x.
+Loses on Graviton 4 (64KB L1D) and AMD Zen 3 (32KB L1D) for
+moderate/deep distributions. Bell curves are the hardest case across
+all platforms.
 
 ### Data Distributions
 
@@ -339,12 +340,13 @@ resource (in this case, the NEON execution units doing TBL shuffles).
 
 ### Where PIVCO Wins
 
-**Skewed distributions on capable hardware: 1.1-1.6x over huf0.**
-PIVCO beats huf0 on proba80 and proba50 on both Apple M4 (1.6x)
-and Intel AVX-512 (1.5x). On AVX-512, PIVCO also wins on two-symbol
-and sparse_4 distributions (1.6x) thanks to the 32-wide `vpcompressw`
-partition. With stage fusion, two_sym_eq now wins on all four platforms
-(1.01-1.59x) by eliminating the partition entirely for both-leaves nodes.
+**Skewed distributions on capable hardware: 1.7-5x over huf0.**
+On Apple M4, prefill memset + root identity optimization push PIVCO to
+3.2x on proba80 and 4.9x on two_sym_eq. The prefill writes the most
+frequent symbol via sequential memset, then the tree walk skips that
+leaf entirely — eliminating thousands of scattered byte stores. On
+AVX-512, PIVCO wins 1.1-1.6x on skewed data thanks to 32-wide
+`vpcompressw` partition. two_sym_eq wins on all four platforms.
 
 The tree's early-exit property means most symbols are decoded in
 the first 2-3 tree levels via large scatter-writes — the per-symbol
@@ -449,6 +451,19 @@ Worth exploring:
   regression from branch misprediction (NEON) and store-buffer
   interference (scalar). Keeping partition and scatter as separate
   phases is essential.
+- **Prefill memset**: Tested and adopted. Before decoding, memset the
+  entire output to the most frequent symbol (precomputed in table as
+  `prefill_sym`/`prefill_node`). The tree walk skips that leaf via a
+  single `node_id == skip_node` check — no scatter, no index loads.
+  +70% on proba80 (4.9→8.3 GB/s), +25% on geometric/proba50, neutral
+  on moderate/uniform distributions. Skipped for root both-leaves case
+  where sequential vst1 stores are already optimal.
+- **Root identity partition**: Tested and adopted. At the root level,
+  indices are [0..N-1], so `partition_root_8` generates them in-register
+  via `vaddq_u16(base, {0..7})` instead of loading from a pre-filled
+  array. Eliminates 16KB identity array initialization. +7% across all
+  distributions. For root both-leaves, the sequential vst1 path writes
+  `symbols[j]` directly (no scatter) — 25+ GB/s on two-symbol data.
 - **SVE backend**: Tested on Graviton 4 (128-bit SVE). `svcompact_u32`
   only handles 4 elements per instruction at this width, requiring
   widen/narrow for uint16 — slower than NEON TBL. Disabled by default.

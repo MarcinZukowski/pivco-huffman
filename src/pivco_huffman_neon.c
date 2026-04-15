@@ -221,13 +221,14 @@ static void decode_node_neon(const pivco_huffman_table_t *table,
                               uint16_t *indices, int n,
                               uint8_t *symbols,
                               const uint8_t **in_ptr,
-                              uint16_t *tmp)
+                              uint16_t *tmp,
+                              int16_t skip_node)
 {
     if (n == 0) return;
+    if (node_id == skip_node) return;  /* prefilled by memset */
 
     const pivco_tree_node_t *node = &table->tree[node_id];
     if (node->symbol >= 0) {
-        /* Leaf — scatter symbol to all indices */
         scatter_sym(symbols, indices, n, (uint8_t)node->symbol);
         return;
     }
@@ -332,22 +333,25 @@ static void decode_node_neon(const pivco_huffman_table_t *table,
     }
 
     if (left_leaf) {
-        /* Left child is leaf — scatter inline, recurse right only */
-        scatter_sym(symbols, indices, n_left,
-                    (uint8_t)left_child->symbol);
+        /* Left child is leaf — scatter inline (skip_node check handles
+           prefilled symbol), recurse right only */
+        if (node->left != skip_node)
+            scatter_sym(symbols, indices, n_left,
+                        (uint8_t)left_child->symbol);
         decode_node_neon(table, node->right, tmp, n_right,
-                         symbols, in_ptr, tmp + n_right);
+                         symbols, in_ptr, tmp + n_right, skip_node);
     } else if (right_leaf) {
         /* Right child is leaf — scatter inline, recurse left only */
-        scatter_sym(symbols, tmp, n_right,
-                    (uint8_t)right_child->symbol);
+        if (node->right != skip_node)
+            scatter_sym(symbols, tmp, n_right,
+                        (uint8_t)right_child->symbol);
         decode_node_neon(table, node->left, indices, n_left,
-                         symbols, in_ptr, tmp + n_right);
+                         symbols, in_ptr, tmp + n_right, skip_node);
     } else {
         decode_node_neon(table, node->left, indices, n_left,
-                         symbols, in_ptr, tmp + n_right);
+                         symbols, in_ptr, tmp + n_right, skip_node);
         decode_node_neon(table, node->right, tmp, n_right,
-                         symbols, in_ptr, tmp + n_right);
+                         symbols, in_ptr, tmp + n_right, skip_node);
     }
 }
 
@@ -405,7 +409,8 @@ int pivco_huffman_decode_neon(const uint8_t *in, size_t in_len,
 
     if (left_leaf && right_leaf) {
         /* Both-leaves at root — sequential vst1 stores, no scatter.
-           indices[j] == j so symbols[indices[j]] = symbols[j]. */
+           indices[j] == j so symbols[indices[j]] = symbols[j].
+           Overwrites the memset, but vst1 is equally fast. */
         uint8_t sym0 = (uint8_t)left_child->symbol;
         uint8_t sym1 = (uint8_t)right_child->symbol;
         uint8x8_t vsym0  = vdup_n_u8(sym0);
@@ -435,8 +440,15 @@ int pivco_huffman_decode_neon(const uint8_t *in, size_t in_len,
         return PIVCO_OK;
     }
 
+    /* Prefill output with the most frequent symbol (precomputed in table).
+       The tree walk skips scattering this symbol — it's already in place. */
+    uint8_t prefill_sym = table->prefill_sym;
+    memset(symbols, prefill_sym, (size_t)N);
+
     /* Partition at root using identity indices generated in-register.
-       Skips the O(N) identity array initialization. */
+       Skips the O(N) identity array initialization.
+       For the one-leaf case, the leaf side's scatter is skipped if it
+       matches prefill_sym (already written by memset above). */
     uint16_t indices[PIVCO_BLOCK_SIZE];
     uint16_t tmp[PIVCO_BLOCK_SIZE * 2];
     int n_left = 0, n_right = 0;
@@ -469,21 +481,25 @@ int pivco_huffman_decode_neon(const uint8_t *in, size_t in_len,
             indices[n_left++] = (uint16_t)j;
     }
 
+    int16_t skip_node = table->prefill_node;
+
     if (left_leaf) {
-        scatter_sym(symbols, indices, n_left,
-                    (uint8_t)left_child->symbol);
+        if (root->left != skip_node)
+            scatter_sym(symbols, indices, n_left,
+                        (uint8_t)left_child->symbol);
         decode_node_neon(table, root->right, tmp, n_right,
-                         symbols, &ptr, tmp + n_right);
+                         symbols, &ptr, tmp + n_right, skip_node);
     } else if (right_leaf) {
-        scatter_sym(symbols, tmp, n_right,
-                    (uint8_t)right_child->symbol);
+        if (root->right != skip_node)
+            scatter_sym(symbols, tmp, n_right,
+                        (uint8_t)right_child->symbol);
         decode_node_neon(table, root->left, indices, n_left,
-                         symbols, &ptr, tmp + n_right);
+                         symbols, &ptr, tmp + n_right, skip_node);
     } else {
         decode_node_neon(table, root->left, indices, n_left,
-                         symbols, &ptr, tmp + n_right);
+                         symbols, &ptr, tmp + n_right, skip_node);
         decode_node_neon(table, root->right, tmp, n_right,
-                         symbols, &ptr, tmp + n_right);
+                         symbols, &ptr, tmp + n_right, skip_node);
     }
 
     *consumed = (size_t)(ptr - in);

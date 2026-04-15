@@ -265,6 +265,8 @@ int pivco_huffman_build_table(const uint64_t freq[PIVCO_MAX_SYMBOLS],
         table->tree[2].right = -1;
         table->tree_root = 0;
         table->tree_node_count = 3;
+        table->prefill_sym = (uint8_t)sym;
+        table->prefill_node = 1;
         return PIVCO_OK;
     }
 
@@ -399,6 +401,28 @@ int pivco_huffman_build_table(const uint64_t freq[PIVCO_MAX_SYMBOLS],
             table->tree[cur].symbol = (int16_t)sym;
         }
         table->tree_node_count = nc;
+    }
+
+    /* Find the most frequent symbol (shortest code) for prefill.
+       Walk the tree to find its node ID. */
+    {
+        uint8_t best_sym = 0;
+        uint8_t best_len = 255;
+        for (int s = 0; s < PIVCO_MAX_SYMBOLS; s++) {
+            if (table->code_len[s] > 0 && table->code_len[s] < best_len) {
+                best_len = table->code_len[s];
+                best_sym = (uint8_t)s;
+            }
+        }
+        table->prefill_sym = best_sym;
+        /* Find the tree node for this symbol */
+        table->prefill_node = -1;
+        for (int16_t i = 0; i < table->tree_node_count; i++) {
+            if (table->tree[i].symbol == (int16_t)best_sym) {
+                table->prefill_node = i;
+                break;
+            }
+        }
     }
 
     return PIVCO_OK;
