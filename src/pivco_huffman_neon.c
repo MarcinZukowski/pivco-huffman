@@ -351,6 +351,27 @@ static void decode_node_neon(const pivco_huffman_table_t *table,
     }
 }
 
+/* Partition 8 identity indices starting at base.
+   Generates [base, base+1, ..., base+7] in-register (no memory read)
+   then partitions via TBL shuffle like partition_8. */
+static inline int partition_root_8(int base, uint8_t mask,
+                                    uint16_t *left_out,
+                                    uint16_t *right_out)
+{
+    static const uint16_t off[8] = {0,1,2,3,4,5,6,7};
+    uint8x16_t data = vreinterpretq_u8_u16(
+        vaddq_u16(vdupq_n_u16((uint16_t)base), vld1q_u16(off)));
+
+    const uint8_t *tab = compress_tab[mask];
+    uint8x16_t shuf_r = vld1q_u8(tab);
+    uint8x16_t shuf_l = vld1q_u8(tab + 16);
+
+    vst1q_u8((uint8_t *)right_out, vqtbl1q_u8(data, shuf_r));
+    vst1q_u8((uint8_t *)left_out, vqtbl1q_u8(data, shuf_l));
+
+    return compress_popcnt[mask];
+}
+
 int pivco_huffman_decode_neon(const uint8_t *in, size_t in_len,
                               const pivco_huffman_table_t *table,
                               uint8_t *symbols, size_t *consumed)
@@ -361,15 +382,109 @@ int pivco_huffman_decode_neon(const uint8_t *in, size_t in_len,
 
     const int N = PIVCO_BLOCK_SIZE;
     (void)in_len;
-
-    uint16_t indices[PIVCO_BLOCK_SIZE];
-    for (int i = 0; i < N; i++) indices[i] = (uint16_t)i;
-
-    uint16_t tmp[PIVCO_BLOCK_SIZE * 2];
     const uint8_t *ptr = in;
 
-    decode_node_neon(table, table->tree_root, indices, N,
-                     symbols, &ptr, tmp);
+    const pivco_tree_node_t *root = &table->tree[table->tree_root];
+
+    /* Root is leaf — fill everything */
+    if (root->symbol >= 0) {
+        memset(symbols, (uint8_t)root->symbol, (size_t)N);
+        *consumed = 0;
+        return PIVCO_OK;
+    }
+
+    /* Read root bitmap */
+    int nbytes = bitmap_bytes(N);
+    const uint8_t *bm = ptr;
+    ptr += nbytes;
+
+    const pivco_tree_node_t *left_child  = &table->tree[root->left];
+    const pivco_tree_node_t *right_child = &table->tree[root->right];
+    int left_leaf  = (left_child->symbol >= 0);
+    int right_leaf = (right_child->symbol >= 0);
+
+    if (left_leaf && right_leaf) {
+        /* Both-leaves at root — sequential vst1 stores, no scatter.
+           indices[j] == j so symbols[indices[j]] = symbols[j]. */
+        uint8_t sym0 = (uint8_t)left_child->symbol;
+        uint8_t sym1 = (uint8_t)right_child->symbol;
+        uint8x8_t vsym0  = vdup_n_u8(sym0);
+        uint8x8_t vdelta = vdup_n_u8(sym0 ^ sym1);
+        static const uint8_t bit_pos_tab[8] = {1,2,4,8,16,32,64,128};
+        uint8x8_t vbit_pos = vld1_u8(bit_pos_tab);
+
+        int j = 0;
+        for (; j + 16 <= N; j += 16) {
+            uint8x8_t bits0 = vtst_u8(vdup_n_u8(bm[j >> 3]), vbit_pos);
+            uint8x8_t vals0 = veor_u8(vsym0, vand_u8(vdelta, bits0));
+            uint8x8_t bits1 = vtst_u8(vdup_n_u8(bm[(j >> 3) + 1]), vbit_pos);
+            uint8x8_t vals1 = veor_u8(vsym0, vand_u8(vdelta, bits1));
+            vst1_u8(symbols + j, vals0);
+            vst1_u8(symbols + j + 8, vals1);
+        }
+        for (; j + 8 <= N; j += 8) {
+            uint8x8_t bits = vtst_u8(vdup_n_u8(bm[j >> 3]), vbit_pos);
+            uint8x8_t vals = veor_u8(vsym0, vand_u8(vdelta, bits));
+            vst1_u8(symbols + j, vals);
+        }
+        for (; j < N; j++) {
+            uint8_t bit = (bm[j >> 3] >> (j & 7)) & 1;
+            symbols[j] = sym0 ^ ((sym0 ^ sym1) & (uint8_t)(-(int8_t)bit));
+        }
+        *consumed = (size_t)(ptr - in);
+        return PIVCO_OK;
+    }
+
+    /* Partition at root using identity indices generated in-register.
+       Skips the O(N) identity array initialization. */
+    uint16_t indices[PIVCO_BLOCK_SIZE];
+    uint16_t tmp[PIVCO_BLOCK_SIZE * 2];
+    int n_left = 0, n_right = 0;
+    int j = 0;
+
+    for (; j + 16 <= N; j += 16) {
+        uint8_t m0 = bm[j >> 3];
+        int nr0 = partition_root_8(j, m0,
+                                    indices + n_left, tmp + n_right);
+        n_right += nr0;
+        n_left += (8 - nr0);
+
+        uint8_t m1 = bm[(j >> 3) + 1];
+        int nr1 = partition_root_8(j + 8, m1,
+                                    indices + n_left, tmp + n_right);
+        n_right += nr1;
+        n_left += (8 - nr1);
+    }
+    for (; j + 8 <= N; j += 8) {
+        uint8_t mask = bm[j >> 3];
+        int nr = partition_root_8(j, mask,
+                                   indices + n_left, tmp + n_right);
+        n_right += nr;
+        n_left += (8 - nr);
+    }
+    for (; j < N; j++) {
+        if (bitmap_get(bm, j))
+            tmp[n_right++] = (uint16_t)j;
+        else
+            indices[n_left++] = (uint16_t)j;
+    }
+
+    if (left_leaf) {
+        scatter_sym(symbols, indices, n_left,
+                    (uint8_t)left_child->symbol);
+        decode_node_neon(table, root->right, tmp, n_right,
+                         symbols, &ptr, tmp + n_right);
+    } else if (right_leaf) {
+        scatter_sym(symbols, tmp, n_right,
+                    (uint8_t)right_child->symbol);
+        decode_node_neon(table, root->left, indices, n_left,
+                         symbols, &ptr, tmp + n_right);
+    } else {
+        decode_node_neon(table, root->left, indices, n_left,
+                         symbols, &ptr, tmp + n_right);
+        decode_node_neon(table, root->right, tmp, n_right,
+                         symbols, &ptr, tmp + n_right);
+    }
 
     *consumed = (size_t)(ptr - in);
     return PIVCO_OK;
