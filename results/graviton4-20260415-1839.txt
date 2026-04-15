@@ -1,0 +1,32 @@
+-- Generating done
+-- Build files have been written to: /home/ec2-user/pivco-huffman/build
+[ 86%] Built target pivco_huffman_tests
+[100%] Built target pivco_huffman_bench
+=== ALL PASSED (0 failures) ===
+=== PIVCO-Huffman Benchmarks ===
+Sequence: 4M, Repeats: 20 (80M/run), Block: 8192, Runs: 5 (drop 2)
+
+DECODE M/s    | pivco_s pivco_n | trad_1s trad_4s | huf0_1s huf0_x1 huf0_x2 | rans_x2 |   ratio
+--------------|-----------------|-----------------|----------------------------|---------|--------
+proba80       |     392    3586 |     320    1022 |     264     938    1678 |     234 |  2.14x
+proba50       |     138    1863 |     305     838 |     264     933    1683 |     202 |  1.11x
+proba14       |      81     874 |     282     823 |     264     934    1635 |     204 |  0.53x
+proba02       |      46     464 |     260     818 |     263     925     979 |     204 |  0.47x
+bell_s10      |      63     681 |     282     230 |     263     926    1519 |     209 |  0.45x
+bell_s30      |      47     486 |     265     229 |     263     925     927 |     208 |  0.52x
+bell_s80      |      40     452 |     269     909 |       0       0       0 |     245 |  0.50x
+uniform       |      40     462 |     285     930 |       0       0       0 |     267 |  0.50x
+english       |      83     916 |     283     898 |     263     930    1638 |     212 |  0.56x
+zipfian       |      52     516 |     251     879 |     263     924    1187 |     175 |  0.43x
+sparse_4      |     236    1731 |     328    1021 |     264     939    1685 |     278 |  1.03x
+sparse_16     |      90     998 |     312    1008 |     264     941    1649 |     274 |  0.60x
+geometric     |     137    1831 |     304     231 |     264     932    1679 |     202 |  1.09x
+two_sym_eq    |    1265   13378 |     337    1024 |     264     937    1685 |     281 |  7.94x
+two_sym_90/10 |    1263   13434 |     338    1027 |     264     937    1669 |     255 |  8.05x
+
+  5 runs of 80M symbols each (20x 4M), drop 2 slowest, warn if spread > 5%
+  PIVCO/trad decode in 8192-symbol blocks
+  huf0 uses 128KB chunks (its max block size)
+  rANS decodes full 4M at once
+  CPU freq drift: +0.1% (OK)
+  Total wall time: 182.9 seconds

@@ -204,14 +204,14 @@ Full detailed results with system info in `results/` directory.
 
 | Distribution  | PIVCO AVX512 | huf0 X1 | huf0 X2 | trad 4s | vs best |
 |---------------|------------:|--------:|--------:|--------:|--------:|
-| proba80       |        2689 |    1064 |    1820 |     722 | **1.48x** |
-| proba50       |        2077 |    1065 |    1821 |     652 | **1.14x** |
-| proba14       |        1013 |    1066 |    1748 |     651 |   0.58x |
-| english       |        1251 |    1060 |    1757 |     681 |   0.71x |
-| geometric     |        1995 |    1065 |    1814 |     274 | **1.10x** |
-| bell_s10      |         720 |    1051 |    1612 |     273 |   0.45x |
-| uniform       |         292 |       0 |       0 |     701 |   0.42x |
-| two_sym_eq    |        2982 |    1064 |    1829 |     724 | **1.63x** |
+| proba80       |        5540 |    1062 |    1819 |     722 | **3.05x** |
+| proba50       |        2703 |    1065 |    1811 |     652 | **1.49x** |
+| proba14       |        1017 |    1066 |    1746 |     651 |   0.58x |
+| english       |        1267 |    1060 |    1754 |     681 |   0.72x |
+| geometric     |        2550 |    1064 |    1815 |     273 | **1.40x** |
+| bell_s10      |         714 |    1052 |    1614 |     273 |   0.44x |
+| uniform       |         282 |       0 |       0 |     701 |   0.40x |
+| two_sym_eq    |        4522 |    1064 |    1829 |     724 | **2.47x** |
 
 ### AWS Graviton 4 Neoverse V2 (NEON, 64KB L1D, block 8192)
 
@@ -230,32 +230,32 @@ Full detailed results with system info in `results/` directory.
 
 | Distribution  | PIVCO SSE | huf0 X1 | huf0 X2 | trad 4s | vs best |
 |---------------|----------:|--------:|--------:|--------:|--------:|
-| proba80       |      1464 |     957 |    1752 |     861 |   0.84x |
-| proba50       |      1140 |     936 |    1691 |     689 |   0.67x |
-| proba14       |       689 |     954 |    1643 |     687 |   0.42x |
-| english       |       739 |     950 |    1657 |     756 |   0.45x |
-| geometric     |      1121 |     953 |    1714 |     168 |   0.65x |
-| bell_s10      |       525 |     946 |    1519 |     166 |   0.35x |
-| uniform       |       328 |       0 |       0 |     810 |   0.40x |
-| two_sym_eq    |      1742 |     956 |    1744 |     871 |   1.00x |
+| proba80       |      1985 |     905 |    1669 |     864 | **1.19x** |
+| proba50       |      1241 |     959 |    1741 |     695 |   0.71x |
+| proba14       |       631 |     961 |    1674 |     692 |   0.38x |
+| english       |       675 |     956 |    1684 |     759 |   0.40x |
+| geometric     |      1220 |     959 |    1737 |     171 |   0.70x |
+| bell_s10      |       489 |     950 |    1547 |     171 |   0.32x |
+| uniform       |       310 |       0 |       0 |     814 |   0.38x |
+| two_sym_eq    |      1495 |     963 |    1769 |     873 |   0.85x |
 
 ### Cross-Platform Summary (PIVCO SIMD vs best other decoder)
 
 | Distribution | M4 NEON | Xeon AVX-512 | Graviton4 NEON | Zen3 SSE |
 |---|---:|---:|---:|---:|
-| **proba80** | **3.47x** | **1.48x** | **2.17x** | 0.84x |
-| **proba50** | **1.86x** | **1.14x** | **1.10x** | 0.67x |
-| proba14 | 0.87x | 0.58x | 0.54x | 0.42x |
-| english | 0.95x | 0.71x | 0.56x | 0.45x |
-| **geometric** | **1.79x** | **1.10x** | **1.09x** | 0.65x |
-| bell_s10 | 0.71x | 0.45x | 0.45x | 0.35x |
-| **two_sym_eq** | **5.05x** | **1.63x** | **8.41x** | 1.00x |
+| **proba80** | **3.47x** | **3.05x** | **2.14x** | **1.19x** |
+| **proba50** | **1.86x** | **1.49x** | **1.11x** | 0.71x |
+| proba14 | 0.87x | 0.58x | 0.53x | 0.38x |
+| english | 0.95x | 0.72x | 0.56x | 0.40x |
+| **geometric** | **1.79x** | **1.40x** | **1.09x** | 0.70x |
+| bell_s10 | 0.71x | 0.44x | 0.45x | 0.32x |
+| **two_sym_eq** | **5.05x** | **2.47x** | **7.94x** | 0.85x |
 
-PIVCO now beats huf0 X2 on three of four platforms for skewed data.
-On M4: 3.5x proba80, 5x two_sym_eq. On Graviton 4: 2.2x proba80,
-8.4x two_sym_eq (prefill + half-partition + stage fusion). On AVX-512:
-1.5x proba80, 1.6x two_sym_eq. Only Zen 3 (32KB L1D, SSE4.1) remains
-at parity or below. Bell curves are the hardest case across all
+PIVCO now beats huf0 X2 on all four platforms for proba80. On M4:
+3.5x proba80, 5x two_sym_eq. On AVX-512: 3.1x proba80, 2.5x
+two_sym_eq (prefill + skip_node doubled throughput). On Graviton 4:
+2.1x proba80, 7.9x two_sym_eq. On Zen 3: 1.2x proba80 (first win
+on this platform). Bell curves remain the hardest case across all
 platforms.
 
 ### Data Distributions
@@ -340,16 +340,13 @@ resource (in this case, the NEON execution units doing TBL shuffles).
 
 ### Where PIVCO Wins
 
-**Skewed distributions on capable hardware: 1.9-5x over huf0.**
-On Apple M4, prefill memset + half-partition push PIVCO to 3.3x on
-proba80 (9.2 GB/s) and 4.9x on two_sym_eq (26 GB/s). The prefill
-writes the most frequent symbol via sequential memset, then the tree
-walk skips that leaf entirely — eliminating thousands of scattered
-byte stores. At the parent of the prefilled leaf, half-partition
-generates only the non-prefilled side's indices (one TBL + one store
-instead of two), saving another 10%. On
-AVX-512, PIVCO wins 1.1-1.6x on skewed data thanks to 32-wide
-`vpcompressw` partition. two_sym_eq wins on all four platforms.
+**Skewed distributions on all platforms: 1.2-5x over huf0.**
+Prefill memset + skip_node + half-partition benefit all backends.
+On M4: 3.5x proba80 (9.9 GB/s), 5x two_sym_eq (27 GB/s). On
+AVX-512: 3.1x proba80 (5.5 GB/s) — prefill doubled throughput by
+skipping the scatter on vpcompressw-partitioned data. On Graviton 4:
+2.1x proba80, 7.9x two_sym_eq. On Zen 3: 1.2x proba80 — first win
+on this platform. proba80 now wins on all four platforms.
 
 The tree's early-exit property means most symbols are decoded in
 the first 2-3 tree levels via large scatter-writes — the per-symbol
@@ -358,11 +355,11 @@ cost drops well below a single table lookup.
 ### Where PIVCO Loses
 
 **Moderate/deep distributions on small-L1D platforms.** On Zen 3
-(32KB L1D), PIVCO loses on all but two_sym_eq. On Graviton 4 (64KB
-L1D), PIVCO now wins on skewed data (2.2x proba80, 8.4x two_sym_eq)
-thanks to prefill + half-partition, but still loses on moderate and
-deep distributions where the 8KB shuffle table + index arrays
-pressure L1D.
+(32KB L1D), PIVCO wins on proba80 (1.2x) but loses on everything
+else. On Graviton 4 (64KB L1D), PIVCO wins on skewed data (2.1x
+proba80, 7.9x two_sym_eq) but loses on moderate and deep
+distributions where the 8KB shuffle table + index arrays pressure
+L1D.
 
 **Moderate and uniform distributions everywhere.** On non-skewed data,
 the tree is deep with few early terminations, so PIVCO does full-depth
