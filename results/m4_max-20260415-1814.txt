@@ -1,0 +1,29 @@
+  WARNING: proba80/pivco_n spread 5.4% (9642..10194)
+  WARNING: two_sym_eq/pivco_n spread 5.5% (26371..27897)
+=== PIVCO-Huffman Benchmarks ===
+Sequence: 4M, Repeats: 20 (80M/run), Block: 8192, Runs: 5 (drop 2)
+
+DECODE M/s    | pivco_s pivco_n | trad_1s trad_4s | huf0_1s huf0_x1 huf0_x2 | rans_x2 |   ratio
+--------------|-----------------|-----------------|----------------------------|---------|--------
+proba80       |    1326    9906 |     580    1762 |     385    1466    2853 |     349 |  3.47x
+proba50       |     939    5270 |     542    1603 |     395    1503    2826 |     301 |  1.86x
+proba14       |     554    2399 |     487    1605 |     392    1496    2760 |     303 |  0.87x
+proba02       |     318    1153 |     440    1522 |     386    1466    1592 |     295 |  0.72x
+bell_s10      |     428    1744 |     485     690 |     383    1447    2464 |     306 |  0.71x
+bell_s30      |     323    1195 |     446     693 |     383    1418    1513 |     297 |  0.79x
+bell_s80      |     286    1135 |     465    1626 |       0       0       0 |     364 |  0.70x
+uniform       |     282    1176 |    1552    1639 |       0       0       0 |     431 |  0.72x
+english       |     555    2427 |     475    1597 |     386    1420    2567 |     311 |  0.95x
+zipfian       |     354    1297 |     409    1585 |     385    1435    1871 |     250 |  0.69x
+sparse_4      |    1198    4172 |    2708    1673 |    1182    3472    5190 |     467 |  0.80x
+sparse_16     |     600    2557 |    2123    1643 |    1157    3200    4509 |     450 |  0.57x
+geometric     |     880    4823 |     526     686 |     386    1450    2690 |     287 |  1.79x
+two_sym_eq    |    2309   26878 |    2911    1656 |     859    3474    5320 |     474 |  5.05x
+two_sym_90/10 |    2319   26052 |    2882    1646 |     858    3494    5089 |     380 |  5.12x
+
+  5 runs of 80M symbols each (20x 4M), drop 2 slowest, warn if spread > 5%
+  PIVCO/trad decode in 8192-symbol blocks
+  huf0 uses 128KB chunks (its max block size)
+  rANS decodes full 4M at once
+  CPU freq drift: +7.4% (OK)
+  Total wall time: 68.5 seconds

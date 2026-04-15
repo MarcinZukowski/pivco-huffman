@@ -191,72 +191,72 @@ Full detailed results with system info in `results/` directory.
 
 | Distribution  | PIVCO NEON | huf0 X1 | huf0 X2 | trad 4s | vs best |
 |---------------|----------:|--------:|--------:|--------:|--------:|
-| proba80       |      9155 |    1460 |    2816 |    1707 | **3.25x** |
-| proba50       |      5122 |    1463 |    2758 |    1564 | **1.86x** |
-| proba14       |      2366 |    1457 |    2672 |    1560 |   0.89x |
-| english       |      2407 |    1430 |    2598 |    1586 |   0.93x |
-| geometric     |      4980 |    1421 |    2682 |     700 | **1.86x** |
-| bell_s10      |      1742 |    1432 |    2475 |     681 |   0.70x |
-| uniform       |      1169 |       0 |       0 |    1623 |   0.72x |
-| two_sym_eq    |     25963 |    3475 |    5334 |    1653 | **4.87x** |
+| proba80       |      9906 |    1466 |    2853 |    1762 | **3.47x** |
+| proba50       |      5270 |    1503 |    2826 |    1603 | **1.86x** |
+| proba14       |      2399 |    1496 |    2760 |    1605 |   0.87x |
+| english       |      2427 |    1420 |    2567 |    1597 |   0.95x |
+| geometric     |      4823 |    1450 |    2690 |     686 | **1.79x** |
+| bell_s10      |      1744 |    1447 |    2464 |     690 |   0.71x |
+| uniform       |      1176 |       0 |       0 |    1639 |   0.72x |
+| two_sym_eq    |     26878 |    3474 |    5320 |    1656 | **5.05x** |
 
 ### Intel Xeon 6975P Granite Rapids (AVX-512 VBMI2, 48KB L1D, block 8192)
 
 | Distribution  | PIVCO AVX512 | huf0 X1 | huf0 X2 | trad 4s | vs best |
 |---------------|------------:|--------:|--------:|--------:|--------:|
-| proba80       |        2686 |    1061 |    1815 |     722 | **1.48x** |
-| proba50       |        2054 |    1064 |    1812 |     652 | **1.13x** |
-| proba14       |         995 |    1064 |    1743 |     651 |   0.57x |
-| english       |        1227 |    1059 |    1754 |     682 |   0.70x |
-| geometric     |        1955 |    1064 |    1813 |     274 | **1.08x** |
-| bell_s10      |         708 |    1051 |    1612 |     274 |   0.44x |
-| uniform       |         288 |       0 |       0 |     702 |   0.41x |
-| two_sym_eq    |        2899 |    1062 |    1825 |     725 | **1.59x** |
+| proba80       |        2689 |    1064 |    1820 |     722 | **1.48x** |
+| proba50       |        2077 |    1065 |    1821 |     652 | **1.14x** |
+| proba14       |        1013 |    1066 |    1748 |     651 |   0.58x |
+| english       |        1251 |    1060 |    1757 |     681 |   0.71x |
+| geometric     |        1995 |    1065 |    1814 |     274 | **1.10x** |
+| bell_s10      |         720 |    1051 |    1612 |     273 |   0.45x |
+| uniform       |         292 |       0 |       0 |     701 |   0.42x |
+| two_sym_eq    |        2982 |    1064 |    1829 |     724 | **1.63x** |
 
 ### AWS Graviton 4 Neoverse V2 (NEON, 64KB L1D, block 8192)
 
 | Distribution  | PIVCO NEON | huf0 X1 | huf0 X2 | trad 4s | vs best |
 |---------------|----------:|--------:|--------:|--------:|--------:|
-| proba80       |      1441 |     939 |    1679 |    1016 |   0.86x |
-| proba50       |      1165 |     933 |    1683 |     841 |   0.69x |
-| proba14       |       824 |     936 |    1638 |     837 |   0.50x |
-| english       |       874 |     932 |    1641 |     910 |   0.53x |
-| geometric     |      1156 |     934 |    1682 |     229 |   0.69x |
-| bell_s10      |       641 |     927 |    1522 |     230 |   0.42x |
-| uniform       |       445 |       0 |       0 |     977 |   0.46x |
-| two_sym_eq    |      2117 |     939 |    1684 |    1021 | **1.26x** |
+| proba80       |      3647 |     938 |    1680 |    1020 | **2.17x** |
+| proba50       |      1845 |     933 |    1683 |     837 | **1.10x** |
+| proba14       |       875 |     934 |    1635 |     808 |   0.54x |
+| english       |       925 |     931 |    1639 |     889 |   0.56x |
+| geometric     |      1830 |     933 |    1680 |     231 | **1.09x** |
+| bell_s10      |       682 |     925 |    1517 |     231 |   0.45x |
+| uniform       |       460 |       0 |       0 |     953 |   0.48x |
+| two_sym_eq    |     14161 |     936 |    1685 |    1021 | **8.41x** |
 
 ### AMD EPYC 7R13 Zen 3 (SSE4.1, 32KB L1D, block 4096)
 
 | Distribution  | PIVCO SSE | huf0 X1 | huf0 X2 | trad 4s | vs best |
 |---------------|----------:|--------:|--------:|--------:|--------:|
-| proba80       |      1463 |     959 |    1741 |     864 |   0.84x |
-| proba50       |      1122 |     955 |    1703 |     690 |   0.66x |
-| proba14       |       677 |     956 |    1633 |     688 |   0.41x |
-| english       |       728 |     951 |    1648 |     758 |   0.44x |
-| geometric     |      1100 |     955 |    1697 |     168 |   0.65x |
-| bell_s10      |       518 |     947 |    1512 |     167 |   0.34x |
-| uniform       |       322 |       0 |       0 |     811 |   0.40x |
-| two_sym_eq    |      1743 |     959 |    1728 |     873 | **1.01x** |
+| proba80       |      1464 |     957 |    1752 |     861 |   0.84x |
+| proba50       |      1140 |     936 |    1691 |     689 |   0.67x |
+| proba14       |       689 |     954 |    1643 |     687 |   0.42x |
+| english       |       739 |     950 |    1657 |     756 |   0.45x |
+| geometric     |      1121 |     953 |    1714 |     168 |   0.65x |
+| bell_s10      |       525 |     946 |    1519 |     166 |   0.35x |
+| uniform       |       328 |       0 |       0 |     810 |   0.40x |
+| two_sym_eq    |      1742 |     956 |    1744 |     871 |   1.00x |
 
 ### Cross-Platform Summary (PIVCO SIMD vs best other decoder)
 
 | Distribution | M4 NEON | Xeon AVX-512 | Graviton4 NEON | Zen3 SSE |
 |---|---:|---:|---:|---:|
-| **proba80** | **3.25x** | **1.48x** | 0.86x | 0.84x |
-| **proba50** | **1.86x** | **1.13x** | 0.69x | 0.66x |
-| proba14 | 0.89x | 0.57x | 0.50x | 0.41x |
-| english | 0.93x | 0.70x | 0.53x | 0.44x |
-| **geometric** | **1.86x** | **1.08x** | 0.69x | 0.65x |
-| bell_s10 | 0.70x | 0.44x | 0.42x | 0.34x |
-| **two_sym_eq** | **4.87x** | **1.59x** | **1.26x** | **1.01x** |
+| **proba80** | **3.47x** | **1.48x** | **2.17x** | 0.84x |
+| **proba50** | **1.86x** | **1.14x** | **1.10x** | 0.67x |
+| proba14 | 0.87x | 0.58x | 0.54x | 0.42x |
+| english | 0.95x | 0.71x | 0.56x | 0.45x |
+| **geometric** | **1.79x** | **1.10x** | **1.09x** | 0.65x |
+| bell_s10 | 0.71x | 0.45x | 0.45x | 0.35x |
+| **two_sym_eq** | **5.05x** | **1.63x** | **8.41x** | 1.00x |
 
-PIVCO beats huf0 X2 on Apple M4 (large L1D) and Intel AVX-512 (wide
-partition) for skewed distributions. On M4, prefill memset + half-partition
-push proba80 to 3.3x and two_sym_eq to 4.9x.
-Loses on Graviton 4 (64KB L1D) and AMD Zen 3 (32KB L1D) for
-moderate/deep distributions. Bell curves are the hardest case across
-all platforms.
+PIVCO now beats huf0 X2 on three of four platforms for skewed data.
+On M4: 3.5x proba80, 5x two_sym_eq. On Graviton 4: 2.2x proba80,
+8.4x two_sym_eq (prefill + half-partition + stage fusion). On AVX-512:
+1.5x proba80, 1.6x two_sym_eq. Only Zen 3 (32KB L1D, SSE4.1) remains
+at parity or below. Bell curves are the hardest case across all
+platforms.
 
 ### Data Distributions
 
@@ -357,12 +357,12 @@ cost drops well below a single table lookup.
 
 ### Where PIVCO Loses
 
-**Most distributions on small-L1D / narrow-SIMD platforms.** On
-Graviton 4 (64KB L1D) and Zen 3 (32KB L1D), PIVCO loses on moderate
-and deep distributions. The 8KB shuffle table + 32KB index arrays
-pressure L1D, and 8-wide SIMD doesn't provide enough throughput
-advantage over huf0's 4-stream ILP. Exception: two_sym_eq now wins
-everywhere thanks to stage fusion eliminating the partition.
+**Moderate/deep distributions on small-L1D platforms.** On Zen 3
+(32KB L1D), PIVCO loses on all but two_sym_eq. On Graviton 4 (64KB
+L1D), PIVCO now wins on skewed data (2.2x proba80, 8.4x two_sym_eq)
+thanks to prefill + half-partition, but still loses on moderate and
+deep distributions where the 8KB shuffle table + index arrays
+pressure L1D.
 
 **Moderate and uniform distributions everywhere.** On non-skewed data,
 the tree is deep with few early terminations, so PIVCO does full-depth
