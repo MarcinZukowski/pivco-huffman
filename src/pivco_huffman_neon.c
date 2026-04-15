@@ -173,6 +173,29 @@ int pivco_huffman_encode_neon(const uint8_t *symbols,
 
 /* ---------- NEON Decode (Tree-Walk with SIMD Partition) ---------- */
 
+/* Half-partition: extract only the right (bit=1) elements.
+   One TBL + one store instead of two. Returns count of right elements. */
+static inline int partition_8_right(const uint16_t *src,
+                                     uint8_t mask,
+                                     uint16_t *right_out)
+{
+    uint8x16_t data = vld1q_u8((const uint8_t *)src);
+    uint8x16_t shuf_r = vld1q_u8(compress_tab[mask]);
+    vst1q_u8((uint8_t *)right_out, vqtbl1q_u8(data, shuf_r));
+    return compress_popcnt[mask];
+}
+
+/* Half-partition: extract only the left (bit=0) elements. */
+static inline int partition_8_left(const uint16_t *src,
+                                    uint8_t mask,
+                                    uint16_t *left_out)
+{
+    uint8x16_t data = vld1q_u8((const uint8_t *)src);
+    uint8x16_t shuf_l = vld1q_u8(compress_tab[mask] + 16);
+    vst1q_u8((uint8_t *)left_out, vqtbl1q_u8(data, shuf_l));
+    return 8 - compress_popcnt[mask];
+}
+
 /* Scatter a single symbol to indices[0..n-1] positions in symbols[].
    NEON-assisted: bulk-load 8 indices per vector + lane extracts. */
 static inline void scatter_sym(uint8_t *symbols,
@@ -300,58 +323,85 @@ static void decode_node_neon(const pivco_huffman_table_t *table,
         return;
     }
 
-    /* SIMD partition in-place, unrolled 2x */
-    int n_left = 0, n_right = 0;
-    int j = 0;
-
-    for (; j + 16 <= n; j += 16) {
-        uint8_t m0 = bm[j >> 3];
-        int nr0 = partition_8(indices + j, m0,
-                              indices + n_left, tmp + n_right);
-        n_right += nr0;
-        n_left += (8 - nr0);
-
-        uint8_t m1 = bm[(j >> 3) + 1];
-        int nr1 = partition_8(indices + j + 8, m1,
-                              indices + n_left, tmp + n_right);
-        n_right += nr1;
-        n_left += (8 - nr1);
-    }
-    for (; j + 8 <= n; j += 8) {
-        uint8_t mask = bm[j >> 3];
-        int nr = partition_8(indices + j, mask,
-                             indices + n_left, tmp + n_right);
-        n_right += nr;
-        n_left += (8 - nr);
-    }
-    /* Scalar remainder */
-    for (; j < n; j++) {
-        if (bitmap_get(bm, j))
-            tmp[n_right++] = indices[j];
-        else
-            indices[n_left++] = indices[j];
-    }
-
-    if (left_leaf) {
-        /* Left child is leaf — scatter inline (skip_node check handles
-           prefilled symbol), recurse right only */
-        if (node->left != skip_node)
-            scatter_sym(symbols, indices, n_left,
-                        (uint8_t)left_child->symbol);
+    if (left_leaf && node->left == skip_node) {
+        /* Left child is the prefilled leaf — half-partition right only.
+           Left side already covered by memset, no scatter needed. */
+        int n_right = 0;
+        int j = 0;
+        for (; j + 8 <= n; j += 8) {
+            n_right += partition_8_right(indices + j, bm[j >> 3],
+                                          tmp + n_right);
+        }
+        for (; j < n; j++) {
+            if (bitmap_get(bm, j))
+                tmp[n_right++] = indices[j];
+        }
         decode_node_neon(table, node->right, tmp, n_right,
                          symbols, in_ptr, tmp + n_right, skip_node);
-    } else if (right_leaf) {
-        /* Right child is leaf — scatter inline, recurse left only */
-        if (node->right != skip_node)
-            scatter_sym(symbols, tmp, n_right,
-                        (uint8_t)right_child->symbol);
+    } else if (right_leaf && node->right == skip_node) {
+        /* Right child is the prefilled leaf — half-partition left only. */
+        int n_left = 0;
+        int j = 0;
+        for (; j + 8 <= n; j += 8) {
+            n_left += partition_8_left(indices + j, bm[j >> 3],
+                                        indices + n_left);
+        }
+        for (; j < n; j++) {
+            if (!bitmap_get(bm, j))
+                indices[n_left++] = indices[j];
+        }
         decode_node_neon(table, node->left, indices, n_left,
-                         symbols, in_ptr, tmp + n_right, skip_node);
+                         symbols, in_ptr, tmp, skip_node);
     } else {
-        decode_node_neon(table, node->left, indices, n_left,
-                         symbols, in_ptr, tmp + n_right, skip_node);
-        decode_node_neon(table, node->right, tmp, n_right,
-                         symbols, in_ptr, tmp + n_right, skip_node);
+        /* Standard full partition */
+        int n_left = 0, n_right = 0;
+        int j = 0;
+
+        for (; j + 16 <= n; j += 16) {
+            uint8_t m0 = bm[j >> 3];
+            int nr0 = partition_8(indices + j, m0,
+                                  indices + n_left, tmp + n_right);
+            n_right += nr0;
+            n_left += (8 - nr0);
+
+            uint8_t m1 = bm[(j >> 3) + 1];
+            int nr1 = partition_8(indices + j + 8, m1,
+                                  indices + n_left, tmp + n_right);
+            n_right += nr1;
+            n_left += (8 - nr1);
+        }
+        for (; j + 8 <= n; j += 8) {
+            uint8_t mask = bm[j >> 3];
+            int nr = partition_8(indices + j, mask,
+                                 indices + n_left, tmp + n_right);
+            n_right += nr;
+            n_left += (8 - nr);
+        }
+        for (; j < n; j++) {
+            if (bitmap_get(bm, j))
+                tmp[n_right++] = indices[j];
+            else
+                indices[n_left++] = indices[j];
+        }
+
+        if (left_leaf) {
+            if (node->left != skip_node)
+                scatter_sym(symbols, indices, n_left,
+                            (uint8_t)left_child->symbol);
+            decode_node_neon(table, node->right, tmp, n_right,
+                             symbols, in_ptr, tmp + n_right, skip_node);
+        } else if (right_leaf) {
+            if (node->right != skip_node)
+                scatter_sym(symbols, tmp, n_right,
+                            (uint8_t)right_child->symbol);
+            decode_node_neon(table, node->left, indices, n_left,
+                             symbols, in_ptr, tmp + n_right, skip_node);
+        } else {
+            decode_node_neon(table, node->left, indices, n_left,
+                             symbols, in_ptr, tmp + n_right, skip_node);
+            decode_node_neon(table, node->right, tmp, n_right,
+                             symbols, in_ptr, tmp + n_right, skip_node);
+        }
     }
 }
 
@@ -445,61 +495,100 @@ int pivco_huffman_decode_neon(const uint8_t *in, size_t in_len,
     uint8_t prefill_sym = table->prefill_sym;
     memset(symbols, prefill_sym, (size_t)N);
 
-    /* Partition at root using identity indices generated in-register.
-       Skips the O(N) identity array initialization.
-       For the one-leaf case, the leaf side's scatter is skipped if it
-       matches prefill_sym (already written by memset above). */
+    int16_t skip_node = table->prefill_node;
     uint16_t indices[PIVCO_BLOCK_SIZE];
     uint16_t tmp[PIVCO_BLOCK_SIZE * 2];
-    int n_left = 0, n_right = 0;
-    int j = 0;
 
-    for (; j + 16 <= N; j += 16) {
-        uint8_t m0 = bm[j >> 3];
-        int nr0 = partition_root_8(j, m0,
-                                    indices + n_left, tmp + n_right);
-        n_right += nr0;
-        n_left += (8 - nr0);
+    if (left_leaf && root->left == skip_node) {
+        /* Left child is the prefilled leaf at root — half-partition
+           right only, generate identity indices in-register. */
+        int n_right = 0;
+        int j = 0;
+        for (; j + 8 <= N; j += 8) {
+            uint8_t mask = bm[j >> 3];
+            static const uint16_t off[8] = {0,1,2,3,4,5,6,7};
+            uint8x16_t data = vreinterpretq_u8_u16(
+                vaddq_u16(vdupq_n_u16((uint16_t)j), vld1q_u16(off)));
+            uint8x16_t shuf_r = vld1q_u8(compress_tab[mask]);
+            vst1q_u8((uint8_t *)(tmp + n_right),
+                     vqtbl1q_u8(data, shuf_r));
+            n_right += compress_popcnt[mask];
+        }
+        for (; j < N; j++) {
+            if (bitmap_get(bm, j))
+                tmp[n_right++] = (uint16_t)j;
+        }
+        decode_node_neon(table, root->right, tmp, n_right,
+                         symbols, &ptr, tmp + n_right, skip_node);
+    } else if (right_leaf && root->right == skip_node) {
+        /* Right child is the prefilled leaf at root — half-partition
+           left only, generate identity indices in-register. */
+        int n_left = 0;
+        int j = 0;
+        for (; j + 8 <= N; j += 8) {
+            uint8_t mask = bm[j >> 3];
+            static const uint16_t off[8] = {0,1,2,3,4,5,6,7};
+            uint8x16_t data = vreinterpretq_u8_u16(
+                vaddq_u16(vdupq_n_u16((uint16_t)j), vld1q_u16(off)));
+            uint8x16_t shuf_l = vld1q_u8(compress_tab[mask] + 16);
+            vst1q_u8((uint8_t *)(indices + n_left),
+                     vqtbl1q_u8(data, shuf_l));
+            n_left += 8 - compress_popcnt[mask];
+        }
+        for (; j < N; j++) {
+            if (!bitmap_get(bm, j))
+                indices[n_left++] = (uint16_t)j;
+        }
+        decode_node_neon(table, root->left, indices, n_left,
+                         symbols, &ptr, tmp, skip_node);
+    } else {
+        /* Full partition at root with identity indices */
+        int n_left = 0, n_right = 0;
+        int j = 0;
 
-        uint8_t m1 = bm[(j >> 3) + 1];
-        int nr1 = partition_root_8(j + 8, m1,
-                                    indices + n_left, tmp + n_right);
-        n_right += nr1;
-        n_left += (8 - nr1);
-    }
-    for (; j + 8 <= N; j += 8) {
-        uint8_t mask = bm[j >> 3];
-        int nr = partition_root_8(j, mask,
-                                   indices + n_left, tmp + n_right);
-        n_right += nr;
-        n_left += (8 - nr);
-    }
-    for (; j < N; j++) {
-        if (bitmap_get(bm, j))
-            tmp[n_right++] = (uint16_t)j;
-        else
-            indices[n_left++] = (uint16_t)j;
-    }
+        for (; j + 16 <= N; j += 16) {
+            uint8_t m0 = bm[j >> 3];
+            int nr0 = partition_root_8(j, m0,
+                                        indices + n_left, tmp + n_right);
+            n_right += nr0;
+            n_left += (8 - nr0);
 
-    int16_t skip_node = table->prefill_node;
+            uint8_t m1 = bm[(j >> 3) + 1];
+            int nr1 = partition_root_8(j + 8, m1,
+                                        indices + n_left, tmp + n_right);
+            n_right += nr1;
+            n_left += (8 - nr1);
+        }
+        for (; j + 8 <= N; j += 8) {
+            uint8_t mask = bm[j >> 3];
+            int nr = partition_root_8(j, mask,
+                                       indices + n_left, tmp + n_right);
+            n_right += nr;
+            n_left += (8 - nr);
+        }
+        for (; j < N; j++) {
+            if (bitmap_get(bm, j))
+                tmp[n_right++] = (uint16_t)j;
+            else
+                indices[n_left++] = (uint16_t)j;
+        }
 
-    if (left_leaf) {
-        if (root->left != skip_node)
+        if (left_leaf) {
             scatter_sym(symbols, indices, n_left,
                         (uint8_t)left_child->symbol);
-        decode_node_neon(table, root->right, tmp, n_right,
-                         symbols, &ptr, tmp + n_right, skip_node);
-    } else if (right_leaf) {
-        if (root->right != skip_node)
+            decode_node_neon(table, root->right, tmp, n_right,
+                             symbols, &ptr, tmp + n_right, skip_node);
+        } else if (right_leaf) {
             scatter_sym(symbols, tmp, n_right,
                         (uint8_t)right_child->symbol);
-        decode_node_neon(table, root->left, indices, n_left,
-                         symbols, &ptr, tmp + n_right, skip_node);
-    } else {
-        decode_node_neon(table, root->left, indices, n_left,
-                         symbols, &ptr, tmp + n_right, skip_node);
-        decode_node_neon(table, root->right, tmp, n_right,
-                         symbols, &ptr, tmp + n_right, skip_node);
+            decode_node_neon(table, root->left, indices, n_left,
+                             symbols, &ptr, tmp + n_right, skip_node);
+        } else {
+            decode_node_neon(table, root->left, indices, n_left,
+                             symbols, &ptr, tmp + n_right, skip_node);
+            decode_node_neon(table, root->right, tmp, n_right,
+                             symbols, &ptr, tmp + n_right, skip_node);
+        }
     }
 
     *consumed = (size_t)(ptr - in);

@@ -191,14 +191,14 @@ Full detailed results with system info in `results/` directory.
 
 | Distribution  | PIVCO NEON | huf0 X1 | huf0 X2 | trad 4s | vs best |
 |---------------|----------:|--------:|--------:|--------:|--------:|
-| proba80       |      8301 |    1406 |    2627 |    1633 | **3.16x** |
-| proba50       |      4673 |    1401 |    2647 |    1479 | **1.77x** |
-| proba14       |      2329 |    1384 |    2525 |    1496 |   0.92x |
-| english       |      2422 |    1416 |    2548 |    1567 |   0.95x |
-| geometric     |      4466 |    1351 |    2571 |     684 | **1.74x** |
-| bell_s10      |      1766 |    1403 |    2346 |     666 |   0.75x |
-| uniform       |      1172 |       0 |       0 |    1603 |   0.73x |
-| two_sym_eq    |     25867 |    3448 |    5281 |    1642 | **4.90x** |
+| proba80       |      9155 |    1460 |    2816 |    1707 | **3.25x** |
+| proba50       |      5122 |    1463 |    2758 |    1564 | **1.86x** |
+| proba14       |      2366 |    1457 |    2672 |    1560 |   0.89x |
+| english       |      2407 |    1430 |    2598 |    1586 |   0.93x |
+| geometric     |      4980 |    1421 |    2682 |     700 | **1.86x** |
+| bell_s10      |      1742 |    1432 |    2475 |     681 |   0.70x |
+| uniform       |      1169 |       0 |       0 |    1623 |   0.72x |
+| two_sym_eq    |     25963 |    3475 |    5334 |    1653 | **4.87x** |
 
 ### Intel Xeon 6975P Granite Rapids (AVX-512 VBMI2, 48KB L1D, block 8192)
 
@@ -243,17 +243,17 @@ Full detailed results with system info in `results/` directory.
 
 | Distribution | M4 NEON | Xeon AVX-512 | Graviton4 NEON | Zen3 SSE |
 |---|---:|---:|---:|---:|
-| **proba80** | **3.16x** | **1.48x** | 0.86x | 0.84x |
-| **proba50** | **1.77x** | **1.13x** | 0.69x | 0.66x |
-| proba14 | 0.92x | 0.57x | 0.50x | 0.41x |
-| english | 0.95x | 0.70x | 0.53x | 0.44x |
-| **geometric** | **1.74x** | **1.08x** | 0.69x | 0.65x |
-| bell_s10 | 0.75x | 0.44x | 0.42x | 0.34x |
-| **two_sym_eq** | **4.90x** | **1.59x** | **1.26x** | **1.01x** |
+| **proba80** | **3.25x** | **1.48x** | 0.86x | 0.84x |
+| **proba50** | **1.86x** | **1.13x** | 0.69x | 0.66x |
+| proba14 | 0.89x | 0.57x | 0.50x | 0.41x |
+| english | 0.93x | 0.70x | 0.53x | 0.44x |
+| **geometric** | **1.86x** | **1.08x** | 0.69x | 0.65x |
+| bell_s10 | 0.70x | 0.44x | 0.42x | 0.34x |
+| **two_sym_eq** | **4.87x** | **1.59x** | **1.26x** | **1.01x** |
 
 PIVCO beats huf0 X2 on Apple M4 (large L1D) and Intel AVX-512 (wide
-partition) for skewed distributions. On M4, prefill memset + root
-identity optimization push proba80 to 3.2x and two_sym_eq to 4.9x.
+partition) for skewed distributions. On M4, prefill memset + half-partition
+push proba80 to 3.3x and two_sym_eq to 4.9x.
 Loses on Graviton 4 (64KB L1D) and AMD Zen 3 (32KB L1D) for
 moderate/deep distributions. Bell curves are the hardest case across
 all platforms.
@@ -340,11 +340,14 @@ resource (in this case, the NEON execution units doing TBL shuffles).
 
 ### Where PIVCO Wins
 
-**Skewed distributions on capable hardware: 1.7-5x over huf0.**
-On Apple M4, prefill memset + root identity optimization push PIVCO to
-3.2x on proba80 and 4.9x on two_sym_eq. The prefill writes the most
-frequent symbol via sequential memset, then the tree walk skips that
-leaf entirely — eliminating thousands of scattered byte stores. On
+**Skewed distributions on capable hardware: 1.9-5x over huf0.**
+On Apple M4, prefill memset + half-partition push PIVCO to 3.3x on
+proba80 (9.2 GB/s) and 4.9x on two_sym_eq (26 GB/s). The prefill
+writes the most frequent symbol via sequential memset, then the tree
+walk skips that leaf entirely — eliminating thousands of scattered
+byte stores. At the parent of the prefilled leaf, half-partition
+generates only the non-prefilled side's indices (one TBL + one store
+instead of two), saving another 10%. On
 AVX-512, PIVCO wins 1.1-1.6x on skewed data thanks to 32-wide
 `vpcompressw` partition. two_sym_eq wins on all four platforms.
 
@@ -458,6 +461,12 @@ Worth exploring:
   +70% on proba80 (4.9→8.3 GB/s), +25% on geometric/proba50, neutral
   on moderate/uniform distributions. Skipped for root both-leaves case
   where sequential vst1 stores are already optimal.
+- **Half-partition for prefill parent**: Tested and adopted. At the
+  parent node of the prefilled leaf, only partition the non-prefilled
+  side (one TBL + one store instead of two). Uses `partition_8_right`
+  or `partition_8_left` which skip the unused shuffle. +10% on proba80
+  (8.3→9.2 GB/s), +12% on geometric. Applies at both root and non-root
+  levels. Microbenchmark: half-partition = 0.05 ns/elem vs full = 0.07.
 - **Root identity partition**: Tested and adopted. At the root level,
   indices are [0..N-1], so `partition_root_8` generates them in-register
   via `vaddq_u16(base, {0..7})` instead of loading from a pre-filled
