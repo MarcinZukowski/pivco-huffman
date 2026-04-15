@@ -23,16 +23,28 @@ decode_node(indices[], n, tree_node):
     return
 
   read n code bits from stream
-  SIMD-partition indices into left[] (bit=0) and right[] (bit=1)
 
-  decode_node(left, n_left, tree_node->left)
-  decode_node(right, n_right, tree_node->right)
+  if both children are leaves:           # stage fusion
+    scatter sym_left/sym_right based on code bits — no partition
+    return
+  SIMD-partition indices into left[] (bit=0) and right[] (bit=1)
+  if one child is leaf:                  # stage fusion
+    scatter leaf symbol inline, recurse non-leaf child only
+  else:
+    decode_node(left, n_left, tree_node->left)
+    decode_node(right, n_right, tree_node->right)
 ```
 
 At each internal node, the block of indices is split into two dense
 sub-arrays using a TBL-based SIMD compress (precomputed 256-entry
 shuffle table, one `vqtbl1q_u8` per 8 uint16_t indices on NEON).
 At each leaf, the symbol is scatter-written to all indices in the list.
+
+**Stage fusion**: When children are leaves, the partition and scatter
+stages are fused. Both-leaves nodes scatter directly from the bitmap
+(branchless `syms[(mask >> k) & 1]`), eliminating the TBL shuffle
+entirely. One-leaf nodes partition only the non-leaf side and scatter
+the leaf symbol inline. This gives +10-38% on NEON platforms.
 
 No accumulation of code bits, no table lookup, no range comparisons.
 The tree position tells you the symbol. The inner loop is purely:
@@ -179,70 +191,71 @@ Full detailed results with system info in `results/` directory.
 
 | Distribution  | PIVCO NEON | huf0 X1 | huf0 X2 | trad 4s | vs best |
 |---------------|----------:|--------:|--------:|--------:|--------:|
-| proba80       |      4381 |    1453 |    2807 |    1727 | **1.56x** |
-| proba50       |      3399 |    1461 |    2776 |    1551 | **1.22x** |
-| proba14       |      1987 |    1455 |    2697 |    1531 |   0.74x |
-| english       |      2109 |    1391 |    2537 |    1569 |   0.83x |
-| geometric     |      3300 |    1406 |    2620 |     678 | **1.26x** |
-| bell_s10      |      1482 |    1437 |    2438 |     678 |   0.61x |
-| uniform       |       922 |       0 |       0 |    1612 |   0.57x |
-| two_sym_eq    |      4576 |    3434 |    5285 |    1614 |   0.87x |
+| proba80       |      4423 |    1448 |    2843 |    1684 | **1.56x** |
+| proba50       |      3571 |    1449 |    2740 |    1556 | **1.30x** |
+| proba14       |      2248 |    1441 |    2687 |    1513 |   0.84x |
+| english       |      2323 |    1428 |    2529 |    1578 |   0.92x |
+| geometric     |      3373 |    1413 |    2679 |     681 | **1.26x** |
+| bell_s10      |      1729 |    1429 |    2406 |     636 |   0.72x |
+| uniform       |      1104 |       0 |       0 |    1622 |   0.68x |
+| two_sym_eq    |      5394 |    3329 |    5064 |    1629 | **1.07x** |
 
 ### Intel Xeon 6975P Granite Rapids (AVX-512 VBMI2, 48KB L1D, block 8192)
 
 | Distribution  | PIVCO AVX512 | huf0 X1 | huf0 X2 | trad 4s | vs best |
 |---------------|------------:|--------:|--------:|--------:|--------:|
-| proba80       |        2650 |    1059 |    1810 |     719 | **1.46x** |
-| proba50       |        2051 |    1060 |    1811 |     649 | **1.13x** |
-| proba14       |         994 |    1060 |    1744 |     646 |   0.57x |
-| english       |        1233 |    1055 |    1753 |     675 |   0.70x |
-| geometric     |        1974 |    1059 |    1807 |     273 | **1.09x** |
-| bell_s10      |         692 |    1048 |    1610 |     273 |   0.43x |
-| uniform       |         288 |       0 |       0 |     689 |   0.42x |
-| two_sym_eq    |        2942 |    1060 |    1819 |     724 | **1.62x** |
+| proba80       |        2686 |    1061 |    1815 |     722 | **1.48x** |
+| proba50       |        2054 |    1064 |    1812 |     652 | **1.13x** |
+| proba14       |         995 |    1064 |    1743 |     651 |   0.57x |
+| english       |        1227 |    1059 |    1754 |     682 |   0.70x |
+| geometric     |        1955 |    1064 |    1813 |     274 | **1.08x** |
+| bell_s10      |         708 |    1051 |    1612 |     274 |   0.44x |
+| uniform       |         288 |       0 |       0 |     702 |   0.41x |
+| two_sym_eq    |        2899 |    1062 |    1825 |     725 | **1.59x** |
 
 ### AWS Graviton 4 Neoverse V2 (NEON, 64KB L1D, block 8192)
 
 | Distribution  | PIVCO NEON | huf0 X1 | huf0 X2 | trad 4s | vs best |
 |---------------|----------:|--------:|--------:|--------:|--------:|
-| proba80       |      1437 |     939 |    1680 |    1020 |   0.86x |
-| proba50       |      1166 |     934 |    1684 |     840 |   0.69x |
-| proba14       |       701 |     935 |    1637 |     837 |   0.43x |
-| english       |       732 |     932 |    1639 |     912 |   0.45x |
-| geometric     |      1146 |     933 |    1681 |     230 |   0.68x |
-| bell_s10      |       540 |     927 |    1517 |     229 |   0.36x |
-| uniform       |       373 |       0 |       0 |     981 |   0.38x |
-| two_sym_eq    |      1536 |     937 |    1685 |    1021 |   0.91x |
+| proba80       |      1441 |     939 |    1679 |    1016 |   0.86x |
+| proba50       |      1165 |     933 |    1683 |     841 |   0.69x |
+| proba14       |       824 |     936 |    1638 |     837 |   0.50x |
+| english       |       874 |     932 |    1641 |     910 |   0.53x |
+| geometric     |      1156 |     934 |    1682 |     229 |   0.69x |
+| bell_s10      |       641 |     927 |    1522 |     230 |   0.42x |
+| uniform       |       445 |       0 |       0 |     977 |   0.46x |
+| two_sym_eq    |      2117 |     939 |    1684 |    1021 | **1.26x** |
 
 ### AMD EPYC 7R13 Zen 3 (SSE4.1, 32KB L1D, block 4096)
 
 | Distribution  | PIVCO SSE | huf0 X1 | huf0 X2 | trad 4s | vs best |
 |---------------|----------:|--------:|--------:|--------:|--------:|
-| proba80       |      1525 |     960 |    1736 |     862 |   0.88x |
-| proba50       |      1186 |     956 |    1705 |     695 |   0.70x |
-| proba14       |       623 |     956 |    1638 |     693 |   0.38x |
-| english       |       690 |     951 |    1653 |     758 |   0.42x |
-| geometric     |      1158 |     955 |    1699 |     169 |   0.68x |
-| bell_s10      |       470 |     946 |    1516 |     170 |   0.31x |
-| uniform       |       254 |       0 |       0 |     819 |   0.31x |
-| two_sym_eq    |      1718 |     959 |    1729 |     874 |   0.99x |
+| proba80       |      1463 |     959 |    1741 |     864 |   0.84x |
+| proba50       |      1122 |     955 |    1703 |     690 |   0.66x |
+| proba14       |       677 |     956 |    1633 |     688 |   0.41x |
+| english       |       728 |     951 |    1648 |     758 |   0.44x |
+| geometric     |      1100 |     955 |    1697 |     168 |   0.65x |
+| bell_s10      |       518 |     947 |    1512 |     167 |   0.34x |
+| uniform       |       322 |       0 |       0 |     811 |   0.40x |
+| two_sym_eq    |      1743 |     959 |    1728 |     873 | **1.01x** |
 
 ### Cross-Platform Summary (PIVCO SIMD vs best other decoder)
 
 | Distribution | M4 NEON | Xeon AVX-512 | Graviton4 NEON | Zen3 SSE |
 |---|---:|---:|---:|---:|
-| **proba80** | **1.56x** | **1.46x** | 0.86x | 0.88x |
-| **proba50** | **1.22x** | **1.13x** | 0.69x | 0.70x |
-| proba14 | 0.74x | 0.57x | 0.43x | 0.38x |
-| english | 0.83x | 0.70x | 0.45x | 0.42x |
-| **geometric** | **1.26x** | **1.09x** | 0.68x | 0.68x |
-| bell_s10 | 0.61x | 0.43x | 0.36x | 0.31x |
-| **two_sym_eq** | 0.87x | **1.62x** | 0.91x | 0.99x |
+| **proba80** | **1.56x** | **1.48x** | 0.86x | 0.84x |
+| **proba50** | **1.30x** | **1.13x** | 0.69x | 0.66x |
+| proba14 | 0.84x | 0.57x | 0.50x | 0.41x |
+| english | 0.92x | 0.70x | 0.53x | 0.44x |
+| **geometric** | **1.26x** | **1.08x** | 0.69x | 0.65x |
+| bell_s10 | 0.72x | 0.44x | 0.42x | 0.34x |
+| **two_sym_eq** | **1.07x** | **1.59x** | **1.26x** | **1.01x** |
 
 PIVCO beats huf0 X2 on Apple M4 (large L1D) and Intel AVX-512 (wide
-partition) for skewed distributions. Loses on Graviton 4 (64KB L1D)
-and AMD Zen 3 (32KB L1D). Bell curves are the hardest case across
-all platforms.
+partition) for skewed distributions. With stage fusion, two_sym_eq now
+wins on all four platforms. Loses on Graviton 4 (64KB L1D) and AMD
+Zen 3 (32KB L1D) for moderate/deep distributions. Bell curves are
+the hardest case across all platforms.
 
 ### Data Distributions
 
@@ -327,10 +340,11 @@ resource (in this case, the NEON execution units doing TBL shuffles).
 ### Where PIVCO Wins
 
 **Skewed distributions on capable hardware: 1.1-1.6x over huf0.**
-PIVCO beats huf0 on proba80 and proba50 on both Apple M4 (1.5x)
+PIVCO beats huf0 on proba80 and proba50 on both Apple M4 (1.6x)
 and Intel AVX-512 (1.5x). On AVX-512, PIVCO also wins on two-symbol
 and sparse_4 distributions (1.6x) thanks to the 32-wide `vpcompressw`
-partition.
+partition. With stage fusion, two_sym_eq now wins on all four platforms
+(1.01-1.59x) by eliminating the partition entirely for both-leaves nodes.
 
 The tree's early-exit property means most symbols are decoded in
 the first 2-3 tree levels via large scatter-writes — the per-symbol
@@ -338,11 +352,12 @@ cost drops well below a single table lookup.
 
 ### Where PIVCO Loses
 
-**All distributions on small-L1D / narrow-SIMD platforms.** On
-Graviton 4 (64KB L1D) and Zen 3 (32KB L1D), PIVCO loses everywhere.
-The 8KB shuffle table + 32KB index arrays pressure L1D, and 8-wide
-SIMD doesn't provide enough throughput advantage over huf0's 4-stream
-ILP.
+**Most distributions on small-L1D / narrow-SIMD platforms.** On
+Graviton 4 (64KB L1D) and Zen 3 (32KB L1D), PIVCO loses on moderate
+and deep distributions. The 8KB shuffle table + 32KB index arrays
+pressure L1D, and 8-wide SIMD doesn't provide enough throughput
+advantage over huf0's 4-stream ILP. Exception: two_sym_eq now wins
+everywhere thanks to stage fusion eliminating the partition.
 
 **Moderate and uniform distributions everywhere.** On non-skewed data,
 the tree is deep with few early terminations, so PIVCO does full-depth
@@ -420,6 +435,20 @@ Worth exploring:
   right (mask) and left (~mask) shuffle patterns contiguously, enabling
   `ldp q0, q1` on ARM (one load-pair vs two separate loads). 5-9%
   improvement across platforms.
+- **Stage fusion (leaf detection at parent)**: Tested and adopted.
+  Before partitioning, check if children are leaves. Both-leaves:
+  scatter both symbols directly from bitmap bits using branchless
+  `syms[(mask >> k) & 1]`, eliminating partition entirely. One-leaf:
+  partition + scatter leaf side inline, avoiding recursive call.
+  +10-38% on NEON (M4, Graviton4), neutral on AVX-512 (vpcompressw
+  partition is already ~free, so fusion was reverted there). Zen3 SSE
+  sees +6-10% on deep trees but ~5% regression on shallow trees from
+  extra child-checking overhead in the smaller icache.
+  Key finding: fusing scatter INTO the partition loop (conditional
+  stores interleaved with sequential partition writes) causes massive
+  regression from branch misprediction (NEON) and store-buffer
+  interference (scalar). Keeping partition and scatter as separate
+  phases is essential.
 - **SVE backend**: Tested on Graviton 4 (128-bit SVE). `svcompact_u32`
   only handles 4 elements per instruction at this width, requiring
   widen/narrow for uint16 — slower than NEON TBL. Disabled by default.

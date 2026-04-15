@@ -206,6 +206,35 @@ static void decode_node_x86(const pivco_huffman_table_t *table,
     const uint8_t *bm = *in_ptr;
     *in_ptr += nbytes;
 
+    /* Check children for stage fusion */
+    const pivco_tree_node_t *left_child  = &table->tree[node->left];
+    const pivco_tree_node_t *right_child = &table->tree[node->right];
+    int left_leaf  = (left_child->symbol >= 0);
+    int right_leaf = (right_child->symbol >= 0);
+
+    if (left_leaf && right_leaf) {
+        /* Both children are leaves — scatter directly from bitmap */
+        uint8_t syms[2] = {(uint8_t)left_child->symbol,
+                           (uint8_t)right_child->symbol};
+        int j = 0;
+        for (; j + 8 <= n; j += 8) {
+            uint8_t mask = bm[j >> 3];
+            __m128i idx = _mm_loadu_si128((const __m128i *)(indices + j));
+            symbols[_mm_extract_epi16(idx, 0)] = syms[(mask >> 0) & 1];
+            symbols[_mm_extract_epi16(idx, 1)] = syms[(mask >> 1) & 1];
+            symbols[_mm_extract_epi16(idx, 2)] = syms[(mask >> 2) & 1];
+            symbols[_mm_extract_epi16(idx, 3)] = syms[(mask >> 3) & 1];
+            symbols[_mm_extract_epi16(idx, 4)] = syms[(mask >> 4) & 1];
+            symbols[_mm_extract_epi16(idx, 5)] = syms[(mask >> 5) & 1];
+            symbols[_mm_extract_epi16(idx, 6)] = syms[(mask >> 6) & 1];
+            symbols[_mm_extract_epi16(idx, 7)] = syms[(mask >> 7) & 1];
+        }
+        for (; j < n; j++) {
+            symbols[indices[j]] = syms[bitmap_get(bm, j)];
+        }
+        return;
+    }
+
     /* SSE partition in-place */
     int n_left = 0, n_right = 0;
     int j = 0;
@@ -218,17 +247,28 @@ static void decode_node_x86(const pivco_huffman_table_t *table,
         n_left += (8 - nr);
     }
     for (; j < n; j++) {
-        if (bitmap_get(bm, j)) {
+        if (bitmap_get(bm, j))
             tmp[n_right++] = indices[j];
-        } else {
+        else
             indices[n_left++] = indices[j];
-        }
     }
 
-    decode_node_x86(table, node->left, indices, n_left,
-                     symbols, in_ptr, tmp + n_right);
-    decode_node_x86(table, node->right, tmp, n_right,
-                     symbols, in_ptr, tmp + n_right);
+    if (left_leaf) {
+        scatter_write_sse(symbols, indices, n_left,
+                          (uint8_t)left_child->symbol);
+        decode_node_x86(table, node->right, tmp, n_right,
+                         symbols, in_ptr, tmp + n_right);
+    } else if (right_leaf) {
+        scatter_write_sse(symbols, tmp, n_right,
+                          (uint8_t)right_child->symbol);
+        decode_node_x86(table, node->left, indices, n_left,
+                         symbols, in_ptr, tmp + n_right);
+    } else {
+        decode_node_x86(table, node->left, indices, n_left,
+                         symbols, in_ptr, tmp + n_right);
+        decode_node_x86(table, node->right, tmp, n_right,
+                         symbols, in_ptr, tmp + n_right);
+    }
 }
 
 int pivco_huffman_decode_x86(const uint8_t *in, size_t in_len,

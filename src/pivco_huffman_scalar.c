@@ -129,6 +129,23 @@ static void decode_node(const pivco_huffman_table_t *table,
     const uint8_t *bm = *in_ptr;
     *in_ptr += nbytes;
 
+    /* Check if children are leaves for stage fusion */
+    const pivco_tree_node_t *left_child  = &table->tree[node->left];
+    const pivco_tree_node_t *right_child = &table->tree[node->right];
+    int left_leaf  = (left_child->symbol >= 0);
+    int right_leaf = (right_child->symbol >= 0);
+
+    if (left_leaf && right_leaf) {
+        /* Both children are leaves — scatter directly, no partition */
+        uint8_t sym0 = (uint8_t)left_child->symbol;
+        uint8_t sym1 = (uint8_t)right_child->symbol;
+        uint8_t syms[2] = {sym0, sym1};
+        for (int j = 0; j < n; j++) {
+            symbols[indices[j]] = syms[bitmap_get(bm, j)];
+        }
+        return;
+    }
+
     /* Partition indices into left (bit=0) and right (bit=1) */
     int n_right = 0;
     int n_left = 0;
@@ -141,10 +158,26 @@ static void decode_node(const pivco_huffman_table_t *table,
         }
     }
 
-    decode_node(table, node->left, indices, n_left,
-                symbols, in_ptr, tmp + n_right);
-    decode_node(table, node->right, tmp, n_right,
-                symbols, in_ptr, tmp + n_right);
+    if (left_leaf) {
+        /* Left child is leaf — scatter inline, recurse right only */
+        uint8_t sym = (uint8_t)left_child->symbol;
+        for (int j = 0; j < n_left; j++)
+            symbols[indices[j]] = sym;
+        decode_node(table, node->right, tmp, n_right,
+                    symbols, in_ptr, tmp + n_right);
+    } else if (right_leaf) {
+        /* Right child is leaf — scatter inline, recurse left only */
+        uint8_t sym = (uint8_t)right_child->symbol;
+        for (int j = 0; j < n_right; j++)
+            symbols[tmp[j]] = sym;
+        decode_node(table, node->left, indices, n_left,
+                    symbols, in_ptr, tmp + n_right);
+    } else {
+        decode_node(table, node->left, indices, n_left,
+                    symbols, in_ptr, tmp + n_right);
+        decode_node(table, node->right, tmp, n_right,
+                    symbols, in_ptr, tmp + n_right);
+    }
 }
 
 int pivco_huffman_decode_scalar(const uint8_t *in, size_t in_len,

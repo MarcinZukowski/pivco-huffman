@@ -199,7 +199,9 @@ static void decode_node_avx512(const pivco_huffman_table_t *table,
     const uint8_t *bm = *in_ptr;
     *in_ptr += nbytes;
 
-    /* AVX-512 partition: 32 indices at a time */
+    /* AVX-512 partition: 32 indices at a time.
+       vpcompressw is so fast (1 insn / 32 elements) that stage fusion
+       is not worthwhile — the partition overhead is negligible. */
     int n_left = 0, n_right = 0;
     int j = 0;
 

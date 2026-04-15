@@ -173,6 +173,49 @@ int pivco_huffman_encode_neon(const uint8_t *symbols,
 
 /* ---------- NEON Decode (Tree-Walk with SIMD Partition) ---------- */
 
+/* Scatter a single symbol to indices[0..n-1] positions in symbols[].
+   NEON-assisted: bulk-load 8 indices per vector + lane extracts. */
+static inline void scatter_sym(uint8_t *symbols,
+                                const uint16_t *indices, int n,
+                                uint8_t sym)
+{
+    int j = 0;
+    for (; j + 16 <= n; j += 16) {
+        uint16x8_t i0 = vld1q_u16(indices + j);
+        uint16x8_t i1 = vld1q_u16(indices + j + 8);
+        symbols[vgetq_lane_u16(i0, 0)] = sym;
+        symbols[vgetq_lane_u16(i0, 1)] = sym;
+        symbols[vgetq_lane_u16(i0, 2)] = sym;
+        symbols[vgetq_lane_u16(i0, 3)] = sym;
+        symbols[vgetq_lane_u16(i0, 4)] = sym;
+        symbols[vgetq_lane_u16(i0, 5)] = sym;
+        symbols[vgetq_lane_u16(i0, 6)] = sym;
+        symbols[vgetq_lane_u16(i0, 7)] = sym;
+        symbols[vgetq_lane_u16(i1, 0)] = sym;
+        symbols[vgetq_lane_u16(i1, 1)] = sym;
+        symbols[vgetq_lane_u16(i1, 2)] = sym;
+        symbols[vgetq_lane_u16(i1, 3)] = sym;
+        symbols[vgetq_lane_u16(i1, 4)] = sym;
+        symbols[vgetq_lane_u16(i1, 5)] = sym;
+        symbols[vgetq_lane_u16(i1, 6)] = sym;
+        symbols[vgetq_lane_u16(i1, 7)] = sym;
+    }
+    for (; j + 8 <= n; j += 8) {
+        uint16x8_t idx = vld1q_u16(indices + j);
+        symbols[vgetq_lane_u16(idx, 0)] = sym;
+        symbols[vgetq_lane_u16(idx, 1)] = sym;
+        symbols[vgetq_lane_u16(idx, 2)] = sym;
+        symbols[vgetq_lane_u16(idx, 3)] = sym;
+        symbols[vgetq_lane_u16(idx, 4)] = sym;
+        symbols[vgetq_lane_u16(idx, 5)] = sym;
+        symbols[vgetq_lane_u16(idx, 6)] = sym;
+        symbols[vgetq_lane_u16(idx, 7)] = sym;
+    }
+    for (; j < n; j++) {
+        symbols[indices[j]] = sym;
+    }
+}
+
 static void decode_node_neon(const pivco_huffman_table_t *table,
                               int16_t node_id,
                               uint16_t *indices, int n,
@@ -184,45 +227,8 @@ static void decode_node_neon(const pivco_huffman_table_t *table,
 
     const pivco_tree_node_t *node = &table->tree[node_id];
     if (node->symbol >= 0) {
-        /* Leaf — NEON-assisted scatter-write: bulk-load 8 indices
-           per vector, extract lanes, do 8 scalar byte stores.
-           Eliminates per-element index load and loop control overhead. */
-        uint8_t sym = (uint8_t)node->symbol;
-        int j = 0;
-        for (; j + 16 <= n; j += 16) {
-            uint16x8_t i0 = vld1q_u16(indices + j);
-            uint16x8_t i1 = vld1q_u16(indices + j + 8);
-            symbols[vgetq_lane_u16(i0, 0)] = sym;
-            symbols[vgetq_lane_u16(i0, 1)] = sym;
-            symbols[vgetq_lane_u16(i0, 2)] = sym;
-            symbols[vgetq_lane_u16(i0, 3)] = sym;
-            symbols[vgetq_lane_u16(i0, 4)] = sym;
-            symbols[vgetq_lane_u16(i0, 5)] = sym;
-            symbols[vgetq_lane_u16(i0, 6)] = sym;
-            symbols[vgetq_lane_u16(i0, 7)] = sym;
-            symbols[vgetq_lane_u16(i1, 0)] = sym;
-            symbols[vgetq_lane_u16(i1, 1)] = sym;
-            symbols[vgetq_lane_u16(i1, 2)] = sym;
-            symbols[vgetq_lane_u16(i1, 3)] = sym;
-            symbols[vgetq_lane_u16(i1, 4)] = sym;
-            symbols[vgetq_lane_u16(i1, 5)] = sym;
-            symbols[vgetq_lane_u16(i1, 6)] = sym;
-            symbols[vgetq_lane_u16(i1, 7)] = sym;
-        }
-        for (; j + 8 <= n; j += 8) {
-            uint16x8_t idx = vld1q_u16(indices + j);
-            symbols[vgetq_lane_u16(idx, 0)] = sym;
-            symbols[vgetq_lane_u16(idx, 1)] = sym;
-            symbols[vgetq_lane_u16(idx, 2)] = sym;
-            symbols[vgetq_lane_u16(idx, 3)] = sym;
-            symbols[vgetq_lane_u16(idx, 4)] = sym;
-            symbols[vgetq_lane_u16(idx, 5)] = sym;
-            symbols[vgetq_lane_u16(idx, 6)] = sym;
-            symbols[vgetq_lane_u16(idx, 7)] = sym;
-        }
-        for (; j < n; j++) {
-            symbols[indices[j]] = sym;
-        }
+        /* Leaf — scatter symbol to all indices */
+        scatter_sym(symbols, indices, n, (uint8_t)node->symbol);
         return;
     }
 
@@ -230,6 +236,58 @@ static void decode_node_neon(const pivco_huffman_table_t *table,
     int nbytes = bitmap_bytes(n);
     const uint8_t *bm = *in_ptr;
     *in_ptr += nbytes;
+
+    /* Check children for stage fusion */
+    const pivco_tree_node_t *left_child  = &table->tree[node->left];
+    const pivco_tree_node_t *right_child = &table->tree[node->right];
+    int left_leaf  = (left_child->symbol >= 0);
+    int right_leaf = (right_child->symbol >= 0);
+
+    if (left_leaf && right_leaf) {
+        /* Both children are leaves — scatter directly from bitmap,
+           no partition needed.  Branchless: index into syms[]. */
+        uint8_t syms[2] = {(uint8_t)left_child->symbol,
+                           (uint8_t)right_child->symbol};
+        int j = 0;
+        for (; j + 16 <= n; j += 16) {
+            uint8_t m0 = bm[j >> 3];
+            uint8_t m1 = bm[(j >> 3) + 1];
+            uint16x8_t i0 = vld1q_u16(indices + j);
+            uint16x8_t i1 = vld1q_u16(indices + j + 8);
+            symbols[vgetq_lane_u16(i0, 0)] = syms[(m0 >> 0) & 1];
+            symbols[vgetq_lane_u16(i0, 1)] = syms[(m0 >> 1) & 1];
+            symbols[vgetq_lane_u16(i0, 2)] = syms[(m0 >> 2) & 1];
+            symbols[vgetq_lane_u16(i0, 3)] = syms[(m0 >> 3) & 1];
+            symbols[vgetq_lane_u16(i0, 4)] = syms[(m0 >> 4) & 1];
+            symbols[vgetq_lane_u16(i0, 5)] = syms[(m0 >> 5) & 1];
+            symbols[vgetq_lane_u16(i0, 6)] = syms[(m0 >> 6) & 1];
+            symbols[vgetq_lane_u16(i0, 7)] = syms[(m0 >> 7) & 1];
+            symbols[vgetq_lane_u16(i1, 0)] = syms[(m1 >> 0) & 1];
+            symbols[vgetq_lane_u16(i1, 1)] = syms[(m1 >> 1) & 1];
+            symbols[vgetq_lane_u16(i1, 2)] = syms[(m1 >> 2) & 1];
+            symbols[vgetq_lane_u16(i1, 3)] = syms[(m1 >> 3) & 1];
+            symbols[vgetq_lane_u16(i1, 4)] = syms[(m1 >> 4) & 1];
+            symbols[vgetq_lane_u16(i1, 5)] = syms[(m1 >> 5) & 1];
+            symbols[vgetq_lane_u16(i1, 6)] = syms[(m1 >> 6) & 1];
+            symbols[vgetq_lane_u16(i1, 7)] = syms[(m1 >> 7) & 1];
+        }
+        for (; j + 8 <= n; j += 8) {
+            uint8_t mask = bm[j >> 3];
+            uint16x8_t idx = vld1q_u16(indices + j);
+            symbols[vgetq_lane_u16(idx, 0)] = syms[(mask >> 0) & 1];
+            symbols[vgetq_lane_u16(idx, 1)] = syms[(mask >> 1) & 1];
+            symbols[vgetq_lane_u16(idx, 2)] = syms[(mask >> 2) & 1];
+            symbols[vgetq_lane_u16(idx, 3)] = syms[(mask >> 3) & 1];
+            symbols[vgetq_lane_u16(idx, 4)] = syms[(mask >> 4) & 1];
+            symbols[vgetq_lane_u16(idx, 5)] = syms[(mask >> 5) & 1];
+            symbols[vgetq_lane_u16(idx, 6)] = syms[(mask >> 6) & 1];
+            symbols[vgetq_lane_u16(idx, 7)] = syms[(mask >> 7) & 1];
+        }
+        for (; j < n; j++) {
+            symbols[indices[j]] = syms[bitmap_get(bm, j)];
+        }
+        return;
+    }
 
     /* SIMD partition in-place, unrolled 2x */
     int n_left = 0, n_right = 0;
@@ -257,17 +315,30 @@ static void decode_node_neon(const pivco_huffman_table_t *table,
     }
     /* Scalar remainder */
     for (; j < n; j++) {
-        if (bitmap_get(bm, j)) {
+        if (bitmap_get(bm, j))
             tmp[n_right++] = indices[j];
-        } else {
+        else
             indices[n_left++] = indices[j];
-        }
     }
 
-    decode_node_neon(table, node->left, indices, n_left,
-                     symbols, in_ptr, tmp + n_right);
-    decode_node_neon(table, node->right, tmp, n_right,
-                     symbols, in_ptr, tmp + n_right);
+    if (left_leaf) {
+        /* Left child is leaf — scatter inline, recurse right only */
+        scatter_sym(symbols, indices, n_left,
+                    (uint8_t)left_child->symbol);
+        decode_node_neon(table, node->right, tmp, n_right,
+                         symbols, in_ptr, tmp + n_right);
+    } else if (right_leaf) {
+        /* Right child is leaf — scatter inline, recurse left only */
+        scatter_sym(symbols, tmp, n_right,
+                    (uint8_t)right_child->symbol);
+        decode_node_neon(table, node->left, indices, n_left,
+                         symbols, in_ptr, tmp + n_right);
+    } else {
+        decode_node_neon(table, node->left, indices, n_left,
+                         symbols, in_ptr, tmp + n_right);
+        decode_node_neon(table, node->right, tmp, n_right,
+                         symbols, in_ptr, tmp + n_right);
+    }
 }
 
 int pivco_huffman_decode_neon(const uint8_t *in, size_t in_len,
