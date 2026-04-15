@@ -185,18 +185,40 @@ int pivco_huffman_encode_x86(const uint8_t *symbols,
 
 /* ---------- x86 Decode (Tree-Walk with SSE Partition) ---------- */
 
+/* Half-partition helpers: extract only one side */
+static inline int partition_8_sse_right(const uint16_t *src,
+                                         uint8_t mask,
+                                         uint16_t *right_out)
+{
+    __m128i data = _mm_loadu_si128((const __m128i *)src);
+    __m128i shuf_r = _mm_load_si128((const __m128i *)compress_tab[mask]);
+    _mm_storeu_si128((__m128i *)right_out, _mm_shuffle_epi8(data, shuf_r));
+    return compress_popcnt[mask];
+}
+
+static inline int partition_8_sse_left(const uint16_t *src,
+                                        uint8_t mask,
+                                        uint16_t *left_out)
+{
+    __m128i data = _mm_loadu_si128((const __m128i *)src);
+    __m128i shuf_l = _mm_load_si128((const __m128i *)(compress_tab[mask] + 16));
+    _mm_storeu_si128((__m128i *)left_out, _mm_shuffle_epi8(data, shuf_l));
+    return 8 - compress_popcnt[mask];
+}
+
 static void decode_node_x86(const pivco_huffman_table_t *table,
                               int16_t node_id,
                               uint16_t *indices, int n,
                               uint8_t *symbols,
                               const uint8_t **in_ptr,
-                              uint16_t *tmp)
+                              uint16_t *tmp,
+                              int16_t skip_node)
 {
     if (n == 0) return;
+    if (node_id == skip_node) return;  /* prefilled by memset */
 
     const pivco_tree_node_t *node = &table->tree[node_id];
     if (node->symbol >= 0) {
-        /* Leaf — SSE scatter-write */
         scatter_write_sse(symbols, indices, n, (uint8_t)node->symbol);
         return;
     }
@@ -235,39 +257,64 @@ static void decode_node_x86(const pivco_huffman_table_t *table,
         return;
     }
 
-    /* SSE partition in-place */
-    int n_left = 0, n_right = 0;
-    int j = 0;
-
-    for (; j + 8 <= n; j += 8) {
-        uint8_t mask = bm[j >> 3];
-        int nr = partition_8_sse(indices + j, mask,
-                                  indices + n_left, tmp + n_right);
-        n_right += nr;
-        n_left += (8 - nr);
-    }
-    for (; j < n; j++) {
-        if (bitmap_get(bm, j))
-            tmp[n_right++] = indices[j];
-        else
-            indices[n_left++] = indices[j];
-    }
-
-    if (left_leaf) {
-        scatter_write_sse(symbols, indices, n_left,
-                          (uint8_t)left_child->symbol);
+    if (left_leaf && node->left == skip_node) {
+        /* Left is prefilled leaf — half-partition right only */
+        int n_right = 0;
+        int j = 0;
+        for (; j + 8 <= n; j += 8)
+            n_right += partition_8_sse_right(indices + j, bm[j >> 3],
+                                              tmp + n_right);
+        for (; j < n; j++)
+            if (bitmap_get(bm, j)) tmp[n_right++] = indices[j];
         decode_node_x86(table, node->right, tmp, n_right,
-                         symbols, in_ptr, tmp + n_right);
-    } else if (right_leaf) {
-        scatter_write_sse(symbols, tmp, n_right,
-                          (uint8_t)right_child->symbol);
+                         symbols, in_ptr, tmp + n_right, skip_node);
+    } else if (right_leaf && node->right == skip_node) {
+        /* Right is prefilled leaf — half-partition left only */
+        int n_left = 0;
+        int j = 0;
+        for (; j + 8 <= n; j += 8)
+            n_left += partition_8_sse_left(indices + j, bm[j >> 3],
+                                            indices + n_left);
+        for (; j < n; j++)
+            if (!bitmap_get(bm, j)) indices[n_left++] = indices[j];
         decode_node_x86(table, node->left, indices, n_left,
-                         symbols, in_ptr, tmp + n_right);
+                         symbols, in_ptr, tmp, skip_node);
     } else {
-        decode_node_x86(table, node->left, indices, n_left,
-                         symbols, in_ptr, tmp + n_right);
-        decode_node_x86(table, node->right, tmp, n_right,
-                         symbols, in_ptr, tmp + n_right);
+        /* Full partition */
+        int n_left = 0, n_right = 0;
+        int j = 0;
+        for (; j + 8 <= n; j += 8) {
+            uint8_t mask = bm[j >> 3];
+            int nr = partition_8_sse(indices + j, mask,
+                                      indices + n_left, tmp + n_right);
+            n_right += nr;
+            n_left += (8 - nr);
+        }
+        for (; j < n; j++) {
+            if (bitmap_get(bm, j))
+                tmp[n_right++] = indices[j];
+            else
+                indices[n_left++] = indices[j];
+        }
+
+        if (left_leaf) {
+            if (node->left != skip_node)
+                scatter_write_sse(symbols, indices, n_left,
+                                  (uint8_t)left_child->symbol);
+            decode_node_x86(table, node->right, tmp, n_right,
+                             symbols, in_ptr, tmp + n_right, skip_node);
+        } else if (right_leaf) {
+            if (node->right != skip_node)
+                scatter_write_sse(symbols, tmp, n_right,
+                                  (uint8_t)right_child->symbol);
+            decode_node_x86(table, node->left, indices, n_left,
+                             symbols, in_ptr, tmp + n_right, skip_node);
+        } else {
+            decode_node_x86(table, node->left, indices, n_left,
+                             symbols, in_ptr, tmp + n_right, skip_node);
+            decode_node_x86(table, node->right, tmp, n_right,
+                             symbols, in_ptr, tmp + n_right, skip_node);
+        }
     }
 }
 
@@ -281,15 +328,99 @@ int pivco_huffman_decode_x86(const uint8_t *in, size_t in_len,
 
     const int N = PIVCO_BLOCK_SIZE;
     (void)in_len;
-
-    uint16_t indices[PIVCO_BLOCK_SIZE];
-    for (int i = 0; i < N; i++) indices[i] = (uint16_t)i;
-
-    uint16_t tmp[PIVCO_BLOCK_SIZE * 2];
     const uint8_t *ptr = in;
 
-    decode_node_x86(table, table->tree_root, indices, N,
-                     symbols, &ptr, tmp);
+    const pivco_tree_node_t *root = &table->tree[table->tree_root];
+
+    /* Root is leaf — fill everything */
+    if (root->symbol >= 0) {
+        memset(symbols, (uint8_t)root->symbol, (size_t)N);
+        *consumed = 0;
+        return PIVCO_OK;
+    }
+
+    /* Read root bitmap */
+    int nbytes = bitmap_bytes(N);
+    const uint8_t *bm = ptr;
+    ptr += nbytes;
+
+    const pivco_tree_node_t *left_child  = &table->tree[root->left];
+    const pivco_tree_node_t *right_child = &table->tree[root->right];
+    int left_leaf  = (left_child->symbol >= 0);
+    int right_leaf = (right_child->symbol >= 0);
+
+    if (left_leaf && right_leaf) {
+        /* Both-leaves at root — sequential stores, no scatter */
+        uint8_t syms[2] = {(uint8_t)left_child->symbol,
+                           (uint8_t)right_child->symbol};
+        for (int j = 0; j < N; j++)
+            symbols[j] = syms[(bm[j >> 3] >> (j & 7)) & 1];
+        *consumed = (size_t)(ptr - in);
+        return PIVCO_OK;
+    }
+
+    /* Prefill output with most frequent symbol */
+    uint8_t prefill_sym = table->prefill_sym;
+    int16_t skip_node = table->prefill_node;
+    memset(symbols, prefill_sym, (size_t)N);
+
+    /* Partition at root — generate identity indices in-place */
+    uint16_t indices[PIVCO_BLOCK_SIZE];
+    uint16_t tmp[PIVCO_BLOCK_SIZE * 2];
+
+    if (left_leaf && root->left == skip_node) {
+        /* Left is prefilled — half-partition right only at root */
+        int n_right = 0;
+        for (int j = 0; j + 8 <= N; j += 8) {
+            /* Generate identity indices [j..j+7] and partition right */
+            uint16_t id[8];
+            for (int k = 0; k < 8; k++) id[k] = (uint16_t)(j + k);
+            n_right += partition_8_sse_right(id, bm[j >> 3], tmp + n_right);
+        }
+        decode_node_x86(table, root->right, tmp, n_right,
+                         symbols, &ptr, tmp + n_right, skip_node);
+    } else if (right_leaf && root->right == skip_node) {
+        /* Right is prefilled — half-partition left only at root */
+        int n_left = 0;
+        for (int j = 0; j + 8 <= N; j += 8) {
+            uint16_t id[8];
+            for (int k = 0; k < 8; k++) id[k] = (uint16_t)(j + k);
+            n_left += partition_8_sse_left(id, bm[j >> 3], indices + n_left);
+        }
+        decode_node_x86(table, root->left, indices, n_left,
+                         symbols, &ptr, tmp, skip_node);
+    } else {
+        /* Full partition at root */
+        int n_left = 0, n_right = 0;
+        for (int j = 0; j + 8 <= N; j += 8) {
+            uint16_t id[8];
+            for (int k = 0; k < 8; k++) id[k] = (uint16_t)(j + k);
+            uint8_t mask = bm[j >> 3];
+            int nr = partition_8_sse(id, mask,
+                                      indices + n_left, tmp + n_right);
+            n_right += nr;
+            n_left += (8 - nr);
+        }
+
+        if (left_leaf) {
+            if (root->left != skip_node)
+                scatter_write_sse(symbols, indices, n_left,
+                                  (uint8_t)left_child->symbol);
+            decode_node_x86(table, root->right, tmp, n_right,
+                             symbols, &ptr, tmp + n_right, skip_node);
+        } else if (right_leaf) {
+            if (root->right != skip_node)
+                scatter_write_sse(symbols, tmp, n_right,
+                                  (uint8_t)right_child->symbol);
+            decode_node_x86(table, root->left, indices, n_left,
+                             symbols, &ptr, tmp + n_right, skip_node);
+        } else {
+            decode_node_x86(table, root->left, indices, n_left,
+                             symbols, &ptr, tmp + n_right, skip_node);
+            decode_node_x86(table, root->right, tmp, n_right,
+                             symbols, &ptr, tmp + n_right, skip_node);
+        }
+    }
 
     *consumed = (size_t)(ptr - in);
     return PIVCO_OK;
