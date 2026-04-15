@@ -245,46 +245,56 @@ static void decode_node_neon(const pivco_huffman_table_t *table,
 
     if (left_leaf && right_leaf) {
         /* Both children are leaves — scatter directly from bitmap,
-           no partition needed.  Branchless: index into syms[]. */
-        uint8_t syms[2] = {(uint8_t)left_child->symbol,
-                           (uint8_t)right_child->symbol};
+           no partition needed.  SIMD symbol select: expand each mask
+           bit to 0x00/0xFF, then sym0 ^ (delta & expanded). */
+        uint8_t sym0 = (uint8_t)left_child->symbol;
+        uint8_t sym1 = (uint8_t)right_child->symbol;
+        uint8x8_t vsym0  = vdup_n_u8(sym0);
+        uint8x8_t vdelta = vdup_n_u8(sym0 ^ sym1);
+        static const uint8_t bit_pos_tab[8] = {1,2,4,8,16,32,64,128};
+        uint8x8_t vbit_pos = vld1_u8(bit_pos_tab);
+
         int j = 0;
         for (; j + 16 <= n; j += 16) {
-            uint8_t m0 = bm[j >> 3];
-            uint8_t m1 = bm[(j >> 3) + 1];
+            uint8x8_t bits0 = vtst_u8(vdup_n_u8(bm[j >> 3]), vbit_pos);
+            uint8x8_t vals0 = veor_u8(vsym0, vand_u8(vdelta, bits0));
+            uint8x8_t bits1 = vtst_u8(vdup_n_u8(bm[(j >> 3) + 1]), vbit_pos);
+            uint8x8_t vals1 = veor_u8(vsym0, vand_u8(vdelta, bits1));
             uint16x8_t i0 = vld1q_u16(indices + j);
             uint16x8_t i1 = vld1q_u16(indices + j + 8);
-            symbols[vgetq_lane_u16(i0, 0)] = syms[(m0 >> 0) & 1];
-            symbols[vgetq_lane_u16(i0, 1)] = syms[(m0 >> 1) & 1];
-            symbols[vgetq_lane_u16(i0, 2)] = syms[(m0 >> 2) & 1];
-            symbols[vgetq_lane_u16(i0, 3)] = syms[(m0 >> 3) & 1];
-            symbols[vgetq_lane_u16(i0, 4)] = syms[(m0 >> 4) & 1];
-            symbols[vgetq_lane_u16(i0, 5)] = syms[(m0 >> 5) & 1];
-            symbols[vgetq_lane_u16(i0, 6)] = syms[(m0 >> 6) & 1];
-            symbols[vgetq_lane_u16(i0, 7)] = syms[(m0 >> 7) & 1];
-            symbols[vgetq_lane_u16(i1, 0)] = syms[(m1 >> 0) & 1];
-            symbols[vgetq_lane_u16(i1, 1)] = syms[(m1 >> 1) & 1];
-            symbols[vgetq_lane_u16(i1, 2)] = syms[(m1 >> 2) & 1];
-            symbols[vgetq_lane_u16(i1, 3)] = syms[(m1 >> 3) & 1];
-            symbols[vgetq_lane_u16(i1, 4)] = syms[(m1 >> 4) & 1];
-            symbols[vgetq_lane_u16(i1, 5)] = syms[(m1 >> 5) & 1];
-            symbols[vgetq_lane_u16(i1, 6)] = syms[(m1 >> 6) & 1];
-            symbols[vgetq_lane_u16(i1, 7)] = syms[(m1 >> 7) & 1];
+            symbols[vgetq_lane_u16(i0, 0)] = vget_lane_u8(vals0, 0);
+            symbols[vgetq_lane_u16(i0, 1)] = vget_lane_u8(vals0, 1);
+            symbols[vgetq_lane_u16(i0, 2)] = vget_lane_u8(vals0, 2);
+            symbols[vgetq_lane_u16(i0, 3)] = vget_lane_u8(vals0, 3);
+            symbols[vgetq_lane_u16(i0, 4)] = vget_lane_u8(vals0, 4);
+            symbols[vgetq_lane_u16(i0, 5)] = vget_lane_u8(vals0, 5);
+            symbols[vgetq_lane_u16(i0, 6)] = vget_lane_u8(vals0, 6);
+            symbols[vgetq_lane_u16(i0, 7)] = vget_lane_u8(vals0, 7);
+            symbols[vgetq_lane_u16(i1, 0)] = vget_lane_u8(vals1, 0);
+            symbols[vgetq_lane_u16(i1, 1)] = vget_lane_u8(vals1, 1);
+            symbols[vgetq_lane_u16(i1, 2)] = vget_lane_u8(vals1, 2);
+            symbols[vgetq_lane_u16(i1, 3)] = vget_lane_u8(vals1, 3);
+            symbols[vgetq_lane_u16(i1, 4)] = vget_lane_u8(vals1, 4);
+            symbols[vgetq_lane_u16(i1, 5)] = vget_lane_u8(vals1, 5);
+            symbols[vgetq_lane_u16(i1, 6)] = vget_lane_u8(vals1, 6);
+            symbols[vgetq_lane_u16(i1, 7)] = vget_lane_u8(vals1, 7);
         }
         for (; j + 8 <= n; j += 8) {
-            uint8_t mask = bm[j >> 3];
+            uint8x8_t bits = vtst_u8(vdup_n_u8(bm[j >> 3]), vbit_pos);
+            uint8x8_t vals = veor_u8(vsym0, vand_u8(vdelta, bits));
             uint16x8_t idx = vld1q_u16(indices + j);
-            symbols[vgetq_lane_u16(idx, 0)] = syms[(mask >> 0) & 1];
-            symbols[vgetq_lane_u16(idx, 1)] = syms[(mask >> 1) & 1];
-            symbols[vgetq_lane_u16(idx, 2)] = syms[(mask >> 2) & 1];
-            symbols[vgetq_lane_u16(idx, 3)] = syms[(mask >> 3) & 1];
-            symbols[vgetq_lane_u16(idx, 4)] = syms[(mask >> 4) & 1];
-            symbols[vgetq_lane_u16(idx, 5)] = syms[(mask >> 5) & 1];
-            symbols[vgetq_lane_u16(idx, 6)] = syms[(mask >> 6) & 1];
-            symbols[vgetq_lane_u16(idx, 7)] = syms[(mask >> 7) & 1];
+            symbols[vgetq_lane_u16(idx, 0)] = vget_lane_u8(vals, 0);
+            symbols[vgetq_lane_u16(idx, 1)] = vget_lane_u8(vals, 1);
+            symbols[vgetq_lane_u16(idx, 2)] = vget_lane_u8(vals, 2);
+            symbols[vgetq_lane_u16(idx, 3)] = vget_lane_u8(vals, 3);
+            symbols[vgetq_lane_u16(idx, 4)] = vget_lane_u8(vals, 4);
+            symbols[vgetq_lane_u16(idx, 5)] = vget_lane_u8(vals, 5);
+            symbols[vgetq_lane_u16(idx, 6)] = vget_lane_u8(vals, 6);
+            symbols[vgetq_lane_u16(idx, 7)] = vget_lane_u8(vals, 7);
         }
         for (; j < n; j++) {
-            symbols[indices[j]] = syms[bitmap_get(bm, j)];
+            uint8_t bit = (bm[j >> 3] >> (j & 7)) & 1;
+            symbols[indices[j]] = sym0 ^ ((sym0 ^ sym1) & (uint8_t)(-(int8_t)bit));
         }
         return;
     }
