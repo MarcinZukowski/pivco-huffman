@@ -494,6 +494,15 @@ Worth exploring:
   The widen-convert step and window management overhead outweigh the
   partition speedup. Might revisit if a way to avoid the gather is
   found (e.g. carry uint8 positions through multiple tree levels).
+- **Computed shuffle (eliminate compress_tab)**: The 8KB compress_tab
+  takes 128 cache lines — 6% of M4's L1D, 12% of Graviton4's, 25% of
+  Zen3's. Could compute the shuffle pattern on the fly using a NEON
+  prefix sum: expand mask bits to 0/1, prefix-add via 3 shift-and-add
+  steps (vext + vadd), then convert to byte-pair indices. ~10 NEON
+  instructions vs 1 table load (~4 cycles when hot). Per-partition
+  ~2.5x slower, but freeing 8KB of L1D could improve overall working
+  set pressure, especially on Zen3 where it's 25% of L1D. Worth A/B
+  testing on small-cache platforms.
 
 ## Building & Running
 
