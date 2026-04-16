@@ -135,7 +135,8 @@ static void decode_node(const pivco_huffman_table_t *table,
     int left_leaf  = (left_child->symbol >= 0);
     int right_leaf = (right_child->symbol >= 0);
 
-    if (left_leaf && right_leaf) {
+    if (left_leaf && right_leaf
+        && node->left != skip_node && node->right != skip_node) {
         uint8_t syms[2] = {(uint8_t)left_child->symbol,
                            (uint8_t)right_child->symbol};
         for (int j = 0; j < n; j++)

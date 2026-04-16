@@ -234,8 +234,9 @@ static void decode_node_x86(const pivco_huffman_table_t *table,
     int left_leaf  = (left_child->symbol >= 0);
     int right_leaf = (right_child->symbol >= 0);
 
-    if (left_leaf && right_leaf) {
-        /* Both children are leaves — scatter directly from bitmap */
+    if (left_leaf && right_leaf
+        && node->left != skip_node && node->right != skip_node) {
+        /* Both children are leaves (neither prefilled) — scatter directly */
         uint8_t syms[2] = {(uint8_t)left_child->symbol,
                            (uint8_t)right_child->symbol};
         int j = 0;

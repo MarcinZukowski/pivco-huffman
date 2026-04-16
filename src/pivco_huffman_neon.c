@@ -267,9 +267,12 @@ static void decode_node_neon(const pivco_huffman_table_t *table,
     int left_leaf  = (left_child->symbol >= 0);
     int right_leaf = (right_child->symbol >= 0);
 
-    if (left_leaf && right_leaf) {
-        /* Both children are leaves — scatter directly from bitmap,
-           no partition needed.  SIMD symbol select: expand each mask
+    if (left_leaf && right_leaf
+        && node->left != skip_node && node->right != skip_node) {
+        /* Both children are leaves (neither prefilled) — scatter directly
+           from bitmap.  If one IS prefilled, fall through to the
+           half-partition path below which is faster (1 TBL vs 8 stores).
+           SIMD symbol select: expand each mask
            bit to 0x00/0xFF, then sym0 ^ (delta & expanded). */
         uint8_t sym0 = (uint8_t)left_child->symbol;
         uint8_t sym1 = (uint8_t)right_child->symbol;
