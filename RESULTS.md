@@ -400,19 +400,106 @@ distributions.
 
 ## Ideas That Can Make Things Faster
 
-Tested and discarded:
-
-- **Iterative DFS with explicit stack**: Tested, showed ~1% improvement
-  on M4 despite the function prologue occupying 14% of execution slots.
-  The stp/ldp register saves pipeline perfectly with partition work —
-  they don't stall the critical path. The OoO engine hides the latency.
-  Not worth the code complexity. May matter on in-order cores.
-
-Worth exploring:
+### Tested and adopted
 
 - **AVX-512 port**: Implemented and tested on Xeon 6975P. `vpcompressw`
   does the partition in ONE instruction (no shuffle table), 32 elements
   per iteration. Beats huf0 on 6 of 12 distributions. See results above.
+- **Combined shuffle table [256][32]**: Stores both right (mask) and
+  left (~mask) shuffle patterns contiguously, enabling `ldp q0, q1` on
+  ARM (one load-pair vs two separate loads). 5-9% improvement across
+  platforms.
+- **Stage fusion (leaf detection at parent)**: Before partitioning,
+  check if children are leaves. Both-leaves: scatter both symbols
+  directly from bitmap bits using branchless `syms[(mask >> k) & 1]`,
+  eliminating partition entirely. One-leaf: partition + scatter leaf
+  side inline, avoiding recursive call. +10-38% on NEON (M4, Graviton4),
+  neutral on AVX-512 (vpcompressw partition is already ~free, so fusion
+  was reverted there). Zen3 SSE sees +6-10% on deep trees but ~5%
+  regression on shallow trees from extra child-checking overhead in the
+  smaller icache.
+  Key finding: fusing scatter INTO the partition loop (conditional
+  stores interleaved with sequential partition writes) causes massive
+  regression from branch misprediction (NEON) and store-buffer
+  interference (scalar). Keeping partition and scatter as separate
+  phases is essential.
+- **Prefill memset**: Before decoding, memset the entire output to the
+  most frequent symbol (precomputed in table as `prefill_sym` /
+  `prefill_node`). The tree walk skips that leaf via a single
+  `node_id == skip_node` check — no scatter, no index loads. +70% on
+  proba80 (4.9→8.3 GB/s), +25% on geometric/proba50, neutral on
+  moderate/uniform distributions. Skipped for root both-leaves case
+  where sequential vst1 stores are already optimal.
+- **Half-partition for prefill parent**: At the parent node of the
+  prefilled leaf, only partition the non-prefilled side (one TBL + one
+  store instead of two). Uses `partition_8_right` or `partition_8_left`
+  which skip the unused shuffle. +10% on proba80 (8.3→9.2 GB/s), +12%
+  on geometric. Applies at both root and non-root levels.
+  Microbenchmark: half-partition = 0.05 ns/elem vs full = 0.07.
+- **Root identity partition**: At the root level, indices are [0..N-1],
+  so `partition_root_8` generates them in-register via
+  `vaddq_u16(base, {0..7})` instead of loading from a pre-filled array.
+  Eliminates 16KB identity array initialization. +7% across all
+  distributions. For root both-leaves, the sequential vst1 path writes
+  `symbols[j]` directly (no scatter) — 25+ GB/s on two-symbol data.
+
+### Tested and discarded
+
+- **Iterative DFS with explicit stack**: Showed ~1% improvement on M4
+  despite the function prologue occupying 14% of execution slots. The
+  stp/ldp register saves pipeline perfectly with partition work — they
+  don't stall the critical path. The OoO engine hides the latency. Not
+  worth the code complexity. May matter on in-order cores.
+- **Wider NEON partition**: Processed 16 indices via two TBL
+  instructions per iteration. 34% regression on M4 — the 10 memory ops
+  (6 loads + 4 stores) per iteration saturate the load/store units.
+  The OoO engine already overlaps consecutive 8-wide iterations
+  effectively. May help on architectures with wider load/store
+  throughput.
+- **Replace `compress_popcnt` table with `__builtin_popcount`**: Showed
+  no improvement (~1% slower consistently on M4). The popcnt table
+  shares a cache line with the shuffle table access.
+- **SVE backend at 128-bit (Graviton 4)**: `svcompact_u32` only handles
+  4 elements per instruction at this width, requiring widen/narrow for
+  uint16 — slower than NEON TBL. Disabled by default. Would help at
+  256-bit+ SVE (see Worth Exploring).
+- **4-way fused partition (neon2)**: At double-internal nodes, read 2
+  bits per symbol and partition into 4 groups in one pass, skipping one
+  tree level. `partition_8_4way` works correctly, but the DFS
+  encode/decode order and scratch management have bugs when multiple
+  4-way levels nest. Code exists as WIP (`pivco_huffman_neon2.c`).
+- **4-way fused partition, reworked (neon2b)**: Rewrote with clean
+  scratch management — LL in-place in `indices`, LR/RL/RR packed in
+  `tmp` with 8-uint16 safety gaps between groups to absorb `vst1q_u8`
+  trailing-zero overflow, two-pass layout (popcount-based count →
+  partition). All 20 roundtrips pass. **Slower than neon on every
+  distribution on M4 Max**: proba80 9.4→7.6 GB/s (−19%), english
+  2.5→1.75 GB/s (−30%), uniform 1.17→0.77 GB/s (−35%), two_sym_eq
+  25.6→6.7 GB/s (−74% — no root both-leaves fast path in neon2b). Root
+  cause: one 4-way partition of 8 elements costs 4 TBLs (one per output
+  group), identical to 2× 2-way. The theoretical wins are only 1 shared
+  index `vld` + 1 skipped recursion frame, and the pass-1 popcount scan
+  to compute packed offsets burns more than those savings on NEON's
+  TBL-bound hot path. The concept pays off only when a single
+  instruction compresses wider than the 8-element TBL (AVX-512
+  `vpcompressw` → 32). Code kept as `pivco_huffman_neon2b.c` for
+  reference.
+- **uint8 level-0 partition**: At level 0, indices are contiguous
+  [0..N-1], so within 256-element windows we can partition uint8_t
+  positions (16 per TBL) instead of uint16_t indices (8 per TBL), then
+  widen back cheaply. Tested two variants:
+  - *Split lo/hi with 256-entry uint8 table + add-8*: 25% regression.
+    4 TBL per 16 elements (same as 2 TBL per 8 uint16) plus combine
+    overhead. No TBL throughput gain.
+  - *64K-entry full 16-bit mask table (2MB)*: 1 TBL per 16 elements
+    (genuine 2x partition speedup) but massive cache thrashing. Net
+    25% regression on proba80 (3333 vs 4488 M/s).
+  The widen-convert step and window management overhead outweigh the
+  partition speedup. Might revisit if a way to avoid the gather is
+  found (e.g. carry uint8 positions through multiple tree levels).
+
+### Worth exploring
+
 - **SVE at 256-bit+**: Untested. `svcompact` on wider SVE (e.g. A64FX
   at 512-bit) would handle 16+ uint32 per instruction, potentially
   matching AVX-512 performance.
@@ -426,89 +513,6 @@ Worth exploring:
 - **Encode optimization**: The encoder's bitmap construction is still
   scalar. NEON comparison + movemask could help, as could encoding
   multiple blocks in parallel.
-- **Wider NEON partition**: Tested: process 16 indices via two
-  TBL instructions per iteration. 34% regression on M4 — the 10
-  memory ops (6 loads + 4 stores) per iteration saturate the
-  load/store units. The OoO engine already overlaps consecutive
-  8-wide iterations effectively. May help on architectures with
-  wider load/store throughput.
-- **Replace `compress_popcnt` table with `__builtin_popcount`**: Tested,
-  showed no improvement (~1% slower consistently on M4). The popcnt
-  table shares a cache line with the shuffle table access.
-- **Combined shuffle table [256][32]**: Tested and adopted. Stores both
-  right (mask) and left (~mask) shuffle patterns contiguously, enabling
-  `ldp q0, q1` on ARM (one load-pair vs two separate loads). 5-9%
-  improvement across platforms.
-- **Stage fusion (leaf detection at parent)**: Tested and adopted.
-  Before partitioning, check if children are leaves. Both-leaves:
-  scatter both symbols directly from bitmap bits using branchless
-  `syms[(mask >> k) & 1]`, eliminating partition entirely. One-leaf:
-  partition + scatter leaf side inline, avoiding recursive call.
-  +10-38% on NEON (M4, Graviton4), neutral on AVX-512 (vpcompressw
-  partition is already ~free, so fusion was reverted there). Zen3 SSE
-  sees +6-10% on deep trees but ~5% regression on shallow trees from
-  extra child-checking overhead in the smaller icache.
-  Key finding: fusing scatter INTO the partition loop (conditional
-  stores interleaved with sequential partition writes) causes massive
-  regression from branch misprediction (NEON) and store-buffer
-  interference (scalar). Keeping partition and scatter as separate
-  phases is essential.
-- **Prefill memset**: Tested and adopted. Before decoding, memset the
-  entire output to the most frequent symbol (precomputed in table as
-  `prefill_sym`/`prefill_node`). The tree walk skips that leaf via a
-  single `node_id == skip_node` check — no scatter, no index loads.
-  +70% on proba80 (4.9→8.3 GB/s), +25% on geometric/proba50, neutral
-  on moderate/uniform distributions. Skipped for root both-leaves case
-  where sequential vst1 stores are already optimal.
-- **Half-partition for prefill parent**: Tested and adopted. At the
-  parent node of the prefilled leaf, only partition the non-prefilled
-  side (one TBL + one store instead of two). Uses `partition_8_right`
-  or `partition_8_left` which skip the unused shuffle. +10% on proba80
-  (8.3→9.2 GB/s), +12% on geometric. Applies at both root and non-root
-  levels. Microbenchmark: half-partition = 0.05 ns/elem vs full = 0.07.
-- **Root identity partition**: Tested and adopted. At the root level,
-  indices are [0..N-1], so `partition_root_8` generates them in-register
-  via `vaddq_u16(base, {0..7})` instead of loading from a pre-filled
-  array. Eliminates 16KB identity array initialization. +7% across all
-  distributions. For root both-leaves, the sequential vst1 path writes
-  `symbols[j]` directly (no scatter) — 25+ GB/s on two-symbol data.
-- **SVE backend**: Tested on Graviton 4 (128-bit SVE). `svcompact_u32`
-  only handles 4 elements per instruction at this width, requiring
-  widen/narrow for uint16 — slower than NEON TBL. Disabled by default.
-  Would help at 256-bit+ SVE.
-- **4-way fused partition (neon2)**: At double-internal nodes, read 2
-  bits per symbol and partition into 4 groups in one pass, skipping one
-  tree level. Partition_8_4way works correctly, but the DFS
-  encode/decode order and scratch management have bugs when multiple
-  4-way levels nest. Code exists as WIP (`pivco_huffman_neon2.c`).
-- **4-way fused partition, reworked (neon2b)**: Rewrote with clean scratch
-  management — LL in-place in `indices`, LR/RL/RR packed in `tmp` with 8-
-  uint16 safety gaps between groups to absorb `vst1q_u8` trailing-zero
-  overflow, two-pass layout (popcount-based count → partition). All 20
-  roundtrips pass. **Slower than neon on every distribution on M4 Max**:
-  proba80 9.4→7.6 GB/s (−19%), english 2.5→1.75 GB/s (−30%), uniform
-  1.17→0.77 GB/s (−35%), two_sym_eq 25.6→6.7 GB/s (−74% — no root
-  both-leaves fast path in neon2b). Root cause: one 4-way partition of
-  8 elements costs 4 TBLs (one per output group), identical to 2× 2-way.
-  The theoretical wins are only 1 shared index `vld` + 1 skipped recursion
-  frame, and the pass-1 popcount scan to compute packed offsets burns more
-  than those savings on NEON's TBL-bound hot path. The concept pays off
-  only when a single instruction compresses wider than the 8-element TBL
-  (AVX-512 `vpcompressw` → 32). Code kept as `pivco_huffman_neon2b.c` for
-  reference.
-- **uint8 level-0 partition**: At level 0, indices are contiguous
-  [0..N-1], so within 256-element windows we can partition uint8_t
-  positions (16 per TBL) instead of uint16_t indices (8 per TBL),
-  then widen back cheaply. Tested two variants:
-  - *Split lo/hi with 256-entry uint8 table + add-8*: 25% regression.
-    4 TBL per 16 elements (same as 2 TBL per 8 uint16) plus combine
-    overhead. No TBL throughput gain.
-  - *64K-entry full 16-bit mask table (2MB)*: 1 TBL per 16 elements
-    (genuine 2x partition speedup) but massive cache thrashing. Net
-    25% regression on proba80 (3333 vs 4488 M/s).
-  The widen-convert step and window management overhead outweigh the
-  partition speedup. Might revisit if a way to avoid the gather is
-  found (e.g. carry uint8 positions through multiple tree levels).
 - **Computed shuffle (eliminate compress_tab)**: The 8KB compress_tab
   takes 128 cache lines — 6% of M4's L1D, 12% of Graviton4's, 25% of
   Zen3's. Could compute the shuffle pattern on the fly using a NEON
