@@ -144,6 +144,15 @@ int pivco_huffman_encode_neon2(const uint8_t *symbols,
 int pivco_huffman_decode_neon2(const uint8_t *in, size_t in_len,
                                 const pivco_huffman_table_t *table,
                                 uint8_t *symbols, size_t *consumed);
+
+/* NEON2B: reworked 4-way with two-pass packed scratch */
+int pivco_huffman_encode_neon2b(const uint8_t *symbols,
+                                 const pivco_huffman_table_t *table,
+                                 uint8_t *out, size_t *out_len);
+
+int pivco_huffman_decode_neon2b(const uint8_t *in, size_t in_len,
+                                 const pivco_huffman_table_t *table,
+                                 uint8_t *symbols, size_t *consumed);
 #endif
 
 #ifdef PIVCO_HAS_SVE

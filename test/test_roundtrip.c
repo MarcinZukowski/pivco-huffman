@@ -225,6 +225,27 @@ static int test_roundtrip_dist(const char *name, const uint64_t freq[PIVCO_MAX_S
                  i, symbols[i], cross_dec[i]);
         }
     }
+
+    /* NEON2B roundtrip (own encoder — interleaved bitmap format) */
+    uint8_t n2b_enc[PIVCO_MAX_ENCODED_SIZE * 2];
+    size_t n2b_len;
+    rc = pivco_huffman_encode_neon2b(symbols, &table, n2b_enc, &n2b_len);
+    if (rc != PIVCO_OK) FAIL("neon2b encode returned %d", rc);
+
+    uint8_t n2b_dec[PIVCO_BLOCK_SIZE];
+    size_t n2b_consumed;
+    rc = pivco_huffman_decode_neon2b(n2b_enc, n2b_len, &table, n2b_dec, &n2b_consumed);
+    if (rc != PIVCO_OK) FAIL("neon2b decode returned %d", rc);
+
+    for (int i = 0; i < PIVCO_BLOCK_SIZE; i++) {
+        if (symbols[i] != n2b_dec[i]) {
+            FAIL("neon2b mismatch at position %d: expected %d, got %d",
+                 i, symbols[i], n2b_dec[i]);
+        }
+    }
+    if (n2b_consumed != n2b_len) {
+        FAIL("neon2b consumed %zu bytes, expected %zu", n2b_consumed, n2b_len);
+    }
 #endif
 
     printf("PASS (pivco=%zu B, trad=%zu B, ratio=%.2fx)\n",

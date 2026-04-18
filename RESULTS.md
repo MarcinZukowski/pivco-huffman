@@ -481,6 +481,21 @@ Worth exploring:
   tree level. Partition_8_4way works correctly, but the DFS
   encode/decode order and scratch management have bugs when multiple
   4-way levels nest. Code exists as WIP (`pivco_huffman_neon2.c`).
+- **4-way fused partition, reworked (neon2b)**: Rewrote with clean scratch
+  management — LL in-place in `indices`, LR/RL/RR packed in `tmp` with 8-
+  uint16 safety gaps between groups to absorb `vst1q_u8` trailing-zero
+  overflow, two-pass layout (popcount-based count → partition). All 20
+  roundtrips pass. **Slower than neon on every distribution on M4 Max**:
+  proba80 9.4→7.6 GB/s (−19%), english 2.5→1.75 GB/s (−30%), uniform
+  1.17→0.77 GB/s (−35%), two_sym_eq 25.6→6.7 GB/s (−74% — no root
+  both-leaves fast path in neon2b). Root cause: one 4-way partition of
+  8 elements costs 4 TBLs (one per output group), identical to 2× 2-way.
+  The theoretical wins are only 1 shared index `vld` + 1 skipped recursion
+  frame, and the pass-1 popcount scan to compute packed offsets burns more
+  than those savings on NEON's TBL-bound hot path. The concept pays off
+  only when a single instruction compresses wider than the 8-element TBL
+  (AVX-512 `vpcompressw` → 32). Code kept as `pivco_huffman_neon2b.c` for
+  reference.
 - **uint8 level-0 partition**: At level 0, indices are contiguous
   [0..N-1], so within 256-element windows we can partition uint8_t
   positions (16 per TBL) instead of uint16_t indices (8 per TBL),

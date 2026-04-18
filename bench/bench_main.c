@@ -96,12 +96,12 @@ int main(int argc, char **argv)
            (int)((size_t)TOTAL_SYMBOLS * repeats / (1024*1024)),
            BLK, RUNS, DROP_WORST);
 
-    printf("%-13s | %7s %7s | %7s %7s | %7s %7s %7s | %7s | %7s\n",
-           "DECODE M/s", "pivco_s", "pivco_n",
+    printf("%-13s | %7s %7s %7s | %7s %7s | %7s %7s %7s | %7s | %7s\n",
+           "DECODE M/s", "pivco_s", "pivco_n", "pivco_2b",
            "trad_1s", "trad_4s",
            "huf0_1s", "huf0_x1", "huf0_x2",
            "rans_x2", "ratio");
-    printf("--------------|-----------------|-----------------|------"
+    printf("--------------|-------------------------|-----------------|------"
            "----------------------|---------|--------\n");
 
     for (int d = 0; d < n_dist; d++) {
@@ -140,6 +140,20 @@ int main(int argc, char **argv)
             pivco_huffman_encode(symbols + (size_t)b * BLK, table,
                                       neon_enc_buf + neon_enc_off[b], &len);
             neon_enc_off[b + 1] = neon_enc_off[b] + len;
+        }
+#endif
+
+#ifdef PIVCO_HAS_NEON
+        /* neon2b uses a different bitstream (interleaved bm0/bm1 at both-internal
+           nodes), so it requires its own pre-encoded buffer. */
+        uint8_t *n2b_enc_buf = (uint8_t *)malloc((size_t)NBLOCKS * PIVCO_MAX_ENCODED_SIZE * 2);
+        size_t  *n2b_enc_off = (size_t *)malloc((size_t)(NBLOCKS + 1) * sizeof(size_t));
+        n2b_enc_off[0] = 0;
+        for (int b = 0; b < NBLOCKS; b++) {
+            size_t len;
+            pivco_huffman_encode_neon2b(symbols + (size_t)b * BLK, table,
+                                        n2b_enc_buf + n2b_enc_off[b], &len);
+            n2b_enc_off[b + 1] = n2b_enc_off[b] + len;
         }
 #endif
 
@@ -269,7 +283,7 @@ int main(int argc, char **argv)
     var = stable_median(runs_arr, label); \
 } while(0)
 
-        double p_dec_s, p_dec_n = 0, t_dec_1s, t_dec_4s;
+        double p_dec_s, p_dec_n = 0, p_dec_2b = 0, t_dec_1s, t_dec_4s;
         double h_dec_1s = 0, h_dec_4s = 0;
         uint64_t expected_cksum = 0; /* set by first BENCH, checked by rest */
 
@@ -294,6 +308,18 @@ int main(int argc, char **argv)
                     table, dec_buf + (size_t)b * BLK, &consumed);
             }
         }, "pivco_n");
+#endif
+
+#ifdef PIVCO_HAS_NEON
+        BENCH(p_dec_2b, {
+            for (int b = 0; b < NBLOCKS; b++) {
+                size_t consumed;
+                pivco_huffman_decode_neon2b(
+                    n2b_enc_buf + n2b_enc_off[b],
+                    n2b_enc_off[b+1] - n2b_enc_off[b],
+                    table, dec_buf + (size_t)b * BLK, &consumed);
+            }
+        }, "pivco_2b");
 #endif
 
         /* Trad 1-stream: decode blocks */
@@ -363,6 +389,7 @@ int main(int argc, char **argv)
 #undef BENCH
 
         double p_best = p_dec_n > p_dec_s ? p_dec_n : p_dec_s;
+        if (p_dec_2b > p_best) p_best = p_dec_2b;
         double t_best = h_dec_4s;
         if (h_dec_x2 > t_best)  t_best = h_dec_x2;
         if (t_dec_4s > t_best) t_best = t_dec_4s;
@@ -371,8 +398,8 @@ int main(int argc, char **argv)
         if (r_dec_2 > t_best)  t_best = r_dec_2;
         double ratio = t_best > 0 ? p_best / t_best : 0;
 
-        printf("%-13s | %7.0f %7.0f | %7.0f %7.0f | %7.0f %7.0f %7.0f | %7.0f | %5.2fx\n",
-               name, p_dec_s, p_dec_n, t_dec_1s, t_dec_4s,
+        printf("%-13s | %7.0f %7.0f %7.0f | %7.0f %7.0f | %7.0f %7.0f %7.0f | %7.0f | %5.2fx\n",
+               name, p_dec_s, p_dec_n, p_dec_2b, t_dec_1s, t_dec_4s,
                h_dec_1s, h_dec_4s, h_dec_x2, r_dec_2, ratio);
 
 cleanup:
@@ -387,6 +414,9 @@ cleanup:
         free(rans_x2_enc);
 #if defined(PIVCO_HAS_NEON) || defined(PIVCO_HAS_SSE4) || defined(PIVCO_HAS_AVX512) || defined(PIVCO_HAS_SVE)
         free(neon_enc_buf); free(neon_enc_off);
+#endif
+#ifdef PIVCO_HAS_NEON
+        free(n2b_enc_buf); free(n2b_enc_off);
 #endif
     }
 
