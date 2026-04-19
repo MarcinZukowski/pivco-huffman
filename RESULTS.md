@@ -467,7 +467,7 @@ distributions.
   bits per symbol and partition into 4 groups in one pass, skipping one
   tree level. `partition_8_4way` works correctly, but the DFS
   encode/decode order and scratch management have bugs when multiple
-  4-way levels nest. Code exists as WIP (`pivco_huffman_neon2.c`).
+  4-way levels nest. Code archived at `extras/pivco_huffman_neon2.c`.
 - **4-way fused partition, reworked (neon2b)**: Rewrote with clean
   scratch management — LL in-place in `indices`, LR/RL/RR packed in
   `tmp` with 8-uint16 safety gaps between groups to absorb `vst1q_u8`
@@ -482,8 +482,7 @@ distributions.
   to compute packed offsets burns more than those savings on NEON's
   TBL-bound hot path. The concept pays off only when a single
   instruction compresses wider than the 8-element TBL (AVX-512
-  `vpcompressw` → 32). Code kept as `pivco_huffman_neon2b.c` for
-  reference.
+  `vpcompressw` → 32). Code archived at `extras/pivco_huffman_neon2b.c`.
 - **uint8 level-0 partition**: At level 0, indices are contiguous
   [0..N-1], so within 256-element windows we can partition uint8_t
   positions (16 per TBL) instead of uint16_t indices (8 per TBL), then
