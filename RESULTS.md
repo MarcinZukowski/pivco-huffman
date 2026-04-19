@@ -483,6 +483,23 @@ distributions.
   TBL-bound hot path. The concept pays off only when a single
   instruction compresses wider than the 8-element TBL (AVX-512
   `vpcompressw` → 32). Code archived at `extras/pivco_huffman_neon2b.c`.
+- **Fused one-leaf partition+scatter (`fused_1leaf`)**: At non-prefill
+  one-leaf nodes, kept the TBL-compacted leaf-side indices in register
+  and drained via lane-extract + strb directly, skipping the memory
+  round-trip of the separate scatter pass. Tried three dispatch flavours:
+  switch/fallthrough (clang emitted a branch tree — proba80 −50%),
+  computed-goto real jump table (proba80 −60% from indirect-branch
+  mispredicts), and Trick-2 bucketed (chunks sorted by n_left, eight
+  straight-line inner loops with compile-time-constant scatter counts).
+  Bucketed recovered most of the regression (proba80 −36%, proba50
+  −53%) but still slower than baseline because the two-pass design
+  re-loads `indices[]` per chunk, whereas the baseline's `scatter_sym`
+  amortizes its `vld` over 8 leaf elements. Net: the "save 1 vld+vst
+  per chunk" premise was wrong — baseline only pays a fractional vld
+  per chunk for scatter. Code archived at
+  `extras/pivco_huffman_neon_fused_1leaf.c`; full writeup with cycle
+  models and disassembly evidence in
+  [`extras/README_FUSED_1LEAF.md`](extras/README_FUSED_1LEAF.md).
 - **uint8 level-0 partition**: At level 0, indices are contiguous
   [0..N-1], so within 256-element windows we can partition uint8_t
   positions (16 per TBL) instead of uint16_t indices (8 per TBL), then
