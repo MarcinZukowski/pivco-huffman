@@ -1,5 +1,25 @@
 # PIVCO Huffman: Implementation & Benchmark Results
 
+## TL;DR
+
+SIMD Huffman decoder that walks the tree top-down and partitions the
+whole block at each internal node, instead of decoding one symbol at
+a time.
+
+**Wins on skewed distributions** where most symbols resolve in 1–3
+tree levels. Peak throughput on M4 (proba80): **9.9 GB/s**, 3.5× huf0
+X2 and 5.6× huf0 X1. On `two_sym_eq` (single-bit codes): **27 GB/s**,
+5× huf0. Ports to AVX-512 VBMI2 (3.1× on Xeon), Graviton 4 NEON
+(2.1–7.9×), and SSE4.1 (1.2× on Zen 3, the only platform where PIVCO
+just barely beats huf0).
+
+**Loses on high-entropy distributions** — english text, bell curves,
+near-uniform — where every symbol traverses 8–12 levels and the
+per-node partition cost stacks up. 0.4–0.9× huf0 X2 there.
+
+Encoded size within 1–4% of traditional Huffman (byte-alignment
+overhead at each tree node).
+
 ## What is PIVCO-Huffman?
 
 PIVCO-Huffman applies the PIVoted COlumnar approach to Huffman coding.
