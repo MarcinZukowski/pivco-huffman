@@ -1,0 +1,131 @@
+/* Profile harness: decode English distribution with PIVCO NEON only.
+   Runs 10M block decodes — enough wall time for sample/perf profiling.
+   Build: (from pivco-huffman/)
+     cmake --build build --parallel
+     cc -O2 -arch arm64 -I include -o build/bench_profile_english \
+       bench/bench_profile_english.c bench/bench_distributions.c \
+       -L build -lpivco_huffman -lm
+   Run:  ./build/bench_profile_english
+   Profile: sample <pid> 10 -f profile.txt */
+
+#include "pivco_huffman.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+#include <unistd.h>
+
+extern void bench_init(void);
+extern int bench_num_distributions(void);
+extern const char *bench_dist_name(int idx);
+extern const uint64_t *bench_dist_freq(int idx);
+extern void bench_generate_symbols(int dist_idx, uint8_t *symbols,
+                                   int n_symbols, uint64_t seed);
+
+static double now_sec(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+}
+
+int main(void)
+{
+    bench_init();
+
+    /* Find "english" distribution */
+    int english_idx = -1;
+    for (int i = 0; i < bench_num_distributions(); i++) {
+        if (strcmp(bench_dist_name(i), "english") == 0) {
+            english_idx = i;
+            break;
+        }
+    }
+    if (english_idx < 0) {
+        fprintf(stderr, "english distribution not found\n");
+        return 1;
+    }
+
+    const int N = PIVCO_BLOCK_SIZE;
+    const int NBLOCKS = 4 * 1024 * 1024 / N;
+    const int REPS = 20000;
+
+    /* Generate symbols and encode */
+    uint8_t *symbols = malloc(NBLOCKS * N);
+    bench_generate_symbols(english_idx, symbols, NBLOCKS * N,
+                           0xBEEFCAFE12345678ULL);
+
+    pivco_huffman_table_t table;
+    pivco_huffman_build_table(bench_dist_freq(english_idx), &table);
+
+    /* Encode all blocks */
+    /* English can exceed PIVCO_MAX_ENCODED_SIZE (deep tree, many nodes
+       with byte-alignment rounding). Use 4x block size to be safe. */
+    /* Allocate generous encode buffer — some distributions exceed
+       PIVCO_MAX_ENCODED_SIZE per block due to byte-alignment rounding. */
+    size_t total_enc_cap = (size_t)NBLOCKS * N * 8;
+    uint8_t *enc_buf = malloc(total_enc_cap);
+    if (!enc_buf) { fprintf(stderr, "malloc enc_buf failed\n"); return 1; }
+    size_t *enc_off = malloc((NBLOCKS + 1) * sizeof(size_t));
+    enc_off[0] = 0;
+    for (int b = 0; b < NBLOCKS; b++) {
+        size_t elen;
+        pivco_huffman_encode(symbols + b * N, &table,
+                             enc_buf + enc_off[b], &elen);
+        enc_off[b + 1] = enc_off[b] + elen;
+    }
+
+    printf("Total encoded: %zu bytes (%.1f per block, max_enc=%zu)\n",
+           enc_off[NBLOCKS], (double)enc_off[NBLOCKS] / NBLOCKS, total_enc_cap);
+    fflush(stdout);
+
+    /* Verify first block decodes correctly */
+    {
+        uint8_t *test = malloc(N);
+        size_t consumed;
+        int rc = pivco_huffman_decode(enc_buf + enc_off[0],
+                                       enc_off[1] - enc_off[0],
+                                       &table, test, &consumed);
+        printf("Verify: rc=%d consumed=%zu match=%d\n",
+               rc, consumed, memcmp(symbols, test, N) == 0);
+        fflush(stdout);
+        free(test);
+    }
+
+    uint8_t *out = malloc((size_t)NBLOCKS * N);
+    if (!out) { fprintf(stderr, "malloc out failed\n"); return 1; }
+    printf("out=%p enc_buf=%p\n", (void*)out, (void*)enc_buf);
+
+    printf("Decoding %d blocks x %d reps = %lld symbols (english)\n",
+           NBLOCKS, REPS, (long long)NBLOCKS * N * REPS);
+    fflush(stdout);
+
+    printf("Starting decode loop...\n"); fflush(stdout);
+    double t0 = now_sec();
+    for (int r = 0; r < REPS; r++) {
+        for (int b = 0; b < NBLOCKS; b++) {
+            size_t consumed;
+            if (r == 0 && b < 5) printf("  block %d: off=%zu len=%zu\n", b, enc_off[b], enc_off[b+1]-enc_off[b]);
+            int rc = pivco_huffman_decode(enc_buf + enc_off[b],
+                                          enc_off[b + 1] - enc_off[b],
+                                          &table, out + b * N, &consumed);
+            if (r == 0 && b < 5) printf("    rc=%d consumed=%zu\n", rc, consumed);
+            if (consumed != enc_off[b + 1] - enc_off[b]) {
+                printf("MISMATCH block %d: encoded=%zu consumed=%zu rc=%d\n",
+                       b, enc_off[b + 1] - enc_off[b], consumed, rc);
+                return 1;
+            }
+        }
+    }
+    double t1 = now_sec();
+
+    double total = (double)NBLOCKS * N * REPS;
+    printf("%.1f M symbols in %.2f s = %.0f M/s\n",
+           total / 1e6, t1 - t0, total / (t1 - t0) / 1e6);
+
+    free(symbols);
+    free(enc_buf);
+    free(enc_off);
+    free(out);
+    return 0;
+}

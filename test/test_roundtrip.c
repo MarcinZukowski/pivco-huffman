@@ -213,6 +213,25 @@ static int test_roundtrip_dist(const char *name, const uint64_t freq[PIVCO_MAX_S
         }
     }
 
+    /* Prefix backend (flat trees only). */
+    if (table.min_len == table.max_len) {
+        uint8_t pfx_enc[PIVCO_MAX_ENCODED_SIZE];
+        size_t pfx_len;
+        rc = pivco_huffman_encode_neon_prefix(symbols, &table, pfx_enc, &pfx_len);
+        if (rc != PIVCO_OK) FAIL("prefix encode returned %d", rc);
+
+        uint8_t pfx_dec[PIVCO_BLOCK_SIZE];
+        size_t pfx_consumed;
+        rc = pivco_huffman_decode_neon_prefix(pfx_enc, pfx_len, &table, pfx_dec, &pfx_consumed);
+        if (rc != PIVCO_OK) FAIL("prefix decode returned %d", rc);
+
+        for (int i = 0; i < PIVCO_BLOCK_SIZE; i++) {
+            if (symbols[i] != pfx_dec[i])
+                FAIL("prefix mismatch at %d: expected %d, got %d",
+                     i, symbols[i], pfx_dec[i]);
+        }
+    }
+
     /* Cross-implementation: scalar encode -> neon decode */
     uint8_t cross_dec[PIVCO_BLOCK_SIZE];
     size_t cross_consumed;

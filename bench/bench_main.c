@@ -96,12 +96,12 @@ int main(int argc, char **argv)
            (int)((size_t)TOTAL_SYMBOLS * repeats / (1024*1024)),
            BLK, RUNS, DROP_WORST);
 
-    printf("%-13s | %7s %7s | %7s %7s | %7s %7s %7s | %7s | %7s\n",
-           "DECODE M/s", "pivco_s", "pivco_n",
+    printf("%-13s | %7s %7s %7s | %7s %7s | %7s %7s %7s | %7s | %7s\n",
+           "DECODE M/s", "pivco_s", "pivco_n", "pivco_p",
            "trad_1s", "trad_4s",
            "huf0_1s", "huf0_x1", "huf0_x2",
            "rans_x2", "ratio");
-    printf("--------------|-----------------|-----------------|------"
+    printf("--------------|-------------------------|-----------------|------"
            "----------------------|---------|--------\n");
 
     for (int d = 0; d < n_dist; d++) {
@@ -140,6 +140,25 @@ int main(int argc, char **argv)
             pivco_huffman_encode(symbols + (size_t)b * BLK, table,
                                       neon_enc_buf + neon_enc_off[b], &len);
             neon_enc_off[b + 1] = neon_enc_off[b] + len;
+        }
+#endif
+
+#ifdef PIVCO_HAS_NEON
+        /* Prefix backend: pre-encode only when the tree is flat (min==max).
+           For non-flat distributions we leave the column at 0. */
+        int pfx_applicable = (table->min_len == table->max_len);
+        uint8_t *pfx_enc_buf = NULL;
+        size_t  *pfx_enc_off = NULL;
+        if (pfx_applicable) {
+            pfx_enc_buf = (uint8_t *)malloc((size_t)NBLOCKS * PIVCO_MAX_ENCODED_SIZE);
+            pfx_enc_off = (size_t *)malloc((size_t)(NBLOCKS + 1) * sizeof(size_t));
+            pfx_enc_off[0] = 0;
+            for (int b = 0; b < NBLOCKS; b++) {
+                size_t len;
+                pivco_huffman_encode_neon_prefix(symbols + (size_t)b * BLK, table,
+                                                 pfx_enc_buf + pfx_enc_off[b], &len);
+                pfx_enc_off[b + 1] = pfx_enc_off[b] + len;
+            }
         }
 #endif
 
@@ -270,7 +289,7 @@ int main(int argc, char **argv)
     var = stable_median(runs_arr, label); \
 } while(0)
 
-        double p_dec_s, p_dec_n = 0, t_dec_1s, t_dec_4s;
+        double p_dec_s, p_dec_n = 0, p_dec_pfx = 0, t_dec_1s, t_dec_4s;
         double h_dec_1s = 0, h_dec_4s = 0;
         uint64_t expected_cksum = 0; /* set by first BENCH, checked by rest */
 
@@ -295,6 +314,20 @@ int main(int argc, char **argv)
                     table, dec_buf + (size_t)b * BLK, &consumed);
             }
         }, "pivco_n");
+#endif
+
+#ifdef PIVCO_HAS_NEON
+        if (pfx_applicable) {
+            BENCH(p_dec_pfx, {
+                for (int b = 0; b < NBLOCKS; b++) {
+                    size_t consumed;
+                    pivco_huffman_decode_neon_prefix(
+                        pfx_enc_buf + pfx_enc_off[b],
+                        pfx_enc_off[b+1] - pfx_enc_off[b],
+                        table, dec_buf + (size_t)b * BLK, &consumed);
+                }
+            }, "pivco_p");
+        }
 #endif
 
 
@@ -365,6 +398,7 @@ int main(int argc, char **argv)
 #undef BENCH
 
         double p_best = p_dec_n > p_dec_s ? p_dec_n : p_dec_s;
+        if (p_dec_pfx > p_best) p_best = p_dec_pfx;
         double t_best = h_dec_4s;
         if (h_dec_x2 > t_best)  t_best = h_dec_x2;
         if (t_dec_4s > t_best) t_best = t_dec_4s;
@@ -373,8 +407,8 @@ int main(int argc, char **argv)
         if (r_dec_2 > t_best)  t_best = r_dec_2;
         double ratio = t_best > 0 ? p_best / t_best : 0;
 
-        printf("%-13s | %7.0f %7.0f | %7.0f %7.0f | %7.0f %7.0f %7.0f | %7.0f | %5.2fx\n",
-               name, p_dec_s, p_dec_n, t_dec_1s, t_dec_4s,
+        printf("%-13s | %7.0f %7.0f %7.0f | %7.0f %7.0f | %7.0f %7.0f %7.0f | %7.0f | %5.2fx\n",
+               name, p_dec_s, p_dec_n, p_dec_pfx, t_dec_1s, t_dec_4s,
                h_dec_1s, h_dec_4s, h_dec_x2, r_dec_2, ratio);
 
 cleanup:
@@ -389,6 +423,9 @@ cleanup:
         free(rans_x2_enc);
 #if defined(PIVCO_HAS_NEON) || defined(PIVCO_HAS_SSE4) || defined(PIVCO_HAS_AVX512) || defined(PIVCO_HAS_SVE)
         free(neon_enc_buf); free(neon_enc_off);
+#endif
+#ifdef PIVCO_HAS_NEON
+        if (pfx_applicable) { free(pfx_enc_buf); free(pfx_enc_off); }
 #endif
     }
 

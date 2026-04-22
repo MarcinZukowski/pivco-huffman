@@ -139,6 +139,18 @@ int pivco_huffman_decode_x86(const uint8_t *in, size_t in_len,
  * are preserved under extras/ as negative results. See extras/README_*
  * files for writeups. */
 
+/* Prefix-stream backend (experimental).  Uses a different bitstream
+ * format: first M bits of every element's code packed contiguously,
+ * where M = table->min_len.  v1 only handles flat trees (min == max);
+ * returns PIVCO_ERR_CORRUPT otherwise. */
+int pivco_huffman_encode_neon_prefix(const uint8_t *symbols,
+                                      const pivco_huffman_table_t *table,
+                                      uint8_t *out, size_t *out_len);
+
+int pivco_huffman_decode_neon_prefix(const uint8_t *in, size_t in_len,
+                                      const pivco_huffman_table_t *table,
+                                      uint8_t *symbols, size_t *consumed);
+
 #ifdef PIVCO_HAS_SVE
 int pivco_huffman_encode_sve(const uint8_t *symbols,
                               const pivco_huffman_table_t *table,

@@ -425,6 +425,18 @@ distributions.
 - **AVX-512 port**: Implemented and tested on Xeon 6975P. `vpcompressw`
   does the partition in ONE instruction (no shuffle table), 32 elements
   per iteration. Beats huf0 on 6 of 12 distributions. See results above.
+- **Prefix-radix backend for flat trees** (`pivco_huffman_neon_prefix.c`):
+  For Huffman tables with `min_len == max_len` (flat trees: uniform,
+  sparse_*, two_sym_*), bypass the tree walk entirely and emit the first
+  `M = min_len` bits of every element's code as a packed per-element
+  stream.  Decoder unpacks each element's `M`-bit code and does a
+  single `code_to_sym[code]` table lookup — no partition, no scatter.
+  **Uniform: 1.17 → 3.97 GB/s (+243%)** — now PIVCO's best distribution
+  vs. all four alternatives (was PIVCO's worst).  sparse_16: +118%.
+  sparse_4: +37%.  two_sym_* regresses (−75%) because neon's root-
+  both-leaves fast path at 26 GB/s is hard to beat; a runtime
+  `max(pivco_n, pivco_p)` gate handles this cleanly.  Full writeup:
+  [`PREFIX_RADIX.md`](PREFIX_RADIX.md).
 - **Combined shuffle table [256][32]**: Stores both right (mask) and
   left (~mask) shuffle patterns contiguously, enabling `ldp q0, q1` on
   ARM (one load-pair vs two separate loads). 5-9% improvement across
@@ -536,6 +548,21 @@ distributions.
 
 ### Worth exploring
 
+- **Single-stage prefix-radix for non-flat trees**: Generalise the
+  adopted flat-tree prefix backend to tables where `min_len < max_len`
+  (english, proba14, bell, zipfian, …).  Emit `M = min_len` bits per
+  element up front, K-way radix into 2^M bins, then recurse with the
+  standard 2-way decoder on each non-leaf bin's subtree.  Expected to
+  recover the distributions PIVCO currently loses on (sparse_4 showed
+  that M=2 already wins on its own, so english/zipfian at M=3 likely
+  do too).  See [`PREFIX_RADIX.md`](PREFIX_RADIX.md) §5.
+- **Nested (multi-stage) prefix-radix**: At each internal node during
+  decode, use `M_local = local_min` of that subtree.  An analysis in
+  `bench/bench_multi_stage_stats.c` shows this fires on a meaningful
+  fraction of elements in several distributions — notably zipfian
+  (70% of elements land in subtree bins with local_min ≥ 2 after a
+  top-level M=3 radix).  Would stack on top of single-stage once
+  that's in.  See [`PREFIX_RADIX.md`](PREFIX_RADIX.md) §4.
 - **SVE at 256-bit+**: Untested. `svcompact` on wider SVE (e.g. A64FX
   at 512-bit) would handle 16+ uint32 per instruction, potentially
   matching AVX-512 performance.
