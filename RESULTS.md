@@ -548,14 +548,17 @@ distributions.
 
 ### Worth exploring
 
-- **Single-stage prefix-radix for non-flat trees**: Generalise the
-  adopted flat-tree prefix backend to tables where `min_len < max_len`
-  (english, proba14, bell, zipfian, …).  Emit `M = min_len` bits per
-  element up front, K-way radix into 2^M bins, then recurse with the
-  standard 2-way decoder on each non-leaf bin's subtree.  Expected to
-  recover the distributions PIVCO currently loses on (sparse_4 showed
-  that M=2 already wins on its own, so english/zipfian at M=3 likely
-  do too).  See [`PREFIX_RADIX.md`](PREFIX_RADIX.md) §5.
+- **Single-stage prefix-radix for non-flat trees**: Extended the
+  prefix backend to tables where `min_len < max_len` (english, proba14,
+  bell, zipfian, …).  Implemented and all 20 roundtrips pass, but
+  **currently slower than baseline on every non-flat distribution**
+  (−23% to −97%).  Per-phase profiling via `bench_prefix_profile`
+  showed phases 2 (histogram) + 4 (bucket) together cost ~3.84 c/elem,
+  dominating the whole decode.  Both are serial-data-dependency-limited
+  scalar loops — classic radix-sort bottlenecks that need SIMD
+  treatment (parallel histograms for phase 2, TBL-based K-way partition
+  for phase 4) to break even.  Detailed profile data, diagnosis, and
+  optimisation path in [`PREFIX_RADIX.md`](PREFIX_RADIX.md) §5+§6.
 - **Nested (multi-stage) prefix-radix**: At each internal node during
   decode, use `M_local = local_min` of that subtree.  An analysis in
   `bench/bench_multi_stage_stats.c` shows this fires on a meaningful

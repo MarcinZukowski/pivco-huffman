@@ -144,9 +144,8 @@ int main(int argc, char **argv)
 #endif
 
 #ifdef PIVCO_HAS_NEON
-        /* Prefix backend: pre-encode only when the tree is flat (min==max).
-           For non-flat distributions we leave the column at 0. */
-        int pfx_applicable = (table->min_len == table->max_len);
+        /* Prefix backend: runs on any table with min_len in [1, 8]. */
+        int pfx_applicable = (table->min_len >= 1 && table->min_len <= 8);
         uint8_t *pfx_enc_buf = NULL;
         size_t  *pfx_enc_off = NULL;
         if (pfx_applicable) {
@@ -155,8 +154,10 @@ int main(int argc, char **argv)
             pfx_enc_off[0] = 0;
             for (int b = 0; b < NBLOCKS; b++) {
                 size_t len;
-                pivco_huffman_encode_neon_prefix(symbols + (size_t)b * BLK, table,
-                                                 pfx_enc_buf + pfx_enc_off[b], &len);
+                int rc = pivco_huffman_encode_neon_prefix(
+                    symbols + (size_t)b * BLK, table,
+                    pfx_enc_buf + pfx_enc_off[b], &len);
+                if (rc != PIVCO_OK) { pfx_applicable = 0; break; }
                 pfx_enc_off[b + 1] = pfx_enc_off[b] + len;
             }
         }

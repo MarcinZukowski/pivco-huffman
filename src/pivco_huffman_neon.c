@@ -606,4 +606,36 @@ int pivco_huffman_decode_neon(const uint8_t *in, size_t in_len,
     return PIVCO_OK;
 }
 
+/* ---------- Internal wrappers exposed for pivco_huffman_neon_prefix.c ----------
+ *
+ * The prefix-radix backend performs a top-level K-way partition and then
+ * needs to delegate each non-leaf bin's subtree (at depth M below the
+ * root) to the standard 2-way neon encoder/decoder.  These thin wrappers
+ * expose exactly the internal recursive entry points, preserving the
+ * same contract. */
+
+void pivco_neon_decode_subtree_(const pivco_huffman_table_t *table,
+                                 int16_t node_id,
+                                 uint16_t *indices, int n,
+                                 uint8_t *symbols,
+                                 const uint8_t **in_ptr,
+                                 uint16_t *tmp,
+                                 int16_t skip_node)
+{
+    decode_node_neon(table, node_id, indices, n,
+                     symbols, in_ptr, tmp, skip_node);
+}
+
+void pivco_neon_encode_subtree_(const pivco_huffman_table_t *table,
+                                 int16_t node_id,
+                                 uint16_t *indices, int n,
+                                 int depth,
+                                 const uint16_t *codes, const uint8_t *lens,
+                                 uint8_t **out_ptr,
+                                 uint16_t *tmp)
+{
+    encode_node_neon(table, node_id, indices, n, depth,
+                     codes, lens, out_ptr, tmp);
+}
+
 #endif /* PIVCO_HAS_NEON */

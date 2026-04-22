@@ -139,10 +139,10 @@ int pivco_huffman_decode_x86(const uint8_t *in, size_t in_len,
  * are preserved under extras/ as negative results. See extras/README_*
  * files for writeups. */
 
-/* Prefix-stream backend (experimental).  Uses a different bitstream
- * format: first M bits of every element's code packed contiguously,
- * where M = table->min_len.  v1 only handles flat trees (min == max);
- * returns PIVCO_ERR_CORRUPT otherwise. */
+/* Prefix-stream backend.  Uses a different bitstream format: first M
+ * bits of every element's code packed contiguously (M = table->min_len),
+ * followed (for non-flat trees) by standard 2-way PIVCO subtree bitmaps
+ * in DFS order.  Works on both flat (min == max) and non-flat tables. */
 int pivco_huffman_encode_neon_prefix(const uint8_t *symbols,
                                       const pivco_huffman_table_t *table,
                                       uint8_t *out, size_t *out_len);
@@ -150,6 +150,25 @@ int pivco_huffman_encode_neon_prefix(const uint8_t *symbols,
 int pivco_huffman_decode_neon_prefix(const uint8_t *in, size_t in_len,
                                       const pivco_huffman_table_t *table,
                                       uint8_t *symbols, size_t *consumed);
+
+/* Internal entry points used by the prefix backend to delegate the
+ * subtree work to the standard neon encoder/decoder.  Not intended for
+ * direct use. */
+void pivco_neon_decode_subtree_(const pivco_huffman_table_t *table,
+                                 int16_t node_id,
+                                 uint16_t *indices, int n,
+                                 uint8_t *symbols,
+                                 const uint8_t **in_ptr,
+                                 uint16_t *tmp,
+                                 int16_t skip_node);
+
+void pivco_neon_encode_subtree_(const pivco_huffman_table_t *table,
+                                 int16_t node_id,
+                                 uint16_t *indices, int n,
+                                 int depth,
+                                 const uint16_t *codes, const uint8_t *lens,
+                                 uint8_t **out_ptr,
+                                 uint16_t *tmp);
 
 #ifdef PIVCO_HAS_SVE
 int pivco_huffman_encode_sve(const uint8_t *symbols,

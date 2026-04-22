@@ -112,4 +112,10 @@ if(BUILD_BENCH)
         bench/bench_distributions.c
     )
     target_link_libraries(pivco_multi_stage_stats pivco_huffman)
+
+    add_executable(pivco_prefix_profile
+        bench/bench_prefix_profile.c
+        bench/bench_distributions.c
+    )
+    target_link_libraries(pivco_prefix_profile pivco_huffman)
 endif()
