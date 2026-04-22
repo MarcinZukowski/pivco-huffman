@@ -63,11 +63,23 @@ static void phase1_extract_m3(const uint8_t *in, uint8_t *out, int n)
     }
 }
 
-/* Phase 2: histogram. */
+/* Phase 2: histogram — 4-way parallel counter arrays (matches decoder). */
 static void phase2_histogram(const uint8_t *prefix, int *bin_count, int K, int n)
 {
-    memset(bin_count, 0, (size_t)K * sizeof(int));
-    for (int k = 0; k < n; k++) bin_count[prefix[k]]++;
+    int bc0[256] = {0};
+    int bc1[256] = {0};
+    int bc2[256] = {0};
+    int bc3[256] = {0};
+    int k = 0;
+    for (; k + 4 <= n; k += 4) {
+        bc0[prefix[k    ]]++;
+        bc1[prefix[k + 1]]++;
+        bc2[prefix[k + 2]]++;
+        bc3[prefix[k + 3]]++;
+    }
+    for (; k < n; k++) bc0[prefix[k]]++;
+    for (int v = 0; v < K; v++)
+        bin_count[v] = bc0[v] + bc1[v] + bc2[v] + bc3[v];
 }
 
 /* Phase 3: prefix-sum for offsets. */
@@ -77,16 +89,36 @@ static void phase3_prefix_sum(const int *bin_count, int *bin_offset, int K)
     for (int v = 0; v < K; v++) bin_offset[v+1] = bin_offset[v] + bin_count[v];
 }
 
-/* Phase 4: bucket element ids by bin. */
+/* Phase 4: bucket — 4-way parallel placement (matches decoder). */
 static void phase4_bucket(const uint8_t *prefix, const int *bin_offset,
                            uint16_t *bin_elements, int K, int n)
 {
-    int place[256];
-    for (int v = 0; v < K; v++) place[v] = bin_offset[v];
-    for (int k = 0; k < n; k++) {
-        int v = prefix[k];
-        bin_elements[place[v]++] = (uint16_t)k;
+    /* Recompute per-stream counts so we can derive per-stream starting
+     * offsets (in the decoder these come for free from phase 2). */
+    int bc0[256] = {0}, bc1[256] = {0}, bc2[256] = {0};
+    int k = 0;
+    for (; k + 4 <= n; k += 4) {
+        bc0[prefix[k    ]]++;
+        bc1[prefix[k + 1]]++;
+        bc2[prefix[k + 2]]++;
+        /* bc3 inferred from totals — unused here. */
     }
+    int place_0[256], place_1[256], place_2[256], place_3[256];
+    for (int v = 0; v < K; v++) {
+        place_0[v] = bin_offset[v];
+        place_1[v] = place_0[v] + bc0[v];
+        place_2[v] = place_1[v] + bc1[v];
+        place_3[v] = place_2[v] + bc2[v];
+    }
+    k = 0;
+    for (; k + 4 <= n; k += 4) {
+        bin_elements[place_0[prefix[k    ]]++] = (uint16_t)(k    );
+        bin_elements[place_1[prefix[k + 1]]++] = (uint16_t)(k + 1);
+        bin_elements[place_2[prefix[k + 2]]++] = (uint16_t)(k + 2);
+        bin_elements[place_3[prefix[k + 3]]++] = (uint16_t)(k + 3);
+    }
+    for (; k < n; k++)
+        bin_elements[place_0[prefix[k]]++] = (uint16_t)k;
 }
 
 /* Phase 0 (for reference): the prefill memset. */

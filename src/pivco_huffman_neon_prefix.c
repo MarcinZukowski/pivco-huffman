@@ -286,14 +286,39 @@ int pivco_huffman_encode_neon_prefix(const uint8_t *symbols,
         lens_pos[k]  = table->code_len[s];
     }
 
-    /* Pack M-bit prefixes into the stream and bucket elements by bin. */
-    int bin_count[1 << 8] = {0};
-    for (int k = 0; k < N; k++) {
-        int L = lens_pos[k];
-        uint32_t prefix = (uint32_t)codes_pos[k] >> (L - M);
-        pack_m_bits(out, k, M, prefix);
-        bin_count[prefix]++;
+    /* Pack M-bit prefixes into the stream; record per-stream histogram
+     * so we can do 4-way parallel bucket placement to match the decoder.
+     * The decoder's 4-way bucket produces an order-within-bin where
+     * stream s's contributions appear together; the encoder must emit
+     * subtree bitmaps in the SAME order so bit positions match at decode
+     * time. */
+    int bc0[1 << 8] = {0};
+    int bc1[1 << 8] = {0};
+    int bc2[1 << 8] = {0};
+    int bc3[1 << 8] = {0};
+    {
+        int k = 0;
+        for (; k + 4 <= N; k += 4) {
+            int L0 = lens_pos[k];     uint32_t p0 = (uint32_t)codes_pos[k    ] >> (L0 - M);
+            int L1 = lens_pos[k + 1]; uint32_t p1 = (uint32_t)codes_pos[k + 1] >> (L1 - M);
+            int L2 = lens_pos[k + 2]; uint32_t p2 = (uint32_t)codes_pos[k + 2] >> (L2 - M);
+            int L3 = lens_pos[k + 3]; uint32_t p3 = (uint32_t)codes_pos[k + 3] >> (L3 - M);
+            pack_m_bits(out, k    , M, p0);
+            pack_m_bits(out, k + 1, M, p1);
+            pack_m_bits(out, k + 2, M, p2);
+            pack_m_bits(out, k + 3, M, p3);
+            bc0[p0]++; bc1[p1]++; bc2[p2]++; bc3[p3]++;
+        }
+        for (; k < N; k++) {
+            int L = lens_pos[k];
+            uint32_t prefix = (uint32_t)codes_pos[k] >> (L - M);
+            pack_m_bits(out, k, M, prefix);
+            bc0[prefix]++;
+        }
     }
+    int bin_count[1 << 8];
+    for (int v = 0; v < K; v++)
+        bin_count[v] = bc0[v] + bc1[v] + bc2[v] + bc3[v];
 
     if (M == table->max_len) {
         /* Flat: no subtree bitmaps. */
@@ -306,16 +331,38 @@ int pivco_huffman_encode_neon_prefix(const uint8_t *symbols,
     bin_offset[0] = 0;
     for (int v = 0; v < K; v++) bin_offset[v+1] = bin_offset[v] + bin_count[v];
 
-    /* bin_elements[] holds original positions sorted by bin.
+    /* bin_elements[] holds original positions sorted by bin.  Populate
+     * via 4-way parallel placement (matching decoder order).
      * +8 slots of slack — encode_node_neon's 16-byte TBL stores can
      * write up to 7 uint16 past the end of a bin's segment. */
     uint16_t bin_elements[PIVCO_BLOCK_SIZE + 8];
-    int place[1 << 8];
-    for (int v = 0; v < K; v++) place[v] = bin_offset[v];
-    for (int k = 0; k < N; k++) {
-        int L = lens_pos[k];
-        int v = (int)((uint32_t)codes_pos[k] >> (L - M));
-        bin_elements[place[v]++] = (uint16_t)k;
+    int place_0[1 << 8];
+    int place_1[1 << 8];
+    int place_2[1 << 8];
+    int place_3[1 << 8];
+    for (int v = 0; v < K; v++) {
+        place_0[v] = bin_offset[v];
+        place_1[v] = place_0[v] + bc0[v];
+        place_2[v] = place_1[v] + bc1[v];
+        place_3[v] = place_2[v] + bc2[v];
+    }
+    {
+        int k = 0;
+        for (; k + 4 <= N; k += 4) {
+            int L0 = lens_pos[k];     int v0 = (int)((uint32_t)codes_pos[k    ] >> (L0 - M));
+            int L1 = lens_pos[k + 1]; int v1 = (int)((uint32_t)codes_pos[k + 1] >> (L1 - M));
+            int L2 = lens_pos[k + 2]; int v2 = (int)((uint32_t)codes_pos[k + 2] >> (L2 - M));
+            int L3 = lens_pos[k + 3]; int v3 = (int)((uint32_t)codes_pos[k + 3] >> (L3 - M));
+            bin_elements[place_0[v0]++] = (uint16_t)(k    );
+            bin_elements[place_1[v1]++] = (uint16_t)(k + 1);
+            bin_elements[place_2[v2]++] = (uint16_t)(k + 2);
+            bin_elements[place_3[v3]++] = (uint16_t)(k + 3);
+        }
+        for (; k < N; k++) {
+            int L = lens_pos[k];
+            int v = (int)((uint32_t)codes_pos[k] >> (L - M));
+            bin_elements[place_0[v]++] = (uint16_t)k;
+        }
     }
 
     /* Per-bin metadata. */
@@ -433,23 +480,66 @@ int pivco_huffman_decode_neon_prefix(const uint8_t *in, size_t in_len,
 
     const uint8_t *ptr = in + prefix_stream_bytes(N, M);
 
-    /* Phase 2: histogram. */
-    int bin_count[1 << 8] = {0};
-    for (int k = 0; k < N; k++) bin_count[prefix[k]]++;
+    /* Phase 2: histogram — 4-way parallel to break the serial dep chain
+     * that `bin_count[prefix[k]]++` has when prefix values cluster.
+     * Four independent counter arrays, each updated by one of every four
+     * elements; summed at the end.  OoO pipelines all 4 chains. */
+    int bc0[1 << 8] = {0};
+    int bc1[1 << 8] = {0};
+    int bc2[1 << 8] = {0};
+    int bc3[1 << 8] = {0};
+    {
+        int k = 0;
+        for (; k + 4 <= N; k += 4) {
+            bc0[prefix[k    ]]++;
+            bc1[prefix[k + 1]]++;
+            bc2[prefix[k + 2]]++;
+            bc3[prefix[k + 3]]++;
+        }
+        for (; k < N; k++) bc0[prefix[k]]++;
+    }
+    int bin_count[1 << 8];
+    for (int v = 0; v < K; v++)
+        bin_count[v] = bc0[v] + bc1[v] + bc2[v] + bc3[v];
 
     /* Phase 3: prefix-sum for offsets. */
     int bin_offset[(1 << 8) + 1];
     bin_offset[0] = 0;
     for (int v = 0; v < K; v++) bin_offset[v+1] = bin_offset[v] + bin_count[v];
 
-    /* Phase 4: bucket element ids by bin.
-     * +8 slack for the same partition-overflow reason as the encoder. */
+    /* Phase 4: bucket element ids by bin — 4-way parallel placement.
+     * Each stream s ∈ {0..3} places elements at positions k where
+     * k%4 == s, using its own place_s[] offset per bin.  place_s[v]
+     * starts at bin_offset[v] + sum_{s' < s} bc_s'[v] so streams don't
+     * overlap.  Order within a bin is interleaved by stream rather than
+     * pure k-order — irrelevant for subtree decode correctness.
+     * +8 slack on bin_elements for the subtree partition's overflow. */
     uint16_t bin_elements[PIVCO_BLOCK_SIZE + 8];
-    int place[1 << 8];
-    for (int v = 0; v < K; v++) place[v] = bin_offset[v];
-    for (int k = 0; k < N; k++) {
-        int v = prefix[k];
-        bin_elements[place[v]++] = (uint16_t)k;
+    /* NOTE: still using 4-way parallel; phase 4 is memory-op-limited
+     * at ~2 c/elem on M4 (4 mem ops/elem / 2 stores+2 loads per cycle).
+     * Going to 8-way doesn't help because M4 memory ports cap throughput
+     * regardless of parallelism depth.  A TBL-based SIMD K-way radix
+     * compactor would be required for a further speedup. */
+    int place_0[1 << 8];
+    int place_1[1 << 8];
+    int place_2[1 << 8];
+    int place_3[1 << 8];
+    for (int v = 0; v < K; v++) {
+        place_0[v] = bin_offset[v];
+        place_1[v] = place_0[v] + bc0[v];
+        place_2[v] = place_1[v] + bc1[v];
+        place_3[v] = place_2[v] + bc2[v];
+    }
+    {
+        int k = 0;
+        for (; k + 4 <= N; k += 4) {
+            bin_elements[place_0[prefix[k    ]]++] = (uint16_t)(k    );
+            bin_elements[place_1[prefix[k + 1]]++] = (uint16_t)(k + 1);
+            bin_elements[place_2[prefix[k + 2]]++] = (uint16_t)(k + 2);
+            bin_elements[place_3[prefix[k + 3]]++] = (uint16_t)(k + 3);
+        }
+        for (; k < N; k++)
+            bin_elements[place_0[prefix[k]]++] = (uint16_t)k;
     }
 
     /* Phase 5: per-bin metadata + dispatch.  Each subtree decode is
