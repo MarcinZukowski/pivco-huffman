@@ -60,6 +60,13 @@ static distribution_t distributions[] = {
     { .name = "geometric" },
     { .name = "two_sym_eq" },
     { .name = "two_sym_90/10" },
+    /* Flat distributions filling out the M-curve for the prefix backend.
+     * Each has 2^M equal-frequency symbols → flat Huffman with all
+     * codes of length M. */
+    { .name = "flat_M3" },   /* 8   symbols, M=3 */
+    { .name = "flat_M5" },   /* 32  symbols, M=5 */
+    { .name = "flat_M6" },   /* 64  symbols, M=6 */
+    { .name = "flat_M7" },   /* 128 symbols, M=7 */
 };
 
 #define NUM_DISTRIBUTIONS (sizeof(distributions) / sizeof(distributions[0]))
@@ -196,6 +203,22 @@ static void init_distributions(void)
     memset(distributions[14].freq, 0, sizeof(distributions[14].freq));
     distributions[14].freq[0] = 900;
     distributions[14].freq[1] = 100;
+
+    /* flat_M3: 8 equal symbols → all codes 3-bit */
+    memset(distributions[15].freq, 0, sizeof(distributions[15].freq));
+    for (int i = 0; i < 8; i++) distributions[15].freq[i] = 100;
+
+    /* flat_M5: 32 equal symbols → all codes 5-bit */
+    memset(distributions[16].freq, 0, sizeof(distributions[16].freq));
+    for (int i = 0; i < 32; i++) distributions[16].freq[i] = 100;
+
+    /* flat_M6: 64 equal symbols → all codes 6-bit */
+    memset(distributions[17].freq, 0, sizeof(distributions[17].freq));
+    for (int i = 0; i < 64; i++) distributions[17].freq[i] = 100;
+
+    /* flat_M7: 128 equal symbols → all codes 7-bit */
+    memset(distributions[18].freq, 0, sizeof(distributions[18].freq));
+    for (int i = 0; i < 128; i++) distributions[18].freq[i] = 100;
 }
 
 /* ---------- Public API ---------- */
