@@ -141,6 +141,25 @@ static inline uint32_t extract_D_bits_x86(const uint8_t *in,
     return (val >> bit_off) & ((1u << D) - 1);
 }
 
+/* Only D=4 gets a SIMD fast path on pure SSE4.1.
+ *
+ * - D=2, D=3, D=5, D=6, D=7 all require either per-byte variable shifts
+ *   (AVX2's _mm_srlv_*) or vpmultishiftqb (AVX-512 VBMI2) to build the
+ *   per-byte code values efficiently.  Without those, the spread would
+ *   need ~4-8 separate pshufb + immediate shifts + blends, which
+ *   benchmarked slower than the scalar FLAT_UNPACK_SWITCH_IDX on AVX-512
+ *   (where even vpmultishiftqb wasn't enough for D=3/5/6), so the
+ *   SSE4.1 variant is definitely not viable.
+ * - D=4 is the special case where the spread is simple: duplicate +
+ *   mask + single-immediate-shift + blend gives (b_i & 0x0F, b_i >> 4)
+ *   per input byte without any variable-shift primitive.
+ * - D=8 has 256-entry c2s, too big for pshufb; scalar LDR wins.
+ *
+ * For real-world Zen-3-style hosts stuck on SSE4.1, the IDEAS.md
+ * "Zen-3 hybrid block decoder" fallback (per-table selection between
+ * PIVCO and trad_huffman_decode_4s) is the right escape for
+ * bell_* / proba02 / english / zipfian. */
+
 /* D=4 SSE4.1 spread: 16 codes from 8 bytes of bm.
  *
  * 8 bytes loaded, duplicated to 16 bytes via pshufb: [b0,b0,b1,b1,..].
