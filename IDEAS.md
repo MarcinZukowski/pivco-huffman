@@ -335,33 +335,35 @@ Sketch of the check:
 
 Easy (lookup-only) win candidate.  5-15 minute first-look exercise.
 
-## Revisit AVX-512 D=3, D=5, D=6 flat-subtree TBL
+## ~~Revisit AVX-512 D=3, D=5, D=6 flat-subtree TBL~~ — SHIPPED
 
-**Status (as of `ae14323`, 2026-04-24):** tried and reverted.  All
-three regressed vs the scalar `FLAT_UNPACK_SWITCH_IDX` macro on
-Xeon 6975P-C (Granite Rapids):
-- D=3 (attempted with `vpmultishiftqb` 16-code-per-iter and with
-  `pshufb` + `_mm_srlv_epi16` 8-code-per-iter): flat_M3 −38%.
-- D=5 (`vpermb` over ymm): flat_M5 −50%, bell_s80 −17%, bell_s30 −13%.
-- D=6 (`vpermb` over zmm): flat_M6 −27%, bell_s80 −32%.
-
-GCC auto-vectorises the scalar 8-wide scatter (`symbols[i+k] = c2s[...]`
-for k=0..7) into wide moves, so the bar is higher than expected.  The
-winning D values were D=2 and D=4 (simpler spread, smaller table, no
-byte-crossings).  See `src/pivco_huffman_avx512.c` for the recorded
-constraints — if you want to reattempt, approaches worth trying:
-
-- **Wider iteration**.  Our attempts all used 128-bit registers to
-  match NEON; a 32-code-per-iter or 64-code-per-iter version using
-  full ymm/zmm might amortise the spread cost enough to win.  Zmm
-  usage may trigger Intel's clock throttling on some SKUs but
-  Granite Rapids is said to be less affected.
-- **Different spread primitive**.  GFNI (`vgf2p8affineqb_epi8`) can
-  do byte-level shift + mask in a single instruction with the right
-  matrix constant; might beat `vpmultishiftqb` for D=3/5.
-- **Skip the spread entirely** for D=4-aligned cases: reorganise
-  the packed format so codes for neighbouring elements land in
-  consecutive bytes aligned for a direct pshufb.
+> **Status (as of `7b2fb8d`, 2026-04-24):** landed.  The earlier
+> "tried and reverted" attempts (committed in `fa1134b`) blamed
+> `vpermb` and the scalar compiler.  Wrong diagnosis: the real cause
+> was `memcpy(&packed, bm_ptr, N)` for **non-power-of-2 N** (5, 6,
+> 10, 12).  GCC lowers those to split loads + OR + store-forwarding
+> chains — adding 2-3 cycles of serial latency that killed the fast
+> path at 16-codes-per-iter.  Fix: load the next natural size
+> (`uint64` / `__m128i`) unconditionally, relying on the fact that
+> the spread control only references the valid-byte range; add a
+> `_safe` variant with the original `N`-byte memcpy for the final
+> chunk so we don't overread past a page boundary.  Fast variant is
+> 1 instruction, safe variant is 1 stack memcpy + 1 xmm load.
+>
+> Headlines (Xeon 6975P-C):
+> - flat_M3: 3820 → 21860 (+472%, 2.10× → 12.00×)
+> - flat_M5: 4370 → 18446 (+322%, 2.42× → 10.21×)
+> - flat_M6: 2890 → 17118 (+492%, 1.72× → 10.18×)
+> - bell_s80: 1891 → 2107 (+11%, 2.72× → 3.03×)
+> - bell_s10 crosses parity 0.95× → 1.03× (D=3 34% contribution)
+> - bell_s30 +2%, zipfian +2%, proba02 +5%, english unchanged
+>
+> Committed in `3f27e81` (D=3) and `7b2fb8d` (D=5, D=6).  AVX-512 now
+> has D=2..6 fast paths, same coverage as NEON.
+>
+> **Lesson for future work:** always check whether `memcpy(ptr, src,
+> N)` for an awkward N actually compiles to a single load before
+> blaming the SIMD primitives.
 
 ## Revisit SSE4.1 D=2, D=3, D=5, D=6 flat-subtree TBL
 
