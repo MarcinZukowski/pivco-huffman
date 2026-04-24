@@ -277,6 +277,35 @@ static inline uint8x16_t flat_d4_spread(const uint8_t *bm_ptr)
     return vandq_u8(shifted, vdupq_n_u8(0x0F));
 }
 
+/* D=5 spread: 5 bytes = 40 bits = 8 codes.  5 of 8 codes cross byte
+ * boundaries, so we work in uint16 lanes.  Lane layout:
+ *   lanes 0,1,2: (b0, b1)  — codes 0,1,2 (shifts  0, 5, 10)
+ *   lane    3: (b1, b2)  — code  3        (shift    7)
+ *   lanes 4,5:   (b2, b3)  — codes 4,5    (shifts  4, 9)
+ *   lanes 6,7:   (b3, b4)  — codes 6,7    (shifts  6, 11)                 */
+static const uint8_t flat_d5_shuf_tab[16] = {
+    0,1,  0,1,  0,1,  1,2,  2,3,  2,3,  3,4,  3,4
+};
+static const int16_t flat_d5_shift_tab[8] = {
+    0, -5, -10, -7, -4, -9, -6, -11
+};
+
+/* Unpack 8 consecutive D=5 codes from 5 bytes starting at bm_ptr. */
+static inline uint8x8_t flat_d5_spread(const uint8_t *bm_ptr)
+{
+    /* 5-byte load via memcpy into the low 40 bits of a uint64 — doesn't
+     * overrun the stream. */
+    uint64_t packed = 0;
+    memcpy(&packed, bm_ptr, 5);
+    uint8x16_t bm_lo = vreinterpretq_u8_u64(
+        vsetq_lane_u64(packed, vdupq_n_u64(0), 0));
+    uint8x16_t shuffled = vqtbl1q_u8(bm_lo, vld1q_u8(flat_d5_shuf_tab));
+    uint16x8_t w = vreinterpretq_u16_u8(shuffled);
+    uint16x8_t shifted = vshlq_u16(w, vld1q_s16(flat_d5_shift_tab));
+    uint16x8_t masked = vandq_u16(shifted, vdupq_n_u16(0x1F));
+    return vmovn_u16(masked);
+}
+
 /* Unpack n D-bit codes from bm, look up in c2s, scatter to
  * symbols[indices[i]].  Used by decode_node_neon. */
 static inline void flat_decode_scatter_neon(uint8_t *symbols,
@@ -331,6 +360,31 @@ static inline void flat_decode_scatter_neon(uint8_t *symbols,
         for (; i + 8 <= n; i += 8) {
             uint8x8_t codes = flat_d3_spread(bm + ((i * 3) >> 3));
             uint8x8_t syms  = vqtbl1_u8(c2s_vec, codes);
+            symbols[indices[i    ]] = vget_lane_u8(syms, 0);
+            symbols[indices[i + 1]] = vget_lane_u8(syms, 1);
+            symbols[indices[i + 2]] = vget_lane_u8(syms, 2);
+            symbols[indices[i + 3]] = vget_lane_u8(syms, 3);
+            symbols[indices[i + 4]] = vget_lane_u8(syms, 4);
+            symbols[indices[i + 5]] = vget_lane_u8(syms, 5);
+            symbols[indices[i + 6]] = vget_lane_u8(syms, 6);
+            symbols[indices[i + 7]] = vget_lane_u8(syms, 7);
+        }
+        for (; i < n; i++) {
+            uint32_t code = extract_D_bits(bm, i * D, D);
+            symbols[indices[i]] = c2s[code];
+        }
+        return;
+    }
+    if (D == 5) {
+        /* c2s has 32 entries — needs a 2-register TBL (vqtbl2_u8).
+         * Process 8 codes per iteration. */
+        uint8x16x2_t c2s_vec;
+        c2s_vec.val[0] = vld1q_u8(c2s);
+        c2s_vec.val[1] = vld1q_u8(c2s + 16);
+        int i = 0;
+        for (; i + 8 <= n; i += 8) {
+            uint8x8_t codes = flat_d5_spread(bm + ((i * 5) >> 3));
+            uint8x8_t syms  = vqtbl2_u8(c2s_vec, codes);
             symbols[indices[i    ]] = vget_lane_u8(syms, 0);
             symbols[indices[i + 1]] = vget_lane_u8(syms, 1);
             symbols[indices[i + 2]] = vget_lane_u8(syms, 2);
@@ -433,6 +487,32 @@ static inline void flat_decode_direct_neon(uint8_t *symbols, int n,
         for (; i + 8 <= n; i += 8) {
             uint8x8_t codes = flat_d3_spread(bm + ((i * 3) >> 3));
             uint8x8_t syms  = vqtbl1_u8(c2s_vec, codes);
+            vst1_u8(symbols + i, syms);
+        }
+        for (; i < n; i++) {
+            uint32_t code = extract_D_bits(bm, i * D, D);
+            symbols[i] = c2s[code];
+        }
+        return;
+    }
+    if (D == 5) {
+        /* 16 codes per iter via two 8-code spreads + vqtbl2q_u8 on the
+         * 32-byte c2s table, single vst1q_u8. */
+        uint8x16x2_t c2s_vec;
+        c2s_vec.val[0] = vld1q_u8(c2s);
+        c2s_vec.val[1] = vld1q_u8(c2s + 16);
+        int i = 0;
+        for (; i + 16 <= n; i += 16) {
+            uint8x8_t codes_lo = flat_d5_spread(bm + ((i      * 5) >> 3));
+            uint8x8_t codes_hi = flat_d5_spread(bm + (((i + 8) * 5) >> 3));
+            uint8x16_t codes = vcombine_u8(codes_lo, codes_hi);
+            uint8x16_t syms  = vqtbl2q_u8(c2s_vec, codes);
+            vst1q_u8(symbols + i, syms);
+        }
+        /* 8-code tail. */
+        for (; i + 8 <= n; i += 8) {
+            uint8x8_t codes = flat_d5_spread(bm + ((i * 5) >> 3));
+            uint8x8_t syms  = vqtbl2_u8(c2s_vec, codes);
             vst1_u8(symbols + i, syms);
         }
         for (; i < n; i++) {
