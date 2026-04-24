@@ -1,5 +1,27 @@
 # Prefix-radix decoder
 
+> **Status (as of `8754347`, 2026-04-24):** the flat-tree special case
+> described in §2-3 of this document has been **superseded** by the
+> *flat-subtree fast path* landed in April 2026 (commit `a275d05` and
+> follow-ups).  The flat-subtree path detects every maximal flat region
+> in the Huffman tree — including the whole-tree flat case — and uses
+> the same N·D-bit packed-stream mechanism described here, but from
+> inside `decode_node_neon` directly, without a separate backend.
+> See RESULTS.md §"Tested and adopted" for the current state.
+>
+> The **non-flat prefix-radix path** described in §5-6 remains an
+> unretired research track — slower than `pivco_n` on M4 (1.2–2.0×) but
+> kept as the `pivco_p` benchmark column for comparison against the
+> main decoder's flat-subtree path.  Nested / multi-stage radix (§4, §6)
+> would target the same distributions the flat-subtree path already
+> wins on, so that work is also effectively displaced.
+>
+> This document is preserved as historical record of the design
+> exploration.  Its proofs about *where* flat-region exploitation
+> pays off (the "single-stage generalisation wins at M≥2" result in
+> §3 and the multi-stage staircase analysis in §4) were directly
+> validated by the flat-subtree sweep results.
+
 An alternative PIVCO decode path for Huffman tables whose **minimum code
 length is ≥ 2**: replace several levels of 2-way SIMD partition with a
 single radix pass over the first `M` bits of every element's code,

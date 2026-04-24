@@ -1,0 +1,80 @@
+=== PIVCO-Huffman Benchmark Results ===
+Date: 2026-04-24 20:47 UTC
+Commit: 8754347
+Environment:
+Linux ip-172-31-30-232.us-west-1.compute.internal 6.1.166-197.305.amzn2023.aarch64 #1 SMP Mon Mar 23 09:53:02 UTC 2026 aarch64 aarch64 aarch64 GNU/Linux
+
+CPU(s):                                  1
+Model:                                   1
+NUMA node0 CPU(s):                       0
+
+PRETTY_NAME="Amazon Linux 2023.11.20260406"
+
+cc (GCC) 11.5.0 20240719 (Red Hat 11.5.0-5)
+
+Platform: AWS Graviton 4 (Neoverse-V2)
+SIMD: NEON (ARMv9)
+Block size: 8192
+
+[ 86%] Built target pivco_one_leaf_stats
+[ 91%] Built target pivco_multi_stage_stats
+[ 91%] Built target pivco_prefix_profile
+[ 91%] Built target pivco_flat_subtree_stats
+[100%] Built target pivco_huffman_bench
+[test_roundtrip_zipf_block_9] PASS (pivco=6440 B, trad=6431 B, ratio=1.00x)
+
+=== ALL PASSED (0 failures) ===
+=== BENCH ===
+  WARNING: proba80/huf0_4s spread 5.6% (467..495)
+  WARNING: proba50/pivco_n spread 10.5% (883..987)
+  WARNING: proba50/huf0_4s spread 5.5% (466..493)
+  WARNING: proba14/trad_4s spread 5.2% (391..412)
+  WARNING: proba02/huf0_x2 spread 5.7% (477..506)
+  WARNING: bell_s10/pivco_n spread 6.5% (529..565)
+  WARNING: bell_s10/huf0_x2 spread 8.7% (726..796)
+=== PIVCO-Huffman Benchmarks ===
+Sequence: 4M, Repeats: 20 (80M/run), Block: 8192, Runs: 5 (drop 2)
+
+DECODE M/s    | pivco_s pivco_n pivco_p | trad_1s trad_4s | huf0_1s huf0_x1 huf0_x2 | rans_x2 |   ratio
+--------------|-------------------------|-----------------|----------------------------|---------|--------
+proba80       |     198    1955     211 |     161     517 |     133     467     838 |     117 |  2.33x
+proba50       |      69     986     188 |     154     419 |     134     466     839 |     101 |  1.18x
+proba14       |      38     461     192 |     140     408 |     133     466     827 |     102 |  0.56x
+proba02       |      37     386     197 |     131     413 |     131     464     477 |     102 |  0.81x
+bell_s10      |      62     563     199 |     140     114 |     131     464     726 |     105 |  0.78x
+bell_s30      |      41     411     207 |     264     229 |     263     926     927 |     208 |  0.44x
+bell_s80      |     114    1051     368 |     269     884 |       0       0       0 |     245 |  1.19x
+uniform       |     951    2170    2078 |     284     937 |       0       0       0 |     267 |  2.32x
+english       |      90    1047     396 |     283     863 |     263     931    1638 |     212 |  0.64x
+zipfian       |      84     975     402 |     251     883 |     263     924    1187 |     175 |  0.82x
+sparse_4      |     966    3078    2934 |     328    1021 |     264     939    1687 |     278 |  1.82x
+sparse_16     |     960    2605    2429 |     312    1011 |     264     939    1648 |     274 |  1.58x
+geometric     |     137    1827     371 |     303     230 |     264     933    1680 |     201 |  1.09x
+two_sym_eq    |     261   14333    3809 |     337    1022 |     264     937    1683 |     280 |  8.52x
+two_sym_90/10 |     654   14344    3811 |     338    1022 |     264     937    1667 |     255 |  8.60x
+flat_M3       |     923    2932    1086 |     319    1018 |     264     939    1684 |     275 |  1.74x
+flat_M5       |     883    3185    1088 |     304    1003 |     264     939    1652 |     272 |  1.93x
+flat_M6       |     881    2344    1384 |     297     987 |     263     934    1541 |     269 |  1.52x
+flat_M7       |     847    2788    1086 |     290     968 |     263     935     857 |     268 |  2.88x
+
+  5 runs of 80M symbols each (20x 4M), drop 2 slowest, warn if spread > 5%
+  PIVCO/trad decode in 8192-symbol blocks
+  huf0 uses 128KB chunks (its max block size)
+  rANS decodes full 4M at once
+  CPU freq drift: +97.7% (OK)
+  Total wall time: 251.8 seconds
+ |     505    1348    1298 |     156     514 |     134     468     829 |     138 |  1.63x
+geometric     |      69     976     188 |     153     116 |     131     466     838 |     101 |  1.16x
+two_sym_eq    |     131    5298    2000 |     168     517 |     131     467     839 |     140 |  6.31x
+two_sym_90/10 |     325   14297    2000 |     172     551 |     134     467     836 |     127 | 17.11x
+flat_M3       |     466    1430     534 |     161     516 |     134     468     838 |     139 |  1.71x
+flat_M5       |     456    1809     570 |     154     514 |     131     468     831 |     136 |  2.18x
+flat_M6       |     456    1275     702 |     149     506 |     133     466     801 |     135 |  1.59x
+flat_M7       |     424    1395     533 |     145     475 |     133     467     447 |     135 |  2.94x
+
+  5 runs of 80M symbols each (20x 4M), drop 2 slowest, warn if spread > 5%
+  PIVCO/trad decode in 8192-symbol blocks
+  huf0 uses 128KB chunks (its max block size)
+  rANS decodes full 4M at once
+  WARNING: CPU freq dropped 50.5% (throttling?)
+  Total wall time: 252.4 seconds

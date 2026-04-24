@@ -1,13 +1,34 @@
 # PIVCO-Huffman Decode Ideas
 
-## Flat-subtree fast path — format-change variant
+## ~~Flat-subtree fast path — format-change variant~~ — SHIPPED
 
-The full-tree flat case (`min_len == max_len`) has a shipped fast path
-in `pivco_huffman_decode_neon_prefix` — the format stores `M` packed
-bits per element and decode is a single `code_to_sym[prefix]` lookup.
-Wins 2.47× on uniform and 1.18-1.24× on sparse_* (§3 of PREFIX_RADIX.md).
+> **Status (as of `8754347`, 2026-04-24):** SHIPPED.  Commits
+> `a275d05` (initial, flat-subtree at non-root nodes on scalar + NEON),
+> `0d9ed64` (root-flat unified into the same mechanism), `7c3238b`
+> (ported to x86 SSE4.1 and AVX-512), `0a92fe3` (libm link fix for
+> Linux).  Measurement analyzer:
+> [`extras/bench_flat_subtree_stats.c`](extras/bench_flat_subtree_stats.c).
+> Four-platform sweep:
+> [`results/20260424-204720-0a92fe3-flat-subtree-sweep.md`](results/20260424-204720-0a92fe3-flat-subtree-sweep.md).
+> Full-grid numbers in RESULTS.md §"Tested and adopted" /
+> §"Benchmark Results".  Replaces (subsumes) the old root-flat
+> `decode_neon_prefix` fast path; the old backend stays as the
+> `pivco_p` column for research comparison.
+>
+> The proposal text below is preserved as historical record —
+> everything here matches what was implemented, and the §"Measured
+> applicability" and §"Implementation sketch" sections are a
+> faithful description of how the shipped code behaves.  The
+> predicted gains matched reality — see RESULTS.md for the landed
+> numbers.
 
-**The generalisation is a *format change*, not a decode-only
+The full-tree flat case (`min_len == max_len`) had a shipped fast path
+in `pivco_huffman_decode_neon_prefix` before this work — the format
+stored `M` packed bits per element and decode was a single
+`code_to_sym[prefix]` lookup.  Won 2.47× on uniform and 1.18-1.24× on
+sparse_* (§3 of PREFIX_RADIX.md).
+
+**The generalisation was a *format change*, not a decode-only
 optimisation**: when the encoder detects that a specific internal node's
 subtree is flat with depth `D >= 2` (all leaves reach the same relative
 depth, 2^D codes total), it stops emitting `D` levels of bitmaps for
@@ -188,7 +209,21 @@ Deep nodes are small, but they are also common on moderate distributions.
 Reducing scalar fallback overhead should improve the AVX-512 backend's worst
 cases without disturbing the strong 32-wide fast path.
 
-## Product-level idea: hybrid block decoder
+## ~~Product-level idea: hybrid block decoder~~ — largely obsoleted
+
+> **Status (as of `8754347`, 2026-04-24):** largely obsoleted by the
+> flat-subtree fast path.  On Apple M4 the PIVCO decoder now beats
+> `huf0`/`trad_4s` on 18/19 distributions.  The only remaining
+> consistent loss is proba14 (0.96×) where the flat-subtree analyzer
+> predicted 0.9% coverage — i.e., the tree shape doesn't permit
+> flat-subtree savings.  A per-table fallback to huf0 would help there
+> but the absolute gap is small.
+>
+> A hybrid block decoder still makes sense on **Zen 3 SSE4.1** where
+> PIVCO loses on several moderate-entropy distributions (bell_*,
+> proba02, english, zipfian at 0.41–0.62×) because the per-cycle
+> partition cost is already cheap.  On that platform falling back to
+> huf0_x2 for those tables would meaningfully boost the geometric mean.
 
 The results strongly suggest that PIVCO wins on skewed distributions and loses
 on moderate/uniform ones.
@@ -240,25 +275,28 @@ These already appear explored or unlikely to pay off:
 
 ## Suggested implementation order
 
-Leaf-child fusion is *shipped*; the remaining outstanding work, roughly
-in increasing cost / decreasing certainty:
+Leaf-child fusion and the flat-subtree fast path are both *shipped*
+(see §"Flat-subtree fast path — format-change variant" above and
+RESULTS.md).  The remaining outstanding work, roughly in increasing
+cost / decreasing certainty:
 
-1. **Runtime flat-tree gate** in `pivco_huffman_decode` — route tables
-   with `min_len == max_len` to `decode_neon_prefix`.  Pure win on
-   uniform / sparse_* / flat_M*; no regression on non-flat tables.
-   Smallest and most certain.
-2. **Flat-subtree fast path** (§"Flat-subtree fast path — format-change
-   variant" above) — measurement is done
-   (`./build/pivco_flat_subtree_stats`) and shows 70-100% coverage on
-   bell_* / proba02 / english / zipfian, exactly the distributions
-   `pivco_n` currently loses on.  Format-change approach reuses the
-   packed-bit decode path already shipped for full-tree flat.  Highest-
-   impact remaining item.
-3. **TBL-based K-way bucket** for `decode_neon_prefix` phase 4 — the
-   main remaining phase-4 lever in the non-flat prefix-radix path.
-   Lower priority if flat-subtree fast path displaces the prefix-radix
-   approach for most real-world tables.
-4. **Nested (multi-stage) prefix-radix** — only if we've already
-   committed to the prefix-radix path winning on zipfian-shaped
-   staircases (§4 of PREFIX_RADIX.md).  Likely superseded by the
-   flat-subtree fast path on similar distributions.
+1. **Vectorise the D-bit extract on AVX-512** using `vpmultishiftqb`
+   (VBMI2).  Xeon moderate-entropy cases (english 0.93×, bell_s10
+   0.86×) are close to parity and likely cross with this.  Low-hanging.
+2. **Zen 3 SSE4.1 hybrid block decoder** — on Zen 3 the
+   moderate-entropy distributions stay at 0.41–0.62× vs huf0_x2 even
+   after flat-subtree.  A per-table fallback to `trad_huffman_decode_4s`
+   (§"Product-level idea: hybrid block decoder") would plausibly
+   recover most of the gap.  Gate heuristic: when flat-subtree coverage
+   estimate is low (e.g., `≤ 20%`) AND `max_len > 6`, fall back to huf0.
+3. **TBL-based K-way bucket** for `decode_neon_prefix` phase 4 — only
+   relevant to the non-flat prefix-radix research path, which is
+   effectively unused now that flat-subtree wins on the same
+   distributions.  Can drop.
+4. **Nested (multi-stage) prefix-radix** — same as (3); subsumed by
+   flat-subtree.  Can drop.
+5. **Retire `pivco_huffman_decode_neon_prefix`** — the remaining
+   research backend.  All of its flat-tree wins are now handled by
+   the flat-subtree path inside `decode_node_neon`; the non-flat
+   prefix-radix never became competitive.  Straight deletion clears
+   ~600 lines of code + the `pivco_p` benchmark column.

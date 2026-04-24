@@ -37,22 +37,40 @@ cmake --build build
 
 - **Backends**: scalar, NEON (ARM), SSE4.1 (x86), AVX-512 VBMI2 (Intel), SVE (disabled)
 - **Block size**: 8192 (ARM/AVX-512), 4096 (x86 SSE) — auto-detected
-- **Format**: DFS-ordered code bits, no continuation bitmaps
-- **Key data structure**: `compress_tab[256][32]` combined shuffle table (shared between NEON and neon2)
+- **Format**: DFS-ordered code bits; flat subtrees with depth D ≥ 2 emit one N·D-bit packed region instead of D bitmap levels
+- **Key data structures**:
+  - `compress_tab[256][32]` combined shuffle table (TBL/pshufb partition)
+  - `table->flat_depth[node]`, `table->flat_offset[node]`,
+    `table->flat_code_to_sym[pool]` — per-table flat-subtree dispatch
 
-## EC2 Test Hosts
+## Test Hosts (AWS EC2)
 
 ```sh
-# Sync to remote
-rsync -avz --delete --exclude='build/' --exclude='.git/' --exclude='.claude/' --exclude='*.dSYM' --exclude='.venv/' . ec2test-XXX:pivco-huffman/
+# Sync to remote (cloud code is assumed stale — rsync before every run)
+rsync -avz --delete --exclude='build/' --exclude='build-asan/' \
+  --exclude='build-release/' --exclude='.git/' --exclude='.claude/' \
+  --exclude='.vscode/' --exclude='*.dSYM' --exclude='.venv/' \
+  . test-XXX:pivco-huffman/
 
-# Hosts: ec2test-c6a (Zen3), ec2test-c8i (Xeon AVX-512), ec2test-c8g (Graviton4)
+# SSH aliases: test-c6a (Zen 3 SSE4.1), test-c8i (Xeon AVX-512 VBMI2),
+#              test-c8g (Graviton 4 NEON)
 ```
+
+After every full sweep, save the per-platform raw output and a
+headline-level `.md` summary to `results/` so we can diff across
+revisions and cite prior numbers.
 
 ## Key Files
 
+- `include/pivco_huffman.h` — public API + table struct
+- `src/huffman_table.c` — `pivco_huffman_build_table` + flat-subtree detection
 - `src/pivco_huffman_neon.c` — main NEON decode/encode (hot path)
-- `src/pivco_huffman_avx512.c` — AVX-512 vpcompressw backend
-- `src/pivco_huffman_neon2.c` — WIP 4-way fused partition (has bugs)
+- `src/pivco_huffman_x86.c` — x86 SSE4.1 backend
+- `src/pivco_huffman_avx512.c` — AVX-512 VBMI2 backend
+- `src/pivco_huffman_scalar.c` — reference scalar backend
+- `src/pivco_huffman_neon_prefix.c` — research prefix-radix backend (`pivco_p` bench column)
 - `bench/bench_main.c` — benchmark harness (4M × repeats methodology)
+- `extras/bench_flat_subtree_stats.c` — flat-subtree applicability analyzer
 - `RESULTS.md` — all benchmark results and analysis
+- `PREFIX_RADIX.md` — historical design record of the prefix-radix path
+- `results/` — timestamped + sha'd full-sweep captures

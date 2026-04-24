@@ -1,3 +1,20 @@
+=== PIVCO-Huffman Benchmark Results ===
+Date: 2026-04-24 20:47 UTC
+Commit: 8754347
+Host: MBP14-M4.local
+Platform: Apple M4 Max
+Architecture: arm64
+OS: macOS 26.3.1
+Compiler: Apple clang version 17.0.0 (clang-1700.4.4.1)
+SIMD: NEON (ARMv8.6-A)
+Block size: 8192
+
+=== TESTS ===
+[test_roundtrip_zipf_block_9] PASS (pivco=6440 B, trad=6431 B, ratio=1.00x)
+
+=== ALL PASSED (0 failures) ===
+
+=== BENCH ===
 === PIVCO-Huffman Benchmarks ===
 Sequence: 4M, Repeats: 20 (80M/run), Block: 8192, Runs: 5 (drop 2)
 

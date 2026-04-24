@@ -88,9 +88,9 @@ Compression ratio unchanged by the format change, within rounding:
 about 100 bytes/8KB block tighter than bitmap-per-level due to single
 tail padding vs D per-level paddings.
 
-## Raw output
+## Raw output (per-platform, full bench + environment)
 
-- `raw_m4.txt` — Apple M4 Max
-- `raw_c6a.txt` — AMD EPYC 7R13 (Zen 3)
-- `raw_c8i.txt` — Intel Xeon 6975P-C (AVX-512)
-- `raw_c8g.txt` — AWS Graviton 4 (NEON)
+- [`m4_max-20260424-2047.txt`](m4_max-20260424-2047.txt) — Apple M4 Max
+- [`zen3-20260424-2047.txt`](zen3-20260424-2047.txt) — AMD EPYC 7R13 (Zen 3 / SSE4.1)
+- [`xeon_6975p-20260424-2047.txt`](xeon_6975p-20260424-2047.txt) — Intel Xeon 6975P-C (AVX-512 VBMI2)
+- [`graviton4-20260424-2047.txt`](graviton4-20260424-2047.txt) — AWS Graviton 4 (NEON)
