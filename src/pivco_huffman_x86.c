@@ -141,6 +141,32 @@ static inline uint32_t extract_D_bits_x86(const uint8_t *in,
     return (val >> bit_off) & ((1u << D) - 1);
 }
 
+/* D=4 SSE4.1 spread: 16 codes from 8 bytes of bm.
+ *
+ * 8 bytes loaded, duplicated to 16 bytes via pshufb: [b0,b0,b1,b1,..].
+ * Treating each pair (dup_{2i}, dup_{2i+1}) as uint16 (low byte, high byte):
+ *   masked = dup & 0xF00F → (b_i & 0x0F, b_i & 0xF0) in low/high bytes.
+ *   shifted = masked >> 4 (uint16 shift) → (0, b_i >> 4) in low/high bytes
+ *     (the low nibble shifts out of the low byte; the high nibble shifts
+ *      across the byte boundary into the low byte but also the high byte
+ *      via a 4-bit move — specifically: pair value (b_i&0xF0)*256 + (b_i&0x0F)
+ *      right-shifted 4 = (b_i&0xF0)*16, bytes = (0, b_i>>4)).
+ *   blend with mask [0,0xFF,0,0xFF,..] to pick shifted's odd bytes and
+ *   masked's even bytes → (b_i&0x0F, b_i>>4) per pair = codes 0,1,2,..,15. */
+static inline __m128i flat_d4_spread_x86(const uint8_t *bm_ptr)
+{
+    __m128i raw = _mm_loadl_epi64((const __m128i *)bm_ptr);
+    const __m128i dup_idx = _mm_setr_epi8(
+        0,0, 1,1, 2,2, 3,3, 4,4, 5,5, 6,6, 7,7);
+    __m128i dup = _mm_shuffle_epi8(raw, dup_idx);
+    __m128i masked = _mm_and_si128(dup, _mm_set1_epi16(0xF00F));
+    __m128i shifted = _mm_srli_epi16(masked, 4);
+    /* Blend: take high byte of each pair from shifted (= b_i >> 4),
+     * low byte from masked (= b_i & 0xF). */
+    __m128i blend_mask = _mm_set1_epi16((int16_t)0xFF00);
+    return _mm_blendv_epi8(masked, shifted, blend_mask);
+}
+
 /* Decode n elements through a D-bit packed region + code_to_sym table,
  * scattering to symbols[indices[i]].  Same per-D specialised unpackers
  * as NEON; scalar-fast on x86. */
@@ -149,6 +175,41 @@ static inline void flat_decode_scatter_x86(uint8_t *symbols,
                                             const uint8_t *bm, int D,
                                             const uint8_t *c2s)
 {
+    if (D == 4) {
+        /* c2s has 16 entries — exactly fills a pshufb register. */
+        __m128i c2s_vec = _mm_loadu_si128((const __m128i *)c2s);
+        int i = 0;
+        for (; i + 16 <= n; i += 16) {
+            __m128i codes = flat_d4_spread_x86(bm + (i >> 1));
+            __m128i syms  = _mm_shuffle_epi8(c2s_vec, codes);
+            symbols[indices[i     ]] = (uint8_t)_mm_extract_epi8(syms, 0);
+            symbols[indices[i +  1]] = (uint8_t)_mm_extract_epi8(syms, 1);
+            symbols[indices[i +  2]] = (uint8_t)_mm_extract_epi8(syms, 2);
+            symbols[indices[i +  3]] = (uint8_t)_mm_extract_epi8(syms, 3);
+            symbols[indices[i +  4]] = (uint8_t)_mm_extract_epi8(syms, 4);
+            symbols[indices[i +  5]] = (uint8_t)_mm_extract_epi8(syms, 5);
+            symbols[indices[i +  6]] = (uint8_t)_mm_extract_epi8(syms, 6);
+            symbols[indices[i +  7]] = (uint8_t)_mm_extract_epi8(syms, 7);
+            symbols[indices[i +  8]] = (uint8_t)_mm_extract_epi8(syms, 8);
+            symbols[indices[i +  9]] = (uint8_t)_mm_extract_epi8(syms, 9);
+            symbols[indices[i + 10]] = (uint8_t)_mm_extract_epi8(syms, 10);
+            symbols[indices[i + 11]] = (uint8_t)_mm_extract_epi8(syms, 11);
+            symbols[indices[i + 12]] = (uint8_t)_mm_extract_epi8(syms, 12);
+            symbols[indices[i + 13]] = (uint8_t)_mm_extract_epi8(syms, 13);
+            symbols[indices[i + 14]] = (uint8_t)_mm_extract_epi8(syms, 14);
+            symbols[indices[i + 15]] = (uint8_t)_mm_extract_epi8(syms, 15);
+        }
+        for (; i + 2 <= n; i += 2) {
+            uint8_t b = bm[i >> 1];
+            symbols[indices[i    ]] = c2s[b & 0x0F];
+            symbols[indices[i + 1]] = c2s[b >> 4];
+        }
+        for (; i < n; i++) {
+            uint32_t code = extract_D_bits_x86(bm, i * D, D);
+            symbols[indices[i]] = c2s[code];
+        }
+        return;
+    }
     int i = 0;
     switch (D) {
     case 2:
@@ -240,6 +301,25 @@ static inline void flat_decode_direct_x86(uint8_t *symbols, int n,
                                            const uint8_t *bm, int D,
                                            const uint8_t *c2s)
 {
+    if (D == 4) {
+        __m128i c2s_vec = _mm_loadu_si128((const __m128i *)c2s);
+        int i = 0;
+        for (; i + 16 <= n; i += 16) {
+            __m128i codes = flat_d4_spread_x86(bm + (i >> 1));
+            __m128i syms  = _mm_shuffle_epi8(c2s_vec, codes);
+            _mm_storeu_si128((__m128i *)(symbols + i), syms);
+        }
+        for (; i + 2 <= n; i += 2) {
+            uint8_t b = bm[i >> 1];
+            symbols[i    ] = c2s[b & 0x0F];
+            symbols[i + 1] = c2s[b >> 4];
+        }
+        for (; i < n; i++) {
+            uint32_t code = extract_D_bits_x86(bm, i * D, D);
+            symbols[i] = c2s[code];
+        }
+        return;
+    }
     int i = 0;
     switch (D) {
     case 2:
