@@ -40,6 +40,19 @@ static inline uint32_t extract_D_bits_scalar(const uint8_t *in,
     return (val >> bit_off) & ((1u << D) - 1);
 }
 
+/* Unpack n D-bit codes from bm, look up in c2s, scatter to
+ * symbols[indices[i]].  Used by decode_node for flat-subtree dispatch. */
+static inline void flat_decode_scatter_scalar(uint8_t *symbols,
+                                               const uint16_t *indices, int n,
+                                               const uint8_t *bm, int D,
+                                               const uint8_t *c2s)
+{
+    for (int i = 0; i < n; i++) {
+        uint32_t code = extract_D_bits_scalar(bm, i * D, D);
+        symbols[indices[i]] = c2s[code];
+    }
+}
+
 /* ---------- PIVCO Huffman Encode (Scalar, Tree-Walk) ----------
  *
  * DFS tree walk. At each internal node with n indices:
@@ -174,18 +187,14 @@ static void decode_node(const pivco_huffman_table_t *table,
         return;
     }
 
-    /* Flat-subtree fast path: read n*D packed bits, look up each element's
-       symbol directly. */
+    /* Flat-subtree fast path. */
     if (table->flat_depth[node_id] >= 2) {
         int D = table->flat_depth[node_id];
         int total_bytes = (n * D + 7) >> 3;
         const uint8_t *bm = *in_ptr;
         *in_ptr += total_bytes;
         const uint8_t *c2s = &table->flat_code_to_sym[table->flat_offset[node_id]];
-        for (int i = 0; i < n; i++) {
-            uint32_t code = extract_D_bits_scalar(bm, i * D, D);
-            symbols[indices[i]] = c2s[code];
-        }
+        flat_decode_scatter_scalar(symbols, indices, n, bm, D, c2s);
         return;
     }
 
@@ -232,28 +241,11 @@ static void decode_node(const pivco_huffman_table_t *table,
                 indices[n_left++] = indices[j];
         }
 
-        if (left_leaf) {
-            if (node->left != skip_node) {
-                uint8_t sym = (uint8_t)left_child->symbol;
-                for (int j = 0; j < n_left; j++)
-                    symbols[indices[j]] = sym;
-            }
-            decode_node(table, node->right, tmp, n_right,
-                        symbols, in_ptr, tmp + n_right, skip_node);
-        } else if (right_leaf) {
-            if (node->right != skip_node) {
-                uint8_t sym = (uint8_t)right_child->symbol;
-                for (int j = 0; j < n_right; j++)
-                    symbols[tmp[j]] = sym;
-            }
-            decode_node(table, node->left, indices, n_left,
-                        symbols, in_ptr, tmp + n_right, skip_node);
-        } else {
-            decode_node(table, node->left, indices, n_left,
-                        symbols, in_ptr, tmp + n_right, skip_node);
-            decode_node(table, node->right, tmp, n_right,
-                        symbols, in_ptr, tmp + n_right, skip_node);
-        }
+        /* Recurse into both; child's entry handles leaf/skip_node. */
+        decode_node(table, node->left, indices, n_left,
+                    symbols, in_ptr, tmp + n_right, skip_node);
+        decode_node(table, node->right, tmp, n_right,
+                    symbols, in_ptr, tmp + n_right, skip_node);
     }
 }
 

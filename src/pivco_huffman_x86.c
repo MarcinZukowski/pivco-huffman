@@ -543,24 +543,11 @@ static void decode_node_x86(const pivco_huffman_table_t *table,
                 indices[n_left++] = indices[j];
         }
 
-        if (left_leaf) {
-            if (node->left != skip_node)
-                scatter_write_sse(symbols, indices, n_left,
-                                  (uint8_t)left_child->symbol);
-            decode_node_x86(table, node->right, tmp, n_right,
-                             symbols, in_ptr, tmp + n_right, skip_node);
-        } else if (right_leaf) {
-            if (node->right != skip_node)
-                scatter_write_sse(symbols, tmp, n_right,
-                                  (uint8_t)right_child->symbol);
-            decode_node_x86(table, node->left, indices, n_left,
-                             symbols, in_ptr, tmp + n_right, skip_node);
-        } else {
-            decode_node_x86(table, node->left, indices, n_left,
-                             symbols, in_ptr, tmp + n_right, skip_node);
-            decode_node_x86(table, node->right, tmp, n_right,
-                             symbols, in_ptr, tmp + n_right, skip_node);
-        }
+        /* Recurse into both; child's entry handles leaf/skip_node. */
+        decode_node_x86(table, node->left, indices, n_left,
+                         symbols, in_ptr, tmp + n_right, skip_node);
+        decode_node_x86(table, node->right, tmp, n_right,
+                         symbols, in_ptr, tmp + n_right, skip_node);
     }
 }
 
@@ -661,24 +648,11 @@ int pivco_huffman_decode_x86(const uint8_t *in, size_t in_len,
             n_left += (8 - nr);
         }
 
-        if (left_leaf) {
-            if (root->left != skip_node)
-                scatter_write_sse(symbols, indices, n_left,
-                                  (uint8_t)left_child->symbol);
-            decode_node_x86(table, root->right, tmp, n_right,
-                             symbols, &ptr, tmp + n_right, skip_node);
-        } else if (right_leaf) {
-            if (root->right != skip_node)
-                scatter_write_sse(symbols, tmp, n_right,
-                                  (uint8_t)right_child->symbol);
-            decode_node_x86(table, root->left, indices, n_left,
-                             symbols, &ptr, tmp + n_right, skip_node);
-        } else {
-            decode_node_x86(table, root->left, indices, n_left,
-                             symbols, &ptr, tmp + n_right, skip_node);
-            decode_node_x86(table, root->right, tmp, n_right,
-                             symbols, &ptr, tmp + n_right, skip_node);
-        }
+        /* Recurse into both; child's entry handles leaf/skip_node. */
+        decode_node_x86(table, root->left, indices, n_left,
+                         symbols, &ptr, tmp + n_right, skip_node);
+        decode_node_x86(table, root->right, tmp, n_right,
+                         symbols, &ptr, tmp + n_right, skip_node);
     }
 
     *consumed = (size_t)(ptr - in);

@@ -73,12 +73,12 @@ decode_node(indices[], n, tree_node):
   if both children are leaves:           # stage fusion (D=1 case)
     scatter sym_left/sym_right based on code bits — no partition
     return
+  if prefill leaf is one side:           # half-partition
+    compact only the other side, recurse
+    return
   SIMD-partition indices into left[] (bit=0) and right[] (bit=1)
-  if one child is leaf:                  # stage fusion
-    scatter leaf symbol inline, recurse non-leaf child only
-  else:
-    decode_node(left, n_left, tree_node->left)
-    decode_node(right, n_right, tree_node->right)
+  decode_node(left,  n_left,  tree_node->left)    # leaf child handled
+  decode_node(right, n_right, tree_node->right)   # at entry, not here
 ```
 
 At each mixed-depth internal node, the block of indices is split into
