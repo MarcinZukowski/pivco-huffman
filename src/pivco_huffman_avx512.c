@@ -139,6 +139,28 @@ static inline __m128i flat_d2_spread_avx512(const uint8_t *bm_ptr)
     return _mm_and_si128(raw, _mm_set1_epi8(0x03));
 }
 
+/* D=3 has NO AVX-512 fast path — both multishift and pshufb+srlv
+ * variants benchmarked slower than the scalar case in
+ * FLAT_UNPACK_SWITCH_IDX, which GCC auto-vectorises the 8-scalar-store
+ * scatter pattern into wide moves.  Leaving the scalar fallback. */
+
+/* D=4: 16 codes from 8 bytes of bm.  2 codes per byte, no cross-byte
+ * carries.  Broadcast 8 bytes to both uint64 lanes; multishift with
+ * offsets {0,4,..,28, 32,36,..,60} extracts codes 0..7 from lane 0
+ * (byte 0..3) and codes 8..15 from lane 1 (bytes 4..7).  Wait —
+ * offsets 32..60 in a 64-bit lane still hit bm[4..7]. */
+static inline __m128i flat_d4_spread_avx512(const uint8_t *bm_ptr)
+{
+    uint64_t packed;
+    memcpy(&packed, bm_ptr, 8);
+    __m128i data = _mm_set1_epi64x((int64_t)packed);
+    const __m128i ctrl = _mm_setr_epi8(
+        0, 4,  8, 12, 16, 20, 24, 28,
+        32, 36, 40, 44, 48, 52, 56, 60);
+    __m128i raw = _mm_multishift_epi64_epi8(ctrl, data);
+    return _mm_and_si128(raw, _mm_set1_epi8(0x0F));
+}
+
 #define FLAT_UNPACK_SWITCH_IDX(dst_expr)                                 \
     int i = 0;                                                            \
     switch (D) {                                                          \
@@ -223,6 +245,36 @@ static inline void flat_decode_scatter_avx512(uint8_t *symbols,
                                                const uint8_t *bm, int D,
                                                const uint8_t *c2s)
 {
+    if (D == 4) {
+        /* c2s has 16 entries — exactly fills a pshufb register. */
+        __m128i c2s_vec = _mm_loadu_si128((const __m128i *)c2s);
+        int i = 0;
+        for (; i + 16 <= n; i += 16) {
+            __m128i codes = flat_d4_spread_avx512(bm + (i >> 1));
+            __m128i syms  = _mm_shuffle_epi8(c2s_vec, codes);
+            symbols[indices[i     ]] = (uint8_t)_mm_extract_epi8(syms, 0);
+            symbols[indices[i +  1]] = (uint8_t)_mm_extract_epi8(syms, 1);
+            symbols[indices[i +  2]] = (uint8_t)_mm_extract_epi8(syms, 2);
+            symbols[indices[i +  3]] = (uint8_t)_mm_extract_epi8(syms, 3);
+            symbols[indices[i +  4]] = (uint8_t)_mm_extract_epi8(syms, 4);
+            symbols[indices[i +  5]] = (uint8_t)_mm_extract_epi8(syms, 5);
+            symbols[indices[i +  6]] = (uint8_t)_mm_extract_epi8(syms, 6);
+            symbols[indices[i +  7]] = (uint8_t)_mm_extract_epi8(syms, 7);
+            symbols[indices[i +  8]] = (uint8_t)_mm_extract_epi8(syms, 8);
+            symbols[indices[i +  9]] = (uint8_t)_mm_extract_epi8(syms, 9);
+            symbols[indices[i + 10]] = (uint8_t)_mm_extract_epi8(syms, 10);
+            symbols[indices[i + 11]] = (uint8_t)_mm_extract_epi8(syms, 11);
+            symbols[indices[i + 12]] = (uint8_t)_mm_extract_epi8(syms, 12);
+            symbols[indices[i + 13]] = (uint8_t)_mm_extract_epi8(syms, 13);
+            symbols[indices[i + 14]] = (uint8_t)_mm_extract_epi8(syms, 14);
+            symbols[indices[i + 15]] = (uint8_t)_mm_extract_epi8(syms, 15);
+        }
+        for (; i < n; i++) {
+            uint32_t code = extract_D_bits_avx512(bm, i * D, D);
+            symbols[indices[i]] = c2s[code];
+        }
+        return;
+    }
     if (D == 2) {
         /* c2s has 4 entries; broadcast to all 128-bit lanes for pshufb. */
         uint32_t c2s_lo;
@@ -274,6 +326,20 @@ static inline void flat_decode_direct_avx512(uint8_t *symbols, int n,
                                               const uint8_t *bm, int D,
                                               const uint8_t *c2s)
 {
+    if (D == 4) {
+        __m128i c2s_vec = _mm_loadu_si128((const __m128i *)c2s);
+        int i = 0;
+        for (; i + 16 <= n; i += 16) {
+            __m128i codes = flat_d4_spread_avx512(bm + (i >> 1));
+            __m128i syms  = _mm_shuffle_epi8(c2s_vec, codes);
+            _mm_storeu_si128((__m128i *)(symbols + i), syms);
+        }
+        for (; i < n; i++) {
+            uint32_t code = extract_D_bits_avx512(bm, i * D, D);
+            symbols[i] = c2s[code];
+        }
+        return;
+    }
     if (D == 2) {
         /* Same spread/lookup as scatter, but block-store 16 bytes. */
         uint32_t c2s_lo;
