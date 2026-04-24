@@ -71,6 +71,6 @@ revisions and cite prior numbers.
 - `src/pivco_huffman_neon_prefix.c` — research prefix-radix backend (`pivco_p` bench column)
 - `bench/bench_main.c` — benchmark harness (4M × repeats methodology)
 - `extras/bench_flat_subtree_stats.c` — flat-subtree applicability analyzer
-- `RESULTS.md` — all benchmark results and analysis
+- `README.md` — benchmark results, analysis, and primary project doc
 - `PREFIX_RADIX.md` — historical design record of the prefix-radix path
 - `results/` — timestamped + sha'd full-sweep captures

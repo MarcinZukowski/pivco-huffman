@@ -7,7 +7,7 @@
 > in the Huffman tree — including the whole-tree flat case — and uses
 > the same N·D-bit packed-stream mechanism described here, but from
 > inside `decode_node_neon` directly, without a separate backend.
-> See RESULTS.md §"Tested and adopted" for the current state.
+> See README.md §"Tested and adopted" for the current state.
 >
 > The **non-flat prefix-radix path** described in §5-6 remains an
 > unretired research track — slower than `pivco_n` on M4 (1.2–2.0×) but

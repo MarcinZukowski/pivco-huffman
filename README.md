@@ -1,5 +1,41 @@
 # PIVCO Huffman: Implementation & Benchmark Results
 
+## Contents
+
+- [TL;DR](#tldr)
+- [What is PIVCO-Huffman?](#what-is-pivco-huffman)
+  - [Encoded Format](#encoded-format)
+- [Implementation](#implementation)
+  - [Key Design Decisions](#key-design-decisions)
+- [Baselines](#baselines)
+  - [Traditional 1-stream (trad_1s)](#traditional-1-stream-trad_1s)
+  - [Our 4-stream (trad_4s)](#our-4-stream-trad_4s)
+  - [huff0 (cyan4973/FiniteStateEntropy)](#huff0-cyan4973finitestateentropy)
+  - [ryg_rans alias (rygorous/ryg_rans)](#ryg_rans-alias-rygorousryg_rans)
+- [Prior Art Survey](#prior-art-survey)
+- [Benchmark Results](#benchmark-results)
+  - [Apple M4 Max (NEON)](#apple-m4-max-neon-128kb-l1d-block-8192)
+  - [Intel Xeon 6975P-C (AVX-512 VBMI2)](#intel-xeon-6975p-c-avx-512-vbmi2-48kb-l1d-block-8192)
+  - [AWS Graviton 4 (NEON)](#aws-graviton-4-neoverse-v2-neon-64kb-l1d-block-8192)
+  - [AMD EPYC 7R13 (Zen 3 SSE4.1)](#amd-epyc-7r13-zen-3-sse41-32kb-l1d-block-4096)
+  - [Cross-Platform Summary](#cross-platform-summary-pivco-simd-vs-best-other-decoder)
+  - [Data Distributions](#data-distributions)
+  - [Compression Ratio](#compression-ratio)
+  - [Block Size Sweep](#block-size-sweep)
+- [Profiling](#profiling)
+- [Analysis](#analysis)
+  - [Where PIVCO Wins](#where-pivco-wins)
+  - [Where PIVCO Still Loses](#where-pivco-still-loses)
+  - [The Core Tradeoff](#the-core-tradeoff)
+  - [SIMD Width Scaling](#simd-width-scaling)
+- [Ideas That Can Make Things Faster](#ideas-that-can-make-things-faster)
+  - [Tested and adopted](#tested-and-adopted)
+  - [Tested and discarded](#tested-and-discarded)
+  - [Worth exploring](#worth-exploring)
+- [Building & Running](#building--running)
+
+---
+
 ## TL;DR
 
 SIMD Huffman decoder that walks the tree top-down and partitions the

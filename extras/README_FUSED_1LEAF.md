@@ -284,4 +284,4 @@ The concept *could* still pay off on architectures where:
   working set size.
 
 None of those is M4 NEON's profile, so this experiment is filed as a
-negative result.  Main entry in `RESULTS.md` → "Tested and discarded".
+negative result.  Main entry in `README.md` → "Tested and discarded".

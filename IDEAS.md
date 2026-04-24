@@ -10,7 +10,7 @@
 > [`extras/bench_flat_subtree_stats.c`](extras/bench_flat_subtree_stats.c).
 > Four-platform sweep:
 > [`results/20260424-204720-0a92fe3-flat-subtree-sweep.md`](results/20260424-204720-0a92fe3-flat-subtree-sweep.md).
-> Full-grid numbers in RESULTS.md §"Tested and adopted" /
+> Full-grid numbers in README.md §"Tested and adopted" /
 > §"Benchmark Results".  Replaces (subsumes) the old root-flat
 > `decode_neon_prefix` fast path; the old backend stays as the
 > `pivco_p` column for research comparison.
@@ -19,7 +19,7 @@
 > everything here matches what was implemented, and the §"Measured
 > applicability" and §"Implementation sketch" sections are a
 > faithful description of how the shipped code behaves.  The
-> predicted gains matched reality — see RESULTS.md for the landed
+> predicted gains matched reality — see README.md for the landed
 > numbers.
 
 The full-tree flat case (`min_len == max_len`) had a shipped fast path
@@ -131,7 +131,7 @@ mitigation options:
 
 ## Scatter fusion into partition — tried, reverted (recorded here for future reference)
 
-See RESULTS.md §"Stage fusion" and §"Tested and discarded": the
+See README.md §"Stage fusion" and §"Tested and discarded": the
 *leaf-child* fusion (check child-type before partitioning, run half-
 partition + scatter when one side is a leaf, sequential blend when both
 are leaves) is *already shipped* and gives +10-38% on NEON.
@@ -159,7 +159,7 @@ to compute packed offsets costs more than that on the TBL-bound hot path.
 
 Fusion only pays off when one instruction can compress wider than the 8-
 element TBL (AVX-512 `vpcompressw` → 32). Not worth further NEON work on
-this track. See RESULTS.md for full numbers.
+this track. See README.md for full numbers.
 
 ## ~~Interleave the 16-elem partition pair in decode~~ — attempted, null result
 
@@ -277,7 +277,7 @@ These already appear explored or unlikely to pay off:
 
 Leaf-child fusion and the flat-subtree fast path are both *shipped*
 (see §"Flat-subtree fast path — format-change variant" above and
-RESULTS.md).  The remaining outstanding work, roughly in increasing
+README.md).  The remaining outstanding work, roughly in increasing
 cost / decreasing certainty:
 
 1. **Vectorise the D-bit extract on AVX-512** using `vpmultishiftqb`
@@ -315,4 +315,4 @@ cost / decreasing certainty:
      the retired backend).
    - Keep `PREFIX_RADIX.md` as historical record (already banner'd as
      superseded).
-   - Update RESULTS.md / CLAUDE.md to reflect deletion.
+   - Update README.md / CLAUDE.md to reflect deletion.
