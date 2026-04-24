@@ -30,9 +30,23 @@ flat region instead of D per-level byte-alignment paddings.
 
 PIVCO-Huffman applies the PIVoted COlumnar approach to Huffman coding.
 Instead of decoding symbols one at a time via table lookup (traditional),
-PIVCO processes an entire block of N symbols simultaneously by walking
-the Huffman tree in bulk — partitioning the block's index set at each
-tree node using SIMD.
+PIVCO processes an entire block of N symbols simultaneously, using
+whichever of two complementary strategies fits the shape of each
+Huffman subtree best:
+
+- a **SIMD tree-walk partition** for mixed-depth subtrees, which
+  splits the block's index set by the bitmap at each internal node
+  and recurses;
+- a **flat-subtree fast path** for subtrees whose leaves all sit at
+  the same relative depth, which replaces a sequence of per-level
+  bitmaps with a single packed D-bit code per element and one direct
+  `code_to_sym[code]` lookup at the bottom.
+
+Detection and dispatch happen once at `pivco_huffman_build_table`
+time — the encoder walks the tree and flags every maximal flat subtree
+(local_min_depth == local_max_depth ≥ 2), pre-computes the
+`code_to_sym` lookup per flat subtree, and both encoder and decoder
+consult the flags to pick the right path at each node.
 
 **Traditional Huffman decode** processes one symbol at a time:
 peek bits → table lookup → emit symbol → consume bits → repeat.
@@ -40,7 +54,8 @@ The serial dependency chain (can't start the next symbol until you know
 how many bits the current one consumed) limits throughput to ~1 symbol
 per 3-4 cycles, even with 4-stream ILP tricks (huff0/zstd).
 
-**PIVCO-Huffman decode** processes all N symbols in parallel:
+**PIVCO-Huffman decode** processes all N symbols of the block in
+parallel, with per-node dispatch:
 
 ```
 decode_node(indices[], n, tree_node):
@@ -48,9 +63,14 @@ decode_node(indices[], n, tree_node):
     write tree_node->symbol to all n indices
     return
 
-  read n code bits from stream
+  if tree_node is a flat-subtree root (D >= 2):
+    read n*D packed bits from stream
+    for each element: symbols[indices[i]] = code_to_sym[D-bit code]
+    return                              # no recursion below this
 
-  if both children are leaves:           # stage fusion
+  read n code bits (bitmap) from stream
+
+  if both children are leaves:           # stage fusion (D=1 case)
     scatter sym_left/sym_right based on code bits — no partition
     return
   SIMD-partition indices into left[] (bit=0) and right[] (bit=1)
@@ -61,50 +81,83 @@ decode_node(indices[], n, tree_node):
     decode_node(right, n_right, tree_node->right)
 ```
 
-At each internal node, the block of indices is split into two dense
-sub-arrays using a TBL-based SIMD compress (precomputed 256-entry
-shuffle table, one `vqtbl1q_u8` per 8 uint16_t indices on NEON).
-At each leaf, the symbol is scatter-written to all indices in the list.
+At each mixed-depth internal node, the block of indices is split into
+two dense sub-arrays using a TBL-based SIMD compress (precomputed
+256-entry shuffle table, one `vqtbl1q_u8` per 8 uint16_t indices on
+NEON).  At each leaf, the symbol is scatter-written to all indices in
+the list.  At each flat-subtree root, the whole subtree is collapsed
+into a single packed-bit region — the decoder performs `n` D-bit
+extracts + `n` table lookups + `n` scalar byte stores, with no
+recursion below that node.
 
-**Stage fusion**: When children are leaves, the partition and scatter
-stages are fused. Both-leaves nodes scatter directly from the bitmap
-(branchless `syms[(mask >> k) & 1]`), eliminating the TBL shuffle
-entirely. One-leaf nodes partition only the non-leaf side and scatter
-the leaf symbol inline. This gives +10-38% on NEON platforms.
+**Stage fusion and flat-subtree are the same mechanism at different
+depths.**  `scatter_both_leaves` is exactly the D=1 case of the
+flat-subtree path (one bit per element, 2-entry inline `syms[]`
+lookup).  Flat-subtree at D ≥ 2 generalises it to deeper regions of
+the tree using a per-subtree `code_to_sym` table.  Both replace D
+levels of partition-and-recurse with a single packed-bit scatter.
 
-No accumulation of code bits, no table lookup, no range comparisons.
-The tree position tells you the symbol. The inner loop is purely:
-load indices → load code bits → shuffle-partition → store.
+**Coverage of the two paths** (measured on the standard bench
+distributions, see `extras/bench_flat_subtree_stats.c`):
+flat-subtree fires on 55–100% of elements for bell_* / proba02 /
+zipfian / english, and 100% of elements for the whole-tree flat cases
+(uniform / sparse_* / flat_M*).  Tree-walk partition handles the rest
+(proba14, stick-tree shapes like proba80/50/geometric).
+
+No accumulation of code bits across symbols, no sequential table-lookup
+dependency chain.  The tree position tells you which path a symbol
+takes; the inner loop of each path is purely:
+load indices → load bits → shuffle/lookup → store.
 
 ### Encoded Format
 
 The encoded data is a DFS-ordered bitstream matching the tree walk.
-At each internal node with n active symbols, ceil(n/8) bytes of code
-bits are stored. The decoder knows the Huffman tree, so it knows
-exactly how many bits to read at each node. No continuation bitmaps
-or metadata are needed — the Huffman tree structure is sufficient.
+At each internal tree-walk node with `n` active symbols, `ceil(n/8)`
+bytes of bitmap (one bit per element) are stored.  At each flat-subtree
+root with `n` active symbols and depth `D`, a single
+`ceil(n·D/8)`-byte packed region is stored — one `D`-bit code per
+element, no per-level framing.
+
+The decoder has the Huffman tree, so it knows which path each node
+uses and exactly how many bytes to consume.  No continuation bitmaps
+or stream-level metadata are needed — the Huffman tree structure is
+sufficient.
 
 Encoded size equals traditional Huffman (sum of code lengths) plus
-byte-alignment rounding at each tree node (typically 1-4% overhead).
+byte-alignment rounding, which is typically 1-4% overhead.  The
+flat-subtree format is marginally tighter than bitmap-per-level on
+flat-heavy regions (one tail padding for the whole packed region vs
+`D` per-level paddings).
 
 ## Implementation
 
-Written in C11 with four backends:
+Written in C11 with four backends.  Each backend implements both the
+SIMD tree-walk partition and the flat-subtree packed-bit fast path;
+detection of which path applies at which node is shared in
+`src/huffman_table.c` (`pivco_huffman_build_table`).
 
 - **Scalar**: bitmap-based partition. For each of n indices, extract
   the code bit, write to left or right output. O(n) per tree node.
+  Flat-subtree decode unpacks `D`-bit codes via a scalar shift chain
+  specialised for `D ∈ {2,3,4,5,6,7,8}`.
 
 - **NEON** (AArch64): TBL-based SIMD partition. Processes 8 × uint16_t
   indices per iteration using `vqtbl1q_u8` with a combined 8KB shuffle
   table (256 entries × 32 bytes: right + left patterns contiguous,
   loaded with a single `ldp q0, q1`). 12 instructions per 8 indices.
+  Flat-subtree decode uses the same scalar D-bit unpacker as the
+  reference path; fast paths for `D ∈ {2,3,4,5,6,7,8}` one byte at a
+  time.
 
 - **SSE4.1** (x86-64): `pshufb`-based partition, same 8-wide approach
-  as NEON with the combined shuffle table.
+  as NEON with the combined shuffle table.  Flat-subtree decode
+  mirrors the NEON scalar unpacker.
 
 - **AVX-512 VBMI2** (x86-64): `vpcompressw` partition — 32 × uint16_t
   per iteration in a single instruction. No shuffle table needed.
-  Available on Intel Granite Rapids (Xeon 6000P) and later.
+  Available on Intel Granite Rapids (Xeon 6000P) and later.  The
+  flat-subtree D-bit unpack is currently scalar; a VBMI2
+  `vpmultishiftqb` implementation is on the shortlist (see IDEAS.md).
 
 An **SVE** backend exists but is disabled: at 128-bit SVE (Graviton 4),
 `svcompact` handles only 4 × uint32 (requiring widen/narrow), which

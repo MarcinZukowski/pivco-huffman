@@ -300,3 +300,19 @@ cost / decreasing certainty:
    the flat-subtree path inside `decode_node_neon`; the non-flat
    prefix-radix never became competitive.  Straight deletion clears
    ~600 lines of code + the `pivco_p` benchmark column.
+
+   Concrete scope (TODO):
+   - Delete `src/pivco_huffman_neon_prefix.c` (~600 lines).
+   - Remove `pivco_huffman_{encode,decode}_neon_prefix` from
+     `include/pivco_huffman.h`.
+   - Remove the prefix-backend test block from `test/test_roundtrip.c`
+     (the primary scalar↔NEON roundtrip coverage stays).
+   - Drop the `pivco_p` column from `bench/bench_main.c`.
+   - Delete `bench/bench_prefix_profile.c` and its `CMakeLists.txt`
+     entry.
+   - Keep `bench/bench_multi_stage_stats.c` and
+     `extras/bench_flat_subtree_stats.c` (they read tree structure, not
+     the retired backend).
+   - Keep `PREFIX_RADIX.md` as historical record (already banner'd as
+     superseded).
+   - Update RESULTS.md / CLAUDE.md to reflect deletion.
