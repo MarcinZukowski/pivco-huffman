@@ -83,6 +83,141 @@ static inline void scatter_write_avx512(uint8_t *symbols,
 
 /* ---------- AVX-512 Encode (Tree-Walk) ---------- */
 
+/* ---------- Flat-subtree helpers (scalar; AVX-512 VBMI2 vectorisation
+ * via vpmultishiftqb would be a follow-up). */
+
+static inline void pack_D_bits_avx512(uint8_t *out, int n, int D,
+                                       const uint16_t *indices,
+                                       const uint16_t *codes)
+{
+    uint32_t mask = (1u << D) - 1;
+    uint64_t buf = 0;
+    int bits_in_buf = 0;
+    int byte_idx = 0;
+    for (int i = 0; i < n; i++) {
+        uint32_t local = (uint32_t)codes[indices[i]] & mask;
+        buf |= ((uint64_t)local) << bits_in_buf;
+        bits_in_buf += D;
+        while (bits_in_buf >= 8) {
+            out[byte_idx++] = (uint8_t)(buf & 0xff);
+            buf >>= 8;
+            bits_in_buf -= 8;
+        }
+    }
+    if (bits_in_buf > 0) {
+        out[byte_idx] = (uint8_t)(buf & ((1u << bits_in_buf) - 1));
+    }
+}
+
+static inline uint32_t extract_D_bits_avx512(const uint8_t *in,
+                                              int bit_pos, int D)
+{
+    int byte_idx = bit_pos >> 3;
+    int bit_off  = bit_pos & 7;
+    uint32_t val = (uint32_t)in[byte_idx];
+    if (bit_off + D > 8)  val |= ((uint32_t)in[byte_idx + 1]) << 8;
+    if (bit_off + D > 16) val |= ((uint32_t)in[byte_idx + 2]) << 16;
+    return (val >> bit_off) & ((1u << D) - 1);
+}
+
+#define FLAT_UNPACK_SWITCH_IDX(dst_expr)                                 \
+    int i = 0;                                                            \
+    switch (D) {                                                          \
+    case 2:                                                               \
+        for (; i + 4 <= n; i += 4) {                                      \
+            uint8_t b = bm[i >> 2];                                       \
+            dst_expr(i    ) = c2s[(b     ) & 3];                          \
+            dst_expr(i + 1) = c2s[(b >> 2) & 3];                          \
+            dst_expr(i + 2) = c2s[(b >> 4) & 3];                          \
+            dst_expr(i + 3) = c2s[(b >> 6) & 3];                          \
+        } break;                                                          \
+    case 3:                                                               \
+        for (; i + 8 <= n; i += 8) {                                      \
+            const uint8_t *p = bm + ((i * 3) >> 3);                       \
+            uint32_t w = (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16); \
+            dst_expr(i    ) = c2s[(w      ) & 7];                         \
+            dst_expr(i + 1) = c2s[(w >>  3) & 7];                         \
+            dst_expr(i + 2) = c2s[(w >>  6) & 7];                         \
+            dst_expr(i + 3) = c2s[(w >>  9) & 7];                         \
+            dst_expr(i + 4) = c2s[(w >> 12) & 7];                         \
+            dst_expr(i + 5) = c2s[(w >> 15) & 7];                         \
+            dst_expr(i + 6) = c2s[(w >> 18) & 7];                         \
+            dst_expr(i + 7) = c2s[(w >> 21) & 7];                         \
+        } break;                                                          \
+    case 4:                                                               \
+        for (; i + 2 <= n; i += 2) {                                      \
+            uint8_t b = bm[i >> 1];                                       \
+            dst_expr(i    ) = c2s[b & 0x0F];                              \
+            dst_expr(i + 1) = c2s[b >> 4];                                \
+        } break;                                                          \
+    case 5:                                                               \
+        for (; i + 8 <= n; i += 8) {                                      \
+            const uint8_t *p = bm + ((i * 5) >> 3);                       \
+            uint64_t w = (uint64_t)p[0] | ((uint64_t)p[1] << 8)           \
+                       | ((uint64_t)p[2] << 16) | ((uint64_t)p[3] << 24)  \
+                       | ((uint64_t)p[4] << 32);                          \
+            dst_expr(i    ) = c2s[(w      ) & 0x1F];                      \
+            dst_expr(i + 1) = c2s[(w >>  5) & 0x1F];                      \
+            dst_expr(i + 2) = c2s[(w >> 10) & 0x1F];                      \
+            dst_expr(i + 3) = c2s[(w >> 15) & 0x1F];                      \
+            dst_expr(i + 4) = c2s[(w >> 20) & 0x1F];                      \
+            dst_expr(i + 5) = c2s[(w >> 25) & 0x1F];                      \
+            dst_expr(i + 6) = c2s[(w >> 30) & 0x1F];                      \
+            dst_expr(i + 7) = c2s[(w >> 35) & 0x1F];                      \
+        } break;                                                          \
+    case 6:                                                               \
+        for (; i + 4 <= n; i += 4) {                                      \
+            const uint8_t *p = bm + ((i * 6) >> 3);                       \
+            uint32_t w = (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16); \
+            dst_expr(i    ) = c2s[(w      ) & 0x3F];                      \
+            dst_expr(i + 1) = c2s[(w >>  6) & 0x3F];                      \
+            dst_expr(i + 2) = c2s[(w >> 12) & 0x3F];                      \
+            dst_expr(i + 3) = c2s[(w >> 18) & 0x3F];                      \
+        } break;                                                          \
+    case 7:                                                               \
+        for (; i + 8 <= n; i += 8) {                                      \
+            const uint8_t *p = bm + ((i * 7) >> 3);                       \
+            uint64_t w = (uint64_t)p[0] | ((uint64_t)p[1] << 8)           \
+                       | ((uint64_t)p[2] << 16) | ((uint64_t)p[3] << 24)  \
+                       | ((uint64_t)p[4] << 32) | ((uint64_t)p[5] << 40)  \
+                       | ((uint64_t)p[6] << 48);                          \
+            dst_expr(i    ) = c2s[(w      ) & 0x7F];                      \
+            dst_expr(i + 1) = c2s[(w >>  7) & 0x7F];                      \
+            dst_expr(i + 2) = c2s[(w >> 14) & 0x7F];                      \
+            dst_expr(i + 3) = c2s[(w >> 21) & 0x7F];                      \
+            dst_expr(i + 4) = c2s[(w >> 28) & 0x7F];                      \
+            dst_expr(i + 5) = c2s[(w >> 35) & 0x7F];                      \
+            dst_expr(i + 6) = c2s[(w >> 42) & 0x7F];                      \
+            dst_expr(i + 7) = c2s[(w >> 49) & 0x7F];                      \
+        } break;                                                          \
+    case 8:                                                               \
+        for (; i < n; i++) dst_expr(i) = c2s[bm[i]];                      \
+        break;                                                            \
+    }                                                                      \
+    for (; i < n; i++) {                                                   \
+        uint32_t code = extract_D_bits_avx512(bm, i * D, D);               \
+        dst_expr(i) = c2s[code];                                           \
+    }
+
+static inline void flat_decode_scatter_avx512(uint8_t *symbols,
+                                               const uint16_t *indices, int n,
+                                               const uint8_t *bm, int D,
+                                               const uint8_t *c2s)
+{
+#define DST_SCATTER(k) symbols[indices[k]]
+    FLAT_UNPACK_SWITCH_IDX(DST_SCATTER)
+#undef DST_SCATTER
+}
+
+static inline void flat_decode_direct_avx512(uint8_t *symbols, int n,
+                                              const uint8_t *bm, int D,
+                                              const uint8_t *c2s)
+{
+#define DST_DIRECT(k) symbols[k]
+    FLAT_UNPACK_SWITCH_IDX(DST_DIRECT)
+#undef DST_DIRECT
+}
+
 static void encode_node_avx512(const pivco_huffman_table_t *table,
                                 int16_t node_id,
                                 uint16_t *indices, int n,
@@ -95,6 +230,17 @@ static void encode_node_avx512(const pivco_huffman_table_t *table,
 
     const pivco_tree_node_t *node = &table->tree[node_id];
     if (node->symbol >= 0) return; /* leaf */
+
+    /* Flat-subtree fast path: emit n*D packed bits. */
+    if (table->flat_depth[node_id] >= 2) {
+        int D = table->flat_depth[node_id];
+        int total_bytes = (n * D + 7) >> 3;
+        uint8_t *out = *out_ptr;
+        if (total_bytes > 0) out[total_bytes - 1] = 0;
+        pack_D_bits_avx512(out, n, D, indices, codes);
+        *out_ptr += total_bytes;
+        return;
+    }
 
     /* Write n code bits */
     int nbytes = bitmap_bytes(n);
@@ -218,6 +364,17 @@ static void decode_node_avx512(const pivco_huffman_table_t *table,
         return;
     }
 
+    /* Flat-subtree fast path. */
+    if (table->flat_depth[node_id] >= 2) {
+        int D = table->flat_depth[node_id];
+        int total_bytes = (n * D + 7) >> 3;
+        const uint8_t *bm = *in_ptr;
+        *in_ptr += total_bytes;
+        const uint8_t *c2s = &table->flat_code_to_sym[table->flat_offset[node_id]];
+        flat_decode_scatter_avx512(symbols, indices, n, bm, D, c2s);
+        return;
+    }
+
     /* Read n code bits */
     int nbytes = bitmap_bytes(n);
     const uint8_t *bm = *in_ptr;
@@ -263,6 +420,18 @@ int pivco_huffman_decode_avx512(const uint8_t *in, size_t in_len,
     if (root->symbol >= 0) {
         memset(symbols, (uint8_t)root->symbol, (size_t)N);
         *consumed = 0;
+        return PIVCO_OK;
+    }
+
+    /* Root is a flat subtree (whole tree flat, D>=2). */
+    if (table->flat_depth[table->tree_root] >= 2) {
+        int D = table->flat_depth[table->tree_root];
+        int total_bytes = (N * D + 7) >> 3;
+        const uint8_t *bm = ptr;
+        ptr += total_bytes;
+        const uint8_t *c2s = &table->flat_code_to_sym[table->flat_offset[table->tree_root]];
+        flat_decode_direct_avx512(symbols, N, bm, D, c2s);
+        *consumed = (size_t)(ptr - in);
         return PIVCO_OK;
     }
 
