@@ -28,7 +28,7 @@ flat region instead of D per-level byte-alignment paddings.
 
 ## What is PIVCO-Huffman?
 
-PIVCO-Huffman applies the PIVoted COlumnar approach to Huffman coding.
+PIVCO-Huffman applies the PIVoted COding approach to Huffman coding.
 Instead of decoding symbols one at a time via table lookup (traditional),
 PIVCO processes an entire block of N symbols simultaneously, using
 whichever of two complementary strategies fits the shape of each
