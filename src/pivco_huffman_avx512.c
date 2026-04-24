@@ -161,6 +161,16 @@ static inline __m128i flat_d4_spread_avx512(const uint8_t *bm_ptr)
     return _mm_and_si128(raw, _mm_set1_epi8(0x0F));
 }
 
+/* D=5 on AVX-512: benchmarked as regression vs scalar FLAT_UNPACK_SWITCH
+ * (flat_M5 -50%, bell_s80 -17%, bell_s30 -13%, zipfian -9%).  The
+ * cross-byte-carry codes make the spread more expensive, and vpermb
+ * (32-byte TBL, cross-lane) has higher latency than pshufb.  Scalar
+ * fallback kept. */
+
+/* D=6 on AVX-512: benchmarked as regression vs scalar (flat_M6 -27%,
+ * bell_s80 -32%).  The vpermb over zmm has higher latency than the
+ * compiler-vectorised scalar scatter.  Scalar fallback kept. */
+
 #define FLAT_UNPACK_SWITCH_IDX(dst_expr)                                 \
     int i = 0;                                                            \
     switch (D) {                                                          \
