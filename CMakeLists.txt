@@ -92,36 +92,36 @@ if(BUILD_BENCH)
         bench/bench_distributions.c
         bench/bench_rans.cpp
     )
-    target_link_libraries(pivco_huffman_bench pivco_huffman huf0)
+    target_link_libraries(pivco_huffman_bench pivco_huffman huf0 m)
     target_include_directories(pivco_huffman_bench PRIVATE ext/fse/lib ext/ryg_rans)
 
     add_executable(pivco_huffman_profile_english
         bench/bench_profile_english.c
         bench/bench_distributions.c
     )
-    target_link_libraries(pivco_huffman_profile_english pivco_huffman)
+    target_link_libraries(pivco_huffman_profile_english pivco_huffman m)
 
     add_executable(pivco_one_leaf_stats
         bench/bench_one_leaf_stats.c
         bench/bench_distributions.c
     )
-    target_link_libraries(pivco_one_leaf_stats pivco_huffman)
+    target_link_libraries(pivco_one_leaf_stats pivco_huffman m)
 
     add_executable(pivco_multi_stage_stats
         bench/bench_multi_stage_stats.c
         bench/bench_distributions.c
     )
-    target_link_libraries(pivco_multi_stage_stats pivco_huffman)
+    target_link_libraries(pivco_multi_stage_stats pivco_huffman m)
 
     add_executable(pivco_prefix_profile
         bench/bench_prefix_profile.c
         bench/bench_distributions.c
     )
-    target_link_libraries(pivco_prefix_profile pivco_huffman)
+    target_link_libraries(pivco_prefix_profile pivco_huffman m)
 
     add_executable(pivco_flat_subtree_stats
         extras/bench_flat_subtree_stats.c
         bench/bench_distributions.c
     )
-    target_link_libraries(pivco_flat_subtree_stats pivco_huffman)
+    target_link_libraries(pivco_flat_subtree_stats pivco_huffman m)
 endif()
