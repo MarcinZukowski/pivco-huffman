@@ -273,14 +273,87 @@ These already appear explored or unlikely to pay off:
 - **SVE at 128-bit width**
   - already slower than NEON on Graviton4.
 
+## D=7 NEON TBL flat-subtree path — not done, not worth much
+
+D=2..6 all got TBL-accelerated flat-subtree paths in
+`src/pivco_huffman_neon.c` (commits `b0639ff` through `a77c589`).  D=7
+was skipped because:
+
+- **No single TBL covers 128 entries.**  Would need 2× `vqtbl4q_u8` and
+  a mask-based merge on the code's high bit, or a blend via
+  `vbslq_u8`.  Extra NEON ops on the inner loop.
+- **Coverage is small.**  From `extras/bench_flat_subtree_stats.c`:
+  - bell_s80 (M=7–9): D≥7 = 0.0% — top distribution unaffected.
+  - zipfian: D≥7 = 11.2% — only meaningful real-world share.
+  - flat_M7: D=7 root-flat — currently 5086 M/s at 1.43× vs huf0
+    (i.e., already winning).
+- **bench/bench_flat_subtree_stats.c** reports the D-coverage breakdown
+  per distribution; re-run if you want fresh numbers before attempting
+  this.
+
+Sketch if someone does attempt it:
+```c
+/* Split 7-bit code by high bit, do two vqtbl4q_u8 and blend. */
+uint8x16_t codes = flat_d7_spread(...);         /* 16 × (0..127) */
+uint8x16_t hi    = vshrq_n_u8(codes, 6);        /* 0 or 1 (top bit) */
+uint8x16_t lo    = vandq_u8(codes, vdupq_n_u8(0x3F));
+uint8x16_t lo_syms = vqtbl4q_u8(c2s_lo64, lo);
+uint8x16_t hi_syms = vqtbl4q_u8(c2s_hi64, lo);
+uint8x16_t mask   = vceqq_u8(hi, vdupq_n_u8(1));
+uint8x16_t syms  = vbslq_u8(mask, hi_syms, lo_syms);
+```
+(~4 extra NEON ops per 16 codes vs D=6's path.)
+
+Expected win: <2% on zipfian; 3-4× on flat_M7 direct root-flat (via
+the same vst1q_u8 pattern as D=2..6).  flat_M7 is already winning so
+the marginal EV is low.
+
+## Check `flat_dX_spread` helpers against FastLanes unpackers
+
+The `flat_d2_spread` / `flat_d3_spread` / ... routines in
+`src/pivco_huffman_neon.c` turn a packed D-bit stream into a
+byte-per-code NEON vector via a small shuffle + shift + mask sequence.
+This is exactly the same primitive as **FastLanes**'
+[bit-unpacking](https://github.com/cwida/FastLanes) inner loop (the
+"unpack N-bit values" operation), which the FL authors have tuned
+heavily on NEON and AVX-512.
+
+**Worth comparing**: our spread sequence vs FastLanes's for each D.
+FL may use slightly different permute constants or a smarter
+shift-mask combo that we're missing.  Even a few percent per spread
+compounds across bell/zipfian/proba02 (which have the largest
+flat-subtree TBL windows).
+
+Sketch of the check:
+- Clone https://github.com/cwida/FastLanes; find the NEON unpack
+  kernel for D ∈ {2,3,4,5,6}.
+- Compare instruction-level vs our `flat_dX_spread` in
+  `src/pivco_huffman_neon.c` (offsets ~150-320 after the
+  `pivco_huffman_common.h` include).
+- If FL is faster, port the trick.  Benchmark with
+  `./build/pivco_huffman_bench 30` and compare english / bell_* / zipfian.
+
+Easy (lookup-only) win candidate.  5-15 minute first-look exercise.
+
 ## Suggested implementation order
 
-Leaf-child fusion and the flat-subtree fast path are both *shipped*
+Leaf-child fusion and the flat-subtree fast path (both the scatter
+loop and the D=2..6 TBL-accelerated variants on NEON) are *shipped*
 (see §"Flat-subtree fast path — format-change variant" above and
 README.md).  The remaining outstanding work, roughly in increasing
 cost / decreasing certainty:
 
-1. **Vectorise the D-bit extract on AVX-512** using `vpmultishiftqb`
+1. **Port TBL-accelerated flat-subtree decode to x86 and AVX-512.**
+   The NEON D=2..6 paths (commits `b0639ff` through `a77c589`) use
+   `vqtbl1`/`vqtbl2`/`vqtbl4` for the c2s lookup and dup-TBL + shift
+   + mask for the spread.  x86 has directly analogous primitives:
+   `pshufb` (SSSE3, 16-byte TBL), `vpermb` / `vpermt2b` (AVX-512
+   VBMI) for wider tables.  Expected to lift all four moderate-entropy
+   distributions on Xeon similar to the M4 gains; also helps Zen 3.
+2. **Check `flat_dX_spread` against FastLanes' unpack kernels**
+   (see §"Check flat_dX_spread against FastLanes unpackers" above).
+   Maybe a few percent per D.
+3. **Vectorise the D-bit extract on AVX-512** using `vpmultishiftqb`
    (VBMI2).  Xeon moderate-entropy cases (english 0.93×, bell_s10
    0.86×) are close to parity and likely cross with this.  Low-hanging.
 2. **Zen 3 SSE4.1 hybrid block decoder** — on Zen 3 the
