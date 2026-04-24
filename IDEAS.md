@@ -1,53 +1,125 @@
 # PIVCO-Huffman Decode Ideas
 
-## Best candidate: fuse leaf handling into partition
+## Flat-subtree fast path — format-change variant
 
-The current decode path in `src/pivco_huffman_neon.c`,
-`src/pivco_huffman_x86.c`, and `src/pivco_huffman_avx512.c` always:
+The full-tree flat case (`min_len == max_len`) has a shipped fast path
+in `pivco_huffman_decode_neon_prefix` — the format stores `M` packed
+bits per element and decode is a single `code_to_sym[prefix]` lookup.
+Wins 2.47× on uniform and 1.18-1.24× on sparse_* (§3 of PREFIX_RADIX.md).
 
-1. reads the bitmap,
-2. partitions indices into left/right,
-3. recurses,
-4. eventually scatter-writes at leaves.
+**The generalisation is a *format change*, not a decode-only
+optimisation**: when the encoder detects that a specific internal node's
+subtree is flat with depth `D >= 2` (all leaves reach the same relative
+depth, 2^D codes total), it stops emitting `D` levels of bitmaps for
+the elements entering that subtree and instead emits a single
+**N × D-bit contiguous stream** — one `D`-bit code per element, packed
+MSB-first, in the order the elements reach the subtree root.  The
+decoder, working from the same table, knows this node is flat and
+switches to the packed-bit reader + direct `code_to_sym[D_bits]` lookup.
 
-This creates avoidable work when one or both children are already leaves.
+This is exactly the mechanism that makes the full-tree flat path fast.
+We are just applying it locally to every maximal flat subtree, not only
+the whole tree.  Compression-wise it is slightly better than the
+bitmap-per-level format because per-level byte-alignment padding is
+replaced by one tail padding for the whole packed region; same number
+of bits otherwise.
 
-### Idea
+### Measured applicability
 
-Add decode fast paths for these common cases:
+`extras/bench_flat_subtree_stats.c` counts elements that would land in
+*maximal* flat subtrees (flat AND parent not flat, so each element is
+counted once).  Results on the standard bench distributions:
 
-- **left leaf, right internal**
-  - scan bitmap once,
-  - scatter the left symbol immediately for bit=0 entries,
-  - compact only bit=1 indices into `tmp`,
-  - recurse only into the right child.
+| Distribution | coverage | breakdown by D | pivco_n vs best |
+|---|--:|---|--:|
+| **bell_s80** | **100.0%** | D=5: 28.6%, D=6: 71.4% | 0.69× |
+| **proba02** | **98.4%** | D=3: 35%, D=4: 52%, D=2: 8% | 0.73× |
+| **bell_s30** | **95.9%** | D=5: 32%, D=4: 30%, D=3: 23%, D=2: 11% | 0.83× |
+| **bell_s10** | **94.4%** | D=4: 55%, D=3: 34%, D=2: 5% | 0.74× |
+| **zipfian** | **69.4%** | spread D=2..7+ | 0.66× |
+| **english** | **54.8%** | D=2: 54.8% (all at one depth) | 0.98× |
+| proba14 | 0.9% | negligible | 0.93× |
+| proba50 / proba80 / geometric | 0 | stick-tree shape | — |
+| uniform / sparse_* / two_sym_* / flat_M* | — | root is flat, existing path handles | — |
 
-- **left internal, right leaf**
-  - symmetric version of the above.
+The flat-subtree fast path would fire on *exactly* the distributions
+where `pivco_n` currently loses to huf0 / trad_4s, with 70-100% of
+elements addressable on the bell_* / proba02 set.
 
-- **both children are leaves**
-  - do not partition into scratch at all,
-  - scan bitmap once,
-  - directly scatter one of two symbols per index,
-  - no recursive calls.
+### Implementation sketch
 
-### Why this looks promising
+Build-time (in `pivco_huffman_build_table`):
 
-From `RESULTS.md` profiling on M4:
+1. Walk tree post-order, computing `(subtree_min, subtree_max)` per
+   internal node.
+2. If `subtree_min == subtree_max == D` and `D >= 2`, mark node as
+   `flat_subtree`, store `D`, and precompute `code_to_sym[1 << D]` for
+   the subtree (indexed by the local `D`-bit code relative to the
+   subtree root).
+3. Also mark parent-chain so we only treat *maximal* flat subtrees as
+   flat (descendants of a flat subtree are not separately flagged).
 
-- SIMD partition: 44.4%
-- Leaf scatter NEON: 12.3%
-- Leaf scatter scalar remainder: 9.5%
-- Function prologue: 14.1%
+Encoder (`encode_node_neon`): when entering a flat-subtree node with
+`n` elements, instead of `D` recursive partition steps, emit `n * D`
+bits packed in the output stream.  For each element, pack the `D` low
+bits of its Huffman code (offset by the subtree prefix) into the
+output.  Advance the bitstream pointer by `ceil(n*D/8)` bytes.
 
-This suggests a worthwhile opportunity to remove:
+Decoder (`decode_node_neon`): when entering a flat-subtree node with
+`n` elements, read `n * D` packed bits, extract one `D`-bit code per
+element using the existing bit-unpack routines from
+`pivco_huffman_neon_prefix.c` (they already handle D ∈ {2,3,4,5,6,7,8}
+with specialised paths), look up `code_to_sym[code]`, scatter to
+`symbols[indices[i]]`.
 
-- one full leaf pass,
-- scratch traffic for leaf-side partitions,
-- recursive calls/checks on shallow subtrees.
+Stream-format compatibility: this changes the bitstream format, so
+existing encoded blobs wouldn't decode with a new decoder.  Two
+mitigation options:
+  - **Version bump on the block header** — gate the format change on a
+    new block flag; backward-compatible.
+  - **Just change the format** — cleanest, no version logic, but flag
+    day for consumers.  Given this is still a research codebase, the
+    clean option is probably right.
 
-This should help most on **skewed distributions**, where many symbols terminate
-near the top of the tree and PIVCO already performs best.
+### Why this design is clean
+
+- Decoder hot path for flat subtrees = the existing packed-bit path
+  that already runs at the fast full-tree-flat speed.  No new
+  bit-accumulate-per-level machinery required.
+- Same total bit budget: `N × D` bits either way.  Slightly better
+  packing (one tail padding vs `D` per-level paddings).
+- Stacks with existing prefill / leaf-fusion / half-partition
+  optimisations — applies only where none of them already handle the
+  work.
+
+### Open questions
+
+- **Small-n overhead**: when only a handful of elements enter a deep
+  flat subtree (e.g., D=6 with n=3), the per-block fixed-cost of
+  entering the packed-bit path may outweigh the savings.  Likely want
+  a runtime `n >= threshold` check to fall back to normal partition on
+  tiny element counts.  Threshold probably ~8-16.
+- **Interaction with leaf-child fusion at the flat-subtree root**: if
+  the flat-subtree's root is itself a "one-leaf parent" node (one child
+  is a leaf, other is a flat subtree of depth D-1), which path wins?
+  The existing leaf-fusion handles depth-1 leaves well; the flat-subtree
+  path covers the remaining D-1 levels.  Need to compose them
+  carefully or settle on one.
+
+## Scatter fusion into partition — tried, reverted (recorded here for future reference)
+
+See RESULTS.md §"Stage fusion" and §"Tested and discarded": the
+*leaf-child* fusion (check child-type before partitioning, run half-
+partition + scatter when one side is a leaf, sequential blend when both
+are leaves) is *already shipped* and gives +10-38% on NEON.
+
+The variant that *wasn't* kept is **conditional stores interleaved
+inside the partition loop body** — letting each lane's output either
+go to `tmp` (compaction) or to `symbols[scattered_position]` (leaf
+scatter) based on the bitmap bit.  That regressed massively from branch
+misprediction (NEON) and store-buffer interference (scalar).  The
+current code keeps partition and scatter as separate phases
+deliberately.
 
 ## ~~Next best idea: finish `neon2` 4-way fused decode~~ — attempted, didn't pay off
 
@@ -65,6 +137,35 @@ to compute packed offsets costs more than that on the TBL-bound hot path.
 Fusion only pays off when one instruction can compress wider than the 8-
 element TBL (AVX-512 `vpcompressw` → 32). Not worth further NEON work on
 this track. See RESULTS.md for full numbers.
+
+## ~~Interleave the 16-elem partition pair in decode~~ — attempted, null result
+
+In `decode_node_neon`, the 16-elem-unrolled inner loop calls
+`partition_8` twice per iteration.  Inspecting `objdump -d` on the
+original code showed the compiler serialized the two chains: `m1`,
+`popcnt[m1]`, `data1`, `compress_tab[m1]`, shuffles, TBLs and stores
+for the second partition were all scheduled after the first partition's
+stores completed — partly because `n_left`/`n_right` update through
+`compress_popcnt[m0]` (a load with ~4-5 cycle latency) and partly
+because pointer aliasing on `partition_8`'s `src`/`left_out`/`right_out`
+forces store-before-load ordering.
+
+Tried: inline both partitions manually — hoist both `m0`+`m1` loads,
+both `compress_popcnt[m*]` loads, both data loads, all four store
+addresses above any stores; then do the four TBLs and four stores.
+
+Codegen transform was dramatic — clang merged both data vectors into a
+single `ldp q0, q1`, issued both popcount loads consecutively, and
+grouped all four TBLs.  Runtime delta on `pivco_n` across all 19
+benchmarked distributions: ±2%, symmetric around zero, within
+thermal-drift noise (CPU freq drift alone covered the spread).
+
+Interpretation: M4's OoO engine was already renaming through the
+textual serialization.  The bottleneck of `pivco_n` at ~0.25 c/elem is
+elsewhere — likely TBL/store-port throughput or instruction fetch
+width, not this dep chain.  Change doubled the loop body line count
+for no measurable win, so reverted.  Recorded here so the next person
+reading the assembly output doesn't repeat the experiment.
 
 ## AVX-512 improvement: better small-node tail
 
@@ -121,15 +222,41 @@ These already appear explored or unlikely to pay off:
   - already tested, regressed due to load/store pressure.
 
 - **Replacing `compress_popcnt` table with builtin popcount**
-  - already tested, slightly worse.
+  - Tested twice, always worse on M4.  Retried 2026-04-24 on current
+    clang: `pivco_n` drops 3–11% across distributions (proba80 −10%,
+    bell_s10 −11%, english −4%, zipfian −3%).  Clang lowers
+    `__builtin_popcount((int)mask)` to a 4-uop vector chain
+    (`fmov d, x; cnt.8b; uaddlv.8b; fmov w, s`) with ~8-10c serial
+    latency, routed through the same vector pipe as TBL.  The load
+    from `compress_popcnt[mask]` is 1 LSU uop at ~5c on a separate
+    pipe.  Replacing the load both adds uops to the already-TBL-heavy
+    vector pipe AND lengthens the latency — strictly worse on every
+    distribution.
 
 - **SVE at 128-bit width**
   - already slower than NEON on Graviton4.
 
 ## Suggested implementation order
 
-1. Add **leaf-child fusion** to `decode_node_neon`.
-2. Mirror the same optimization in `decode_node_x86`.
-3. Add the same fast paths to `decode_node_avx512`.
-4. Benchmark on skewed distributions first (`proba80`, `proba50`, `sparse_2`).
-5. Only after that, revisit `neon2` and/or hybrid decode selection.
+Leaf-child fusion is *shipped*; the remaining outstanding work, roughly
+in increasing cost / decreasing certainty:
+
+1. **Runtime flat-tree gate** in `pivco_huffman_decode` — route tables
+   with `min_len == max_len` to `decode_neon_prefix`.  Pure win on
+   uniform / sparse_* / flat_M*; no regression on non-flat tables.
+   Smallest and most certain.
+2. **Flat-subtree fast path** (§"Flat-subtree fast path — format-change
+   variant" above) — measurement is done
+   (`./build/pivco_flat_subtree_stats`) and shows 70-100% coverage on
+   bell_* / proba02 / english / zipfian, exactly the distributions
+   `pivco_n` currently loses on.  Format-change approach reuses the
+   packed-bit decode path already shipped for full-tree flat.  Highest-
+   impact remaining item.
+3. **TBL-based K-way bucket** for `decode_neon_prefix` phase 4 — the
+   main remaining phase-4 lever in the non-flat prefix-radix path.
+   Lower priority if flat-subtree fast path displaces the prefix-radix
+   approach for most real-world tables.
+4. **Nested (multi-stage) prefix-radix** — only if we've already
+   committed to the prefix-radix path winning on zipfian-shaped
+   staircases (§4 of PREFIX_RADIX.md).  Likely superseded by the
+   flat-subtree fast path on similar distributions.
