@@ -9,9 +9,10 @@ This document covers:
 
 1. The core idea and why it should help.
 2. The v1 prototype — works for flat trees only.
-3. Bench results on M4 Max.
+3. Bench results on M4 Max for the flat case.
 4. Multi-stage analysis — when nested radix would unlock additional gains.
-5. Next steps.
+5. Single-stage for non-flat trees — current state and per-phase profile.
+6. Experiments tried and remaining candidates.
 
 ---
 
@@ -218,79 +219,94 @@ histogram.
 
 ---
 
-## 5. Single-stage for non-flat trees — implemented, correct, slow
+## 5. Single-stage for non-flat trees — implemented, correct, still losing
 
-`src/pivco_huffman_neon_prefix.c` now handles the non-flat case as well
-as the flat case.  The decoder flow is:
+`src/pivco_huffman_neon_prefix.c` handles the non-flat case as well as
+the flat case.  The decoder flow is:
 
 1. **Phase 0** — `memset` output with `prefill_sym`.
 2. **Phase 1** — extract each element's `M`-bit prefix from the stream
    into a per-element `prefix[N]` buffer (specialised fast paths for
    `M ∈ {1, 2, 4, 8}`, scalar-unrolled for `M ∈ {3, 5, 6, 7}`).
-3. **Phase 2** — histogram: for each `k`, increment `bin_count[prefix[k]]`.
+3. **Phase 2** — histogram: 8 independent counter arrays `bc[8][K]`
+   indexed by `k % 8`, summed at the end.
 4. **Phase 3** — prefix-sum for `bin_offset[K+1]`.
-5. **Phase 4** — bucket element ids by bin: `bin_elements[place[prefix[k]]++] = k`.
+5. **Phase 4** — bucket: 8 independent `place[8][K]` arrays
+   pre-computed so lane `s` writes `bin_elements[place[s][prefix[k+s]]++] = k+s`.
 6. **Phase 5** — per-bin dispatch: leaf bin → `scatter_sym`, subtree bin
    → `pivco_neon_decode_subtree_` on the bin's elements (with a scratch
    copy to avoid the existing subtree encoder writing past the bin's
    segment via its 16-byte partition stores).
 
-All 20 roundtrip tests pass.  But it's **slower than baseline across
+All 20 roundtrip tests pass.  After the 4-way and then 8-way parallel
+rewrites of phases 2 + 4 it is **roughly 2× faster than the initial
+scalar version** but still **slower than the `pivco_n` 2-way decoder on
 every non-flat distribution**:
 
-| Distribution | pivco_n | pivco_p | Δ      |
-|--------------|--------:|--------:|-------:|
-| proba80 (M=1)  | 9478    | 318     | −97%   |
-| proba50 (M=1)  | 5085    | 342     | −93%   |
-| geometric (M=1)| 4816    | 342     | −93%   |
-| english (M=3)  | 2468    | 697     | −72%   |
-| proba14 (M=3)  | 2366    | 700     | −70%   |
-| zipfian (M=3)  | 1252    | 541     | −57%   |
-| bell_s10 (M=5) | 1754    | 844     | −52%   |
-| bell_s30 (M=6) | 1195    | 871     | −27%   |
-| proba02 (M=6)  | 1135    | 837     | −26%   |
-| bell_s80 (M=7) | 1091    | 842     | −23%   |
+| Distribution | pivco_n | pivco_p | Δ    |
+|--------------|--------:|--------:|-----:|
+| proba80 (M=1)   | 9625 | 1167 | −88% |
+| geometric (M=1) | 4956 | 1054 | −79% |
+| proba50 (M=1)   | 5137 | 1075 | −79% |
+| english (M=3)   | 2514 | 1242 | −51% |
+| proba14 (M=3)   | 2423 | 1232 | −49% |
+| bell_s10 (M=5)  | 1785 | 1115 | −38% |
+| zipfian (M=3)   | 1261 |  822 | −35% |
+| bell_s80 (M=7)  | 1124 |  958 | −15% |
+| bell_s30 (M=6)  | 1210 | 1036 | −14% |
+| proba02 (M=6)   | 1144 |  998 | −13% |
 
-### Per-phase profile (`bench_prefix_profile`)
+(M/s, `./build/pivco_huffman_bench 20`, M4 Max, 4M × 20 reps.)
 
-`bench/bench_prefix_profile.c` times each phase over 50k iterations.
-Results on M4 Max (c/elem assumes 3.5 GHz):
+The gap narrows as `M` grows because phase 5 shrinks toward zero
+(deeper prefixes → more bins are leaves at depth `M`).  At `M = 6–7`
+we are within 15% of `pivco_n` without having touched phase 4 SIMD yet.
 
-| Phase | english (M=3) | zipfian (M=3) | proba02 (M=6) |
-|-------|:-------------:|:-------------:|:-------------:|
-| 0: memset               | 0.05 | 0.04 | 0.04 |
-| 1: extract M-bit prefix | 0.28 | 0.23 | 0.22 |
-| **2: histogram**        | **1.70** | **1.73** | **1.67** |
-| 3: prefix-sum           | 0.00 | 0.00 | 0.01 |
-| **4: bucket**           | **2.14** | **2.16** | **2.14** |
-| 5: per-bin dispatch     | 0.67 | 1.52 | ~0   |
-| **TOTAL**               | **4.84** | **5.67** | **3.71** |
-| baseline `pivco_n`      | 1.32 | 2.05 | 2.41 |
-| ratio                   | 3.7× | 2.8× | 1.5× |
+### Per-phase profile (`bench_prefix_profile`, current 8-way tree)
+
+c/elem assuming 3.5 GHz:
+
+| Phase                 | english | zipfian | proba14 | proba02 | bell_s30 | bell_s80 |
+|-----------------------|:-------:|:-------:|:-------:|:-------:|:--------:|:--------:|
+| 0: memset             | 0.04    | 0.03    | 0.03    | 0.03    | 0.03     | 0.03     |
+| 1: extract M-bit      | 0.24    | 0.20    | 0.21    | 0.20    | 0.20     | 0.20     |
+| **2: histogram**      | **0.72**| **0.72**| **0.73**| **0.73**| **0.74** | **0.73** |
+| 3: prefix-sum         | 0.00    | 0.00    | 0.00    | 0.01    | 0.01     | 0.02     |
+| **4: bucket**         | **1.74**| **1.80**| **1.78**| **1.79**| **1.79** | **1.82** |
+| 5: per-bin dispatch   | 0.00    | 0.66    | 0.00    | 0.18    | 0.11     | 0.55     |
+| **TOTAL**             | **2.66**| **3.41**| **2.70**| **2.94**| **2.89** | **3.34** |
+| `pivco_n`             | 1.30    | 1.98    | 1.32    | 2.38    | 2.26     | 2.41     |
+| ratio                 | 2.05×   | 1.72×   | 2.05×   | 1.24×   | 1.28×    | 1.37×    |
 
 ### Diagnosis
 
-**Phases 2 and 4 together cost ~3.84 c/elem regardless of `M` or
-distribution.**  They're the expensive part and the reason the approach
-loses.  Both are serial-data-dependency-limited scalar loops:
+**Phase 2 (histogram) is close to port-bound and hard to speed up
+further.**  8 independent streams give OoO enough to sustain ~1 load +
+1 store per cycle on the counter RMW.  At 0.72 c/elem the load/store
+ports are well-saturated per 8 elements — going wider would add
+counter-summing overhead that eats the gains.
 
-- Phase 2: `bin_count[prefix[k]]++` — when prefix values cluster (e.g.
-  english's 25% on one bin), adjacent increments of the same counter
-  serialise on the load-add-store dependency.
-- Phase 4: `bin_elements[place[prefix[k]]++] = k` — same serial dep
-  on `place[v]`, plus a store with v-dependent address (poor write
-  combining when bins are interleaved).
+**Phase 4 (bucket) is dep-chain-latency-limited on `place[s][v]`, not
+memory-port-limited** — my earlier hypothesis was wrong.  The 4→8-way
+split empirically delivered another +12–19% on top of the 4-way version
+(english, zipfian, proba14 across the benches), which ruled out the
+"we're already at the load/store-port cap" story.  What's actually
+happening: each lane's `place[s][prefix[k+s]]++` is a load → add →
+store RMW chain of ~4 cycles on the same address when prefixes cluster;
+4 independent lanes weren't enough for the OoO window to hide the
+latency on inputs where two prefixes within a group of 8 collide
+(english has a 25% prefix, so collisions are common).  8 lanes fit,
+and the next doubling (16) would need 16 × K × 4 B ≥ 8 KB of L1 at
+K = 128 — enough to start thrashing.
 
-**Phase 5 scales favourably with `M`** — it's just the existing neon
-subtree work on smaller, pre-partitioned groups.  For english (M=3),
-phase 5 is 0.67 c/elem vs baseline's full 1.32; for proba02 (M=6),
-phase 5 is ≈0 because most bins are leaves.
-
-**Phases 2+4 DON'T scale with `M`** — they're O(N) regardless, and
-that's the problem.  Baseline's 3 levels of 2-way partition (for M=3)
-cost ~0.75 c/elem on M4 NEON (three `partition_root_8` passes × 0.25
-c/elem each) with all SIMD.  We're spending 3.84 c/elem to do the same
-amount of conceptual work in scalar + serial.
+**Phase 5 scales favourably with `M`.**  Its cost is distribution-
+dependent: zipfian (M=3) pays 0.66 c/elem because four deep subtrees
+carry most of the weight, while proba02/bell_s30 (M=6) pay 0.11–0.18
+because most bins are leaves at depth 6.  The profiler computes phase
+5 as `full_decode − Σ(phase 0..4)` clamped at 0, so the 0.00 reported
+for english / proba14 is an overlap artifact (the isolated-phase
+measurements overestimate slightly), not literal zero subtree work —
+but it is small enough to vanish in the jitter.
 
 ### Why `init_compress_table()` was the root cause of an earlier crash
 
@@ -304,73 +320,74 @@ garbage "valid" entries that propagated until one was dereferenced as
 a `codes[idx]` lookup with an out-of-range idx.  Fixed by calling
 `init_compress_table()` at the top of both public entry points.
 
-## 6. Next steps
+## 6. Experiments tried
 
-The profile makes the direction clear: phases 2 and 4 have to drop by
-roughly 3× combined to break even with baseline, or 5× to have a
-meaningful win.  Both optimisations are classic radix-sort techniques:
+Summary of what has been explored against the profile above.
 
-### Parallel histogram (phase 2)
+### Parallel histogram + bucket (phase 2 + 4) — *shipped*
 
-Use 4 independent counter arrays indexed by `k % 4`, sum at end.  OoO
-pipelines 4 independent `counter_p[prefix[k]]++` dependency chains.
-Expected: 1.70 → ~0.45 c/elem (near-linear 4× speedup) on proba80-ish
-clustered distributions.
+4-way counter arrays indexed by `k % 4`, summed at end.  Delivered
+~30–40% vs the initial scalar version (commit `96b578a`).  Extended to
+8-way for another +12–19% (commit `5557966`).  Current 8-way phase 2
+at 0.72 c/elem, phase 4 at 1.78 c/elem.  Widening further to 16 lanes
+would cost 16 × K × 4 B of working set (8 KB at K = 128) — cache
+pressure + summing overhead outweigh the marginal dep-chain slack.
 
-### SIMD K-way bucket partition (phase 4)
+### Skip-histogram, pre-allocated per-bin buffers — *tried, reverted*
 
-Replace the serial `bin_elements[place[v]++] = k` with a TBL-based
-per-chunk radix partition: load 8 prefix values + the corresponding
-element identities, for each bin `v ∈ [0..K)` compute the 8-lane mask
-where `prefix == v`, TBL-compact the matching identities into that
-bin's output offset, advance `place[v]`.  Per 8 elements: K TBLs +
-K vsts.  For K=8 (M=3): 8 TBLs per 8 elements = 1 TBL/elem — same order
-as a 2-way partition's 2 TBLs per 8 elements but doing the work of 3
-tree levels in one sweep.  Expected: 2.14 → ~0.8 c/elem.
+Replace phases 2–4 with: allocate one `uint16_t[N]` scratch per bin, in
+one pass append `k` to `scratch[prefix[k]]`, then copy each scratch
+back out to `bin_elements` respecting the prefix-sum.  Eliminates the
+separate histogram pass, but `K × N × 2 B` (e.g. 8 × 8192 × 2 = 128 KB
+at M=3 block) blows L1d on M4; copy-out phase dominates and the total
+came in slower than the 4-way baseline.  Reverted.
 
-### Combined projection
+### Skip-histogram, wide-stride N+K buffer — *tried, reverted*
 
-If both optimisations hit their targets:
+Single `uint16_t[N + padding_per_bin × K]` buffer, each bin owns a
+stride of up to `N` slots inside it.  Avoided the per-bin allocation
+but regressed on M ≥ 6 because the stride overcommit grew with K
+(e.g. 128 × N at M=7) and the copy-out still did bin-ordered
+gather-like reads.  Mixed wins on M=3/5, losses elsewhere — net neutral.
+Reverted.
 
-| Phase | Current | After SIMD |
-|-------|--------:|-----------:|
-| 0     | 0.05    | 0.05       |
-| 1     | 0.28    | 0.28       |
-| 2     | 1.70    | 0.45       |
-| 3     | 0.00    | 0.00       |
-| 4     | 2.14    | 0.80       |
-| 5     | 0.67    | 0.67       |
-| total | 4.84    | **2.25**   |
+### Software write-combining buffer (SWCB) for phase 4 — *tried, reverted*
 
-That's within striking distance of baseline's 1.32 c/elem on english —
-still probably a modest loss, but flipping to a win on zipfian
-(baseline 2.05) and comfortably beating baseline on proba02+ (baseline
-2.41).  With nested radix (the zipfian staircase from §4), zipfian's
-phase 5 could drop further as well.
+Per-bin small buffer (16 entries × K), flush to `bin_elements` when
+full.  The flush amortises the cache-line ping-pong of interleaved
+bucket writes, which helps on much larger N where cache lines for
+different bins conflict.  At our N = 8192 and K ≤ 128 block, the flush
+bookkeeping (per-bin count check each loop iter, or branch-on-full)
+added more latency than the sparse-write penalty it was trying to
+avoid.  Reverted.
 
-### Nested (multi-stage) prefix-radix
+### Remaining candidates (not yet tried)
 
-At each internal node during decode, use `M_local = local_min`
-(precomputed at `build_table` time).  If `M_local ≥ 2`, another radix
-pass; else fall back to a bitmap byte (== 2-way partition).  The
-zipfian case suggests this could unlock a further 30–50% on top of
-single-stage, specifically for distributions with staircase code length
-profiles.
-
-### Runtime gate in the public decoder
-
-`pivco_huffman_decode` should pick between `decode_neon` and
-`decode_neon_prefix` based on the table shape (flat-tree → prefix;
-stick tree → neon; otherwise → whatever is faster at that `M` and
-distribution shape).  Trivial once both backends are competitive.
+- **TBL-based SIMD K-way bucket partition.**  Per chunk of 8 elements,
+  for each bin `v` compute a 8-lane mask where `prefix == v`, TBL-
+  compact the matching indices into `bin_elements[place[v]]`, advance
+  `place[v]` by popcount.  Cost per 8 elements: K mask-compares + K
+  TBLs + K popcounts + K stores — cheap at K = 8 (M=3), expensive at
+  K = 128 (M=7).  This is the main phase-4 lever still on the table
+  for small-M distributions.
+- **Nested (multi-stage) prefix-radix.**  At each internal node, use
+  `M_local = local_min` (precomputed).  §4 shows zipfian has 70% of
+  its weight in subtree bins with `local_min ≥ 2`; nested radix could
+  collapse phase 5's subtree cost for exactly that shape.
+- **Runtime gate in `pivco_huffman_decode`.**  The prefix backend
+  already wins on flat trees (§3) by 37–243%.  A trivial gate picking
+  the prefix path when `min_len == max_len` would be a pure win; for
+  non-flat tables it would keep using `pivco_n` until the TBL bucket
+  lands.  This is the concrete next incremental step.
 
 ---
 
 ## Files
 
 - `src/pivco_huffman_neon_prefix.c` — encoder + decoder.  Flat case is
-  a fast direct permutation; non-flat case is correct but slower than
-  baseline pending the phase-2/phase-4 SIMD work described in §6.
+  a fast direct permutation; non-flat case is 8-way-parallel in phases
+  2 + 4 but still slower than `pivco_n` pending the TBL bucket work
+  described in §6.
 - `bench/bench_multi_stage_stats.c` — per-distribution applicability
   analyser used in §4.
 - `bench/bench_prefix_profile.c` — per-phase profiler used in §5
