@@ -613,6 +613,102 @@ int pivco_huffman_decode_neon(const uint8_t *in, size_t in_len,
         return PIVCO_OK;
     }
 
+    /* Root is a flat subtree (whole tree is flat, D >= 2).  Stream is
+       N*D packed bits; indices are identity so we write symbols[i]
+       directly.  No prefill memset needed (every byte is written). */
+    if (table->flat_depth[table->tree_root] >= 2) {
+        int D = table->flat_depth[table->tree_root];
+        int total_bytes = (N * D + 7) >> 3;
+        const uint8_t *bm = ptr;
+        ptr += total_bytes;
+        const uint8_t *c2s = &table->flat_code_to_sym[table->flat_offset[table->tree_root]];
+        int i = 0;
+        switch (D) {
+        case 2:
+            for (; i + 4 <= N; i += 4) {
+                uint8_t b = bm[i >> 2];
+                symbols[i    ] = c2s[(b     ) & 3];
+                symbols[i + 1] = c2s[(b >> 2) & 3];
+                symbols[i + 2] = c2s[(b >> 4) & 3];
+                symbols[i + 3] = c2s[(b >> 6) & 3];
+            }
+            break;
+        case 3:
+            for (; i + 8 <= N; i += 8) {
+                const uint8_t *p = bm + ((i * 3) >> 3);
+                uint32_t w = (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16);
+                symbols[i    ] = c2s[(w      ) & 7];
+                symbols[i + 1] = c2s[(w >>  3) & 7];
+                symbols[i + 2] = c2s[(w >>  6) & 7];
+                symbols[i + 3] = c2s[(w >>  9) & 7];
+                symbols[i + 4] = c2s[(w >> 12) & 7];
+                symbols[i + 5] = c2s[(w >> 15) & 7];
+                symbols[i + 6] = c2s[(w >> 18) & 7];
+                symbols[i + 7] = c2s[(w >> 21) & 7];
+            }
+            break;
+        case 4:
+            for (; i + 2 <= N; i += 2) {
+                uint8_t b = bm[i >> 1];
+                symbols[i    ] = c2s[b & 0x0F];
+                symbols[i + 1] = c2s[b >> 4];
+            }
+            break;
+        case 5:
+            for (; i + 8 <= N; i += 8) {
+                const uint8_t *p = bm + ((i * 5) >> 3);
+                uint64_t w = (uint64_t)p[0] | ((uint64_t)p[1] << 8)
+                           | ((uint64_t)p[2] << 16) | ((uint64_t)p[3] << 24)
+                           | ((uint64_t)p[4] << 32);
+                symbols[i    ] = c2s[(w      ) & 0x1F];
+                symbols[i + 1] = c2s[(w >>  5) & 0x1F];
+                symbols[i + 2] = c2s[(w >> 10) & 0x1F];
+                symbols[i + 3] = c2s[(w >> 15) & 0x1F];
+                symbols[i + 4] = c2s[(w >> 20) & 0x1F];
+                symbols[i + 5] = c2s[(w >> 25) & 0x1F];
+                symbols[i + 6] = c2s[(w >> 30) & 0x1F];
+                symbols[i + 7] = c2s[(w >> 35) & 0x1F];
+            }
+            break;
+        case 6:
+            for (; i + 4 <= N; i += 4) {
+                const uint8_t *p = bm + ((i * 6) >> 3);
+                uint32_t w = (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16);
+                symbols[i    ] = c2s[(w      ) & 0x3F];
+                symbols[i + 1] = c2s[(w >>  6) & 0x3F];
+                symbols[i + 2] = c2s[(w >> 12) & 0x3F];
+                symbols[i + 3] = c2s[(w >> 18) & 0x3F];
+            }
+            break;
+        case 7:
+            for (; i + 8 <= N; i += 8) {
+                const uint8_t *p = bm + ((i * 7) >> 3);
+                uint64_t w = (uint64_t)p[0] | ((uint64_t)p[1] << 8)
+                           | ((uint64_t)p[2] << 16) | ((uint64_t)p[3] << 24)
+                           | ((uint64_t)p[4] << 32) | ((uint64_t)p[5] << 40)
+                           | ((uint64_t)p[6] << 48);
+                symbols[i    ] = c2s[(w      ) & 0x7F];
+                symbols[i + 1] = c2s[(w >>  7) & 0x7F];
+                symbols[i + 2] = c2s[(w >> 14) & 0x7F];
+                symbols[i + 3] = c2s[(w >> 21) & 0x7F];
+                symbols[i + 4] = c2s[(w >> 28) & 0x7F];
+                symbols[i + 5] = c2s[(w >> 35) & 0x7F];
+                symbols[i + 6] = c2s[(w >> 42) & 0x7F];
+                symbols[i + 7] = c2s[(w >> 49) & 0x7F];
+            }
+            break;
+        case 8:
+            for (; i < N; i++) symbols[i] = c2s[bm[i]];
+            break;
+        }
+        for (; i < N; i++) {
+            uint32_t code = extract_D_bits(bm, i * D, D);
+            symbols[i] = c2s[code];
+        }
+        *consumed = (size_t)(ptr - in);
+        return PIVCO_OK;
+    }
+
     /* Read root bitmap */
     int nbytes = bitmap_bytes(N);
     const uint8_t *bm = ptr;
