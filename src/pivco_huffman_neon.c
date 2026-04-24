@@ -81,6 +81,45 @@ static inline int partition_8(const uint16_t *src,
 
 /* ---------- NEON Encode (Tree-Walk) ---------- */
 
+/* Pack `n` values of `D` bits each into `out`, LSB-first within each byte.
+   `vals[i]` supplies the low D bits for element i.  Writes ceil(n*D/8)
+   bytes.  Used for the flat-subtree fast path. */
+static inline void pack_D_bits(uint8_t *out, int n, int D,
+                                const uint16_t *indices,
+                                const uint16_t *codes)
+{
+    int total_bytes = (n * D + 7) >> 3;
+    if (total_bytes > 0) out[total_bytes - 1] = 0; /* clear tail partial byte */
+    uint32_t mask = (1u << D) - 1;
+    uint64_t buf = 0;
+    int bits_in_buf = 0;
+    int byte_idx = 0;
+    for (int i = 0; i < n; i++) {
+        uint32_t local = (uint32_t)codes[indices[i]] & mask;
+        buf |= ((uint64_t)local) << bits_in_buf;
+        bits_in_buf += D;
+        while (bits_in_buf >= 8) {
+            out[byte_idx++] = (uint8_t)(buf & 0xff);
+            buf >>= 8;
+            bits_in_buf -= 8;
+        }
+    }
+    if (bits_in_buf > 0) {
+        out[byte_idx] = (uint8_t)(buf & ((1u << bits_in_buf) - 1));
+    }
+}
+
+/* Extract D bits at bit position `bit_pos` from `in`.  D <= 16. */
+static inline uint32_t extract_D_bits(const uint8_t *in, int bit_pos, int D)
+{
+    int byte_idx = bit_pos >> 3;
+    int bit_off  = bit_pos & 7;
+    uint32_t val = (uint32_t)in[byte_idx];
+    if (bit_off + D > 8)  val |= ((uint32_t)in[byte_idx + 1]) << 8;
+    if (bit_off + D > 16) val |= ((uint32_t)in[byte_idx + 2]) << 16;
+    return (val >> bit_off) & ((1u << D) - 1);
+}
+
 static void encode_node_neon(const pivco_huffman_table_t *table,
                               int16_t node_id,
                               uint16_t *indices, int n,
@@ -93,6 +132,17 @@ static void encode_node_neon(const pivco_huffman_table_t *table,
 
     const pivco_tree_node_t *node = &table->tree[node_id];
     if (node->symbol >= 0) return; /* leaf */
+
+    /* Flat-subtree fast path: emit N*D packed bits instead of D levels of
+       bitmaps.  Detected at build_table time. */
+    if (table->flat_depth[node_id] >= 2) {
+        int D = table->flat_depth[node_id];
+        int total_bytes = (n * D + 7) >> 3;
+        uint8_t *out = *out_ptr;
+        *out_ptr += total_bytes;
+        pack_D_bits(out, n, D, indices, codes);
+        return;
+    }
 
     /* Build bitmap and partition in one fused pass.
        For each group of 8 indices, construct the mask byte directly
@@ -310,6 +360,110 @@ static void decode_node_neon(const pivco_huffman_table_t *table,
     const pivco_tree_node_t *node = &table->tree[node_id];
     if (node->symbol >= 0) {
         scatter_sym(symbols, indices, n, (uint8_t)node->symbol);
+        return;
+    }
+
+    /* Flat-subtree fast path: read N*D packed bits, look up each
+       element's symbol directly in a per-subtree code_to_sym table. */
+    if (table->flat_depth[node_id] >= 2) {
+        int D = table->flat_depth[node_id];
+        int total_bytes = (n * D + 7) >> 3;
+        const uint8_t *bm = *in_ptr;
+        *in_ptr += total_bytes;
+        const uint8_t *c2s = &table->flat_code_to_sym[table->flat_offset[node_id]];
+        int i = 0;
+        switch (D) {
+        case 2:
+            /* 4 codes per byte, no cross-byte carry */
+            for (; i + 4 <= n; i += 4) {
+                uint8_t b = bm[i >> 2];
+                symbols[indices[i    ]] = c2s[(b     ) & 3];
+                symbols[indices[i + 1]] = c2s[(b >> 2) & 3];
+                symbols[indices[i + 2]] = c2s[(b >> 4) & 3];
+                symbols[indices[i + 3]] = c2s[(b >> 6) & 3];
+            }
+            break;
+        case 3:
+            /* 8 codes per 3 bytes */
+            for (; i + 8 <= n; i += 8) {
+                const uint8_t *p = bm + ((i * 3) >> 3);
+                uint32_t w = (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16);
+                symbols[indices[i    ]] = c2s[(w     ) & 7];
+                symbols[indices[i + 1]] = c2s[(w >>  3) & 7];
+                symbols[indices[i + 2]] = c2s[(w >>  6) & 7];
+                symbols[indices[i + 3]] = c2s[(w >>  9) & 7];
+                symbols[indices[i + 4]] = c2s[(w >> 12) & 7];
+                symbols[indices[i + 5]] = c2s[(w >> 15) & 7];
+                symbols[indices[i + 6]] = c2s[(w >> 18) & 7];
+                symbols[indices[i + 7]] = c2s[(w >> 21) & 7];
+            }
+            break;
+        case 4:
+            /* 2 codes per byte */
+            for (; i + 2 <= n; i += 2) {
+                uint8_t b = bm[i >> 1];
+                symbols[indices[i    ]] = c2s[b & 0x0F];
+                symbols[indices[i + 1]] = c2s[b >> 4];
+            }
+            break;
+        case 5:
+            /* 8 codes per 5 bytes */
+            for (; i + 8 <= n; i += 8) {
+                const uint8_t *p = bm + ((i * 5) >> 3);
+                uint64_t w = (uint64_t)p[0] | ((uint64_t)p[1] << 8)
+                           | ((uint64_t)p[2] << 16) | ((uint64_t)p[3] << 24)
+                           | ((uint64_t)p[4] << 32);
+                symbols[indices[i    ]] = c2s[(w      ) & 0x1F];
+                symbols[indices[i + 1]] = c2s[(w >>  5) & 0x1F];
+                symbols[indices[i + 2]] = c2s[(w >> 10) & 0x1F];
+                symbols[indices[i + 3]] = c2s[(w >> 15) & 0x1F];
+                symbols[indices[i + 4]] = c2s[(w >> 20) & 0x1F];
+                symbols[indices[i + 5]] = c2s[(w >> 25) & 0x1F];
+                symbols[indices[i + 6]] = c2s[(w >> 30) & 0x1F];
+                symbols[indices[i + 7]] = c2s[(w >> 35) & 0x1F];
+            }
+            break;
+        case 6:
+            /* 4 codes per 3 bytes */
+            for (; i + 4 <= n; i += 4) {
+                const uint8_t *p = bm + ((i * 6) >> 3);
+                uint32_t w = (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16);
+                symbols[indices[i    ]] = c2s[(w      ) & 0x3F];
+                symbols[indices[i + 1]] = c2s[(w >>  6) & 0x3F];
+                symbols[indices[i + 2]] = c2s[(w >> 12) & 0x3F];
+                symbols[indices[i + 3]] = c2s[(w >> 18) & 0x3F];
+            }
+            break;
+        case 7:
+            /* 8 codes per 7 bytes */
+            for (; i + 8 <= n; i += 8) {
+                const uint8_t *p = bm + ((i * 7) >> 3);
+                uint64_t w = (uint64_t)p[0] | ((uint64_t)p[1] << 8)
+                           | ((uint64_t)p[2] << 16) | ((uint64_t)p[3] << 24)
+                           | ((uint64_t)p[4] << 32) | ((uint64_t)p[5] << 40)
+                           | ((uint64_t)p[6] << 48);
+                symbols[indices[i    ]] = c2s[(w      ) & 0x7F];
+                symbols[indices[i + 1]] = c2s[(w >>  7) & 0x7F];
+                symbols[indices[i + 2]] = c2s[(w >> 14) & 0x7F];
+                symbols[indices[i + 3]] = c2s[(w >> 21) & 0x7F];
+                symbols[indices[i + 4]] = c2s[(w >> 28) & 0x7F];
+                symbols[indices[i + 5]] = c2s[(w >> 35) & 0x7F];
+                symbols[indices[i + 6]] = c2s[(w >> 42) & 0x7F];
+                symbols[indices[i + 7]] = c2s[(w >> 49) & 0x7F];
+            }
+            break;
+        case 8:
+            /* 1 code per byte */
+            for (; i < n; i++) {
+                symbols[indices[i]] = c2s[bm[i]];
+            }
+            break;
+        }
+        /* Tail: anything not consumed by the fast path */
+        for (; i < n; i++) {
+            uint32_t code = extract_D_bits(bm, i * D, D);
+            symbols[indices[i]] = c2s[code];
+        }
         return;
     }
 

@@ -4,21 +4,27 @@
 
 SIMD Huffman decoder that walks the tree top-down and partitions the
 whole block at each internal node, instead of decoding one symbol at
-a time.
+a time.  Plus a **flat-subtree fast path**: every maximal flat subtree
+of depth D ≥ 2 in the Huffman tree emits a single N·D-bit packed
+region instead of D levels of bitmaps, decoded via direct lookup.
 
-**Wins on skewed distributions** where most symbols resolve in 1–3
-tree levels. Peak throughput on M4 (proba80): **9.9 GB/s**, 3.5× huf0
-X2 and 5.6× huf0 X1. On `two_sym_eq` (single-bit codes): **27 GB/s**,
-5× huf0. Ports to AVX-512 VBMI2 (3.1× on Xeon), Graviton 4 NEON
-(2.1–7.9×), and SSE4.1 (1.2× on Zen 3, the only platform where PIVCO
-just barely beats huf0).
+**Wins everywhere measured on Apple M4** — 1.0× to 5.2× huf0/trad_4s
+across the full bench grid.  Concrete:
+- `two_sym_eq` single-bit codes: **27 GB/s**, 4.9× huf0.
+- `proba80` strongly skewed: **9.5 GB/s**, 3.4× huf0.
+- `uniform` fully flat: **3.9 GB/s**, 2.4× huf0 (via flat-tree path).
+- `bell_s80` / `bell_s30` / `zipfian` / `proba02` — the **historically
+  losing** moderate-entropy distributions — now win 1.07× to 1.55× huf0
+  thanks to the flat-subtree path.
+- `english`: 2.5 GB/s, 1.03× huf0 (crossed from 0.98×).
 
-**Loses on high-entropy distributions** — english text, bell curves,
-near-uniform — where every symbol traverses 8–12 levels and the
-per-node partition cost stacks up. 0.4–0.9× huf0 X2 there.
+**Portable to other ISAs**: AVX-512 VBMI2 (3.1× on Xeon), Graviton 4
+NEON (2.1–7.9×), SSE4.1 (1.2× on Zen 3).  Platform sweep for the
+flat-subtree addition still pending.
 
-Encoded size within 1–4% of traditional Huffman (byte-alignment
-overhead at each tree node).
+Encoded size within 1–4% of traditional Huffman.  The flat-subtree
+format actually *improves* packing slightly — one tail padding per
+flat region instead of D per-level byte-alignment paddings.
 
 ## What is PIVCO-Huffman?
 

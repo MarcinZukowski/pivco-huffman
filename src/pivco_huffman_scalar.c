@@ -2,6 +2,44 @@
 #include "pivco_huffman_common.h"
 #include <string.h>
 
+/* Pack n*D bits, LSB-first within each byte: D bits per element, local
+   code = codes[indices[i]] & ((1<<D)-1).  Used for the flat-subtree
+   fast path. */
+static inline void pack_D_bits_scalar(uint8_t *out, int n, int D,
+                                       const uint16_t *indices,
+                                       const uint16_t *codes)
+{
+    uint32_t mask = (1u << D) - 1;
+    uint64_t buf = 0;
+    int bits_in_buf = 0;
+    int byte_idx = 0;
+    for (int i = 0; i < n; i++) {
+        uint32_t local = (uint32_t)codes[indices[i]] & mask;
+        buf |= ((uint64_t)local) << bits_in_buf;
+        bits_in_buf += D;
+        while (bits_in_buf >= 8) {
+            out[byte_idx++] = (uint8_t)(buf & 0xff);
+            buf >>= 8;
+            bits_in_buf -= 8;
+        }
+    }
+    if (bits_in_buf > 0) {
+        out[byte_idx] = (uint8_t)(buf & ((1u << bits_in_buf) - 1));
+    }
+}
+
+/* Extract D bits at bit position `bit_pos`. */
+static inline uint32_t extract_D_bits_scalar(const uint8_t *in,
+                                              int bit_pos, int D)
+{
+    int byte_idx = bit_pos >> 3;
+    int bit_off  = bit_pos & 7;
+    uint32_t val = (uint32_t)in[byte_idx];
+    if (bit_off + D > 8)  val |= ((uint32_t)in[byte_idx + 1]) << 8;
+    if (bit_off + D > 16) val |= ((uint32_t)in[byte_idx + 2]) << 16;
+    return (val >> bit_off) & ((1u << D) - 1);
+}
+
 /* ---------- PIVCO Huffman Encode (Scalar, Tree-Walk) ----------
  *
  * DFS tree walk. At each internal node with n indices:
@@ -27,6 +65,18 @@ static void encode_node(const pivco_huffman_table_t *table,
     const pivco_tree_node_t *node = &table->tree[node_id];
     if (node->symbol >= 0) {
         /* Leaf — nothing to write, symbol known from tree */
+        return;
+    }
+
+    /* Flat-subtree fast path: emit n*D packed bits instead of D levels
+       of bitmaps.  Detected at build_table time. */
+    if (table->flat_depth[node_id] >= 2) {
+        int D = table->flat_depth[node_id];
+        int total_bytes = (n * D + 7) >> 3;
+        uint8_t *out = *out_ptr;
+        if (total_bytes > 0) out[total_bytes - 1] = 0;
+        pack_D_bits_scalar(out, n, D, indices, codes);
+        *out_ptr += total_bytes;
         return;
     }
 
@@ -121,6 +171,21 @@ static void decode_node(const pivco_huffman_table_t *table,
         uint8_t sym = (uint8_t)node->symbol;
         for (int j = 0; j < n; j++)
             symbols[indices[j]] = sym;
+        return;
+    }
+
+    /* Flat-subtree fast path: read n*D packed bits, look up each element's
+       symbol directly. */
+    if (table->flat_depth[node_id] >= 2) {
+        int D = table->flat_depth[node_id];
+        int total_bytes = (n * D + 7) >> 3;
+        const uint8_t *bm = *in_ptr;
+        *in_ptr += total_bytes;
+        const uint8_t *c2s = &table->flat_code_to_sym[table->flat_offset[node_id]];
+        for (int i = 0; i < n; i++) {
+            uint32_t code = extract_D_bits_scalar(bm, i * D, D);
+            symbols[indices[i]] = c2s[code];
+        }
         return;
     }
 

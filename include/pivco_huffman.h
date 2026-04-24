@@ -79,6 +79,16 @@ typedef struct {
        output with this symbol via memset and skips its leaf scatter. */
     uint8_t  prefill_sym;
     int16_t  prefill_node;      /* tree node ID of the prefill leaf */
+
+    /* Flat-subtree fast path: per-node, if flat_depth[i] >= 2 then node i
+       is the root of a MAXIMAL flat subtree of depth D = flat_depth[i]
+       (all 2^D leaves at the same relative depth).  Encoder emits N*D
+       packed bits at this node instead of D levels of bitmaps; decoder
+       reads N*D bits and uses flat_code_to_sym[flat_offset[i] + code]
+       per element.  Pool sum of 2^D across flat subtrees <= num_symbols. */
+    uint8_t  flat_depth[PIVCO_MAX_TREE_NODES];
+    uint16_t flat_offset[PIVCO_MAX_TREE_NODES];
+    uint8_t  flat_code_to_sym[PIVCO_MAX_SYMBOLS];
 } pivco_huffman_table_t;
 
 /* ---------- Implementation selection ---------- */

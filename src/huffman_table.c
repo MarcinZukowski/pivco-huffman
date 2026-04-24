@@ -2,6 +2,72 @@
 #include <string.h>
 #include <stdlib.h>
 
+/* ---------- Flat-subtree detection ---------- */
+
+/* Shortest leaf depth below node_id (0 if node_id is itself a leaf). */
+static int flat_local_min(const pivco_tree_node_t *tree, int16_t node_id)
+{
+    const pivco_tree_node_t *n = &tree[node_id];
+    if (n->symbol >= 0) return 0;
+    int l = flat_local_min(tree, n->left);
+    int r = flat_local_min(tree, n->right);
+    return 1 + (l < r ? l : r);
+}
+
+/* Deepest leaf depth below node_id. */
+static int flat_local_max(const pivco_tree_node_t *tree, int16_t node_id)
+{
+    const pivco_tree_node_t *n = &tree[node_id];
+    if (n->symbol >= 0) return 0;
+    int l = flat_local_max(tree, n->left);
+    int r = flat_local_max(tree, n->right);
+    return 1 + (l > r ? l : r);
+}
+
+/* Populate code_to_sym for a flat subtree of depth D rooted at node_id.
+   For each leaf symbol reachable from this root, local_code = low D bits
+   of code[sym] (canonical Huffman codes are MSB-first; low D bits are
+   the in-subtree part).  `out_base` is the pool offset for this subtree;
+   table->flat_code_to_sym[out_base + local_code] = sym. */
+static void flat_fill_code_to_sym(pivco_huffman_table_t *t,
+                                   int16_t node_id, int D,
+                                   uint16_t out_base)
+{
+    const pivco_tree_node_t *n = &t->tree[node_id];
+    if (n->symbol >= 0) {
+        int sym = n->symbol;
+        int local_code = t->code[sym] & ((1 << D) - 1);
+        t->flat_code_to_sym[out_base + local_code] = (uint8_t)sym;
+        return;
+    }
+    flat_fill_code_to_sym(t, n->left,  D, out_base);
+    flat_fill_code_to_sym(t, n->right, D, out_base);
+}
+
+/* DFS from root.  At every internal node, if subtree is flat with depth
+   >= 2, mark node as a maximal flat-subtree root and stop (its descendants
+   are not separately flagged).  Otherwise recurse into children. */
+static void flat_mark_subtrees(pivco_huffman_table_t *t,
+                                int16_t node_id,
+                                uint16_t *pool_cursor)
+{
+    const pivco_tree_node_t *n = &t->tree[node_id];
+    if (n->symbol >= 0) return;
+    int lmin = flat_local_min(t->tree, node_id);
+    int lmax = flat_local_max(t->tree, node_id);
+    if (lmin == lmax && lmin >= 2) {
+        int D = lmin;
+        int size = 1 << D;
+        t->flat_depth[node_id]  = (uint8_t)D;
+        t->flat_offset[node_id] = *pool_cursor;
+        flat_fill_code_to_sym(t, node_id, D, *pool_cursor);
+        *pool_cursor = (uint16_t)(*pool_cursor + size);
+        return;  /* maximal — don't descend */
+    }
+    flat_mark_subtrees(t, n->left,  pool_cursor);
+    flat_mark_subtrees(t, n->right, pool_cursor);
+}
+
 /* ---------- Min-heap for Huffman tree construction ---------- */
 
 typedef struct {
@@ -423,6 +489,17 @@ int pivco_huffman_build_table(const uint64_t freq[PIVCO_MAX_SYMBOLS],
                 break;
             }
         }
+    }
+
+    /* Flat-subtree detection.  Mark every internal node that is the root
+       of a maximal flat subtree with depth >= 2 and fill its
+       code_to_sym lookup.  If the whole tree is flat (min_len ==
+       max_len), skip — the existing full-tree flat fast path (via
+       pivco_huffman_decode_neon_prefix) handles that case and we don't
+       want to intercept at root here. */
+    if (table->min_len != table->max_len) {
+        uint16_t pool_cursor = 0;
+        flat_mark_subtrees(table, table->tree_root, &pool_cursor);
     }
 
     return PIVCO_OK;

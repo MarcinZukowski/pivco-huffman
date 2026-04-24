@@ -88,23 +88,25 @@ mitigation options:
   bit-accumulate-per-level machinery required.
 - Same total bit budget: `N × D` bits either way.  Slightly better
   packing (one tail padding vs `D` per-level paddings).
-- Stacks with existing prefill / leaf-fusion / half-partition
-  optimisations — applies only where none of them already handle the
-  work.
-
-### Open questions
-
-- **Small-n overhead**: when only a handful of elements enter a deep
-  flat subtree (e.g., D=6 with n=3), the per-block fixed-cost of
-  entering the packed-bit path may outweigh the savings.  Likely want
-  a runtime `n >= threshold` check to fall back to normal partition on
-  tiny element counts.  Threshold probably ~8-16.
-- **Interaction with leaf-child fusion at the flat-subtree root**: if
-  the flat-subtree's root is itself a "one-leaf parent" node (one child
-  is a leaf, other is a flat subtree of depth D-1), which path wins?
-  The existing leaf-fusion handles depth-1 leaves well; the flat-subtree
-  path covers the remaining D-1 levels.  Need to compose them
-  carefully or settle on one.
+- Today's `scatter_both_leaves` is *already* the `D = 1` case of this
+  scheme — one packed bit per element, direct
+  `syms[(mask >> lane) & 1]` lookup.  The generalisation to `D >= 2`
+  uses the same mechanism with wider codes and a `code_to_sym` table
+  instead of a 2-entry inline array.
+- No composition conflict with existing leaf-child fusion.  By
+  construction every internal node inside a flat subtree of depth `D`
+  has both children at relative depth `>= 1` with matching depths —
+  so `partition_8_right`/`_left` half-partitions (which only fire when
+  the leaf child is the `skip_node`, i.e., prefill, per
+  `pivco_huffman_neon.c:338,353`) cannot apply inside the flat region.
+  One-leaf-parent nodes always sit *outside* any flat subtree
+  (`subtree_min = 1, subtree_max > 1` → not flat).
+- No small-n threshold needed.  The packed-bit decode path's
+  per-element cost is lower than the current per-level recursive
+  tree walk even for single-digit `n`, because tree-walk carries
+  function-call / scalar-remainder overhead per level.  `D = 1` with
+  `scatter_both_leaves` already runs at all sizes without a threshold;
+  `D >= 2` inherits that.
 
 ## Scatter fusion into partition — tried, reverted (recorded here for future reference)
 
