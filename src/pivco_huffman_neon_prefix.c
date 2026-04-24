@@ -23,6 +23,7 @@
 
 #include "pivco_huffman.h"
 #include "pivco_huffman_common.h"
+#include "pivco_huffman_neon_common.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -251,8 +252,6 @@ static inline void scatter_sym(uint8_t *symbols,
 }
 
 /* ---------- Encode ---------- */
-
-extern void init_compress_table(void);
 
 int pivco_huffman_encode_neon_prefix(const uint8_t *symbols,
                                       const pivco_huffman_table_t *table,

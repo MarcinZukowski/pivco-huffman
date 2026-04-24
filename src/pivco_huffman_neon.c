@@ -1,5 +1,6 @@
 #include "pivco_huffman.h"
 #include "pivco_huffman_common.h"
+#include "pivco_huffman_neon_common.h"
 #include <string.h>
 
 #ifdef PIVCO_HAS_NEON
