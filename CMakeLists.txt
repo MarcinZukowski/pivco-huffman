@@ -45,7 +45,7 @@ elseif(TARGET_ARCH STREQUAL "x86_64" OR TARGET_ARCH STREQUAL "amd64")
         message(STATUS "x86_64 detected — enabling AVX-512 VBMI2 + SSE4.1")
         list(APPEND PIVCO_SOURCES src/pivco_huffman_avx512.c src/pivco_huffman_x86.c)
         add_compile_definitions(PIVCO_HAS_AVX512=1 PIVCO_HAS_SSE4=1)
-        add_compile_options(-mavx512f -mavx512bw -mavx512vl -mavx512vbmi2 -msse4.1 -mpopcnt)
+        add_compile_options(-mavx512f -mavx512bw -mavx512vl -mavx512vbmi -mavx512vbmi2 -msse4.1 -mpopcnt)
     else()
         message(STATUS "x86_64 detected — enabling SSE4.1")
         list(APPEND PIVCO_SOURCES src/pivco_huffman_x86.c)
@@ -113,11 +113,14 @@ if(BUILD_BENCH)
     )
     target_link_libraries(pivco_multi_stage_stats pivco_huffman m)
 
-    add_executable(pivco_prefix_profile
-        bench/bench_prefix_profile.c
-        bench/bench_distributions.c
-    )
-    target_link_libraries(pivco_prefix_profile pivco_huffman m)
+    # Prefix profiler is NEON-only (includes <arm_neon.h> directly).
+    if(TARGET_ARCH STREQUAL "aarch64")
+        add_executable(pivco_prefix_profile
+            bench/bench_prefix_profile.c
+            bench/bench_distributions.c
+        )
+        target_link_libraries(pivco_prefix_profile pivco_huffman m)
+    endif()
 
     add_executable(pivco_flat_subtree_stats
         extras/bench_flat_subtree_stats.c

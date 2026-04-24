@@ -120,6 +120,25 @@ static inline uint32_t extract_D_bits_avx512(const uint8_t *in,
     return (val >> bit_off) & ((1u << D) - 1);
 }
 
+/* ---------- SIMD D-bit spread helpers (VBMI2) ----------
+ * vpmultishiftqb extracts 8-bit fields from uint64 lanes at per-byte bit
+ * offsets — a natural fit for D-bit unpacking.  For each D we broadcast
+ * the packed bytes to fill a register, then multishift + mask. */
+
+/* D=2: 16 codes from 4 bytes of bm.  Replicate 4 bytes to 16 bytes, then
+ * multishift with offsets {0,2,..,14, 16,18,..,30} across 2 uint64 lanes. */
+static inline __m128i flat_d2_spread_avx512(const uint8_t *bm_ptr)
+{
+    uint32_t packed;
+    memcpy(&packed, bm_ptr, 4);
+    __m128i data = _mm_set1_epi32((int32_t)packed);
+    const __m128i ctrl = _mm_setr_epi8(
+        0, 2, 4, 6, 8, 10, 12, 14,
+        16, 18, 20, 22, 24, 26, 28, 30);
+    __m128i raw = _mm_multishift_epi64_epi8(ctrl, data);
+    return _mm_and_si128(raw, _mm_set1_epi8(0x03));
+}
+
 #define FLAT_UNPACK_SWITCH_IDX(dst_expr)                                 \
     int i = 0;                                                            \
     switch (D) {                                                          \
@@ -204,6 +223,48 @@ static inline void flat_decode_scatter_avx512(uint8_t *symbols,
                                                const uint8_t *bm, int D,
                                                const uint8_t *c2s)
 {
+    if (D == 2) {
+        /* c2s has 4 entries; broadcast to all 128-bit lanes for pshufb. */
+        uint32_t c2s_lo;
+        memcpy(&c2s_lo, c2s, 4);
+        __m128i c2s_vec = _mm_set1_epi32((int32_t)c2s_lo);
+        int i = 0;
+        for (; i + 16 <= n; i += 16) {
+            __m128i codes = flat_d2_spread_avx512(bm + (i >> 2));
+            __m128i syms  = _mm_shuffle_epi8(c2s_vec, codes);
+            /* 16 lane-extract + strbs.  Using _mm_extract_epi8 for
+             * compile-time lanes. */
+            symbols[indices[i     ]] = (uint8_t)_mm_extract_epi8(syms, 0);
+            symbols[indices[i +  1]] = (uint8_t)_mm_extract_epi8(syms, 1);
+            symbols[indices[i +  2]] = (uint8_t)_mm_extract_epi8(syms, 2);
+            symbols[indices[i +  3]] = (uint8_t)_mm_extract_epi8(syms, 3);
+            symbols[indices[i +  4]] = (uint8_t)_mm_extract_epi8(syms, 4);
+            symbols[indices[i +  5]] = (uint8_t)_mm_extract_epi8(syms, 5);
+            symbols[indices[i +  6]] = (uint8_t)_mm_extract_epi8(syms, 6);
+            symbols[indices[i +  7]] = (uint8_t)_mm_extract_epi8(syms, 7);
+            symbols[indices[i +  8]] = (uint8_t)_mm_extract_epi8(syms, 8);
+            symbols[indices[i +  9]] = (uint8_t)_mm_extract_epi8(syms, 9);
+            symbols[indices[i + 10]] = (uint8_t)_mm_extract_epi8(syms, 10);
+            symbols[indices[i + 11]] = (uint8_t)_mm_extract_epi8(syms, 11);
+            symbols[indices[i + 12]] = (uint8_t)_mm_extract_epi8(syms, 12);
+            symbols[indices[i + 13]] = (uint8_t)_mm_extract_epi8(syms, 13);
+            symbols[indices[i + 14]] = (uint8_t)_mm_extract_epi8(syms, 14);
+            symbols[indices[i + 15]] = (uint8_t)_mm_extract_epi8(syms, 15);
+        }
+        /* Tail: scalar 4-wide, then 1-wide. */
+        for (; i + 4 <= n; i += 4) {
+            uint8_t b = bm[i >> 2];
+            symbols[indices[i    ]] = c2s[(b     ) & 3];
+            symbols[indices[i + 1]] = c2s[(b >> 2) & 3];
+            symbols[indices[i + 2]] = c2s[(b >> 4) & 3];
+            symbols[indices[i + 3]] = c2s[(b >> 6) & 3];
+        }
+        for (; i < n; i++) {
+            uint32_t code = extract_D_bits_avx512(bm, i * D, D);
+            symbols[indices[i]] = c2s[code];
+        }
+        return;
+    }
 #define DST_SCATTER(k) symbols[indices[k]]
     FLAT_UNPACK_SWITCH_IDX(DST_SCATTER)
 #undef DST_SCATTER
@@ -213,6 +274,30 @@ static inline void flat_decode_direct_avx512(uint8_t *symbols, int n,
                                               const uint8_t *bm, int D,
                                               const uint8_t *c2s)
 {
+    if (D == 2) {
+        /* Same spread/lookup as scatter, but block-store 16 bytes. */
+        uint32_t c2s_lo;
+        memcpy(&c2s_lo, c2s, 4);
+        __m128i c2s_vec = _mm_set1_epi32((int32_t)c2s_lo);
+        int i = 0;
+        for (; i + 16 <= n; i += 16) {
+            __m128i codes = flat_d2_spread_avx512(bm + (i >> 2));
+            __m128i syms  = _mm_shuffle_epi8(c2s_vec, codes);
+            _mm_storeu_si128((__m128i *)(symbols + i), syms);
+        }
+        for (; i + 4 <= n; i += 4) {
+            uint8_t b = bm[i >> 2];
+            symbols[i    ] = c2s[(b     ) & 3];
+            symbols[i + 1] = c2s[(b >> 2) & 3];
+            symbols[i + 2] = c2s[(b >> 4) & 3];
+            symbols[i + 3] = c2s[(b >> 6) & 3];
+        }
+        for (; i < n; i++) {
+            uint32_t code = extract_D_bits_avx512(bm, i * D, D);
+            symbols[i] = c2s[code];
+        }
+        return;
+    }
 #define DST_DIRECT(k) symbols[k]
     FLAT_UNPACK_SWITCH_IDX(DST_DIRECT)
 #undef DST_DIRECT
