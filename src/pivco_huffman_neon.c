@@ -256,6 +256,27 @@ static inline uint8x8_t flat_d3_spread(const uint8_t *bm_ptr)
     return vmovn_u16(masked);
 }
 
+/* D=4 spread: 8 bytes hold 16 codes (2 per byte, no byte-crossings).
+ * Replicate each byte to 2 lanes and shift lane k by (k & 1) * 4. */
+static const uint8_t flat_d4_dup_tab[16] = {
+    0,0, 1,1, 2,2, 3,3, 4,4, 5,5, 6,6, 7,7
+};
+static const int8_t flat_d4_shift_tab[16] = {
+    0,-4, 0,-4, 0,-4, 0,-4, 0,-4, 0,-4, 0,-4, 0,-4
+};
+
+/* Unpack 16 consecutive D=4 codes from 8 bytes of bm. */
+static inline uint8x16_t flat_d4_spread(const uint8_t *bm_ptr)
+{
+    uint64_t packed;
+    memcpy(&packed, bm_ptr, 8);
+    uint8x16_t bm_lo = vreinterpretq_u8_u64(
+        vsetq_lane_u64(packed, vdupq_n_u64(0), 0));
+    uint8x16_t dup = vqtbl1q_u8(bm_lo, vld1q_u8(flat_d4_dup_tab));
+    uint8x16_t shifted = vshlq_u8(dup, vld1q_s8(flat_d4_shift_tab));
+    return vandq_u8(shifted, vdupq_n_u8(0x0F));
+}
+
 /* Unpack n D-bit codes from bm, look up in c2s, scatter to
  * symbols[indices[i]].  Used by decode_node_neon. */
 static inline void flat_decode_scatter_neon(uint8_t *symbols,
@@ -325,6 +346,43 @@ static inline void flat_decode_scatter_neon(uint8_t *symbols,
         }
         return;
     }
+    if (D == 4) {
+        /* c2s has 16 entries — exactly fills a 16-byte TBL register.
+         * Process 16 codes per iteration. */
+        uint8x16_t c2s_vec = vld1q_u8(c2s);
+        int i = 0;
+        for (; i + 16 <= n; i += 16) {
+            uint8x16_t codes = flat_d4_spread(bm + (i >> 1));
+            uint8x16_t syms  = vqtbl1q_u8(c2s_vec, codes);
+            symbols[indices[i     ]] = vgetq_lane_u8(syms, 0);
+            symbols[indices[i +  1]] = vgetq_lane_u8(syms, 1);
+            symbols[indices[i +  2]] = vgetq_lane_u8(syms, 2);
+            symbols[indices[i +  3]] = vgetq_lane_u8(syms, 3);
+            symbols[indices[i +  4]] = vgetq_lane_u8(syms, 4);
+            symbols[indices[i +  5]] = vgetq_lane_u8(syms, 5);
+            symbols[indices[i +  6]] = vgetq_lane_u8(syms, 6);
+            symbols[indices[i +  7]] = vgetq_lane_u8(syms, 7);
+            symbols[indices[i +  8]] = vgetq_lane_u8(syms, 8);
+            symbols[indices[i +  9]] = vgetq_lane_u8(syms, 9);
+            symbols[indices[i + 10]] = vgetq_lane_u8(syms, 10);
+            symbols[indices[i + 11]] = vgetq_lane_u8(syms, 11);
+            symbols[indices[i + 12]] = vgetq_lane_u8(syms, 12);
+            symbols[indices[i + 13]] = vgetq_lane_u8(syms, 13);
+            symbols[indices[i + 14]] = vgetq_lane_u8(syms, 14);
+            symbols[indices[i + 15]] = vgetq_lane_u8(syms, 15);
+        }
+        /* 2-wide and 1-wide tail (same as generic D=4 case). */
+        for (; i + 2 <= n; i += 2) {
+            uint8_t b = bm[i >> 1];
+            symbols[indices[i    ]] = c2s[b & 0x0F];
+            symbols[indices[i + 1]] = c2s[b >> 4];
+        }
+        for (; i < n; i++) {
+            uint32_t code = extract_D_bits(bm, i * D, D);
+            symbols[indices[i]] = c2s[code];
+        }
+        return;
+    }
 #define DST_SCATTER(k) symbols[indices[k]]
     NEON_FLAT_UNPACK_SWITCH(DST_SCATTER)
 #undef DST_SCATTER
@@ -376,6 +434,26 @@ static inline void flat_decode_direct_neon(uint8_t *symbols, int n,
             uint8x8_t codes = flat_d3_spread(bm + ((i * 3) >> 3));
             uint8x8_t syms  = vqtbl1_u8(c2s_vec, codes);
             vst1_u8(symbols + i, syms);
+        }
+        for (; i < n; i++) {
+            uint32_t code = extract_D_bits(bm, i * D, D);
+            symbols[i] = c2s[code];
+        }
+        return;
+    }
+    if (D == 4) {
+        /* 16 codes per iter, single vst1q_u8 — indices are identity. */
+        uint8x16_t c2s_vec = vld1q_u8(c2s);
+        int i = 0;
+        for (; i + 16 <= n; i += 16) {
+            uint8x16_t codes = flat_d4_spread(bm + (i >> 1));
+            uint8x16_t syms  = vqtbl1q_u8(c2s_vec, codes);
+            vst1q_u8(symbols + i, syms);
+        }
+        for (; i + 2 <= n; i += 2) {
+            uint8_t b = bm[i >> 1];
+            symbols[i    ] = c2s[b & 0x0F];
+            symbols[i + 1] = c2s[b >> 4];
         }
         for (; i < n; i++) {
             uint32_t code = extract_D_bits(bm, i * D, D);
