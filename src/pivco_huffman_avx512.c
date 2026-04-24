@@ -139,10 +139,37 @@ static inline __m128i flat_d2_spread_avx512(const uint8_t *bm_ptr)
     return _mm_and_si128(raw, _mm_set1_epi8(0x03));
 }
 
-/* D=3 has NO AVX-512 fast path — both multishift and pshufb+srlv
- * variants benchmarked slower than the scalar case in
- * FLAT_UNPACK_SWITCH_IDX, which GCC auto-vectorises the 8-scalar-store
- * scatter pattern into wide moves.  Leaving the scalar fallback. */
+/* D=3 spread, fast unsafe form: loads 8 bytes (2 past the end of
+ * the 6-valid-byte region).  Caller must guarantee buffer slack, e.g.
+ * by stopping the SIMD loop one iteration before the final 16-code
+ * chunk.  GCC compiles the 8-byte memcpy to a single movq, whereas
+ * a 6-byte memcpy splits into 2 loads + OR and adds 2-3 cycles of
+ * serial latency that kills the fast path's win. */
+static inline __m128i flat_d3_spread_avx512_fast(const uint8_t *bm_ptr)
+{
+    uint64_t packed;
+    memcpy(&packed, bm_ptr, 8);
+    __m128i data = _mm_set1_epi64x((int64_t)packed);
+    const __m128i ctrl = _mm_setr_epi8(
+        0, 3, 6, 9, 12, 15, 18, 21,
+        24, 27, 30, 33, 36, 39, 42, 45);
+    __m128i raw = _mm_multishift_epi64_epi8(ctrl, data);
+    return _mm_and_si128(raw, _mm_set1_epi8(0x07));
+}
+
+/* D=3 spread, safe form: 6-byte memcpy, for the last chunk where the
+ * 8-byte load would overread. */
+static inline __m128i flat_d3_spread_avx512_safe(const uint8_t *bm_ptr)
+{
+    uint64_t packed = 0;
+    memcpy(&packed, bm_ptr, 6);
+    __m128i data = _mm_set1_epi64x((int64_t)packed);
+    const __m128i ctrl = _mm_setr_epi8(
+        0, 3, 6, 9, 12, 15, 18, 21,
+        24, 27, 30, 33, 36, 39, 42, 45);
+    __m128i raw = _mm_multishift_epi64_epi8(ctrl, data);
+    return _mm_and_si128(raw, _mm_set1_epi8(0x07));
+}
 
 /* D=4: 16 codes from 8 bytes of bm.  2 codes per byte, no cross-byte
  * carries.  Broadcast 8 bytes to both uint64 lanes; multishift with
@@ -255,6 +282,64 @@ static inline void flat_decode_scatter_avx512(uint8_t *symbols,
                                                const uint8_t *bm, int D,
                                                const uint8_t *c2s)
 {
+    if (D == 3) {
+        /* c2s has 8 entries — fits in low 8 bytes of pshufb register.
+         * Codes are masked 0..7, so only low 8 bytes are indexed. */
+        uint64_t c2s_lo;
+        memcpy(&c2s_lo, c2s, 8);
+        __m128i c2s_vec = _mm_cvtsi64_si128((int64_t)c2s_lo);
+        int i = 0;
+        /* All but the last 16-code chunk: unsafe fast path (8-byte load
+         * overreads into the NEXT chunk's valid bytes). */
+        int fast_end = n >= 16 ? n - 16 : 0;
+        for (; i + 16 <= fast_end; i += 16) {
+            __m128i codes = flat_d3_spread_avx512_fast(bm + ((i * 3) >> 3));
+            __m128i syms  = _mm_shuffle_epi8(c2s_vec, codes);
+            symbols[indices[i     ]] = (uint8_t)_mm_extract_epi8(syms, 0);
+            symbols[indices[i +  1]] = (uint8_t)_mm_extract_epi8(syms, 1);
+            symbols[indices[i +  2]] = (uint8_t)_mm_extract_epi8(syms, 2);
+            symbols[indices[i +  3]] = (uint8_t)_mm_extract_epi8(syms, 3);
+            symbols[indices[i +  4]] = (uint8_t)_mm_extract_epi8(syms, 4);
+            symbols[indices[i +  5]] = (uint8_t)_mm_extract_epi8(syms, 5);
+            symbols[indices[i +  6]] = (uint8_t)_mm_extract_epi8(syms, 6);
+            symbols[indices[i +  7]] = (uint8_t)_mm_extract_epi8(syms, 7);
+            symbols[indices[i +  8]] = (uint8_t)_mm_extract_epi8(syms, 8);
+            symbols[indices[i +  9]] = (uint8_t)_mm_extract_epi8(syms, 9);
+            symbols[indices[i + 10]] = (uint8_t)_mm_extract_epi8(syms, 10);
+            symbols[indices[i + 11]] = (uint8_t)_mm_extract_epi8(syms, 11);
+            symbols[indices[i + 12]] = (uint8_t)_mm_extract_epi8(syms, 12);
+            symbols[indices[i + 13]] = (uint8_t)_mm_extract_epi8(syms, 13);
+            symbols[indices[i + 14]] = (uint8_t)_mm_extract_epi8(syms, 14);
+            symbols[indices[i + 15]] = (uint8_t)_mm_extract_epi8(syms, 15);
+        }
+        /* Final 16-code chunk (if any): safe 6-byte-memcpy variant. */
+        if (i + 16 <= n) {
+            __m128i codes = flat_d3_spread_avx512_safe(bm + ((i * 3) >> 3));
+            __m128i syms  = _mm_shuffle_epi8(c2s_vec, codes);
+            symbols[indices[i     ]] = (uint8_t)_mm_extract_epi8(syms, 0);
+            symbols[indices[i +  1]] = (uint8_t)_mm_extract_epi8(syms, 1);
+            symbols[indices[i +  2]] = (uint8_t)_mm_extract_epi8(syms, 2);
+            symbols[indices[i +  3]] = (uint8_t)_mm_extract_epi8(syms, 3);
+            symbols[indices[i +  4]] = (uint8_t)_mm_extract_epi8(syms, 4);
+            symbols[indices[i +  5]] = (uint8_t)_mm_extract_epi8(syms, 5);
+            symbols[indices[i +  6]] = (uint8_t)_mm_extract_epi8(syms, 6);
+            symbols[indices[i +  7]] = (uint8_t)_mm_extract_epi8(syms, 7);
+            symbols[indices[i +  8]] = (uint8_t)_mm_extract_epi8(syms, 8);
+            symbols[indices[i +  9]] = (uint8_t)_mm_extract_epi8(syms, 9);
+            symbols[indices[i + 10]] = (uint8_t)_mm_extract_epi8(syms, 10);
+            symbols[indices[i + 11]] = (uint8_t)_mm_extract_epi8(syms, 11);
+            symbols[indices[i + 12]] = (uint8_t)_mm_extract_epi8(syms, 12);
+            symbols[indices[i + 13]] = (uint8_t)_mm_extract_epi8(syms, 13);
+            symbols[indices[i + 14]] = (uint8_t)_mm_extract_epi8(syms, 14);
+            symbols[indices[i + 15]] = (uint8_t)_mm_extract_epi8(syms, 15);
+            i += 16;
+        }
+        for (; i < n; i++) {
+            uint32_t code = extract_D_bits_avx512(bm, i * D, D);
+            symbols[indices[i]] = c2s[code];
+        }
+        return;
+    }
     if (D == 4) {
         /* c2s has 16 entries — exactly fills a pshufb register. */
         __m128i c2s_vec = _mm_loadu_si128((const __m128i *)c2s);
@@ -336,6 +421,29 @@ static inline void flat_decode_direct_avx512(uint8_t *symbols, int n,
                                               const uint8_t *bm, int D,
                                               const uint8_t *c2s)
 {
+    if (D == 3) {
+        uint64_t c2s_lo;
+        memcpy(&c2s_lo, c2s, 8);
+        __m128i c2s_vec = _mm_cvtsi64_si128((int64_t)c2s_lo);
+        int i = 0;
+        int fast_end = n >= 16 ? n - 16 : 0;
+        for (; i + 16 <= fast_end; i += 16) {
+            __m128i codes = flat_d3_spread_avx512_fast(bm + ((i * 3) >> 3));
+            __m128i syms  = _mm_shuffle_epi8(c2s_vec, codes);
+            _mm_storeu_si128((__m128i *)(symbols + i), syms);
+        }
+        if (i + 16 <= n) {
+            __m128i codes = flat_d3_spread_avx512_safe(bm + ((i * 3) >> 3));
+            __m128i syms  = _mm_shuffle_epi8(c2s_vec, codes);
+            _mm_storeu_si128((__m128i *)(symbols + i), syms);
+            i += 16;
+        }
+        for (; i < n; i++) {
+            uint32_t code = extract_D_bits_avx512(bm, i * D, D);
+            symbols[i] = c2s[code];
+        }
+        return;
+    }
     if (D == 4) {
         __m128i c2s_vec = _mm_loadu_si128((const __m128i *)c2s);
         int i = 0;
