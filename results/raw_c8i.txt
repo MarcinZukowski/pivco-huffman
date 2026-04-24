@@ -1,0 +1,40 @@
+  416 |         free(dec_buf);
+      |         ^~~~~~~~~~~~~
+[ 94%] Linking CXX executable pivco_huffman_bench
+[ 94%] Built target pivco_huffman_bench
+gmake: *** [Makefile:91: all] Error 2
+[test_roundtrip_zipf_block_9] PASS (pivco=6440 B, trad=6431 B, ratio=1.00x)
+
+=== ALL PASSED (0 failures) ===
+=== BENCH ===
+=== PIVCO-Huffman Benchmarks ===
+Sequence: 4M, Repeats: 20 (80M/run), Block: 8192, Runs: 5 (drop 2)
+
+DECODE M/s    | pivco_s pivco_n pivco_p | trad_1s trad_4s | huf0_1s huf0_x1 huf0_x2 | rans_x2 |   ratio
+--------------|-------------------------|-----------------|----------------------------|---------|--------
+proba80       |     337    5773       0 |     386     722 |     310    1060    1814 |     248 |  3.18x
+proba50       |     115    2761       0 |     288     651 |     310    1064    1817 |     209 |  1.52x
+proba14       |      64    1200       0 |     273     651 |     310    1064    1741 |     212 |  0.69x
+proba02       |      63    1212       0 |     257     650 |     309    1051    1041 |     208 |  1.15x
+bell_s10      |     107    1390       0 |     280     273 |     309    1049    1612 |     217 |  0.86x
+bell_s30      |      70    1069       0 |     264     273 |     309    1050     985 |     212 |  1.02x
+bell_s80      |     101    1913       0 |     270     693 |       0       0       0 |     256 |  2.76x
+uniform       |    1208    4564       0 |     285     699 |       0       0       0 |     284 |  6.53x
+english       |      76    1632       0 |     275     680 |     309    1058    1754 |     221 |  0.93x
+zipfian       |      72    1586       0 |     244     681 |     309    1050    1262 |     175 |  1.26x
+sparse_4      |    1212    3864       0 |     318     723 |     310    1066    1830 |     306 |  2.11x
+sparse_16     |    1207    3554       0 |     283     720 |     309    1068    1812 |     297 |  1.96x
+geometric     |     115    2871       0 |     289     273 |     310    1062    1807 |     208 |  1.59x
+two_sym_eq    |     224    4649       0 |     310     725 |     310    1062    1825 |     312 |  2.55x
+two_sym_90/10 |     617    8815       0 |     433     724 |     310    1063    1812 |     275 |  4.87x
+flat_M3       |    1138    3866       0 |     310     724 |     310    1068    1821 |     302 |  2.12x
+flat_M5       |    1073    4254       0 |     301     717 |     310    1067    1809 |     293 |  2.35x
+flat_M6       |    1121    3083       0 |     295     715 |     310    1065    1672 |     290 |  1.84x
+flat_M7       |     875    3716       0 |     290     708 |     310    1063     923 |     287 |  3.50x
+
+  5 runs of 80M symbols each (20x 4M), drop 2 slowest, warn if spread > 5%
+  PIVCO/trad decode in 8192-symbol blocks
+  huf0 uses 128KB chunks (its max block size)
+  rANS decodes full 4M at once
+  CPU freq drift: +0.2% (OK)
+  Total wall time: 170.3 seconds
