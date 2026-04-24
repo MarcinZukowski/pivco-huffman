@@ -677,6 +677,30 @@ distributions.
   analyzer used to predict coverage per distribution.  Format-wise,
   this replaces the older "prefix-radix backend for flat trees" bullet
   below — the flat-subtree path subsumes it.
+
+- **TBL-accelerated flat-subtree decode, per-D**
+  (April 2026, commits `b0639ff`..`a77c589` for NEON, `210211d` /
+  `ad17cdc` / `fa1134b` for AVX-512, `0e037ab` / `ae14323` for SSE4.1):
+  After the format-change above, the decoder's `flat_decode_*`
+  helpers were specialised per `D` using per-ISA table-lookup
+  primitives (`vqtbl{1,2,4}q_u8` on NEON, `vpshufb` /
+  `vpmultishiftqb` / `vpermb` on AVX-512, `pshufb` on SSE4.1).
+  *(headline per-ISA gains as of `ae14323`, 2026-04-24; measured on
+  M4 Max / c8i / c6a, 20-30 reps × 4M symbols; full sweep pending)*:
+
+  | backend | D's shipped | headline wins |
+  |---|---|---|
+  | NEON (M4, Graviton) | D=2..6 | english +10%, bell_s80 +16%, flat_M5/6 +300% (root-flat direct-write) |
+  | AVX-512 (Xeon) | D=2, D=4 | english 0.93×→1.03× (first Xeon win), bell_s10 0.86×→0.95×, sparse_4 +520% |
+  | SSE4.1 (Zen 3) | D=4 | sparse_16 +842%, bell_s10 +7% |
+
+  AVX-512 D=3/5/6 were attempted and rejected — GCC auto-vectorises
+  the scalar scatter pattern more effectively than `vpermb`-over-ymm/zmm
+  for those D values; documented in IDEAS.md §"Revisit AVX-512 D=3,
+  D=5, D=6".  SSE4.1 D=2/3/5/6 were skipped because pure SSE4.1 lacks
+  variable per-lane byte shifts; enabling AVX2 (`_mm_srlv_epi16`) on
+  Zen-3-class hosts may unlock D=2/3, logged in IDEAS.md §"Revisit
+  SSE4.1".
 - **Prefix-radix backend (non-flat research path)**
   (`pivco_huffman_neon_prefix.c`): For Huffman tables with
   `min_len < max_len`, a separate prefix-radix partition approach.

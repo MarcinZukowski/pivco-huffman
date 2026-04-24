@@ -335,40 +335,93 @@ Sketch of the check:
 
 Easy (lookup-only) win candidate.  5-15 minute first-look exercise.
 
+## Revisit AVX-512 D=3, D=5, D=6 flat-subtree TBL
+
+**Status (as of `ae14323`, 2026-04-24):** tried and reverted.  All
+three regressed vs the scalar `FLAT_UNPACK_SWITCH_IDX` macro on
+Xeon 6975P-C (Granite Rapids):
+- D=3 (attempted with `vpmultishiftqb` 16-code-per-iter and with
+  `pshufb` + `_mm_srlv_epi16` 8-code-per-iter): flat_M3 −38%.
+- D=5 (`vpermb` over ymm): flat_M5 −50%, bell_s80 −17%, bell_s30 −13%.
+- D=6 (`vpermb` over zmm): flat_M6 −27%, bell_s80 −32%.
+
+GCC auto-vectorises the scalar 8-wide scatter (`symbols[i+k] = c2s[...]`
+for k=0..7) into wide moves, so the bar is higher than expected.  The
+winning D values were D=2 and D=4 (simpler spread, smaller table, no
+byte-crossings).  See `src/pivco_huffman_avx512.c` for the recorded
+constraints — if you want to reattempt, approaches worth trying:
+
+- **Wider iteration**.  Our attempts all used 128-bit registers to
+  match NEON; a 32-code-per-iter or 64-code-per-iter version using
+  full ymm/zmm might amortise the spread cost enough to win.  Zmm
+  usage may trigger Intel's clock throttling on some SKUs but
+  Granite Rapids is said to be less affected.
+- **Different spread primitive**.  GFNI (`vgf2p8affineqb_epi8`) can
+  do byte-level shift + mask in a single instruction with the right
+  matrix constant; might beat `vpmultishiftqb` for D=3/5.
+- **Skip the spread entirely** for D=4-aligned cases: reorganise
+  the packed format so codes for neighbouring elements land in
+  consecutive bytes aligned for a direct pshufb.
+
+## Revisit SSE4.1 D=2, D=3, D=5, D=6 flat-subtree TBL
+
+**Status (as of `ae14323`, 2026-04-24):** skipped.  Pure SSE4.1 has no
+per-byte variable shift (no `vpsrlv*` until AVX2) and no
+`vpmultishiftqb` (VBMI2), so the spread would need 4–8 separate
+`pshufb` + immediate shifts + blends — which benchmarked slower than
+scalar even on AVX-512 (§"Revisit AVX-512 D=3, D=5, D=6").
+
+Approaches to try:
+
+- **AVX2 when available**.  `_mm_srlv_epi16` (AVX2) would give the
+  per-uint16-lane variable shift we need.  Zen 3 (the current SSE4.1
+  test host) has AVX2 but CMakeLists doesn't enable `-mavx2` on the
+  non-AVX-512 path.  Adding it would unlock D=2/3 on Zen 3.
+- **GFNI fallback**.  Same primitive as the AVX-512 revisit above;
+  Zen 3 has GFNI (check for SSSE3 + GFNI at build time).
+- **Hybrid with scalar**.  Skip TBL for odd D and keep the scalar
+  scatter (compiler will vectorise it as on AVX-512).  Only add TBL
+  for D=4 (already done).  Already the current state.
+
+Real-world impact on Zen 3 moderate-entropy distributions is limited
+even with perfect TBL — the IDEAS.md "Zen 3 hybrid block decoder"
+fallback (route per-table between PIVCO and trad_huffman_decode_4s
+when flat-subtree coverage is low) is probably the right escape
+there regardless.
+
 ## Suggested implementation order
 
 Leaf-child fusion and the flat-subtree fast path (both the scatter
-loop and the D=2..6 TBL-accelerated variants on NEON) are *shipped*
-(see §"Flat-subtree fast path — format-change variant" above and
-README.md).  The remaining outstanding work, roughly in increasing
-cost / decreasing certainty:
+loop and the TBL-accelerated variants) are *shipped*:
 
-1. **Port TBL-accelerated flat-subtree decode to x86 and AVX-512.**
-   The NEON D=2..6 paths (commits `b0639ff` through `a77c589`) use
-   `vqtbl1`/`vqtbl2`/`vqtbl4` for the c2s lookup and dup-TBL + shift
-   + mask for the spread.  x86 has directly analogous primitives:
-   `pshufb` (SSSE3, 16-byte TBL), `vpermb` / `vpermt2b` (AVX-512
-   VBMI) for wider tables.  Expected to lift all four moderate-entropy
-   distributions on Xeon similar to the M4 gains; also helps Zen 3.
-2. **Check `flat_dX_spread` against FastLanes' unpack kernels**
+- NEON D=2..6 (commits `b0639ff` through `a77c589`)
+- AVX-512 D=2 (`210211d`) and D=4 (`ad17cdc`)
+- SSE4.1 D=4 (`0e037ab`)
+
+Remaining outstanding work, roughly in increasing cost / decreasing
+certainty:
+
+1. **Check `flat_dX_spread` against FastLanes' unpack kernels**
    (see §"Check flat_dX_spread against FastLanes unpackers" above).
    Maybe a few percent per D.
-3. **Vectorise the D-bit extract on AVX-512** using `vpmultishiftqb`
-   (VBMI2).  Xeon moderate-entropy cases (english 0.93×, bell_s10
-   0.86×) are close to parity and likely cross with this.  Low-hanging.
-2. **Zen 3 SSE4.1 hybrid block decoder** — on Zen 3 the
+2. **Revisit AVX-512 D=3, D=5, D=6** — see section above.  Wider
+   iteration, GFNI, or format tweaks may flip these from regression
+   to win.
+3. **Revisit SSE4.1 D=2, D=3, D=5, D=6** with AVX2 `_mm_srlv_epi16`
+   or GFNI — see section above.
+4. **Zen 3 SSE4.1 hybrid block decoder** — on Zen 3 the
    moderate-entropy distributions stay at 0.41–0.62× vs huf0_x2 even
    after flat-subtree.  A per-table fallback to `trad_huffman_decode_4s`
    (§"Product-level idea: hybrid block decoder") would plausibly
    recover most of the gap.  Gate heuristic: when flat-subtree coverage
    estimate is low (e.g., `≤ 20%`) AND `max_len > 6`, fall back to huf0.
-3. **TBL-based K-way bucket** for `decode_neon_prefix` phase 4 — only
+5. **TBL-based K-way bucket** for `decode_neon_prefix` phase 4 — only
    relevant to the non-flat prefix-radix research path, which is
    effectively unused now that flat-subtree wins on the same
    distributions.  Can drop.
-4. **Nested (multi-stage) prefix-radix** — same as (3); subsumed by
+6. **Nested (multi-stage) prefix-radix** — same as (5); subsumed by
    flat-subtree.  Can drop.
-5. **Retire `pivco_huffman_decode_neon_prefix`** — the remaining
+7. **Retire `pivco_huffman_decode_neon_prefix`** — the remaining
    research backend.  All of its flat-tree wins are now handled by
    the flat-subtree path inside `decode_node_neon`; the non-flat
    prefix-radix never became competitive.  Straight deletion clears
