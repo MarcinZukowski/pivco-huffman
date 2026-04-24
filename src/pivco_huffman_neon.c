@@ -203,6 +203,29 @@ static inline uint32_t extract_D_bits(const uint8_t *in, int bit_pos, int D)
         DST(i) = c2s[code];                                                    \
     }
 
+/* D=2 spread constants: each byte of input holds 4 codes; replicate each
+ * input byte to 4 output lanes, then right-shift lane k by 2k to align
+ * the desired 2-bit code at the low bits. */
+static const uint8_t flat_d2_dup_tab[16] = {
+    0,0,0,0,  1,1,1,1,  2,2,2,2,  3,3,3,3
+};
+static const int8_t flat_d2_shift_tab[16] = {
+    0,-2,-4,-6,  0,-2,-4,-6,  0,-2,-4,-6,  0,-2,-4,-6
+};
+
+/* Unpack 16 consecutive D=2 codes from 4 bytes of bm into a 16-lane byte
+ * vector (values 0..3). */
+static inline uint8x16_t flat_d2_spread(const uint8_t *bm_ptr)
+{
+    uint32_t packed;
+    memcpy(&packed, bm_ptr, 4);
+    uint8x16_t bm_lo = vreinterpretq_u8_u32(
+        vsetq_lane_u32(packed, vdupq_n_u32(0), 0));
+    uint8x16_t dup = vqtbl1q_u8(bm_lo, vld1q_u8(flat_d2_dup_tab));
+    uint8x16_t shifted = vshlq_u8(dup, vld1q_s8(flat_d2_shift_tab));
+    return vandq_u8(shifted, vdupq_n_u8(0x03));
+}
+
 /* Unpack n D-bit codes from bm, look up in c2s, scatter to
  * symbols[indices[i]].  Used by decode_node_neon. */
 static inline void flat_decode_scatter_neon(uint8_t *symbols,
@@ -210,6 +233,45 @@ static inline void flat_decode_scatter_neon(uint8_t *symbols,
                                              const uint8_t *bm, int D,
                                              const uint8_t *c2s)
 {
+    if (D == 2) {
+        /* Keep c2s (4 entries) in a NEON register; look up 16 codes per
+         * iteration with one vqtbl1q_u8 instead of 16 scalar c2s LDRs. */
+        uint8x16_t c2s_vec = vld1q_u8(c2s);  /* upper 12 bytes are unused */
+        int i = 0;
+        for (; i + 16 <= n; i += 16) {
+            uint8x16_t codes = flat_d2_spread(bm + (i >> 2));
+            uint8x16_t syms  = vqtbl1q_u8(c2s_vec, codes);
+            symbols[indices[i     ]] = vgetq_lane_u8(syms, 0);
+            symbols[indices[i +  1]] = vgetq_lane_u8(syms, 1);
+            symbols[indices[i +  2]] = vgetq_lane_u8(syms, 2);
+            symbols[indices[i +  3]] = vgetq_lane_u8(syms, 3);
+            symbols[indices[i +  4]] = vgetq_lane_u8(syms, 4);
+            symbols[indices[i +  5]] = vgetq_lane_u8(syms, 5);
+            symbols[indices[i +  6]] = vgetq_lane_u8(syms, 6);
+            symbols[indices[i +  7]] = vgetq_lane_u8(syms, 7);
+            symbols[indices[i +  8]] = vgetq_lane_u8(syms, 8);
+            symbols[indices[i +  9]] = vgetq_lane_u8(syms, 9);
+            symbols[indices[i + 10]] = vgetq_lane_u8(syms, 10);
+            symbols[indices[i + 11]] = vgetq_lane_u8(syms, 11);
+            symbols[indices[i + 12]] = vgetq_lane_u8(syms, 12);
+            symbols[indices[i + 13]] = vgetq_lane_u8(syms, 13);
+            symbols[indices[i + 14]] = vgetq_lane_u8(syms, 14);
+            symbols[indices[i + 15]] = vgetq_lane_u8(syms, 15);
+        }
+        /* Tail: scalar 4-wide, then 1-wide (same as generic D=2 case) */
+        for (; i + 4 <= n; i += 4) {
+            uint8_t b = bm[i >> 2];
+            symbols[indices[i    ]] = c2s[(b     ) & 3];
+            symbols[indices[i + 1]] = c2s[(b >> 2) & 3];
+            symbols[indices[i + 2]] = c2s[(b >> 4) & 3];
+            symbols[indices[i + 3]] = c2s[(b >> 6) & 3];
+        }
+        for (; i < n; i++) {
+            uint32_t code = extract_D_bits(bm, i * D, D);
+            symbols[indices[i]] = c2s[code];
+        }
+        return;
+    }
 #define DST_SCATTER(k) symbols[indices[k]]
     NEON_FLAT_UNPACK_SWITCH(DST_SCATTER)
 #undef DST_SCATTER
@@ -221,6 +283,29 @@ static inline void flat_decode_direct_neon(uint8_t *symbols, int n,
                                             const uint8_t *bm, int D,
                                             const uint8_t *c2s)
 {
+    if (D == 2) {
+        /* Same unpack as scatter, but store 16 symbols per iter as a
+         * single contiguous vst1q_u8 — indices are identity. */
+        uint8x16_t c2s_vec = vld1q_u8(c2s);
+        int i = 0;
+        for (; i + 16 <= n; i += 16) {
+            uint8x16_t codes = flat_d2_spread(bm + (i >> 2));
+            uint8x16_t syms  = vqtbl1q_u8(c2s_vec, codes);
+            vst1q_u8(symbols + i, syms);
+        }
+        for (; i + 4 <= n; i += 4) {
+            uint8_t b = bm[i >> 2];
+            symbols[i    ] = c2s[(b     ) & 3];
+            symbols[i + 1] = c2s[(b >> 2) & 3];
+            symbols[i + 2] = c2s[(b >> 4) & 3];
+            symbols[i + 3] = c2s[(b >> 6) & 3];
+        }
+        for (; i < n; i++) {
+            uint32_t code = extract_D_bits(bm, i * D, D);
+            symbols[i] = c2s[code];
+        }
+        return;
+    }
 #define DST_DIRECT(k) symbols[k]
     NEON_FLAT_UNPACK_SWITCH(DST_DIRECT)
 #undef DST_DIRECT
