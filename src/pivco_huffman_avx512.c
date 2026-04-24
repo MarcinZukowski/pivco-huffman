@@ -188,15 +188,55 @@ static inline __m128i flat_d4_spread_avx512(const uint8_t *bm_ptr)
     return _mm_and_si128(raw, _mm_set1_epi8(0x0F));
 }
 
-/* D=5 on AVX-512: benchmarked as regression vs scalar FLAT_UNPACK_SWITCH
- * (flat_M5 -50%, bell_s80 -17%, bell_s30 -13%, zipfian -9%).  The
- * cross-byte-carry codes make the spread more expensive, and vpermb
- * (32-byte TBL, cross-lane) has higher latency than pshufb.  Scalar
- * fallback kept. */
+/* D=5: 16 codes from 10 valid bytes.  Broadcast-to-lanes via pshufb
+ * then multishift.  Fast path loads 16 bytes directly; the shuffle
+ * control only touches bytes 0..9 so the top 6 are don't-care. */
+static inline __m128i flat_d5_spread_avx512_fast(const uint8_t *bm_ptr)
+{
+    __m128i raw = _mm_loadu_si128((const __m128i *)bm_ptr);
+    const __m128i shuf = _mm_setr_epi8(
+        0, 1, 2, 3, 4, 5, 6, 7,
+        2, 3, 4, 5, 6, 7, 8, 9);
+    __m128i data = _mm_shuffle_epi8(raw, shuf);
+    const __m128i ctrl = _mm_setr_epi8(
+        0,   5, 10, 15, 20, 25, 30, 35,
+        24, 29, 34, 39, 44, 49, 54, 59);
+    __m128i ms = _mm_multishift_epi64_epi8(ctrl, data);
+    return _mm_and_si128(ms, _mm_set1_epi8(0x1F));
+}
 
-/* D=6 on AVX-512: benchmarked as regression vs scalar (flat_M6 -27%,
- * bell_s80 -32%).  The vpermb over zmm has higher latency than the
- * compiler-vectorised scalar scatter.  Scalar fallback kept. */
+/* D=5 safe form for the last chunk (10-byte memcpy into a stack buf). */
+static inline __m128i flat_d5_spread_avx512_safe(const uint8_t *bm_ptr)
+{
+    uint8_t buf[16] = {0};
+    memcpy(buf, bm_ptr, 10);
+    return flat_d5_spread_avx512_fast(buf);
+}
+
+/* D=6: 16 codes from 12 valid bytes.  Same pattern as D=5.  Lane
+ * layout: lane 0 = bm[0..7] (codes 0..7 at offsets 0,6,12,18,24,30,
+ * 36,42), lane 1 = bm[4..11] (codes 8..15 at offsets 16,22,28,34,
+ * 40,46,52,58 = stream_bit - 32). */
+static inline __m128i flat_d6_spread_avx512_fast(const uint8_t *bm_ptr)
+{
+    __m128i raw = _mm_loadu_si128((const __m128i *)bm_ptr);
+    const __m128i shuf = _mm_setr_epi8(
+        0, 1, 2, 3, 4, 5, 6, 7,
+        4, 5, 6, 7, 8, 9, 10, 11);
+    __m128i data = _mm_shuffle_epi8(raw, shuf);
+    const __m128i ctrl = _mm_setr_epi8(
+        0,   6, 12, 18, 24, 30, 36, 42,
+        16, 22, 28, 34, 40, 46, 52, 58);
+    __m128i ms = _mm_multishift_epi64_epi8(ctrl, data);
+    return _mm_and_si128(ms, _mm_set1_epi8(0x3F));
+}
+
+static inline __m128i flat_d6_spread_avx512_safe(const uint8_t *bm_ptr)
+{
+    uint8_t buf[16] = {0};
+    memcpy(buf, bm_ptr, 12);
+    return flat_d6_spread_avx512_fast(buf);
+}
 
 #define FLAT_UNPACK_SWITCH_IDX(dst_expr)                                 \
     int i = 0;                                                            \
@@ -282,6 +322,118 @@ static inline void flat_decode_scatter_avx512(uint8_t *symbols,
                                                const uint8_t *bm, int D,
                                                const uint8_t *c2s)
 {
+    if (D == 6) {
+        /* c2s has 64 entries — fits in zmm, use vpermb. */
+        __m512i c2s_vec = _mm512_loadu_si512((const __m512i *)c2s);
+        int i = 0;
+        int fast_end = n >= 16 ? n - 16 : 0;
+        for (; i + 16 <= fast_end; i += 16) {
+            __m128i codes = flat_d6_spread_avx512_fast(bm + ((i * 6) >> 3));
+            __m512i codes_ext = _mm512_castsi128_si512(codes);
+            __m512i syms_full = _mm512_permutexvar_epi8(codes_ext, c2s_vec);
+            __m128i syms = _mm512_castsi512_si128(syms_full);
+            symbols[indices[i     ]] = (uint8_t)_mm_extract_epi8(syms, 0);
+            symbols[indices[i +  1]] = (uint8_t)_mm_extract_epi8(syms, 1);
+            symbols[indices[i +  2]] = (uint8_t)_mm_extract_epi8(syms, 2);
+            symbols[indices[i +  3]] = (uint8_t)_mm_extract_epi8(syms, 3);
+            symbols[indices[i +  4]] = (uint8_t)_mm_extract_epi8(syms, 4);
+            symbols[indices[i +  5]] = (uint8_t)_mm_extract_epi8(syms, 5);
+            symbols[indices[i +  6]] = (uint8_t)_mm_extract_epi8(syms, 6);
+            symbols[indices[i +  7]] = (uint8_t)_mm_extract_epi8(syms, 7);
+            symbols[indices[i +  8]] = (uint8_t)_mm_extract_epi8(syms, 8);
+            symbols[indices[i +  9]] = (uint8_t)_mm_extract_epi8(syms, 9);
+            symbols[indices[i + 10]] = (uint8_t)_mm_extract_epi8(syms, 10);
+            symbols[indices[i + 11]] = (uint8_t)_mm_extract_epi8(syms, 11);
+            symbols[indices[i + 12]] = (uint8_t)_mm_extract_epi8(syms, 12);
+            symbols[indices[i + 13]] = (uint8_t)_mm_extract_epi8(syms, 13);
+            symbols[indices[i + 14]] = (uint8_t)_mm_extract_epi8(syms, 14);
+            symbols[indices[i + 15]] = (uint8_t)_mm_extract_epi8(syms, 15);
+        }
+        if (i + 16 <= n) {
+            __m128i codes = flat_d6_spread_avx512_safe(bm + ((i * 6) >> 3));
+            __m512i codes_ext = _mm512_castsi128_si512(codes);
+            __m512i syms_full = _mm512_permutexvar_epi8(codes_ext, c2s_vec);
+            __m128i syms = _mm512_castsi512_si128(syms_full);
+            symbols[indices[i     ]] = (uint8_t)_mm_extract_epi8(syms, 0);
+            symbols[indices[i +  1]] = (uint8_t)_mm_extract_epi8(syms, 1);
+            symbols[indices[i +  2]] = (uint8_t)_mm_extract_epi8(syms, 2);
+            symbols[indices[i +  3]] = (uint8_t)_mm_extract_epi8(syms, 3);
+            symbols[indices[i +  4]] = (uint8_t)_mm_extract_epi8(syms, 4);
+            symbols[indices[i +  5]] = (uint8_t)_mm_extract_epi8(syms, 5);
+            symbols[indices[i +  6]] = (uint8_t)_mm_extract_epi8(syms, 6);
+            symbols[indices[i +  7]] = (uint8_t)_mm_extract_epi8(syms, 7);
+            symbols[indices[i +  8]] = (uint8_t)_mm_extract_epi8(syms, 8);
+            symbols[indices[i +  9]] = (uint8_t)_mm_extract_epi8(syms, 9);
+            symbols[indices[i + 10]] = (uint8_t)_mm_extract_epi8(syms, 10);
+            symbols[indices[i + 11]] = (uint8_t)_mm_extract_epi8(syms, 11);
+            symbols[indices[i + 12]] = (uint8_t)_mm_extract_epi8(syms, 12);
+            symbols[indices[i + 13]] = (uint8_t)_mm_extract_epi8(syms, 13);
+            symbols[indices[i + 14]] = (uint8_t)_mm_extract_epi8(syms, 14);
+            symbols[indices[i + 15]] = (uint8_t)_mm_extract_epi8(syms, 15);
+            i += 16;
+        }
+        for (; i < n; i++) {
+            uint32_t code = extract_D_bits_avx512(bm, i * D, D);
+            symbols[indices[i]] = c2s[code];
+        }
+        return;
+    }
+    if (D == 5) {
+        /* c2s has 32 entries — needs vpermb over ymm. */
+        __m256i c2s_vec = _mm256_loadu_si256((const __m256i *)c2s);
+        int i = 0;
+        int fast_end = n >= 16 ? n - 16 : 0;
+        for (; i + 16 <= fast_end; i += 16) {
+            __m128i codes = flat_d5_spread_avx512_fast(bm + ((i * 5) >> 3));
+            __m256i codes_ext = _mm256_zextsi128_si256(codes);
+            __m256i syms_full = _mm256_permutexvar_epi8(codes_ext, c2s_vec);
+            __m128i syms = _mm256_castsi256_si128(syms_full);
+            symbols[indices[i     ]] = (uint8_t)_mm_extract_epi8(syms, 0);
+            symbols[indices[i +  1]] = (uint8_t)_mm_extract_epi8(syms, 1);
+            symbols[indices[i +  2]] = (uint8_t)_mm_extract_epi8(syms, 2);
+            symbols[indices[i +  3]] = (uint8_t)_mm_extract_epi8(syms, 3);
+            symbols[indices[i +  4]] = (uint8_t)_mm_extract_epi8(syms, 4);
+            symbols[indices[i +  5]] = (uint8_t)_mm_extract_epi8(syms, 5);
+            symbols[indices[i +  6]] = (uint8_t)_mm_extract_epi8(syms, 6);
+            symbols[indices[i +  7]] = (uint8_t)_mm_extract_epi8(syms, 7);
+            symbols[indices[i +  8]] = (uint8_t)_mm_extract_epi8(syms, 8);
+            symbols[indices[i +  9]] = (uint8_t)_mm_extract_epi8(syms, 9);
+            symbols[indices[i + 10]] = (uint8_t)_mm_extract_epi8(syms, 10);
+            symbols[indices[i + 11]] = (uint8_t)_mm_extract_epi8(syms, 11);
+            symbols[indices[i + 12]] = (uint8_t)_mm_extract_epi8(syms, 12);
+            symbols[indices[i + 13]] = (uint8_t)_mm_extract_epi8(syms, 13);
+            symbols[indices[i + 14]] = (uint8_t)_mm_extract_epi8(syms, 14);
+            symbols[indices[i + 15]] = (uint8_t)_mm_extract_epi8(syms, 15);
+        }
+        if (i + 16 <= n) {
+            __m128i codes = flat_d5_spread_avx512_safe(bm + ((i * 5) >> 3));
+            __m256i codes_ext = _mm256_zextsi128_si256(codes);
+            __m256i syms_full = _mm256_permutexvar_epi8(codes_ext, c2s_vec);
+            __m128i syms = _mm256_castsi256_si128(syms_full);
+            symbols[indices[i     ]] = (uint8_t)_mm_extract_epi8(syms, 0);
+            symbols[indices[i +  1]] = (uint8_t)_mm_extract_epi8(syms, 1);
+            symbols[indices[i +  2]] = (uint8_t)_mm_extract_epi8(syms, 2);
+            symbols[indices[i +  3]] = (uint8_t)_mm_extract_epi8(syms, 3);
+            symbols[indices[i +  4]] = (uint8_t)_mm_extract_epi8(syms, 4);
+            symbols[indices[i +  5]] = (uint8_t)_mm_extract_epi8(syms, 5);
+            symbols[indices[i +  6]] = (uint8_t)_mm_extract_epi8(syms, 6);
+            symbols[indices[i +  7]] = (uint8_t)_mm_extract_epi8(syms, 7);
+            symbols[indices[i +  8]] = (uint8_t)_mm_extract_epi8(syms, 8);
+            symbols[indices[i +  9]] = (uint8_t)_mm_extract_epi8(syms, 9);
+            symbols[indices[i + 10]] = (uint8_t)_mm_extract_epi8(syms, 10);
+            symbols[indices[i + 11]] = (uint8_t)_mm_extract_epi8(syms, 11);
+            symbols[indices[i + 12]] = (uint8_t)_mm_extract_epi8(syms, 12);
+            symbols[indices[i + 13]] = (uint8_t)_mm_extract_epi8(syms, 13);
+            symbols[indices[i + 14]] = (uint8_t)_mm_extract_epi8(syms, 14);
+            symbols[indices[i + 15]] = (uint8_t)_mm_extract_epi8(syms, 15);
+            i += 16;
+        }
+        for (; i < n; i++) {
+            uint32_t code = extract_D_bits_avx512(bm, i * D, D);
+            symbols[indices[i]] = c2s[code];
+        }
+        return;
+    }
     if (D == 3) {
         /* c2s has 8 entries — fits in low 8 bytes of pshufb register.
          * Codes are masked 0..7, so only low 8 bytes are indexed. */
@@ -421,6 +573,56 @@ static inline void flat_decode_direct_avx512(uint8_t *symbols, int n,
                                               const uint8_t *bm, int D,
                                               const uint8_t *c2s)
 {
+    if (D == 6) {
+        __m512i c2s_vec = _mm512_loadu_si512((const __m512i *)c2s);
+        int i = 0;
+        int fast_end = n >= 16 ? n - 16 : 0;
+        for (; i + 16 <= fast_end; i += 16) {
+            __m128i codes = flat_d6_spread_avx512_fast(bm + ((i * 6) >> 3));
+            __m512i codes_ext = _mm512_castsi128_si512(codes);
+            __m512i syms_full = _mm512_permutexvar_epi8(codes_ext, c2s_vec);
+            _mm_storeu_si128((__m128i *)(symbols + i),
+                             _mm512_castsi512_si128(syms_full));
+        }
+        if (i + 16 <= n) {
+            __m128i codes = flat_d6_spread_avx512_safe(bm + ((i * 6) >> 3));
+            __m512i codes_ext = _mm512_castsi128_si512(codes);
+            __m512i syms_full = _mm512_permutexvar_epi8(codes_ext, c2s_vec);
+            _mm_storeu_si128((__m128i *)(symbols + i),
+                             _mm512_castsi512_si128(syms_full));
+            i += 16;
+        }
+        for (; i < n; i++) {
+            uint32_t code = extract_D_bits_avx512(bm, i * D, D);
+            symbols[i] = c2s[code];
+        }
+        return;
+    }
+    if (D == 5) {
+        __m256i c2s_vec = _mm256_loadu_si256((const __m256i *)c2s);
+        int i = 0;
+        int fast_end = n >= 16 ? n - 16 : 0;
+        for (; i + 16 <= fast_end; i += 16) {
+            __m128i codes = flat_d5_spread_avx512_fast(bm + ((i * 5) >> 3));
+            __m256i codes_ext = _mm256_zextsi128_si256(codes);
+            __m256i syms_full = _mm256_permutexvar_epi8(codes_ext, c2s_vec);
+            _mm_storeu_si128((__m128i *)(symbols + i),
+                             _mm256_castsi256_si128(syms_full));
+        }
+        if (i + 16 <= n) {
+            __m128i codes = flat_d5_spread_avx512_safe(bm + ((i * 5) >> 3));
+            __m256i codes_ext = _mm256_zextsi128_si256(codes);
+            __m256i syms_full = _mm256_permutexvar_epi8(codes_ext, c2s_vec);
+            _mm_storeu_si128((__m128i *)(symbols + i),
+                             _mm256_castsi256_si128(syms_full));
+            i += 16;
+        }
+        for (; i < n; i++) {
+            uint32_t code = extract_D_bits_avx512(bm, i * D, D);
+            symbols[i] = c2s[code];
+        }
+        return;
+    }
     if (D == 3) {
         uint64_t c2s_lo;
         memcpy(&c2s_lo, c2s, 8);
