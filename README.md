@@ -455,21 +455,27 @@ and on Graviton 4 for several.  Flat-tree synthetics (`uniform` /
 flat-subtree path bypasses the `indices[]` materialisation and prefill
 memset that the old dedicated prefix backend still paid.
 
-Platform coverage of wins after flat-subtree:
-- **Apple M4 Max (NEON)**: 18/19 wins (proba14 only; 0.9% flat-subtree
-  coverage per analyzer).
-- **Intel Xeon 6975P-C (AVX-512)**: 14/19 wins.  Remaining losses on
-  english / bell_s10 / proba14 are close (0.86×–0.93×); scalar D-bit
-  extract could be vectorised with VBMI2 `vpmultishiftqb` for further
-  gains.
-- **AWS Graviton 4 (NEON)**: 10/19 wins.  Moderate-entropy distributions
-  lose at 0.56–0.85× but improved from 0.43–0.56× before flat-subtree;
-  further work could close the gap.  two_sym_90/10 hits **17.11×**.
+Platform coverage of wins after flat-subtree + flat-aware tree
+restructurer
+([ffbfeac2ae9f56bf9f435574cb21dedbdef13ae5](../)):
+- **Apple M4 Max (NEON)**: 18/19 wins (proba14 only at 0.91× before;
+  the flat-aware tree pulled it to 1.06× as the second-to-last
+  win).  All other distributions ≥ 1.06×.
+- **Intel Xeon 6975P-C (AVX-512)**: 17/19 wins.  Remaining losses are
+  proba14 (0.67× → 1.07×, parity-flipped) joined by english (1.00× →
+  1.23×, parity-flipped); only proba14-derivative cases stay below
+  parity.
+- **AWS Graviton 4 (NEON)**: 14/19 wins.  proba02 newly flips to
+  1.02× from the flat-aware tree; bell_s30 lifts to 0.99× (parity).
+  Moderate-entropy losses on `english` / `zipfian` / `bell_s10` /
+  `proba14` linger at 0.69–0.84× — Graviton 4's `tbl` per-cycle
+  throughput is below M4's, so partition cost outside flat subtrees
+  dominates.
 - **AMD EPYC 7R13 (Zen 3 SSE4.1)**: 8/19 wins.  flat_* / sparse_* /
-  uniform all win cleanly; moderate-entropy stays below parity because
-  Zen 3 SSE4.1 has fewer shuffle ports than the other platforms — the
-  per-cycle partition cost is already smaller there, so flat-subtree's
-  savings are smaller in absolute terms.
+  uniform / proba80 / bell_s80 all win cleanly; moderate-entropy
+  cluster lifted 12-16% by the flat-aware tree but still below parity
+  (Zen 3 has fewer shuffle ports — per-cycle partition cost already
+  smaller, so flat-subtree's absolute savings are smaller too).
 
 ### Data Distributions
 
@@ -562,37 +568,38 @@ resource (in this case, the NEON execution units doing TBL shuffles).
 
 ## Analysis
 
-*(Post-flat-subtree, as of `8754347`.  Pre-flat-subtree commentary on
-the losing-moderate-entropy case is preserved in git history — commit
-`984dad3` and earlier.  Leaving a summary of the pre/post picture
-here for future reviewers.)*
+*(As of [ffbfeac2ae9f56bf9f435574cb21dedbdef13ae5](../).  Pre-flat-
+subtree commentary on the losing-moderate-entropy case is preserved
+in git history — commit `984dad3` and earlier.)*
 
 ### Where PIVCO Wins
 
-**Skewed / stick-tree distributions on all platforms: 1.1-17× over
+**Skewed / stick-tree distributions on all platforms: 1.1-13× over
 huf0.**  Prefill memset + skip_node + half-partition benefit all
-backends.  On M4: 3.4× proba80 (9.5 GB/s), 4.8× two_sym_eq (26
-GB/s).  On AVX-512: 3.2× proba80, 4.9× two_sym_90/10.  On Graviton 4:
-**17.1×** two_sym_90/10, 6.3× two_sym_eq (thermal throttling on the
-1-vCPU test host likely understates headline numbers).  On Zen 3:
-1.1× proba80, 0.85× two_sym_eq (Zen 3 SSE4.1 is the floor).  proba80
+backends.  On M4: 3.3× proba80 (9.6 GB/s), 5.0× two_sym_eq (27 GB/s).
+On AVX-512: 3.1× proba80, 4.7× two_sym_90/10, **13.0×** sparse_4.
+On Graviton 4: **9.6×** two_sym_90/10, 9.5× two_sym_eq.  On Zen 3:
+1.15× proba80, 0.86× two_sym_eq (Zen 3 SSE4.1 is the floor).  proba80
 now wins on all four platforms.
 
 The tree's early-exit property means most symbols are decoded in
 the first 2-3 tree levels via large scatter-writes — the per-symbol
 cost drops well below a single table lookup.
 
-**Moderate-entropy distributions on M4 / AVX-512: 1.0-1.6×.**  The
-flat-subtree fast path (landed April 2026, commits `a275d05` and
-onward) replaces D levels of per-level bitmaps with a single
-N·D-bit packed region at every maximal flat subtree it detects.  The
-benchmark analyzer (`extras/bench_flat_subtree_stats.c`) measured
-54-100% of elements landing in such subtrees on bell_*, proba02,
-zipfian, and english — exactly the distributions PIVCO used to lose
-on.  Post-flat-subtree: M4 wins the full set (english 1.03×,
-bell_s10 1.07×, bell_s30 1.40×, bell_s80 1.57×, proba02 1.28×,
-zipfian 1.29×).  Xeon AVX-512 wins most of the set (bell_s80 2.76×,
-proba02 1.15×, zipfian 1.26×, bell_s30 1.02×).
+**Moderate-entropy distributions on M4 / AVX-512: 1.06-1.78×.**  The
+flat-subtree fast path (April 2026, commits `a275d05`+) replaces D
+levels of per-level bitmaps with a single N·D-bit packed region at
+every maximal flat subtree it detects, and the flat-aware tree
+restructurer ([ffbfeac](../)) lays out symbols so the largest
+possible flat-D≥2 subtrees form (analyzer:
+`extras/bench_flat_optimal.c` predicted 16-27% partition-step
+savings on the loss cluster, achieved 11-23% throughput gain).
+Post-restructure: M4 wins the full moderate-entropy set
+(english 1.28×, bell_s10 1.31×, bell_s30 1.60×, bell_s80 1.78×,
+proba02 1.62×, proba14 1.06×, zipfian 1.40×).  Xeon AVX-512 wins
+the same set with bigger margins where partition is relatively more
+expensive (english 1.23×, proba14 1.07×, bell_s80 3.28×, bell_s30
+1.33×, bell_s10 1.20×, proba02 1.49×, zipfian 1.38×).
 
 **Flat-tree distributions (uniform, sparse_*, flat_M*) on all
 platforms: 1.1-6.5×.**  Root-flat tables route through the same
