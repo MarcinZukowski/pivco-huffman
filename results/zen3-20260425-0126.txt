@@ -1,0 +1,46 @@
+=== PIVCO-Huffman Benchmark Results ===
+Date: 2026-04-25 01:25 UTC
+Commit: cee2366bb2372cd173e1900db0b5ea99f4c0c65b
+Host: ip-172-31-18-88.us-west-1.compute.internal (AWS test-c6a)
+Platform: AMD EPYC 7R13 (Zen 3)
+Architecture: x86_64
+OS: Amazon Linux 2023, kernel 6.1.166-197.305.amzn2023.x86_64
+Compiler: gcc (GCC) 11.5.0 20240719 (Red Hat 11.5.0-5)
+SIMD: SSE4.1
+Block size: 4096
+Run pinned: taskset -c 0
+
+  Note: this commit only changes NEON; numbers should match prior 6762c55
+  sweep within noise.  Captured for cross-platform consistency.
+
+=== PIVCO-Huffman Benchmarks ===
+Sequence: 4M, Repeats: 30 (120M/run), Block: 4096, Runs: 5 (drop 2)
+
+DECODE M/s    | pivco_s pivco_n pivco_p | trad_1s trad_4s | huf0_1s huf0_x1 huf0_x2 | rans_x2 |   ratio
+--------------|-------------------------|-----------------|----------------------------|---------|--------
+proba80       |     382    1987       0 |     348     860 |     349     959    1788 |     262 |  1.11x
+proba50       |     122    1252       0 |     281     691 |     349     956    1756 |     225 |  0.71x
+proba14       |      67     669       0 |     263     689 |     349     957    1677 |     230 |  0.40x
+proba02       |      66     626       0 |     247     688 |     347     946    1011 |     224 |  0.62x
+bell_s10      |     111     830       0 |     265     168 |     349     948    1549 |     235 |  0.54x
+bell_s30      |      72     610       0 |     252     168 |     348     945     955 |     228 |  0.64x
+bell_s80      |     103     818       0 |     255     773 |       0       0       0 |     273 |  1.06x
+uniform       |    1057    1769       0 |     268     819 |       0       0       0 |     310 |  2.16x
+english       |      80     794       0 |     264     760 |     349     952    1691 |     241 |  0.47x
+zipfian       |      75     738       0 |     238     758 |     347     947    1217 |     188 |  0.61x
+sparse_4      |    1061    2698       0 |     296     873 |     350     962    1782 |     307 |  1.51x
+sparse_16     |    1060   20632       0 |     286     864 |     348     963    1771 |     313 | 11.65x
+geometric     |     121    1277       0 |     281     168 |     350     955    1751 |     224 |  0.73x
+two_sym_eq    |     234    1510       0 |     303     873 |     349     960    1780 |     303 |  0.85x
+two_sym_90/10 |     730    1509       0 |     429     874 |     350     959    1789 |     286 |  0.84x
+flat_M3       |     998    2457       0 |     292     867 |     350     962    1780 |     311 |  1.38x
+flat_M5       |     932    2579       0 |     274     859 |     350     962    1753 |     312 |  1.47x
+flat_M6       |     932    2238       0 |     275     846 |     349     961    1672 |     315 |  1.34x
+flat_M7       |     875    2193       0 |     272     843 |     349     958     890 |     316 |  2.29x
+
+  5 runs of 120M symbols each (30x 4M), drop 2 slowest, warn if spread > 5%
+  PIVCO/trad decode in 4096-symbol blocks
+  huf0 uses 128KB chunks (its max block size)
+  rANS decodes full 4M at once
+  CPU freq drift: +0.4% (OK)
+  Total wall time: 254.6 seconds

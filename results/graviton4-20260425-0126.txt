@@ -1,0 +1,43 @@
+=== PIVCO-Huffman Benchmark Results ===
+Date: 2026-04-25 01:21 UTC
+Commit: cee2366bb2372cd173e1900db0b5ea99f4c0c65b
+Host: ip-172-31-30-232.us-west-1.compute.internal (AWS test-c8g, c8g.large)
+Platform: AWS Graviton 4 (Neoverse-V2)
+Architecture: aarch64
+OS: Amazon Linux 2023, kernel 6.1.166-197.305.amzn2023.aarch64
+Compiler: gcc (GCC) 11.5.0 20240719 (Red Hat 11.5.0-5)
+SIMD: NEON (ARMv9-A) — PIVCO_NEON_FAST_MULTI_TBL=0 (D=5/D=6 fall through to scalar switch)
+Block size: 8192
+Run pinned: taskset -c 0 (c8g.large is 2 vCPU, dedicated — non-burstable)
+
+=== PIVCO-Huffman Benchmarks ===
+Sequence: 4M, Repeats: 30 (120M/run), Block: 8192, Runs: 5 (drop 2)
+
+DECODE M/s    | pivco_s pivco_n pivco_p | trad_1s trad_4s | huf0_1s huf0_x1 huf0_x2 | rans_x2 |   ratio
+--------------|-------------------------|-----------------|----------------------------|---------|--------
+proba80       |     393    4036     418 |     320    1020 |     264     939    1680 |     234 |  2.40x
+proba50       |     138    2010     366 |     304     838 |     264     933    1685 |     202 |  1.19x
+proba14       |      77     973     387 |     281     813 |     264     935    1635 |     205 |  0.60x
+proba02       |      75     899     387 |     260     821 |     263     925     980 |     204 |  0.92x
+bell_s10      |     125    1189     397 |     281     228 |     263     926    1519 |     209 |  0.78x
+bell_s30      |      82     882     406 |     265     228 |     263     925     927 |     208 |  0.95x
+bell_s80      |     115    1105     366 |     269     889 |       0       0       0 |     245 |  1.24x
+uniform       |     958    2553    2480 |     285     930 |       0       0       0 |     267 |  2.75x
+english       |      91    1177     396 |     283     883 |     263     931    1640 |     212 |  0.72x
+zipfian       |      85    1012     404 |     251     882 |     263     925    1188 |     175 |  0.85x
+sparse_4      |     964   14365    2940 |     328    1021 |     264     939    1687 |     277 |  8.51x
+sparse_16     |     963   14462    2432 |     312    1011 |     264     942    1648 |     274 |  8.77x
+geometric     |     138    1950     365 |     303     229 |     264     933    1680 |     201 |  1.16x
+two_sym_eq    |     262   16041    4386 |     337    1022 |     264     938    1684 |     280 |  9.53x
+two_sym_90/10 |     651   16053    4392 |     338    1022 |     264     938    1668 |     255 |  9.63x
+flat_M3       |     932    6998    1086 |     321    1018 |     264     940    1685 |     275 |  4.15x
+flat_M5       |     833    3187    1088 |     303    1007 |     264     940    1655 |     272 |  1.93x
+flat_M6       |     919    2458    1393 |     297     977 |     263     936    1542 |     269 |  1.59x
+flat_M7       |     895    2781    1086 |     290     948 |     263     936     859 |     268 |  2.93x
+
+  5 runs of 120M symbols each (30x 4M), drop 2 slowest, warn if spread > 5%
+  PIVCO/trad decode in 8192-symbol blocks
+  huf0 uses 128KB chunks (its max block size)
+  rANS decodes full 4M at once
+  CPU freq drift: +0.1% (OK)
+  Total wall time: 270.7 seconds

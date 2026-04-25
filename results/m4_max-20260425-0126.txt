@@ -1,0 +1,42 @@
+=== PIVCO-Huffman Benchmark Results ===
+Date: 2026-04-25 01:26 UTC
+Commit: cee2366bb2372cd173e1900db0b5ea99f4c0c65b
+Host: MBP14-M4.local
+Platform: Apple M4 Max
+Architecture: arm64
+OS: macOS 26.3.1
+Compiler: Apple clang version 17.0.0 (clang-1700.4.4.1)
+SIMD: NEON (ARMv8.6-A) — PIVCO_NEON_FAST_MULTI_TBL=1 (default on __APPLE__)
+Block size: 8192
+
+=== PIVCO-Huffman Benchmarks ===
+Sequence: 4M, Repeats: 30 (120M/run), Block: 8192, Runs: 5 (drop 2)
+
+DECODE M/s    | pivco_s pivco_n pivco_p | trad_1s trad_4s | huf0_1s huf0_x1 huf0_x2 | rans_x2 |   ratio
+--------------|-------------------------|-----------------|----------------------------|---------|--------
+proba80       |     857   10006    1198 |     572    1746 |     393    1501    2928 |     359 |  3.42x
+proba50       |     350    5212    1089 |     540    1572 |     393    1498    2815 |     301 |  1.85x
+proba14       |     437    2510    1264 |     489    1560 |     394    1492    2765 |     309 |  0.91x
+proba02       |     514    2304    1095 |     455    1542 |     385    1456    1585 |     301 |  1.45x
+bell_s10      |     762    3114    1202 |     493     688 |     390    1459    2486 |     311 |  1.25x
+bell_s30      |     539    2303    1174 |     457     697 |     392    1465    1519 |     303 |  1.52x
+bell_s80      |     702    2890     956 |     473    1632 |       0       0       0 |     370 |  1.77x
+uniform       |    2268    4182    4036 |    1599    1625 |       0       0       0 |     438 |  2.57x
+english       |     492    2908    1263 |     480    1581 |     392    1459    2648 |     310 |  1.10x
+zipfian       |     431    2656    1265 |     413    1566 |     392    1440    1917 |     249 |  1.39x
+sparse_4      |    2282   47608    6216 |    2659    1656 |    1176    3518    5239 |     472 |  9.09x
+sparse_16     |    2268   45607    5714 |    2161    1650 |    1170    3252    4588 |     455 |  9.94x
+geometric     |     359    4994    1054 |     535     695 |     392    1442    2691 |     288 |  1.86x
+two_sym_eq    |     424   26264    6331 |    2972    1656 |     879    3528    5386 |     479 |  4.88x
+two_sym_90/10 |    1625   26501    6364 |    2935    1648 |     876    3520    5105 |     385 |  5.19x
+flat_M3       |    2111   23079    3910 |    2385    1646 |     878    3538    5387 |     460 |  4.28x
+flat_M5       |    1998   25221    2947 |    1961    1643 |     922    3553    5169 |     447 |  4.88x
+flat_M6       |    2001   21880    4003 |    1810    1634 |    1161    3451    4481 |     438 |  4.88x
+flat_M7       |    1888    5015    2998 |    1690    1597 |     864    3536    2769 |     432 |  1.42x
+
+  5 runs of 120M symbols each (30x 4M), drop 2 slowest, warn if spread > 5%
+  PIVCO/trad decode in 8192-symbol blocks
+  huf0 uses 128KB chunks (its max block size)
+  rANS decodes full 4M at once
+  CPU freq drift: +105.8% (OK)
+  Total wall time: 116.4 seconds

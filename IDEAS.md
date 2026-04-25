@@ -335,10 +335,45 @@ Sketch of the check:
 
 Easy (lookup-only) win candidate.  5-15 minute first-look exercise.
 
-## Graviton 4 NEON D=5/D=6 regression — gate or replace vqtbl{2,4}q_u8
+## ~~Graviton 4 NEON D=5/D=6 regression — gate or replace vqtbl{2,4}q_u8~~ — SHIPPED
 
-**Status (as of [6762c55f2ad5fae16765fc80aac222f715d19113](../), 2026-04-24):** discovered during the
-post-AVX-512 full sweep ([results/20260424-2327-6762c55-full-sweep.md](results/20260424-2327-6762c55-full-sweep.md)).
+> **Status (as of [cee2366bb2372cd173e1900db0b5ea99f4c0c65b](../), 2026-04-25):** SHIPPED via build-time gate.
+> Add `PIVCO_NEON_FAST_MULTI_TBL` macro defaulting to 1 on `__APPLE__`
+> and 0 elsewhere.  When 0, the D=5 / D=6 cases in
+> `flat_decode_scatter_neon` and `flat_decode_direct_neon` fall through
+> to `NEON_FLAT_UNPACK_SWITCH` — the same scalar handling already used
+> for D=7 / D≥8.  Override with `-DPIVCO_NEON_FAST_MULTI_TBL=0/1` if
+> a future ARM uarch flips the trade.
+>
+> Sweep file: [`results/20260425-0126-cee2366-graviton-d56-fix.md`](results/20260425-0126-cee2366-graviton-d56-fix.md).
+>
+> Graviton 4 (c8g.large pinned, 30 reps × 4M) headlines:
+> - bell_s80: 537 → **1105** M/s (+106%, 0.60× → **1.24×** — now wins)
+> - flat_M5: 1282 → **3187** M/s (+148%, 0.77× → **1.93×** — now wins)
+> - flat_M6: 1194 → **2458** M/s (+106%, 0.91× → **1.59×** — now wins)
+> - bell_s30 +27%, zipfian +19% (subtree D=5/6 contributions)
+> - sparse_4/16: small −5%/−11% nick (D=5/6 not dominant; vqtbl was
+>   competitive there but the scalar path is still well ahead of huf0)
+>
+> Win count on c8g: 10/19 → 13/19 distributions.
+>
+> **Tried-and-rejected variant:** replacing `vqtbl{2,4}q_u8` with
+> `2× vqtbl1` (or `4× vqtbl1`) + `vsub` + `vorrq` blends.  bell_s80
+> went 537 → **458** M/s — *slower than the regressed multi-register
+> path*.  Conclusion: on Neoverse-V2, any 2-byte-output-per-iter
+> vector lookup over a 32/64-byte table loses to scalar OoO-extracted
+> parallelism for the iteration counts these flat subtrees produce.
+> The right fix is to fall through to scalar entirely.
+>
+> **Methodology note:** the original sweep was on `c8g.medium`
+> (1 vCPU, burstable) with visible CPU-steal variance on individual
+> rows.  Re-baselined on `c8g.large` (2 vCPU, dedicated) before
+> diagnosing — confirmed the regression was real and not host noise.
+
+The proposal text below is preserved as historical record.
+
+---
+
 The NEON D=5 path uses `vqtbl2q_u8` (32-byte table across 2 reg) and
 D=6 uses `vqtbl4q_u8` (64-byte table across 4 reg).  On Apple M4 both
 are ~1/cycle throughput; on AWS Graviton 4 (Neoverse-V2) they run at
@@ -352,23 +387,6 @@ Concrete numbers (test-c8g, 30 reps × 4M):
 - bell_s30 (32% D=5): smaller hit, ~−10%
 
 D=2/D=3/D=4 (single-register `vqtbl1q_u8`) are fine on c8g.
-
-Approaches to fix:
-
-- **Detect uarch at build time** (e.g., `__ARM_FEATURE_*` macros, or
-  a CMake check for cpuinfo `Neoverse-V2`) and skip the D=5/D=6
-  TBL paths on Neoverse-V2 hosts.  Falls back to scalar
-  `FLAT_UNPACK_SWITCH_IDX` which performed better.
-- **Replace vqtbl2/vqtbl4 with 2× vqtbl1 + blend** for D=5 (split
-  c2s into two 16B halves) and 4× vqtbl1 + blends for D=6.  Possibly
-  faster on V2 even if it's more instructions overall, because
-  single-register TBL throughput is good.
-- **Runtime selection** via a per-table function pointer set at
-  `pivco_huffman_build_table` time.  More flexible but adds an
-  indirect call.
-
-Easy-win candidate: build-time gate, ~30 min.  If we ever ship a
-production Graviton build this needs fixing.
 
 ## ~~Revisit AVX-512 D=3, D=5, D=6 flat-subtree TBL~~ — SHIPPED
 
