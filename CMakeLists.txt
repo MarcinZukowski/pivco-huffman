@@ -133,4 +133,15 @@ if(BUILD_BENCH)
         bench/bench_distributions.c
     )
     target_link_libraries(pivco_flat_optimal pivco_huffman m)
+
+    add_executable(pivco_tree_viz
+        extras/bench_tree_viz.c
+        bench/bench_distributions.c
+    )
+    target_link_libraries(pivco_tree_viz pivco_huffman m)
+
+    add_executable(pivco_file_to_dist
+        extras/file_to_dist.c
+    )
+    target_link_libraries(pivco_file_to_dist m)
 endif()

@@ -3,6 +3,8 @@
 #include <stdlib.h>
 #include <math.h>
 
+#include "dist_real_freqs.h"   /* freq_html_wiki / prose_pride / image_jpeg */
+
 /* ---------- PRNG ---------- */
 
 static uint64_t xorshift64(uint64_t *state)
@@ -67,6 +69,17 @@ static distribution_t distributions[] = {
     { .name = "flat_M5" },   /* 32  symbols, M=5 */
     { .name = "flat_M6" },   /* 64  symbols, M=6 */
     { .name = "flat_M7" },   /* 128 symbols, M=7 */
+    /* Real-world byte distributions (extras/datasets/README.md). */
+    { .name = "html_wiki" },     /* en.wikipedia.org/wiki/Cat HTML */
+    { .name = "prose_pride" },   /* Project Gutenberg Pride and Prejudice */
+    { .name = "image_jpeg" },    /* Wikimedia Commons Cat03.jpg */
+    { .name = "json_api" },      /* GitHub API commit feed JSON */
+    { .name = "source_c" },      /* zstd_compress.c */
+    { .name = "log_apache" },    /* NASA HTTP / Logstash sample */
+    { .name = "dna_fasta" },     /* E. coli K-12 genome FASTA */
+    { .name = "csv_numeric" },   /* OWID CO2 dataset CSV */
+    { .name = "gzip_random" },   /* gzip(cat-wiki.html) — near-uniform */
+    { .name = "chinese_text" },  /* Project Gutenberg 紅樓夢 */
 };
 
 #define NUM_DISTRIBUTIONS (sizeof(distributions) / sizeof(distributions[0]))
@@ -219,6 +232,19 @@ static void init_distributions(void)
     /* flat_M7: 128 equal symbols → all codes 7-bit */
     memset(distributions[18].freq, 0, sizeof(distributions[18].freq));
     for (int i = 0; i < 128; i++) distributions[18].freq[i] = 100;
+
+    /* Real-world byte freqs.  Source files + regeneration steps in
+     * extras/datasets/README.md. */
+    memcpy(distributions[19].freq, freq_html_wiki,    sizeof(freq_html_wiki));
+    memcpy(distributions[20].freq, freq_prose_pride,  sizeof(freq_prose_pride));
+    memcpy(distributions[21].freq, freq_image_jpeg,   sizeof(freq_image_jpeg));
+    memcpy(distributions[22].freq, freq_json_api,     sizeof(freq_json_api));
+    memcpy(distributions[23].freq, freq_source_c,     sizeof(freq_source_c));
+    memcpy(distributions[24].freq, freq_log_apache,   sizeof(freq_log_apache));
+    memcpy(distributions[25].freq, freq_dna_fasta,    sizeof(freq_dna_fasta));
+    memcpy(distributions[26].freq, freq_csv_numeric,  sizeof(freq_csv_numeric));
+    memcpy(distributions[27].freq, freq_gzip_random,  sizeof(freq_gzip_random));
+    memcpy(distributions[28].freq, freq_chinese_text, sizeof(freq_chinese_text));
 }
 
 /* ---------- Public API ---------- */
