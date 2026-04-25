@@ -335,6 +335,41 @@ Sketch of the check:
 
 Easy (lookup-only) win candidate.  5-15 minute first-look exercise.
 
+## Graviton 4 NEON D=5/D=6 regression — gate or replace vqtbl{2,4}q_u8
+
+**Status (as of [6762c55f2ad5fae16765fc80aac222f715d19113](../), 2026-04-24):** discovered during the
+post-AVX-512 full sweep ([results/20260424-2327-6762c55-full-sweep.md](results/20260424-2327-6762c55-full-sweep.md)).
+The NEON D=5 path uses `vqtbl2q_u8` (32-byte table across 2 reg) and
+D=6 uses `vqtbl4q_u8` (64-byte table across 4 reg).  On Apple M4 both
+are ~1/cycle throughput; on AWS Graviton 4 (Neoverse-V2) they run at
+noticeably lower throughput, making the SIMD path slower than the
+scalar-vectorised fallback for these D values.
+
+Concrete numbers (test-c8g, 30 reps × 4M):
+- bell_s80 (71% D=6, 29% D=5): 1055 → 526 M/s (**−50%**)
+- flat_M5 (D=5 root-flat): 1809 → 1282 M/s (−29%)
+- flat_M6 (D=6 root-flat): 1275 → 1194 M/s (−6%)
+- bell_s30 (32% D=5): smaller hit, ~−10%
+
+D=2/D=3/D=4 (single-register `vqtbl1q_u8`) are fine on c8g.
+
+Approaches to fix:
+
+- **Detect uarch at build time** (e.g., `__ARM_FEATURE_*` macros, or
+  a CMake check for cpuinfo `Neoverse-V2`) and skip the D=5/D=6
+  TBL paths on Neoverse-V2 hosts.  Falls back to scalar
+  `FLAT_UNPACK_SWITCH_IDX` which performed better.
+- **Replace vqtbl2/vqtbl4 with 2× vqtbl1 + blend** for D=5 (split
+  c2s into two 16B halves) and 4× vqtbl1 + blends for D=6.  Possibly
+  faster on V2 even if it's more instructions overall, because
+  single-register TBL throughput is good.
+- **Runtime selection** via a per-table function pointer set at
+  `pivco_huffman_build_table` time.  More flexible but adds an
+  indirect call.
+
+Easy-win candidate: build-time gate, ~30 min.  If we ever ship a
+production Graviton build this needs fixing.
+
 ## ~~Revisit AVX-512 D=3, D=5, D=6 flat-subtree TBL~~ — SHIPPED
 
 > **Status (as of `7b2fb8d`, 2026-04-24):** landed.  The earlier

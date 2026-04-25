@@ -1,0 +1,60 @@
+=== PIVCO-Huffman Benchmark Results ===
+Date: 2026-04-24 23:27 UTC
+Commit: 6762c55f2ad5fae16765fc80aac222f715d19113
+Linux ip-172-31-17-236.us-west-1.compute.internal 6.1.166-197.305.amzn2023.x86_64 #1 SMP PREEMPT_DYNAMIC Mon Mar 23 09:53:26 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux
+
+CPU(s):                                  2
+Vendor ID:                               GenuineIntel
+Model name:                              Intel(R) Xeon(R) 6975P-C
+L1d cache:                               48 KiB (1 instance)
+NUMA node0 CPU(s):                       0,1
+
+PRETTY_NAME="Amazon Linux 2023.11.20260406"
+
+cc (GCC) 11.5.0 20240719 (Red Hat 11.5.0-5)
+
+Platform: Intel Xeon 6975P-C (Granite Rapids)
+SIMD: AVX-512 VBMI2 + VBMI (vpcompressw, vpmultishiftqb, vpermb)
+Block size: 8192
+
+-- Configuring done
+-- Generating done
+-- Build files have been written to: /home/ec2-user/pivco-huffman/build
+      |         ^~~~~~~~~~~~~
+[100%] Linking CXX executable pivco_huffman_bench
+[100%] Built target pivco_huffman_bench
+[test_roundtrip_zipf_block_9] PASS (pivco=6440 B, trad=6431 B, ratio=1.00x)
+
+=== ALL PASSED (0 failures) ===
+=== BENCH ===
+=== PIVCO-Huffman Benchmarks ===
+Sequence: 4M, Repeats: 30 (120M/run), Block: 8192, Runs: 5 (drop 2)
+
+DECODE M/s    | pivco_s pivco_n pivco_p | trad_1s trad_4s | huf0_1s huf0_x1 huf0_x2 | rans_x2 |   ratio
+--------------|-------------------------|-----------------|----------------------------|---------|--------
+proba80       |     343    5796       0 |     386     723 |     311    1063    1818 |     248 |  3.19x
+proba50       |     114    2770       0 |     291     652 |     310    1063    1811 |     209 |  1.53x
+proba14       |      61    1190       0 |     273     651 |     310    1065    1750 |     212 |  0.68x
+proba02       |      60    1397       0 |     253     650 |     309    1052    1040 |     207 |  1.33x
+bell_s10      |     102    1655       0 |     275     273 |     309    1050    1614 |     217 |  1.03x
+bell_s30      |      67    1174       0 |     260     273 |     309    1051     985 |     212 |  1.12x
+bell_s80      |      99    2064       0 |     270     694 |       0       0       0 |     255 |  2.98x
+uniform       |    1207    4370       0 |     286     702 |       0       0       0 |     284 |  6.23x
+english       |      73    1786       0 |     275     681 |     310    1060    1759 |     221 |  1.02x
+zipfian       |      69    1706       0 |     243     680 |     309    1051    1264 |     175 |  1.35x
+sparse_4      |    1209   23982       0 |     319     724 |     311    1068    1831 |     307 | 13.10x
+sparse_16     |    1210   19968       0 |     305     721 |     310    1066    1800 |     297 | 11.09x
+geometric     |     114    2874       0 |     293     274 |     311    1062    1814 |     208 |  1.58x
+two_sym_eq    |     231    4699       0 |     310     725 |     311    1064    1827 |     312 |  2.57x
+two_sym_90/10 |     646    8941       0 |     433     725 |     311    1064    1810 |     276 |  4.94x
+flat_M3       |    1209   21825       0 |     311     723 |     311    1069    1825 |     302 | 11.96x
+flat_M5       |    1121   18455       0 |     292     720 |     310    1067    1805 |     293 | 10.22x
+flat_M6       |    1120   17107       0 |     295     714 |     310    1066    1680 |     290 | 10.18x
+flat_M7       |    1082    3697       0 |     289     707 |     310    1064     923 |     287 |  3.47x
+
+  5 runs of 120M symbols each (30x 4M), drop 2 slowest, warn if spread > 5%
+  PIVCO/trad decode in 8192-symbol blocks
+  huf0 uses 128KB chunks (its max block size)
+  rANS decodes full 4M at once
+  CPU freq drift: +0.1% (OK)
+  Total wall time: 253.6 seconds
