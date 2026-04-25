@@ -577,6 +577,23 @@ certainty:
    relevant to the non-flat prefix-radix research path, which is
    effectively unused now that flat-subtree wins on the same
    distributions.  Can drop.
+
+   *Speculative-fill alternative tried* (2026-04-25): generalise the
+   phase-0 `memset(prefill_sym)` (which covers only the SINGLE most-
+   frequent leaf bin) into a NEON TBL pass writing
+   `bin_to_sym[prefix[k]]` for every k.  After this pass, all
+   leaf-bin elements are already correctly placed; phase 5 only
+   handles non-leaf bins.  Gated to K ≤ 16 (NEON `vqtbl1q_u8` covers
+   exactly that — for K > 16 the scalar fallback regresses
+   noticeably).  Result on M4: +2-3% on K=8 distributions
+   (`proba14` 1305 → 1340, `english` 1275 → 1306), neutral
+   elsewhere.  Diagnosis: phase-5 leaf-scatter on K=8 is already
+   essentially zero (sequential byte writes, bandwidth-free), so the
+   savings come from eliminating the `scatter_sym` branch in phase 5
+   only — small.  Phase 4 still buckets leaf-bin elements
+   unconditionally; making it skip them needs a hot-loop branch
+   (mispredict-risky) or a separate compaction pass.  Reverted —
+   gain too small to justify complexity given pivco_p retirement.
 6. **Nested (multi-stage) prefix-radix** — same as (5); subsumed by
    flat-subtree.  Can drop.
 7. **Retire `pivco_huffman_decode_neon_prefix`** — the remaining
