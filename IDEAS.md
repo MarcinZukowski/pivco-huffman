@@ -1,5 +1,88 @@
 # PIVCO-Huffman Decode Ideas
 
+## Flat-aware Huffman tree restructurer
+
+**Status (2026-04-25):** investigation done, implementation pending.
+Analyzer: [`extras/bench_flat_optimal.c`](extras/bench_flat_optimal.c).
+
+**The opportunity.**  `pivco_huffman_build_table` currently produces the
+canonical Huffman tree (sort symbols by `(length, value)`, assign codes
+sequentially, walk codes MSB-first to materialise the tree).  This
+preserves a property useful for many Huffman implementations — codes
+within a length class are contiguous — but it does **not** maximise
+flat-subtree coverage.  A different arrangement of the same code-length
+multiset (= identical compression) can produce more / larger flat-D≥2
+subtrees and fewer partition steps in the tree-walk decode.
+
+**Algorithm (greedy, optimal):**  For each length L, decompose `c_L` by
+its binary representation:
+- Bits at positions ≥ 2 → flat-D≥2 chunks of size 2^D.  Highest-freq
+  length-L symbols go to largest-D chunks (deepest savings).
+- Bit 1 → D=1 sibling pair (handled by stage fusion in production).
+- Bit 0 → singleton (paired with whatever residual structure exists).
+
+This is provably optimal for D≥2 leaf coverage:
+`max_per_length = c_L & ~3` because any flat-D≥2 subtree must contain
+2^D ≥ 4 same-length leaves.  The union of all per-length greedy chunks
+is realisable in a valid tree because each flat-D root contributes the
+same Kraft (`2^-(L-D)`) as one residual internal node would; the
+leftovers (`c_L mod 4` per length, 0..3 each) fill the remaining mass.
+
+**Why it matters — partition steps, not coverage.**  The first-pass
+analysis (D≥2 leaf coverage) was misleading: canonical Huffman already
+handles "leaf-coverage equivalents" via stage-fusion D=1 sibling pairs.
+The real win is in **partition-step count**: a flat-D=2 root absorbs
+the partition that would otherwise happen at depths between root and
+leaves, while two D=1 stage-fusion pairs only avoid the partition at
+their immediate parent.  Flatness *compounds*: a D=3 flat eliminates
+3 levels of partition path, vs 3 separate D=1 pairs which only save
+the bottom level.
+
+**Measured gap (canonical vs optimal, partition operations per element):**
+
+| Distribution | canon | opt  | savings |
+|---|--:|--:|--:|
+| `bell_s80`   | 2.24 | 1.64 | **−26.7%** |
+| `english`    | 2.73 | 2.04 | **−25.3%** |
+| `proba02`    | 3.60 | 2.90 | **−19.4%** |
+| `proba14`    | 3.39 | 2.84 | **−16.0%** |
+| `bell_s10`   | 2.04 | 1.93 | −5.8% |
+| `bell_s30`   | 3.26 | 3.17 | −2.8% |
+| `zipfian`    | 3.21 | 3.20 | −0.2% |
+| `geometric`  | 2.02 | 2.01 | −0.8% |
+| `proba80`, `proba50`, fully-flat dists | (no change) | | |
+
+`bell_s80` notably already has 100% flat coverage in canonical, but
+optimal still saves 26.7% partitions — by consolidating multiple small
+flat-roots into fewer, deeper ones.
+
+**Expected runtime gain.**  Partition_8 costs ~1 cycle / 8 elements.
+For an 8192-block of english: canonical ≈ 2800 partition cycles,
+optimal ≈ 2090, saving ~700 cycles.  Out of ~25k cycles total decode
+cost (M4 at 2900 M/s on 3 GHz core), that's roughly 3% throughput.
+Across the four big-savings distributions, expect 3–8% absolute
+throughput gain — small but real, and on top of the existing flat-
+subtree work.
+
+**Implementation sketch.**
+1. In `pivco_huffman_build_table`, replace the "walk canonical bits to
+   build tree" pass (lines ~435–470 today) with a constructive layout:
+   - Per length L (descending): emit chunks in greedy order (largest D
+     first), then D=1 pairs, then singleton.
+   - For each chunk, allocate one residual-internal slot at depth L−D
+     and instantiate the perfect-binary subtree of 2^D leaves below it.
+   - Place these residual leaves (= flat roots + leftover leaves) into
+     a binary tree by concatenating Kraft mass — equivalent to
+     canonical assignment over the *residual* multiset.
+2. Re-derive `table->code[sym]` from the resulting tree shape (walk DFS,
+   emit the bit string for each leaf).  `decode_sym` / `decode_len` /
+   `first_code` / `sorted_symbols` fall out the same way.
+3. `flat_mark_subtrees` (existing) detects the new flat roots.
+4. Encoded format is self-describing — no on-the-wire change.
+
+The decoder side requires no changes (it already routes via
+`flat_depth[node]` and stage fusion).
+
 ## ~~Flat-subtree fast path — format-change variant~~ — SHIPPED
 
 > **Status (as of `8754347`, 2026-04-24):** SHIPPED.  Commits

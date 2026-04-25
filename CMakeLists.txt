@@ -127,4 +127,10 @@ if(BUILD_BENCH)
         bench/bench_distributions.c
     )
     target_link_libraries(pivco_flat_subtree_stats pivco_huffman m)
+
+    add_executable(pivco_flat_optimal
+        extras/bench_flat_optimal.c
+        bench/bench_distributions.c
+    )
+    target_link_libraries(pivco_flat_optimal pivco_huffman m)
 endif()
