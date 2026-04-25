@@ -44,18 +44,19 @@ a time.  Plus a **flat-subtree fast path**: every maximal flat subtree
 of depth D ≥ 2 in the Huffman tree emits a single N·D-bit packed
 region instead of D levels of bitmaps, decoded via direct lookup.
 
-**Wins everywhere measured on Apple M4** — 1.0× to 5.2× huf0/trad_4s
+**Wins everywhere measured on Apple M4** — 1.06× to 10.1× huf0/trad_4s
 across the full bench grid.  Concrete:
-- `two_sym_eq` single-bit codes: **27 GB/s**, 4.9× huf0.
-- `proba80` strongly skewed: **9.5 GB/s**, 3.4× huf0.
-- `uniform` fully flat: **3.9 GB/s**, 2.4× huf0 (via flat-tree path).
-- `bell_s80` / `bell_s30` / `zipfian` / `proba02` — the **historically
-  losing** moderate-entropy distributions — now win 1.07× to 1.55× huf0
-  thanks to the flat-subtree path.
-- `english`: 2.5 GB/s, 1.03× huf0 (crossed from 0.98×).
+- `two_sym_eq` single-bit codes: **27 GB/s**, 5× huf0.
+- `proba80` strongly skewed: **9.6 GB/s**, 3.3× huf0.
+- `uniform` fully flat: **4.2 GB/s**, 2.6× huf0 (via flat-tree path).
+- `bell_s80` / `bell_s30` / `zipfian` / `proba02` / `proba14` /
+  `english` — the **historically losing** moderate-entropy distributions
+  — now all win 1.06× to 1.78× huf0 thanks to the flat-subtree path
+  plus the flat-aware tree restructurer.
 
-**Portable to other ISAs**: AVX-512 VBMI2 (3.1× on Xeon), Graviton 4
-NEON (1.16–9.6× on 13/19 distributions), SSE4.1 (1.1× on Zen 3).
+**Portable to other ISAs**: AVX-512 VBMI2 (1.07–13× on Xeon),
+Graviton 4 NEON (1.17–9.60× on 14/19 distributions), SSE4.1
+(1.15–12.66× on 8/19 distributions).
 
 Encoded size within 1–4% of traditional Huffman.  The flat-subtree
 format actually *improves* packing slightly — one tail padding per
@@ -303,146 +304,146 @@ Full detailed results with system info in `results/` directory.
 
 ### Apple M4 Max (NEON, 128KB L1D, block 8192)
 
-*(as of [cee2366bb2372cd173e1900db0b5ea99f4c0c65b](../) commit, 2026-04-25; 30 reps × 4M
+*(as of [ffbfeac2ae9f56bf9f435574cb21dedbdef13ae5](../) commit, 2026-04-25; 30 reps × 4M
 symbols, median of 3 of 5 runs.  Full sweep file:
-[`results/20260425-0126-cee2366-graviton-d56-fix.md`](results/20260425-0126-cee2366-graviton-d56-fix.md))*
+[`results/20260425-0329-ffbfeac-flat-aware-tree.md`](results/20260425-0329-ffbfeac-flat-aware-tree.md))*
 
 | Distribution  | PIVCO NEON | huf0 X1 | huf0 X2 | trad 4s | vs best |
 |---------------|----------:|--------:|--------:|--------:|--------:|
-| proba80       |     10006 |    1501 |    2928 |    1746 | **3.42x** |
-| proba50       |      5212 |    1498 |    2815 |    1572 | **1.85x** |
-| proba14       |      2510 |    1492 |    2765 |    1560 |   0.91x |
-| english       |      2908 |    1459 |    2648 |    1581 | **1.10x** |
-| zipfian       |      2656 |    1440 |    1917 |    1566 | **1.39x** |
-| geometric     |      4994 |    1442 |    2691 |     695 | **1.86x** |
-| bell_s10      |      3114 |    1459 |    2486 |     688 | **1.25x** |
-| bell_s30      |      2303 |    1465 |    1519 |     697 | **1.52x** |
-| bell_s80      |      2890 |       0 |       0 |    1632 | **1.77x** |
-| proba02       |      2304 |    1456 |    1585 |    1542 | **1.45x** |
-| uniform       |      4182 |       0 |       0 |    1625 | **2.57x** |
-| sparse_4      |     47608 |    3518 |    5239 |    1656 | **9.09x** |
-| sparse_16     |     45607 |    3252 |    4588 |    1650 | **9.94x** |
-| flat_M3       |     23079 |    3538 |    5387 |    1646 | **4.28x** |
-| flat_M5       |     25221 |    3553 |    5169 |    1643 | **4.88x** |
-| flat_M6       |     21880 |    3451 |    4481 |    1634 | **4.88x** |
-| flat_M7       |      5015 |    3536 |    2769 |    1597 | **1.42x** |
-| two_sym_eq    |     26264 |    3528 |    5386 |    1656 | **4.88x** |
-| two_sym_90/10 |     26501 |    3520 |    5105 |    1648 | **5.19x** |
+| proba80       |      9556 |    1485 |    2867 |    1706 | **3.33x** |
+| proba50       |      5119 |    1472 |    2815 |    1543 | **1.82x** |
+| proba14       |      2866 |    1478 |    2705 |    1529 | **1.06x** |
+| english       |      3333 |    1449 |    2610 |    1594 | **1.28x** |
+| zipfian       |      2666 |    1430 |    1907 |    1580 | **1.40x** |
+| geometric     |      5049 |    1439 |    2696 |     696 | **1.87x** |
+| bell_s10      |      3204 |    1417 |    2455 |     689 | **1.31x** |
+| bell_s30      |      2396 |    1427 |    1497 |     687 | **1.60x** |
+| bell_s80      |      2872 |       0 |       0 |    1612 | **1.78x** |
+| proba02       |      2588 |    1446 |    1602 |    1526 | **1.62x** |
+| uniform       |      4169 |       0 |       0 |    1633 | **2.55x** |
+| sparse_4      |     48377 |    3547 |    5281 |    1657 | **9.16x** |
+| sparse_16     |     46210 |    3248 |    4581 |    1655 | **10.09x** |
+| flat_M3       |     23033 |    3572 |    5445 |    1654 | **4.23x** |
+| flat_M5       |     24848 |    3577 |    5211 |    1647 | **4.77x** |
+| flat_M6       |     22083 |    3468 |    4509 |    1641 | **4.90x** |
+| flat_M7       |      5071 |    3554 |    2781 |    1623 | **1.43x** |
+| two_sym_eq    |     26795 |    3548 |    5384 |    1657 | **4.98x** |
+| two_sym_90/10 |     26363 |    3549 |    5183 |    1650 | **5.09x** |
 
 ### Intel Xeon 6975P-C (AVX-512 VBMI2 + VBMI, 48KB L1D, block 8192)
 
-*(as of [cee2366bb2372cd173e1900db0b5ea99f4c0c65b](../) commit, 2026-04-25; AWS `test-c8i`,
+*(as of [ffbfeac2ae9f56bf9f435574cb21dedbdef13ae5](../) commit, 2026-04-25; AWS `test-c8i`,
 2 vCPU, GCC 11.5.0, Amazon Linux 2023; 30 reps × 4M symbols)*
 
 | Distribution  | PIVCO AVX512 | huf0 X1 | huf0 X2 | trad 4s | vs best |
 |---------------|------------:|--------:|--------:|--------:|--------:|
-| proba80       |       5545 |    1060 |    1816 |     722 | **3.05x** |
-| proba50       |       2714 |    1062 |    1814 |     652 | **1.50x** |
-| proba14       |       1176 |    1065 |    1748 |     651 |   0.67x |
-| english       |       1758 |    1060 |    1759 |     681 | **1.00x** |
-| zipfian       |       1701 |    1051 |    1263 |     681 | **1.35x** |
-| geometric     |       2807 |    1062 |    1816 |     274 | **1.55x** |
-| bell_s10      |       1639 |    1051 |    1614 |     273 | **1.02x** |
-| bell_s30      |       1175 |    1052 |     985 |     273 | **1.12x** |
-| bell_s80      |       2041 |       0 |       0 |     695 | **2.94x** |
-| proba02       |       1405 |    1052 |    1040 |     650 | **1.34x** |
-| uniform       |       4371 |       0 |       0 |     702 | **6.23x** |
-| sparse_4      |      23815 |    1068 |    1832 |     724 | **13.00x** |
-| sparse_16     |      19859 |    1069 |    1816 |     722 | **10.94x** |
-| flat_M3       |      21576 |    1069 |    1824 |     723 | **11.83x** |
-| flat_M5       |      18276 |    1066 |    1805 |     720 | **10.12x** |
-| flat_M6       |      17000 |    1063 |    1674 |     715 | **10.15x** |
-| flat_M7       |       3734 |    1063 |     923 |     707 | **3.51x** |
-| two_sym_eq    |       4511 |    1063 |    1826 |     725 | **2.47x** |
-| two_sym_90/10 |       8139 |    1063 |    1810 |     725 | **4.50x** |
+| proba80       |       5684 |    1062 |    1817 |     722 | **3.13x** |
+| proba50       |       2712 |    1063 |    1816 |     652 | **1.49x** |
+| proba14       |       1876 |    1065 |    1748 |     651 | **1.07x** |
+| english       |       2171 |    1059 |    1760 |     681 | **1.23x** |
+| zipfian       |       1743 |    1052 |    1263 |     680 | **1.38x** |
+| geometric     |       2830 |    1063 |    1816 |     274 | **1.56x** |
+| bell_s10      |       1941 |    1051 |    1613 |     273 | **1.20x** |
+| bell_s30      |       1396 |    1051 |     985 |     272 | **1.33x** |
+| bell_s80      |       2277 |       0 |       0 |     694 | **3.28x** |
+| proba02       |       1564 |    1050 |    1040 |     649 | **1.49x** |
+| uniform       |       4585 |       0 |       0 |     701 | **6.54x** |
+| sparse_4      |      23742 |    1067 |    1831 |     721 | **12.97x** |
+| sparse_16     |      19903 |    1068 |    1816 |     720 | **10.96x** |
+| flat_M3       |      21665 |    1069 |    1821 |     722 | **11.89x** |
+| flat_M5       |      18303 |    1067 |    1806 |     719 | **10.13x** |
+| flat_M6       |      16998 |    1063 |    1681 |     714 | **10.11x** |
+| flat_M7       |       3779 |    1064 |     921 |     707 | **3.55x** |
+| two_sym_eq    |       4590 |    1063 |    1826 |     724 | **2.51x** |
+| two_sym_90/10 |       8474 |    1063 |    1809 |     723 | **4.68x** |
 
 ### AWS Graviton 4 Neoverse V2 (NEON, 64KB L1D, block 8192)
 
-*(as of [cee2366bb2372cd173e1900db0b5ea99f4c0c65b](../) commit, 2026-04-25; AWS `test-c8g`,
-2 vCPU c8g.large pinned `taskset -c 0`, GCC 11.5.0, Amazon Linux 2023; 30 reps × 4M
-symbols.  D=5/D=6 NEON paths gated off via `PIVCO_NEON_FAST_MULTI_TBL=0` —
-fall through to scalar `NEON_FLAT_UNPACK_SWITCH`.  bell_s80 / flat_M5 /
-flat_M6 are now wins; see [`results/20260425-0126-cee2366-graviton-d56-fix.md`](results/20260425-0126-cee2366-graviton-d56-fix.md).)*
+*(as of [ffbfeac2ae9f56bf9f435574cb21dedbdef13ae5](../) commit, 2026-04-25; AWS `test-c8g`,
+2 vCPU c8g.large pinned `taskset -c 0`, GCC 11.5.0, Amazon Linux 2023; 30 reps × 4M symbols.
+D=5/D=6 NEON paths gated off via `PIVCO_NEON_FAST_MULTI_TBL=0`.)*
 
 | Distribution  | PIVCO NEON | huf0 X1 | huf0 X2 | trad 4s | vs best |
 |---------------|----------:|--------:|--------:|--------:|--------:|
-| proba80       |      4036 |     939 |    1680 |    1020 | **2.40x** |
-| proba50       |      2010 |     933 |    1685 |     838 | **1.19x** |
-| proba14       |       973 |     935 |    1635 |     813 |   0.60x |
-| english       |      1177 |     931 |    1640 |     883 |   0.72x |
-| zipfian       |      1012 |     925 |    1188 |     882 |   0.85x |
-| geometric     |      1950 |     933 |    1680 |     229 | **1.16x** |
-| bell_s10      |      1189 |     926 |    1519 |     228 |   0.78x |
-| bell_s30      |       882 |     925 |     927 |     228 |   0.95x |
-| bell_s80      |      1105 |       0 |       0 |     889 | **1.24x** |
-| proba02       |       899 |     925 |     980 |     821 |   0.92x |
-| uniform       |      2553 |       0 |       0 |     930 | **2.75x** |
-| sparse_4      |     14365 |     939 |    1687 |    1021 | **8.51x** |
-| sparse_16     |     14462 |     942 |    1648 |    1011 | **8.77x** |
-| flat_M3       |      6998 |     940 |    1685 |    1018 | **4.15x** |
-| flat_M5       |      3187 |     940 |    1655 |    1007 | **1.93x** |
-| flat_M6       |      2458 |     936 |    1542 |     977 | **1.59x** |
-| flat_M7       |      2781 |     936 |     859 |     948 | **2.93x** |
-| two_sym_eq    |     16041 |     938 |    1684 |    1022 | **9.53x** |
-| two_sym_90/10 |     16053 |     938 |    1668 |    1022 | **9.62x** |
+| proba80       |      4031 |     939 |    1680 |    1020 | **2.40x** |
+| proba50       |      2015 |     932 |    1686 |     837 | **1.20x** |
+| proba14       |      1133 |     935 |    1636 |     826 |   0.69x |
+| english       |      1200 |     931 |    1640 |     893 |   0.73x |
+| zipfian       |       972 |     925 |    1188 |     872 |   0.82x |
+| geometric     |      1962 |     933 |    1682 |     229 | **1.17x** |
+| bell_s10      |      1279 |     926 |    1518 |     228 |   0.84x |
+| bell_s30      |       914 |     925 |     925 |     228 |   0.99x |
+| bell_s80      |      1310 |       0 |       0 |     906 | **1.45x** |
+| proba02       |       997 |     926 |     979 |     813 | **1.02x** |
+| uniform       |      2552 |       0 |       0 |     955 | **2.67x** |
+| sparse_4      |     15389 |     939 |    1689 |    1021 | **9.11x** |
+| sparse_16     |     15319 |     941 |    1652 |    1009 | **9.27x** |
+| flat_M3       |      7012 |     939 |    1686 |    1018 | **4.16x** |
+| flat_M5       |      3180 |     939 |    1656 |    1007 | **1.92x** |
+| flat_M6       |      2459 |     935 |    1541 |     979 | **1.60x** |
+| flat_M7       |      2786 |     935 |     859 |     932 | **2.98x** |
+| two_sym_eq    |     16007 |     937 |    1684 |    1022 | **9.50x** |
+| two_sym_90/10 |     16017 |     937 |    1668 |    1022 | **9.60x** |
 
 ### AMD EPYC 7R13 Zen 3 (SSE4.1, 32KB L1D, block 4096)
 
-*(as of [cee2366bb2372cd173e1900db0b5ea99f4c0c65b](../) commit, 2026-04-25; AWS `test-c6a`,
+*(as of [ffbfeac2ae9f56bf9f435574cb21dedbdef13ae5](../) commit, 2026-04-25; AWS `test-c6a`,
 2 vCPU, GCC 11.5.0, Amazon Linux 2023; 30 reps × 4M symbols)*
 
 | Distribution  | PIVCO SSE | huf0 X1 | huf0 X2 | trad 4s | vs best |
 |---------------|----------:|--------:|--------:|--------:|--------:|
-| proba80       |      1987 |     959 |    1788 |     860 | **1.11x** |
-| proba50       |      1252 |     956 |    1756 |     691 |   0.71x |
-| proba14       |       669 |     957 |    1677 |     689 |   0.40x |
-| english       |       794 |     952 |    1691 |     760 |   0.47x |
-| zipfian       |       738 |     947 |    1217 |     758 |   0.61x |
-| geometric     |      1277 |     955 |    1751 |     168 |   0.73x |
-| bell_s10      |       830 |     948 |    1549 |     168 |   0.54x |
-| bell_s30      |       610 |     945 |     955 |     168 |   0.64x |
-| bell_s80      |       818 |       0 |       0 |     773 | **1.06x** |
-| proba02       |       626 |     946 |    1011 |     688 |   0.62x |
-| uniform       |      1769 |       0 |       0 |     819 | **2.16x** |
-| sparse_4      |      2698 |     962 |    1782 |     873 | **1.51x** |
-| sparse_16     |     20632 |     963 |    1771 |     864 | **11.65x** |
-| flat_M3       |      2457 |     962 |    1780 |     867 | **1.38x** |
-| flat_M5       |      2579 |     962 |    1753 |     859 | **1.47x** |
-| flat_M6       |      2238 |     961 |    1672 |     846 | **1.34x** |
-| flat_M7       |      2193 |     958 |     890 |     843 | **2.29x** |
-| two_sym_eq    |      1510 |     960 |    1780 |     873 |   0.85x |
-| two_sym_90/10 |      1509 |     959 |    1789 |     874 |   0.84x |
+| proba80       |      2006 |     959 |    1751 |     863 | **1.15x** |
+| proba50       |      1277 |     956 |    1714 |     691 |   0.75x |
+| proba14       |       773 |     956 |    1639 |     689 |   0.47x |
+| english       |       887 |     951 |    1654 |     759 |   0.54x |
+| zipfian       |       741 |     945 |    1188 |     757 |   0.62x |
+| geometric     |      1282 |     954 |    1708 |     168 |   0.75x |
+| bell_s10      |       871 |     947 |    1514 |     168 |   0.58x |
+| bell_s30      |       647 |     943 |     932 |     168 |   0.69x |
+| bell_s80      |       923 |       0 |       0 |     773 | **1.20x** |
+| proba02       |       710 |     945 |     987 |     688 |   0.72x |
+| uniform       |      1768 |       0 |       0 |     818 | **2.16x** |
+| sparse_4      |      2695 |     961 |    1741 |     873 | **1.55x** |
+| sparse_16     |     21932 |     963 |    1732 |     864 | **12.66x** |
+| flat_M3       |      2444 |     962 |    1739 |     867 | **1.41x** |
+| flat_M5       |      2760 |     961 |    1713 |     859 | **1.61x** |
+| flat_M6       |      2157 |     959 |    1638 |     846 | **1.32x** |
+| flat_M7       |      2274 |     958 |     869 |     844 | **2.38x** |
+| two_sym_eq    |      1493 |     959 |    1740 |     874 |   0.86x |
+| two_sym_90/10 |      1492 |     959 |    1753 |     872 |   0.85x |
 
 ### Cross-Platform Summary (PIVCO SIMD vs best other decoder)
 
-*(as of [cee2366bb2372cd173e1900db0b5ea99f4c0c65b](../) commit, 2026-04-25; see per-platform
+*(as of [ffbfeac2ae9f56bf9f435574cb21dedbdef13ae5](../) commit, 2026-04-25; see per-platform
 sections above for raw M/s)*
 
 | Distribution | M4 NEON | Xeon AVX-512 | Graviton4 NEON | Zen3 SSE |
 |---|---:|---:|---:|---:|
-| **two_sym_90/10** | **5.19x** | **4.50x** | **9.62x** | 0.84x |
-| **two_sym_eq** | **4.88x** | **2.47x** | **9.53x** | 0.85x |
-| **proba80** | **3.42x** | **3.05x** | **2.40x** | **1.11x** |
-| **proba50** | **1.85x** | **1.50x** | **1.19x** | 0.71x |
-| proba14 | 0.91x | 0.67x | 0.60x | 0.40x |
-| **english** | **1.10x** | **1.00x** | 0.72x | 0.47x |
-| **zipfian** | **1.39x** | **1.35x** | 0.85x | 0.61x |
-| **geometric** | **1.86x** | **1.55x** | **1.16x** | 0.73x |
-| **bell_s10** | **1.25x** | **1.02x** | 0.78x | 0.54x |
-| **bell_s30** | **1.52x** | **1.12x** | 0.95x | 0.64x |
-| **bell_s80** | **1.77x** | **2.94x** | **1.24x** | **1.06x** |
-| **proba02** | **1.45x** | **1.34x** | 0.92x | 0.62x |
-| **uniform** | **2.57x** | **6.23x** | **2.75x** | **2.16x** |
-| **sparse_4** | **9.09x** | **13.00x** | **8.51x** | **1.51x** |
-| **sparse_16** | **9.94x** | **10.94x** | **8.77x** | **11.65x** |
-| **flat_M3** | **4.28x** | **11.83x** | **4.15x** | **1.38x** |
-| **flat_M5** | **4.88x** | **10.12x** | **1.93x** | **1.47x** |
-| **flat_M6** | **4.88x** | **10.15x** | **1.59x** | **1.34x** |
-| **flat_M7** | **1.42x** | **3.51x** | **2.93x** | **2.29x** |
+| **two_sym_90/10** | **5.09x** | **4.68x** | **9.60x** | 0.85x |
+| **two_sym_eq** | **4.98x** | **2.51x** | **9.50x** | 0.86x |
+| **proba80** | **3.33x** | **3.13x** | **2.40x** | **1.15x** |
+| **proba50** | **1.82x** | **1.49x** | **1.20x** | 0.75x |
+| **proba14** † | **1.06x** | **1.07x** | 0.69x | 0.47x |
+| **english** † | **1.28x** | **1.23x** | 0.73x | 0.54x |
+| **zipfian** | **1.40x** | **1.38x** | 0.82x | 0.62x |
+| **geometric** | **1.87x** | **1.56x** | **1.17x** | 0.75x |
+| **bell_s10** | **1.31x** | **1.20x** | 0.84x | 0.58x |
+| **bell_s30** | **1.60x** | **1.33x** | 0.99x | 0.69x |
+| **bell_s80** | **1.78x** | **3.28x** | **1.45x** | **1.20x** |
+| **proba02** † | **1.62x** | **1.49x** | **1.02x** | 0.72x |
+| **uniform** | **2.55x** | **6.54x** | **2.67x** | **2.16x** |
+| **sparse_4** | **9.16x** | **12.97x** | **9.11x** | **1.55x** |
+| **sparse_16** | **10.09x** | **10.96x** | **9.27x** | **12.66x** |
+| **flat_M3** | **4.23x** | **11.89x** | **4.16x** | **1.41x** |
+| **flat_M5** | **4.77x** | **10.13x** | **1.92x** | **1.61x** |
+| **flat_M6** | **4.90x** | **10.11x** | **1.60x** | **1.32x** |
+| **flat_M7** | **1.43x** | **3.55x** | **2.98x** | **2.38x** |
 
-Graviton 4 bell_s80 / flat_M5 / flat_M6 cross from loss to win in this
-sweep: see commit [cee2366bb2372cd173e1900db0b5ea99f4c0c65b](../) for
-the D=5/D=6 fix.
+† New parity-cross from the flat-aware tree restructurer
+([ffbfeac2ae9f56bf9f435574cb21dedbdef13ae5](../)): `proba14` flips on
+M4 (0.91× → 1.06×) and Xeon (0.67× → 1.07×); `proba02` flips on
+Graviton 4 (0.92× → 1.02×); `english` lifts from 1.10× to 1.28× on M4
+and from 1.00× to 1.23× on Xeon.
 
 **Post-flat-subtree (April 2026):**  The flat-subtree fast path
 (flat regions of the tree emit one N·D-bit packed region instead of
@@ -601,28 +602,30 @@ memset.
 
 ### Where PIVCO Still Loses
 
-**proba14 everywhere** (0.41-0.96×).  The flat-subtree analyzer
-measured only 0.9% of elements in flat subtrees for proba14 — the
-Huffman tree for that distribution happens to be highly asymmetric
-with a deep moderately-mixed middle, giving neither the stick-tree
-fast path nor the flat-subtree fast path much to chew on.
+**proba14 still loses on Graviton 4 / Zen 3** (0.69× / 0.47×).  The
+flat-aware tree restructurer pulled `proba14` from 0.91× to 1.06× on
+M4 and from 0.67× to 1.07× on Xeon (commit
+[ffbfeac2ae9f56bf9f435574cb21dedbdef13ae5](../)) — the rule "max-
+chunk per length" lifted leaf coverage 33%→83% and freq coverage
+0.9%→54.7%.  The remaining gap on Graviton / Zen 3 is residual
+partition-cost: even with optimal tree shape, those uarchs partition
+slower than M4/Xeon per element.
 
-**Graviton 4 moderate-entropy cluster** (english 0.72×, zipfian
-0.85×, bell_s10 0.78×, proba02 0.92×, proba14 0.60×).  Graviton 4
-`tbl` throughput is measurably below M4's; the partition cost
-outside flat subtrees dominates.  D=5/D=6 nodes specifically fall
-through to scalar on this uarch (commit
-[cee2366bb2372cd173e1900db0b5ea99f4c0c65b](../)) since the multi-
+**Graviton 4 moderate-entropy cluster** (english 0.73×, zipfian
+0.82×, bell_s10 0.84×).  Graviton 4 `tbl` throughput is measurably
+below M4's; the partition cost outside flat subtrees dominates.
+D=5/D=6 NEON paths fall through to scalar on this uarch
+([cee2366bb2372cd173e1900db0b5ea99f4c0c65b](../)) since the multi-
 register `vqtbl{2,4}q_u8` instructions retire too slowly to beat the
 scalar switch — see the "Graviton 4 D=5/D=6 fix" callout above.
 
-**Zen 3 SSE4.1 moderate-entropy cluster** (0.41-0.62× across
+**Zen 3 SSE4.1 moderate-entropy cluster** (0.47-0.75× across
 proba14/proba02/english/zipfian/bell_*).  Zen 3 has fewer shuffle
 execution ports than Xeon / M4 / Graviton, so the per-cycle
 partition cost is already smaller — making flat-subtree's absolute
-savings smaller in turn.  Even so, flat-subtree moved Zen 3's
-moderate-entropy numbers from the pre-flat-subtree 0.32-0.56× range
-up to 0.41-0.62×.
+savings smaller in turn.  The flat-aware tree restructurer
+([ffbfeac2ae9f56bf9f435574cb21dedbdef13ae5](../)) moved Zen 3
+moderate-entropy numbers up another 12-16% but didn't flip them yet.
 
 ### The Core Tradeoff
 
@@ -738,6 +741,27 @@ distributions.
   `vpmultishiftqb` and variable per-lane byte shifts; enabling AVX2
   (`_mm_srlv_epi16`) on Zen-3-class hosts may unlock D=2/3, logged in
   IDEAS.md §"Revisit SSE4.1".
+
+- **Flat-aware Huffman tree restructurer** (April 2026, commit
+  [ffbfeac2ae9f56bf9f435574cb21dedbdef13ae5](../) — see
+  [`results/20260425-0329-ffbfeac-flat-aware-tree.md`](results/20260425-0329-ffbfeac-flat-aware-tree.md)):
+  `pivco_huffman_build_table` no longer produces canonical Huffman
+  trees; instead it lays out symbols of each length L into greedy
+  power-of-2 chunks (largest D first) and assigns codes so that
+  same-length leaves are bunched into the largest possible flat-D≥2
+  subtrees.  Same code-length multiset = identical compression; tree
+  shape minimises the partition-step count along leaf paths
+  (provably optimal for D≥2 leaf coverage — see analyzer
+  [`extras/bench_flat_optimal.c`](extras/bench_flat_optimal.c)).
+  Mechanism: a flat-D≥2 root absorbs the entire partition path
+  through its 2^D-leaf subtree, while D=1 stage-fusion only saves the
+  partition at the immediate parent; consolidating multiple D=1 sib
+  pairs into one D≥2 flat compounds the savings.
+  Results: `english` and `proba14` cross from loss to win on M4 and
+  Xeon; `proba02` flips on Graviton 4; `bell_s80` +12-19% on the
+  three non-M4 platforms; throughout +11-23% on the historical
+  loss cluster.
+
 - **Prefix-radix backend (non-flat research path)**
   (`pivco_huffman_neon_prefix.c`): For Huffman tables with
   `min_len < max_len`, a separate prefix-radix partition approach.

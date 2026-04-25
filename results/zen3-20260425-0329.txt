@@ -1,0 +1,46 @@
+=== PIVCO-Huffman Benchmark Results ===
+Date: 2026-04-25 03:25 UTC
+Commit: ffbfeac2ae9f56bf9f435574cb21dedbdef13ae5
+Host: ip-172-31-18-88.us-west-1.compute.internal (AWS test-c6a)
+Platform: AMD EPYC 7R13 (Zen 3)
+Architecture: x86_64
+OS: Amazon Linux 2023, kernel 6.1.166-197.305.amzn2023.x86_64
+Compiler: gcc (GCC) 11.5.0 20240719 (Red Hat 11.5.0-5)
+SIMD: SSE4.1
+Block size: 4096
+Run pinned: taskset -c 0
+
+  Note: this commit is the flat-aware tree restructurer.  Same code-length
+  multiset (= identical compression); tree shape maximises flat-D>=2 coverage.
+
+=== PIVCO-Huffman Benchmarks ===
+Sequence: 4M, Repeats: 30 (120M/run), Block: 4096, Runs: 5 (drop 2)
+
+DECODE M/s    | pivco_s pivco_n pivco_p | trad_1s trad_4s | huf0_1s huf0_x1 huf0_x2 | rans_x2 |   ratio
+--------------|-------------------------|-----------------|----------------------------|---------|--------
+proba80       |     385    2006       0 |     368     863 |     349     959    1751 |     261 |  1.15x
+proba50       |     122    1277       0 |     287     691 |     349     956    1714 |     225 |  0.75x
+proba14       |      78     773       0 |     266     689 |     348     956    1639 |     229 |  0.47x
+proba02       |      80     710       0 |     253     688 |     347     945     987 |     224 |  0.72x
+bell_s10      |     119     871       0 |     273     168 |     349     947    1514 |     235 |  0.58x
+bell_s30      |      74     647       0 |     260     168 |     347     943     932 |     228 |  0.69x
+bell_s80      |     135     923       0 |     265     773 |       0       0       0 |     273 |  1.20x
+uniform       |    1056    1768       0 |     282     818 |       0       0       0 |     310 |  2.16x
+english       |     103     887       0 |     268     759 |     348     951    1654 |     241 |  0.54x
+zipfian       |      76     741       0 |     242     757 |     347     945    1188 |     188 |  0.62x
+sparse_4      |    1059    2695       0 |     301     873 |     349     961    1741 |     307 |  1.55x
+sparse_16     |    1059   21932       0 |     302     864 |     348     963    1732 |     326 | 12.66x
+geometric     |     122    1282       0 |     287     168 |     349     954    1708 |     224 |  0.75x
+two_sym_eq    |     236    1493       0 |     322     874 |     349     959    1740 |     303 |  0.86x
+two_sym_90/10 |     739    1492       0 |     455     872 |     349     959    1753 |     285 |  0.85x
+flat_M3       |     982    2444       0 |     308     867 |     349     962    1739 |     311 |  1.41x
+flat_M5       |     918    2760       0 |     285     859 |     349     961    1713 |     312 |  1.61x
+flat_M6       |     915    2157       0 |     290     846 |     348     959    1638 |     315 |  1.32x
+flat_M7       |     861    2274       0 |     285     844 |     348     958     869 |     315 |  2.38x
+
+  5 runs of 120M symbols each (30x 4M), drop 2 slowest, warn if spread > 5%
+  PIVCO/trad decode in 4096-symbol blocks
+  huf0 uses 128KB chunks (its max block size)
+  rANS decodes full 4M at once
+  CPU freq drift: +0.6% (OK)
+  Total wall time: 245.5 seconds
