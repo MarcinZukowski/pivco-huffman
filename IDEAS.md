@@ -1,9 +1,29 @@
 # PIVCO-Huffman Decode Ideas
 
-## Flat-aware Huffman tree restructurer
+## ~~Flat-aware Huffman tree restructurer~~ — SHIPPED
 
-**Status (2026-04-25):** investigation done, implementation pending.
-Analyzer: [`extras/bench_flat_optimal.c`](extras/bench_flat_optimal.c).
+**Status (2026-04-25):** SHIPPED.  `pivco_huffman_build_table` now
+produces flat-aware tree shapes; same code-length multiset (=
+identical compression).  Analyzer:
+[`extras/bench_flat_optimal.c`](extras/bench_flat_optimal.c).
+
+**Headline wins (pivco_n M/s, before → after):**
+
+| Distribution | Apple M4 | Xeon AVX-512 | Graviton 4 | Zen 3 |
+|---|--:|--:|--:|--:|
+| `english`  | 2908 → 3303 (**+14%**) | 1758 → 2171 (**+23%**) | 1177 → 1246 (+6%)  | 794 → 887 (**+12%**) |
+| `proba14`  | 2510 → 2829 (**+13%**) | 1176 → 1876 (**+60%**) | 973 → 1147 (**+18%**) | 669 → 773 (**+16%**) |
+| `proba02`  | 2304 → 2569 (**+12%**) | 1405 → 1564 (**+11%**) | 899 → 1015 (**+13%**) | 626 → 710 (**+13%**) |
+| `bell_s80` | 2890 (no change)        | 2041 → 2277 (**+12%**) | 1105 → 1312 (**+19%**) | 818 → 923 (**+13%**) |
+| `bell_s10` | 3114 → 3179 (+2%)      | 1639 → 1941 (**+18%**) | 1189 → 1304 (**+10%**) | 830 → 871 (+5%)  |
+| `bell_s30` | 2303 → 2370 (+3%)      | 1175 → 1396 (**+19%**) | 882 → 920 (+4%)   | 610 → 647 (+6%)  |
+
+Parity-cross flips: **`proba14` on M4 (0.91× → 1.10×)**, **`proba14`
+on Xeon (0.67× → 1.07×)**, **`proba02` on Graviton (0.92× → 1.04×)**.
+
+The Xeon wins are larger than M4 because Xeon's `vpcompressw` partition
+has higher relative cost than M4's NEON `tbl`, so saving partitions
+translates to a bigger throughput gain there.
 
 **The opportunity.**  `pivco_huffman_build_table` currently produces the
 canonical Huffman tree (sort symbols by `(length, value)`, assign codes

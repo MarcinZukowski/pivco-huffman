@@ -391,28 +391,149 @@ int pivco_huffman_build_table(const uint64_t freq[PIVCO_MAX_SYMBOLS],
     table->max_len = max_len;
     table->min_len = min_len;
 
-    /* Sort symbols by (length, value) for canonical assignment */
-    int sorted_idx = 0;
-    for (int len = 1; len <= max_len; len++) {
-        table->first_sym_idx[len] = (uint16_t)sorted_idx;
-        for (int sym = 0; sym < PIVCO_MAX_SYMBOLS; sym++) {
-            if (lengths[sym] == len) {
-                table->sorted_symbols[sorted_idx++] = (uint8_t)sym;
+    /* ---------- Flat-aware code assignment ----------
+     *
+     * Goal: give each symbol a code of its assigned length such that the
+     * resulting binary tree has as many large flat-D>=2 subtrees as
+     * possible (consolidates the partition path during tree-walk decode).
+     * Compression is unaffected — code lengths match the Huffman result.
+     *
+     * Algorithm: per length L, decompose c_L by its binary representation
+     * into "chunks": bits >= 2 form D>=2 flat subtrees of size 2^D rooted
+     * at depth L-D; bit 1 forms a D=1 sibling pair (handled by stage
+     * fusion at decode); bit 0 is a singleton.  Sort chunks by their
+     * tree-depth asc (depth = L-D for D>=2 chunks, L-1 for D=1, L for
+     * singletons), then canonical-assign codes to chunks.  Within each
+     * chunk, top-freq-first symbols of length L are assigned to its
+     * 2^bit suffix slots (highest freqs go to the largest-D chunk per
+     * length, where the partition-path savings are deepest).
+     *
+     * See IDEAS.md "Flat-aware Huffman tree restructurer" for the gap
+     * analysis (extras/bench_flat_optimal.c).
+     */
+
+    /* Per-length: collect symbols sorted by frequency desc (ties by
+       symbol value asc for determinism). */
+    typedef struct {
+        uint8_t  sym;
+        uint64_t freq;
+    } sf_t;
+    sf_t  flat_items[PIVCO_MAX_SYMBOLS];
+    int   per_len_start[PIVCO_MAX_CODE_LEN + 2];
+    {
+        int cursor = 0;
+        for (int L = 1; L <= max_len; L++) {
+            per_len_start[L] = cursor;
+            int seg_start = cursor;
+            for (int s = 0; s < PIVCO_MAX_SYMBOLS; s++) {
+                if (lengths[s] == (uint8_t)L) {
+                    flat_items[cursor].sym  = (uint8_t)s;
+                    flat_items[cursor].freq = freq[s];
+                    cursor++;
+                }
+            }
+            /* Insertion sort: highest freq first; tie-break by smaller sym. */
+            for (int i = seg_start + 1; i < cursor; i++) {
+                sf_t cur = flat_items[i];
+                int j = i - 1;
+                while (j >= seg_start &&
+                       (flat_items[j].freq < cur.freq ||
+                        (flat_items[j].freq == cur.freq && flat_items[j].sym > cur.sym))) {
+                    flat_items[j + 1] = flat_items[j];
+                    j--;
+                }
+                flat_items[j + 1] = cur;
+            }
+        }
+        per_len_start[max_len + 1] = cursor;
+    }
+
+    /* Decompose each c_L into chunks (one chunk per set bit). */
+    typedef struct {
+        uint16_t L;
+        uint16_t bit;       /* 0..PIVCO_MAX_CODE_LEN */
+        uint16_t depth;     /* tree-depth of chunk root */
+        uint16_t n_syms;    /* 1 << bit */
+        int      sym_idx;   /* index into flat_items */
+    } chunk_t;
+    chunk_t chunks[PIVCO_MAX_SYMBOLS];   /* upper bound: one chunk per symbol */
+    int n_chunks = 0;
+    {
+        for (int L = 1; L <= max_len; L++) {
+            int c = table->sym_count[L];
+            int cur = per_len_start[L];
+            /* Iterate set bits high-to-low so larger chunks come first
+               within the length (matters only for top-freq-first symbol
+               assignment within the length). */
+            for (int bit = PIVCO_MAX_CODE_LEN; bit >= 0; bit--) {
+                if (c & (1 << bit)) {
+                    int n = 1 << bit;
+                    int depth;
+                    if      (bit >= 2) depth = L - bit;
+                    else if (bit == 1) depth = L - 1;
+                    else               depth = L;
+                    chunks[n_chunks].L      = (uint16_t)L;
+                    chunks[n_chunks].bit    = (uint16_t)bit;
+                    chunks[n_chunks].depth  = (uint16_t)depth;
+                    chunks[n_chunks].n_syms = (uint16_t)n;
+                    chunks[n_chunks].sym_idx = cur;
+                    cur += n;
+                    n_chunks++;
+                }
             }
         }
     }
 
-    /* Assign canonical codes */
-    uint16_t code = 0;
-    for (int len = 1; len <= max_len; len++) {
-        table->first_code[len] = code;
-        int idx = table->first_sym_idx[len];
-        for (int i = 0; i < table->sym_count[len]; i++) {
-            int sym = table->sorted_symbols[idx + i];
-            table->code[sym] = code;
-            code++;
+    /* Sort chunks by depth asc (stable; ties keep their natural order
+       which is L asc by length, larger-bit-first within length). */
+    for (int i = 1; i < n_chunks; i++) {
+        chunk_t cur = chunks[i];
+        int j = i - 1;
+        while (j >= 0 && chunks[j].depth > cur.depth) {
+            chunks[j + 1] = chunks[j];
+            j--;
         }
-        code <<= 1;
+        chunks[j + 1] = cur;
+    }
+
+    /* Canonical-assign codes to chunks (chunk-level Kraft sum = 1).
+       Each chunk gets a code prefix of length `chunk.depth`.  Within
+       the chunk, symbol i takes suffix i for i in [0, 2^bit). */
+    {
+        uint32_t code = 0;
+        int prev_depth = 0;
+        for (int ci = 0; ci < n_chunks; ci++) {
+            int d = chunks[ci].depth;
+            if (d > prev_depth) code <<= (d - prev_depth);
+            int bit = chunks[ci].bit;
+            int n   = chunks[ci].n_syms;
+            for (int i = 0; i < n; i++) {
+                uint8_t sym = flat_items[chunks[ci].sym_idx + i].sym;
+                table->code[sym] = (uint16_t)((code << bit) | (uint32_t)i);
+            }
+            code += 1;
+            prev_depth = d;
+        }
+    }
+
+    /* Populate sorted_symbols / first_sym_idx / first_code from the
+       new code assignment.  These fields are not used by runtime
+       decoders (only by the tree-walk pass below), but we keep them
+       in length-asc order for compatibility with anyone inspecting
+       the table. */
+    int sorted_idx = 0;
+    for (int len = 1; len <= max_len; len++) {
+        table->first_sym_idx[len] = (uint16_t)sorted_idx;
+        uint16_t min_code = 0xFFFF;
+        int seg_start = sorted_idx;
+        for (int s = 0; s < PIVCO_MAX_SYMBOLS; s++) {
+            if (lengths[s] == (uint8_t)len) {
+                if (table->code[s] < min_code) min_code = table->code[s];
+                table->sorted_symbols[sorted_idx++] = (uint8_t)s;
+            }
+        }
+        (void)seg_start;
+        table->first_code[len] = (min_code == 0xFFFF) ? 0 : min_code;
     }
 
     /* Build flat decode table (2^MAX_CODE_LEN entries) */
