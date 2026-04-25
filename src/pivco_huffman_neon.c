@@ -6,6 +6,26 @@
 #ifdef PIVCO_HAS_NEON
 #include <arm_neon.h>
 
+/* ---------- uarch gate: D=5/D=6 flat-subtree TBL paths ----------
+ *
+ * On Apple silicon (M-series), vqtbl2q_u8 / vqtbl4q_u8 retire fast
+ * enough that processing 8/16 codes per iteration via a single multi-
+ * register TBL is a clean win over scalar 8-byte chunked lookups.
+ *
+ * On AWS Graviton 4 (Neoverse-V2), the same paths measure markedly
+ * slower than the scalar (NEON_FLAT_UNPACK_SWITCH) fallback — and a
+ * 2x vqtbl1 + or emulation is slower still.  Disable on non-Apple ARM
+ * and fall through to the scalar switch.
+ *
+ * Override with -DPIVCO_NEON_FAST_MULTI_TBL=0/1 to force one path. */
+#ifndef PIVCO_NEON_FAST_MULTI_TBL
+#  if defined(__APPLE__)
+#    define PIVCO_NEON_FAST_MULTI_TBL 1
+#  else
+#    define PIVCO_NEON_FAST_MULTI_TBL 0
+#  endif
+#endif
+
 /* ---------- SIMD Compress Shuffle Table ----------
  *
  * For each 8-bit mask, a 16-byte TBL shuffle that packs selected
@@ -403,6 +423,7 @@ static inline void flat_decode_scatter_neon(uint8_t *symbols,
         }
         return;
     }
+#if PIVCO_NEON_FAST_MULTI_TBL
     if (D == 5) {
         /* c2s has 32 entries — needs a 2-register TBL (vqtbl2_u8).
          * Process 8 codes per iteration. */
@@ -455,6 +476,7 @@ static inline void flat_decode_scatter_neon(uint8_t *symbols,
         }
         return;
     }
+#endif /* PIVCO_NEON_FAST_MULTI_TBL */
     if (D == 4) {
         /* c2s has 16 entries — exactly fills a 16-byte TBL register.
          * Process 16 codes per iteration. */
@@ -550,6 +572,7 @@ static inline void flat_decode_direct_neon(uint8_t *symbols, int n,
         }
         return;
     }
+#if PIVCO_NEON_FAST_MULTI_TBL
     if (D == 5) {
         /* 16 codes per iter via two 8-code spreads + vqtbl2q_u8 on the
          * 32-byte c2s table, single vst1q_u8. */
@@ -603,6 +626,7 @@ static inline void flat_decode_direct_neon(uint8_t *symbols, int n,
         }
         return;
     }
+#endif /* PIVCO_NEON_FAST_MULTI_TBL */
     if (D == 4) {
         /* 16 codes per iter, single vst1q_u8 — indices are identity. */
         uint8x16_t c2s_vec = vld1q_u8(c2s);
