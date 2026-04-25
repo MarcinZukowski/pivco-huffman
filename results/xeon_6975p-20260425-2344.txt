@@ -1,0 +1,55 @@
+=== PIVCO-Huffman Benchmark Results ===
+Date: 2026-04-25 23:44 UTC
+Commit: a1e742cded9f059d4e165177deca1ac8e26ba49e
+Host: ip-172-31-17-236.us-west-1.compute.internal (AWS test-c8i)
+Platform: Intel(R) Xeon(R) 6975P-C
+Architecture: x86_64
+OS: Amazon Linux 2023, kernel 6.1.166-197.305.amzn2023.x86_64
+Compiler: gcc (GCC) 11.5.0 20240719 (Red Hat 11.5.0-5)
+SIMD: AVX-512 VBMI2 + VBMI
+Block size: 8192
+Run pinned: taskset -c 0
+
+  Note: first sweep across all 29 distributions (synthetic + 10 real-world).
+
+=== PIVCO-Huffman Benchmarks ===
+Sequence: 4M, Repeats: 30 (120M/run), Block: 8192, Runs: 5 (drop 2)
+
+DECODE M/s    | pivco_s pivco_n pivco_p | trad_1s trad_4s | huf0_1s huf0_x1 huf0_x2 | rans_x2 |   ratio
+--------------|-------------------------|-----------------|----------------------------|---------|--------
+proba80       |     342    5673       0 |     386     722 |     310    1062    1817 |     248 |  3.12x
+proba50       |     117    2733       0 |     288     652 |     310    1062    1810 |     210 |  1.51x
+proba14       |      75    1886       0 |     274     651 |     310    1065    1744 |     213 |  1.08x
+proba02       |      78    1558       0 |     257     650 |     309    1051    1040 |     207 |  1.48x
+bell_s10      |     116    1967       0 |     279     273 |     309    1050    1613 |     218 |  1.22x
+bell_s30      |      72    1397       0 |     265     273 |     309    1051     985 |     212 |  1.33x
+bell_s80      |     133    2319       0 |     272     696 |       0       0       0 |     256 |  3.33x
+uniform       |    1210    4581       0 |     285     702 |       0       0       0 |     284 |  6.52x
+english       |      99    2187       0 |     276     681 |     310    1059    1760 |     222 |  1.24x
+zipfian       |      73    1749       0 |     244     681 |     309    1051    1263 |     175 |  1.39x
+sparse_4      |    1211   24008       0 |     319     723 |     310    1066    1832 |     307 | 13.11x
+sparse_16     |    1211   20011       0 |     305     722 |     310    1067    1816 |     297 | 11.02x
+geometric     |     117    2846       0 |     290     274 |     310    1063    1810 |     209 |  1.57x
+two_sym_eq    |     230    4628       0 |     310     722 |     311    1062    1826 |     312 |  2.53x
+two_sym_90/10 |     646    8651       0 |     432     724 |     311    1062    1810 |     276 |  4.78x
+flat_M3       |    1178   21813       0 |     311     721 |     310    1067    1824 |     302 | 11.96x
+flat_M5       |    1112   18406       0 |     301     721 |     310    1065    1808 |     293 | 10.18x
+flat_M6       |    1123   17104       0 |     295     717 |     310    1063    1684 |     290 | 10.16x
+flat_M7       |    1019    3793       0 |     290     708 |     310    1063     921 |     287 |  3.57x
+html_wiki     |      73    1383       0 |     265     273 |     309    1054    1509 |     194 |  0.92x
+prose_pride   |      71    1487       0 |     271     274 |     309    1053    1660 |     203 |  0.90x
+image_jpeg    |     116    1968       0 |     267     681 |     309    1053     912 |     253 |  1.87x
+json_api      |      72    1546       0 |     265     273 |     309    1057    1587 |     191 |  0.97x
+source_c      |      79    1556       0 |     257     273 |     310    1057    1551 |     177 |  1.00x
+log_apache    |      75    1544       0 |     267     273 |     310    1060    1530 |     198 |  1.01x
+dna_fasta     |     113    2662       0 |     336     682 |     310    1059    1804 |     285 |  1.48x
+csv_numeric   |      96    1963       0 |     278     274 |     310    1060    1745 |     186 |  1.13x
+gzip_random   |    1210    4582       0 |     285     702 |       0       0       0 |     280 |  6.53x
+chinese_text  |      74    1583       0 |     266     273 |     309    1053    1396 |     196 |  1.13x
+
+  5 runs of 120M symbols each (30x 4M), drop 2 slowest, warn if spread > 5%
+  PIVCO/trad decode in 8192-symbol blocks
+  huf0 uses 128KB chunks (its max block size)
+  rANS decodes full 4M at once
+  CPU freq drift: +0.1% (OK)
+  Total wall time: 418.7 seconds

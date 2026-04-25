@@ -1,0 +1,54 @@
+=== PIVCO-Huffman Benchmark Results ===
+Date: 2026-04-25 23:44 UTC
+Commit: a1e742cded9f059d4e165177deca1ac8e26ba49e
+Host: MBP14-M4.local
+Platform: Apple M4 Max
+Architecture: arm64
+OS: macOS 26.3.1
+Compiler: Apple clang version 17.0.0 (clang-1700.4.4.1)
+SIMD: NEON (ARMv8.6-A) — PIVCO_NEON_FAST_MULTI_TBL=1 (default on __APPLE__)
+Block size: 8192
+
+  Note: first sweep across all 29 distributions (synthetic + 10 real-world).
+
+=== PIVCO-Huffman Benchmarks ===
+Sequence: 4M, Repeats: 30 (120M/run), Block: 8192, Runs: 5 (drop 2)
+
+DECODE M/s    | pivco_s pivco_n pivco_p | trad_1s trad_4s | huf0_1s huf0_x1 huf0_x2 | rans_x2 |   ratio
+--------------|-------------------------|-----------------|----------------------------|---------|--------
+proba80       |     799    9335    1113 |     546    1631 |     371    1392    2584 |     332 |  3.61x
+proba50       |     336    4945    1039 |     506    1495 |     370    1386    2627 |     279 |  1.88x
+proba14       |     464    2819    1245 |     448    1489 |     372    1399    2541 |     284 |  1.11x
+proba02       |     584    2558    1011 |     414    1486 |     369    1363    1503 |     278 |  1.70x
+bell_s10      |     779    3125    1153 |     467     673 |     371    1362    2325 |     291 |  1.34x
+bell_s30      |     547    2366    1122 |     427     680 |     375    1352    1428 |     284 |  1.66x
+bell_s80      |     826    2857     933 |     443    1586 |       0       0       0 |     349 |  1.80x
+uniform       |    2236    3928    3798 |    1555    1584 |       0       0       0 |     407 |  2.48x
+english       |     552    3291    1250 |     454    1556 |     368    1360    2472 |     293 |  1.33x
+zipfian       |     424    2632    1231 |     391    1551 |     370    1353    1805 |     239 |  1.46x
+sparse_4      |    2247   44463    6135 |    2627    1619 |    1110    3479    5212 |     442 |  8.53x
+sparse_16     |    2256   45491    5639 |    2140    1617 |    1099    3208    4565 |     427 |  9.97x
+geometric     |     333    4959    1028 |     507     687 |     370    1365    2572 |     274 |  1.93x
+two_sym_eq    |     392   25359    6055 |    2867    1620 |     822    3477    5305 |     449 |  4.78x
+two_sym_90/10 |    1541   25497    6197 |    2890    1622 |     807    3476    5093 |     363 |  5.01x
+flat_M3       |    2100   22841    3809 |    2371    1618 |     818    3507    5375 |     438 |  4.25x
+flat_M5       |    1974   24004    2906 |    1946    1619 |     876    3513    5127 |     422 |  4.68x
+flat_M6       |    1986   21669    3887 |    1792    1607 |    1111    3421    4486 |     415 |  4.83x
+flat_M7       |    1876    5017    2955 |    1668    1592 |     811    3516    2748 |     409 |  1.43x
+html_wiki     |     509    2429    1280 |     429     676 |     356    1359    2186 |     260 |  1.11x
+prose_pride   |     456    2586    1202 |     434     678 |     360    1344    2398 |     270 |  1.08x
+image_jpeg    |     753    2774     972 |     429    1558 |     362    1356    1322 |     336 |  1.78x
+json_api      |     453    2580    1170 |     426     677 |     359    1369    2273 |     256 |  1.13x
+source_c      |     383    2917    1122 |     412     679 |     361    1371    2232 |     237 |  1.31x
+log_apache    |     573    2527    1323 |     432     676 |     356    1353    2212 |     265 |  1.14x
+dna_fasta     |     454    3785    1282 |     502    1564 |     363    1360    2625 |     374 |  1.44x
+csv_numeric   |     464    3562    1218 |     452     681 |     360    1347    2530 |     247 |  1.41x
+gzip_random   |    2246    3950    3808 |    1558    1591 |       0       0       0 |     367 |  2.48x
+chinese_text  |     513    2585    1203 |     428     683 |     359    1341    2009 |     264 |  1.29x
+
+  5 runs of 120M symbols each (30x 4M), drop 2 slowest, warn if spread > 5%
+  PIVCO/trad decode in 8192-symbol blocks
+  huf0 uses 128KB chunks (its max block size)
+  rANS decodes full 4M at once
+  CPU freq drift: +78.7% (OK)
+  Total wall time: 210.1 seconds

@@ -312,21 +312,28 @@ Deep nodes are small, but they are also common on moderate distributions.
 Reducing scalar fallback overhead should improve the AVX-512 backend's worst
 cases without disturbing the strong 32-wide fast path.
 
-## ~~Product-level idea: hybrid block decoder~~ — largely obsoleted
+## Hybrid block decoder — back on the table after the real-data sweep
 
-> **Status (as of `8754347`, 2026-04-24):** largely obsoleted by the
-> flat-subtree fast path.  On Apple M4 the PIVCO decoder now beats
-> `huf0`/`trad_4s` on 18/19 distributions.  The only remaining
-> consistent loss is proba14 (0.96×) where the flat-subtree analyzer
-> predicted 0.9% coverage — i.e., the tree shape doesn't permit
-> flat-subtree savings.  A per-table fallback to huf0 would help there
-> but the absolute gap is small.
+> **Status (as of [a1e742cded9f059d4e165177deca1ac8e26ba49e](../),
+> 2026-04-25):** the 2026-04-25 mega sweep added 10 real-world byte
+> distributions (Wikipedia HTML, Project Gutenberg prose, JPEG, JSON,
+> source code, Apache log, FASTA, CSV, gzip output, classical Chinese
+> text — see [`extras/datasets/`](extras/datasets/)).  PIVCO loses
+> badly on the real-text cluster outside Apple silicon:
 >
-> A hybrid block decoder still makes sense on **Zen 3 SSE4.1** where
-> PIVCO loses on several moderate-entropy distributions (bell_*,
-> proba02, english, zipfian at 0.41–0.62×) because the per-cycle
-> partition cost is already cheap.  On that platform falling back to
-> huf0_x2 for those tables would meaningfully boost the geometric mean.
+> - Xeon AVX-512: `prose_pride` 0.90×, `html_wiki` 0.92×,
+>   `json_api` 0.97× (3 losses).
+> - Graviton 4: real-text cluster at 0.63–0.78× (8 losses).
+> - Zen 3 SSE4.1: real-text cluster at 0.44–0.55× (9 losses).
+>
+> Apple M4 still wins all 29 distributions (1.08–10×).
+>
+> The synthetic `english` distribution (1.33× M4 / 1.24× Xeon) was
+> overstating the win by ~25-33% vs real prose.
+>
+> **Hybrid is now the highest-EV outstanding optimisation** — it's
+> the cheapest path to flipping all four platforms back into the win
+> column on the loss cluster.
 
 The results strongly suggest that PIVCO wins on skewed distributions and loses
 on moderate/uniform ones.

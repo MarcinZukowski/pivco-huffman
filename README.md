@@ -44,19 +44,31 @@ a time.  Plus a **flat-subtree fast path**: every maximal flat subtree
 of depth D ≥ 2 in the Huffman tree emits a single N·D-bit packed
 region instead of D levels of bitmaps, decoded via direct lookup.
 
-**Wins everywhere measured on Apple M4** — 1.06× to 10.1× huf0/trad_4s
-across the full bench grid.  Concrete:
-- `two_sym_eq` single-bit codes: **27 GB/s**, 5× huf0.
-- `proba80` strongly skewed: **9.6 GB/s**, 3.3× huf0.
-- `uniform` fully flat: **4.2 GB/s**, 2.6× huf0 (via flat-tree path).
-- `bell_s80` / `bell_s30` / `zipfian` / `proba02` / `proba14` /
-  `english` — the **historically losing** moderate-entropy distributions
-  — now all win 1.06× to 1.78× huf0 thanks to the flat-subtree path
-  plus the flat-aware tree restructurer.
+**Apple M4: wins on all 29 benched distributions** — 1.08× to 10.0×
+huf0/trad_4s.  Concrete:
+- `gzip_random` / `image_jpeg` (high-entropy, 256-symbol): **2.5×** /
+  **1.78×** huf0_x2 (huf0 fails on near-uniform; PIVCO doesn't).
+- `proba80` strongly skewed: **9.3 GB/s**, 3.6× huf0.
+- `uniform` / `flat_M*` fully flat: **2.5–4.8×** huf0 / trad_4s.
+- `english` / `prose_pride` / `html_wiki` / `chinese_text` real text:
+  **1.08–1.33×** huf0_x2.
 
-**Portable to other ISAs**: AVX-512 VBMI2 (1.07–13× on Xeon),
-Graviton 4 NEON (1.17–9.60× on 14/19 distributions), SSE4.1
-(1.15–12.66× on 8/19 distributions).
+**Portable but uneven across ISAs:**
+- **Xeon AVX-512 VBMI2** wins 25/29 (deepest-tree real text within
+  ±10% of parity; everything else wins 1.0–13×).
+- **Graviton 4 NEON** wins 16/29 — strong on synthetic but loses
+  the real text/markup cluster at 0.6–0.8×.
+- **Zen 3 SSE4.1** wins 8/29 (synthetic flat-tree only); real text
+  hits 0.44–0.55× because pure SSE4.1 lacks `vpcompressw`-class
+  partition primitives.
+
+The bench grid intentionally includes 10 real-world byte
+distributions (Wikipedia HTML, Project Gutenberg prose, JPEG image,
+GitHub JSON, C source, Apache log, E. coli FASTA, OWID CSV, gzip
+output, classical Chinese text — sources in
+[`extras/datasets/`](extras/datasets/)).  The synthetic `english`
+distribution overstates PIVCO's real-prose win by ~25% on M4 and
+~33% on Xeon — quote real-world numbers when comparing.
 
 Encoded size within 1–4% of traditional Huffman.  The flat-subtree
 format actually *improves* packing slightly — one tail padding per
@@ -304,146 +316,206 @@ Full detailed results with system info in `results/` directory.
 
 ### Apple M4 Max (NEON, 128KB L1D, block 8192)
 
-*(as of [ffbfeac2ae9f56bf9f435574cb21dedbdef13ae5](../) commit, 2026-04-25; 30 reps × 4M
+*(as of [a1e742cded9f059d4e165177deca1ac8e26ba49e](../) commit, 2026-04-25; 30 reps × 4M
 symbols, median of 3 of 5 runs.  Full sweep file:
-[`results/20260425-0329-ffbfeac-flat-aware-tree.md`](results/20260425-0329-ffbfeac-flat-aware-tree.md))*
+[`results/20260425-2344-a1e742c-mega-sweep.md`](results/20260425-2344-a1e742c-mega-sweep.md).
+Real-world distributions (`html_wiki` … `chinese_text`) source files in
+[`extras/datasets/`](extras/datasets/).)*
 
 | Distribution  | PIVCO NEON | huf0 X1 | huf0 X2 | trad 4s | vs best |
 |---------------|----------:|--------:|--------:|--------:|--------:|
-| proba80       |      9556 |    1485 |    2867 |    1706 | **3.33x** |
-| proba50       |      5119 |    1472 |    2815 |    1543 | **1.82x** |
-| proba14       |      2866 |    1478 |    2705 |    1529 | **1.06x** |
-| english       |      3333 |    1449 |    2610 |    1594 | **1.28x** |
-| zipfian       |      2666 |    1430 |    1907 |    1580 | **1.40x** |
-| geometric     |      5049 |    1439 |    2696 |     696 | **1.87x** |
-| bell_s10      |      3204 |    1417 |    2455 |     689 | **1.31x** |
-| bell_s30      |      2396 |    1427 |    1497 |     687 | **1.60x** |
-| bell_s80      |      2872 |       0 |       0 |    1612 | **1.78x** |
-| proba02       |      2588 |    1446 |    1602 |    1526 | **1.62x** |
-| uniform       |      4169 |       0 |       0 |    1633 | **2.55x** |
-| sparse_4      |     48377 |    3547 |    5281 |    1657 | **9.16x** |
-| sparse_16     |     46210 |    3248 |    4581 |    1655 | **10.09x** |
-| flat_M3       |     23033 |    3572 |    5445 |    1654 | **4.23x** |
-| flat_M5       |     24848 |    3577 |    5211 |    1647 | **4.77x** |
-| flat_M6       |     22083 |    3468 |    4509 |    1641 | **4.90x** |
-| flat_M7       |      5071 |    3554 |    2781 |    1623 | **1.43x** |
-| two_sym_eq    |     26795 |    3548 |    5384 |    1657 | **4.98x** |
-| two_sym_90/10 |     26363 |    3549 |    5183 |    1650 | **5.09x** |
+| proba80       |      9335 |    1392 |    2584 |    1631 | **3.61x** |
+| proba50       |      4945 |    1386 |    2627 |    1495 | **1.88x** |
+| proba14       |      2819 |    1399 |    2541 |    1489 | **1.11x** |
+| english       |      3291 |    1360 |    2472 |    1556 | **1.33x** |
+| zipfian       |      2632 |    1353 |    1805 |    1551 | **1.46x** |
+| geometric     |      4959 |    1365 |    2572 |     687 | **1.93x** |
+| bell_s10      |      3125 |    1362 |    2325 |     673 | **1.34x** |
+| bell_s30      |      2366 |    1352 |    1428 |     680 | **1.66x** |
+| bell_s80      |      2857 |       0 |       0 |    1586 | **1.80x** |
+| proba02       |      2558 |    1363 |    1503 |    1486 | **1.70x** |
+| uniform       |      3928 |       0 |       0 |    1584 | **2.48x** |
+| sparse_4      |     44463 |    3479 |    5212 |    1619 | **8.53x** |
+| sparse_16     |     45491 |    3208 |    4565 |    1617 | **9.97x** |
+| flat_M3       |     22841 |    3507 |    5375 |    1618 | **4.25x** |
+| flat_M5       |     24004 |    3513 |    5127 |    1619 | **4.68x** |
+| flat_M6       |     21669 |    3421 |    4486 |    1607 | **4.83x** |
+| flat_M7       |      5017 |    3516 |    2748 |    1592 | **1.43x** |
+| two_sym_eq    |     25359 |    3477 |    5305 |    1620 | **4.78x** |
+| two_sym_90/10 |     25497 |    3476 |    5093 |    1622 | **5.01x** |
+| html_wiki     |      2429 |    1359 |    2186 |     676 | **1.11x** |
+| prose_pride   |      2586 |    1344 |    2398 |     678 | **1.08x** |
+| image_jpeg    |      2774 |    1356 |    1322 |    1558 | **1.78x** |
+| json_api      |      2580 |    1369 |    2273 |     677 | **1.13x** |
+| source_c      |      2917 |    1371 |    2232 |     679 | **1.31x** |
+| log_apache    |      2527 |    1353 |    2212 |     676 | **1.14x** |
+| dna_fasta     |      3785 |    1360 |    2625 |    1564 | **1.44x** |
+| csv_numeric   |      3562 |    1347 |    2530 |     681 | **1.41x** |
+| gzip_random   |      3950 |       0 |       0 |    1591 | **2.48x** |
+| chinese_text  |      2585 |    1341 |    2009 |     683 | **1.29x** |
 
 ### Intel Xeon 6975P-C (AVX-512 VBMI2 + VBMI, 48KB L1D, block 8192)
 
-*(as of [ffbfeac2ae9f56bf9f435574cb21dedbdef13ae5](../) commit, 2026-04-25; AWS `test-c8i`,
+*(as of [a1e742cded9f059d4e165177deca1ac8e26ba49e](../) commit, 2026-04-25; AWS `test-c8i`,
 2 vCPU, GCC 11.5.0, Amazon Linux 2023; 30 reps × 4M symbols)*
 
 | Distribution  | PIVCO AVX512 | huf0 X1 | huf0 X2 | trad 4s | vs best |
 |---------------|------------:|--------:|--------:|--------:|--------:|
-| proba80       |       5684 |    1062 |    1817 |     722 | **3.13x** |
-| proba50       |       2712 |    1063 |    1816 |     652 | **1.49x** |
-| proba14       |       1876 |    1065 |    1748 |     651 | **1.07x** |
-| english       |       2171 |    1059 |    1760 |     681 | **1.23x** |
-| zipfian       |       1743 |    1052 |    1263 |     680 | **1.38x** |
-| geometric     |       2830 |    1063 |    1816 |     274 | **1.56x** |
-| bell_s10      |       1941 |    1051 |    1613 |     273 | **1.20x** |
-| bell_s30      |       1396 |    1051 |     985 |     272 | **1.33x** |
-| bell_s80      |       2277 |       0 |       0 |     694 | **3.28x** |
-| proba02       |       1564 |    1050 |    1040 |     649 | **1.49x** |
-| uniform       |       4585 |       0 |       0 |     701 | **6.54x** |
-| sparse_4      |      23742 |    1067 |    1831 |     721 | **12.97x** |
-| sparse_16     |      19903 |    1068 |    1816 |     720 | **10.96x** |
-| flat_M3       |      21665 |    1069 |    1821 |     722 | **11.89x** |
-| flat_M5       |      18303 |    1067 |    1806 |     719 | **10.13x** |
-| flat_M6       |      16998 |    1063 |    1681 |     714 | **10.11x** |
-| flat_M7       |       3779 |    1064 |     921 |     707 | **3.55x** |
-| two_sym_eq    |       4590 |    1063 |    1826 |     724 | **2.51x** |
-| two_sym_90/10 |       8474 |    1063 |    1809 |     723 | **4.68x** |
+| proba80       |       5673 |    1062 |    1817 |     722 | **3.12x** |
+| proba50       |       2733 |    1062 |    1810 |     652 | **1.51x** |
+| proba14       |       1886 |    1065 |    1744 |     651 | **1.08x** |
+| english       |       2187 |    1059 |    1760 |     681 | **1.24x** |
+| zipfian       |       1749 |    1051 |    1263 |     681 | **1.39x** |
+| geometric     |       2846 |    1063 |    1810 |     274 | **1.57x** |
+| bell_s10      |       1967 |    1050 |    1613 |     273 | **1.22x** |
+| bell_s30      |       1397 |    1051 |     985 |     273 | **1.33x** |
+| bell_s80      |       2319 |       0 |       0 |     696 | **3.33x** |
+| proba02       |       1558 |    1051 |    1040 |     650 | **1.48x** |
+| uniform       |       4581 |       0 |       0 |     702 | **6.52x** |
+| sparse_4      |      24008 |    1066 |    1832 |     723 | **13.11x** |
+| sparse_16     |      20011 |    1067 |    1816 |     722 | **11.02x** |
+| flat_M3       |      21813 |    1067 |    1824 |     721 | **11.96x** |
+| flat_M5       |      18406 |    1065 |    1808 |     721 | **10.18x** |
+| flat_M6       |      17104 |    1063 |    1684 |     717 | **10.16x** |
+| flat_M7       |       3793 |    1063 |     921 |     708 | **3.57x** |
+| two_sym_eq    |       4628 |    1062 |    1826 |     722 | **2.53x** |
+| two_sym_90/10 |       8651 |    1062 |    1810 |     724 | **4.78x** |
+| html_wiki     |       1383 |    1054 |    1509 |     273 |   0.92x |
+| prose_pride   |       1487 |    1053 |    1660 |     274 |   0.90x |
+| image_jpeg    |       1968 |    1053 |     912 |     681 | **1.87x** |
+| json_api      |       1546 |    1057 |    1587 |     273 |   0.97x |
+| source_c      |       1556 |    1057 |    1551 |     273 | **1.00x** |
+| log_apache    |       1544 |    1060 |    1530 |     273 | **1.01x** |
+| dna_fasta     |       2662 |    1059 |    1804 |     682 | **1.48x** |
+| csv_numeric   |       1963 |    1060 |    1745 |     274 | **1.13x** |
+| gzip_random   |       4582 |       0 |       0 |     702 | **6.53x** |
+| chinese_text  |       1583 |    1053 |    1396 |     273 | **1.13x** |
 
 ### AWS Graviton 4 Neoverse V2 (NEON, 64KB L1D, block 8192)
 
-*(as of [ffbfeac2ae9f56bf9f435574cb21dedbdef13ae5](../) commit, 2026-04-25; AWS `test-c8g`,
+*(as of [a1e742cded9f059d4e165177deca1ac8e26ba49e](../) commit, 2026-04-25; AWS `test-c8g`,
 2 vCPU c8g.large pinned `taskset -c 0`, GCC 11.5.0, Amazon Linux 2023; 30 reps × 4M symbols.
 D=5/D=6 NEON paths gated off via `PIVCO_NEON_FAST_MULTI_TBL=0`.)*
 
 | Distribution  | PIVCO NEON | huf0 X1 | huf0 X2 | trad 4s | vs best |
 |---------------|----------:|--------:|--------:|--------:|--------:|
-| proba80       |      4031 |     939 |    1680 |    1020 | **2.40x** |
-| proba50       |      2015 |     932 |    1686 |     837 | **1.20x** |
-| proba14       |      1133 |     935 |    1636 |     826 |   0.69x |
-| english       |      1200 |     931 |    1640 |     893 |   0.73x |
-| zipfian       |       972 |     925 |    1188 |     872 |   0.82x |
-| geometric     |      1962 |     933 |    1682 |     229 | **1.17x** |
-| bell_s10      |      1279 |     926 |    1518 |     228 |   0.84x |
-| bell_s30      |       914 |     925 |     925 |     228 |   0.99x |
-| bell_s80      |      1310 |       0 |       0 |     906 | **1.45x** |
-| proba02       |       997 |     926 |     979 |     813 | **1.02x** |
-| uniform       |      2552 |       0 |       0 |     955 | **2.67x** |
-| sparse_4      |     15389 |     939 |    1689 |    1021 | **9.11x** |
-| sparse_16     |     15319 |     941 |    1652 |    1009 | **9.27x** |
-| flat_M3       |      7012 |     939 |    1686 |    1018 | **4.16x** |
-| flat_M5       |      3180 |     939 |    1656 |    1007 | **1.92x** |
-| flat_M6       |      2459 |     935 |    1541 |     979 | **1.60x** |
-| flat_M7       |      2786 |     935 |     859 |     932 | **2.98x** |
-| two_sym_eq    |     16007 |     937 |    1684 |    1022 | **9.50x** |
-| two_sym_90/10 |     16017 |     937 |    1668 |    1022 | **9.60x** |
+| proba80       |      4034 |     939 |    1680 |    1020 | **2.40x** |
+| proba50       |      2007 |     933 |    1686 |     838 | **1.19x** |
+| proba14       |      1132 |     936 |    1636 |     815 |   0.69x |
+| english       |      1167 |     931 |    1640 |     892 |   0.71x |
+| zipfian       |      1003 |     925 |    1189 |     889 |   0.84x |
+| geometric     |      1957 |     933 |    1680 |     229 | **1.17x** |
+| bell_s10      |      1293 |     926 |    1519 |     229 |   0.85x |
+| bell_s30      |       925 |     926 |     927 |     229 | **1.00x** |
+| bell_s80      |      1314 |       0 |       0 |     910 | **1.44x** |
+| proba02       |      1015 |     926 |     980 |     823 | **1.04x** |
+| uniform       |      2549 |       0 |       0 |     933 | **2.73x** |
+| sparse_4      |     15217 |     940 |    1686 |    1021 | **9.02x** |
+| sparse_16     |     15830 |     941 |    1651 |    1011 | **9.59x** |
+| flat_M3       |      6997 |     940 |    1685 |    1013 | **4.15x** |
+| flat_M5       |      3188 |     941 |    1655 |    1007 | **1.93x** |
+| flat_M6       |      2460 |     937 |    1541 |     979 | **1.60x** |
+| flat_M7       |      2786 |     936 |     858 |     953 | **2.92x** |
+| two_sym_eq    |     16000 |     938 |    1684 |    1021 | **9.50x** |
+| two_sym_90/10 |     16042 |     938 |    1666 |    1022 | **9.63x** |
+| html_wiki     |       925 |     927 |    1425 |     229 |   0.65x |
+| prose_pride   |       999 |     927 |    1564 |     227 |   0.64x |
+| image_jpeg    |      1236 |     923 |     849 |     872 | **1.34x** |
+| json_api      |       938 |     929 |    1493 |     228 |   0.63x |
+| source_c      |      1061 |     930 |    1453 |     228 |   0.73x |
+| log_apache    |       938 |     930 |    1443 |     229 |   0.65x |
+| dna_fasta     |      1531 |     935 |    1670 |     909 |   0.92x |
+| csv_numeric   |      1288 |     931 |    1632 |     228 |   0.79x |
+| gzip_random   |      2548 |       0 |       0 |     935 | **2.72x** |
+| chinese_text  |      1030 |     926 |    1319 |     229 |   0.78x |
 
 ### AMD EPYC 7R13 Zen 3 (SSE4.1, 32KB L1D, block 4096)
 
-*(as of [ffbfeac2ae9f56bf9f435574cb21dedbdef13ae5](../) commit, 2026-04-25; AWS `test-c6a`,
+*(as of [a1e742cded9f059d4e165177deca1ac8e26ba49e](../) commit, 2026-04-25; AWS `test-c6a`,
 2 vCPU, GCC 11.5.0, Amazon Linux 2023; 30 reps × 4M symbols)*
 
 | Distribution  | PIVCO SSE | huf0 X1 | huf0 X2 | trad 4s | vs best |
 |---------------|----------:|--------:|--------:|--------:|--------:|
-| proba80       |      2006 |     959 |    1751 |     863 | **1.15x** |
-| proba50       |      1277 |     956 |    1714 |     691 |   0.75x |
-| proba14       |       773 |     956 |    1639 |     689 |   0.47x |
-| english       |       887 |     951 |    1654 |     759 |   0.54x |
-| zipfian       |       741 |     945 |    1188 |     757 |   0.62x |
-| geometric     |      1282 |     954 |    1708 |     168 |   0.75x |
-| bell_s10      |       871 |     947 |    1514 |     168 |   0.58x |
-| bell_s30      |       647 |     943 |     932 |     168 |   0.69x |
-| bell_s80      |       923 |       0 |       0 |     773 | **1.20x** |
-| proba02       |       710 |     945 |     987 |     688 |   0.72x |
-| uniform       |      1768 |       0 |       0 |     818 | **2.16x** |
-| sparse_4      |      2695 |     961 |    1741 |     873 | **1.55x** |
-| sparse_16     |     21932 |     963 |    1732 |     864 | **12.66x** |
-| flat_M3       |      2444 |     962 |    1739 |     867 | **1.41x** |
-| flat_M5       |      2760 |     961 |    1713 |     859 | **1.61x** |
-| flat_M6       |      2157 |     959 |    1638 |     846 | **1.32x** |
-| flat_M7       |      2274 |     958 |     869 |     844 | **2.38x** |
-| two_sym_eq    |      1493 |     959 |    1740 |     874 |   0.86x |
-| two_sym_90/10 |      1492 |     959 |    1753 |     872 |   0.85x |
+| proba80       |      1989 |     957 |    1741 |     861 | **1.14x** |
+| proba50       |      1248 |     953 |    1704 |     695 |   0.73x |
+| proba14       |       755 |     954 |    1639 |     692 |   0.46x |
+| english       |       883 |     949 |    1651 |     758 |   0.53x |
+| zipfian       |       703 |     944 |    1191 |     757 |   0.59x |
+| geometric     |      1257 |     953 |    1701 |     171 |   0.74x |
+| bell_s10      |       869 |     945 |    1515 |     171 |   0.57x |
+| bell_s30      |       631 |     941 |     935 |     171 |   0.67x |
+| bell_s80      |       915 |       0 |       0 |     771 | **1.19x** |
+| proba02       |       696 |     943 |     989 |     692 |   0.70x |
+| uniform       |      3080 |       0 |       0 |     816 | **3.78x** |
+| sparse_4      |      2714 |     960 |    1732 |     869 | **1.57x** |
+| sparse_16     |     21333 |     959 |    1724 |     860 | **12.37x** |
+| flat_M3       |      2506 |     960 |    1728 |     863 | **1.45x** |
+| flat_M5       |      2658 |     960 |    1714 |     856 | **1.55x** |
+| flat_M6       |      2238 |     958 |    1638 |     843 | **1.37x** |
+| flat_M7       |      2274 |     955 |     871 |     841 | **2.38x** |
+| two_sym_eq    |      1491 |     956 |    1733 |     871 |   0.86x |
+| two_sym_90/10 |      1493 |     957 |    1743 |     871 |   0.86x |
+| html_wiki     |       632 |     945 |    1418 |     171 |   0.45x |
+| prose_pride   |       688 |     945 |    1557 |     171 |   0.44x |
+| image_jpeg    |       850 |     943 |     866 |     757 |   0.90x |
+| json_api      |       662 |     948 |    1489 |     171 |   0.44x |
+| source_c      |       722 |     948 |    1451 |     171 |   0.50x |
+| log_apache    |       668 |     950 |    1437 |     171 |   0.46x |
+| dna_fasta     |      1125 |     950 |    1710 |     760 |   0.66x |
+| csv_numeric   |       915 |     950 |    1635 |     171 |   0.56x |
+| gzip_random   |      3081 |       0 |       0 |     816 | **3.77x** |
+| chinese_text  |       716 |     946 |    1310 |     171 |   0.55x |
 
 ### Cross-Platform Summary (PIVCO SIMD vs best other decoder)
 
-*(as of [ffbfeac2ae9f56bf9f435574cb21dedbdef13ae5](../) commit, 2026-04-25; see per-platform
-sections above for raw M/s)*
+*(as of [a1e742cded9f059d4e165177deca1ac8e26ba49e](../) commit, 2026-04-25; see per-platform
+sections above for raw M/s.  Real-world byte distributions
+(`html_wiki` … `chinese_text`) sourced from the files in
+[`extras/datasets/`](extras/datasets/).)*
 
 | Distribution | M4 NEON | Xeon AVX-512 | Graviton4 NEON | Zen3 SSE |
 |---|---:|---:|---:|---:|
-| **two_sym_90/10** | **5.09x** | **4.68x** | **9.60x** | 0.85x |
-| **two_sym_eq** | **4.98x** | **2.51x** | **9.50x** | 0.86x |
-| **proba80** | **3.33x** | **3.13x** | **2.40x** | **1.15x** |
-| **proba50** | **1.82x** | **1.49x** | **1.20x** | 0.75x |
-| **proba14** † | **1.06x** | **1.07x** | 0.69x | 0.47x |
-| **english** † | **1.28x** | **1.23x** | 0.73x | 0.54x |
-| **zipfian** | **1.40x** | **1.38x** | 0.82x | 0.62x |
-| **geometric** | **1.87x** | **1.56x** | **1.17x** | 0.75x |
-| **bell_s10** | **1.31x** | **1.20x** | 0.84x | 0.58x |
-| **bell_s30** | **1.60x** | **1.33x** | 0.99x | 0.69x |
-| **bell_s80** | **1.78x** | **3.28x** | **1.45x** | **1.20x** |
-| **proba02** † | **1.62x** | **1.49x** | **1.02x** | 0.72x |
-| **uniform** | **2.55x** | **6.54x** | **2.67x** | **2.16x** |
-| **sparse_4** | **9.16x** | **12.97x** | **9.11x** | **1.55x** |
-| **sparse_16** | **10.09x** | **10.96x** | **9.27x** | **12.66x** |
-| **flat_M3** | **4.23x** | **11.89x** | **4.16x** | **1.41x** |
-| **flat_M5** | **4.77x** | **10.13x** | **1.92x** | **1.61x** |
-| **flat_M6** | **4.90x** | **10.11x** | **1.60x** | **1.32x** |
-| **flat_M7** | **1.43x** | **3.55x** | **2.98x** | **2.38x** |
+| **two_sym_90/10** | **5.01x** | **4.78x** | **9.63x** | 0.86x |
+| **two_sym_eq** | **4.78x** | **2.53x** | **9.50x** | 0.86x |
+| **proba80** | **3.61x** | **3.12x** | **2.40x** | **1.14x** |
+| **proba50** | **1.88x** | **1.51x** | **1.19x** | 0.73x |
+| **proba14** | **1.11x** | **1.08x** | 0.69x | 0.46x |
+| **english** | **1.33x** | **1.24x** | 0.71x | 0.53x |
+| **zipfian** | **1.46x** | **1.39x** | 0.84x | 0.59x |
+| **geometric** | **1.93x** | **1.57x** | **1.17x** | 0.74x |
+| **bell_s10** | **1.34x** | **1.22x** | 0.85x | 0.57x |
+| **bell_s30** | **1.66x** | **1.33x** | **1.00x** | 0.67x |
+| **bell_s80** | **1.80x** | **3.33x** | **1.44x** | **1.19x** |
+| **proba02** | **1.70x** | **1.48x** | **1.04x** | 0.70x |
+| **uniform** | **2.48x** | **6.52x** | **2.73x** | **3.78x** |
+| **sparse_4** | **8.53x** | **13.11x** | **9.02x** | **1.57x** |
+| **sparse_16** | **9.97x** | **11.02x** | **9.59x** | **12.37x** |
+| **flat_M3** | **4.25x** | **11.96x** | **4.15x** | **1.45x** |
+| **flat_M5** | **4.68x** | **10.18x** | **1.93x** | **1.55x** |
+| **flat_M6** | **4.83x** | **10.16x** | **1.60x** | **1.37x** |
+| **flat_M7** | **1.43x** | **3.57x** | **2.92x** | **2.38x** |
+| `html_wiki`     ‡ | **1.11x** | 0.92x | 0.65x | 0.45x |
+| `prose_pride`   ‡ | **1.08x** | 0.90x | 0.64x | 0.44x |
+| `image_jpeg`    ‡ | **1.78x** | **1.87x** | **1.34x** | 0.90x |
+| `json_api`      ‡ | **1.13x** | 0.97x | 0.63x | 0.44x |
+| `source_c`      ‡ | **1.31x** | **1.00x** | 0.73x | 0.50x |
+| `log_apache`    ‡ | **1.14x** | **1.01x** | 0.65x | 0.46x |
+| `dna_fasta`     ‡ | **1.44x** | **1.48x** | 0.92x | 0.66x |
+| `csv_numeric`   ‡ | **1.41x** | **1.13x** | 0.79x | 0.56x |
+| `gzip_random`   ‡ | **2.48x** | **6.53x** | **2.72x** | **3.77x** |
+| `chinese_text`  ‡ | **1.29x** | **1.13x** | 0.78x | 0.55x |
 
-† New parity-cross from the flat-aware tree restructurer
-([ffbfeac2ae9f56bf9f435574cb21dedbdef13ae5](../)): `proba14` flips on
-M4 (0.91× → 1.06×) and Xeon (0.67× → 1.07×); `proba02` flips on
-Graviton 4 (0.92× → 1.02×); `english` lifts from 1.10× to 1.28× on M4
-and from 1.00× to 1.23× on Xeon.
+‡ Real-world byte-frequency distributions (added 2026-04-25).
+Source files in [`extras/datasets/`](extras/datasets/), regeneration
+via `pivco_file_to_dist`.
+
+Win counts: **M4 28/29**, **Xeon 25/29**, **Graviton 4 16/29**,
+**Zen 3 8/29**.  PIVCO is unconditionally the right default on
+Apple silicon; close to it on Xeon AVX-512 (only the deepest real-
+text trees lose, by ≤10%).  Graviton 4 and Zen 3 lose most of the
+real-text cluster — the existing IDEAS.md "Zen 3 hybrid block
+decoder" follow-up (per-table fallback to huf0_x2 when flat-subtree
+coverage is low) addresses this directly.
 
 **Post-flat-subtree (April 2026):**  The flat-subtree fast path
 (flat regions of the tree emit one N·D-bit packed region instead of
@@ -455,27 +527,31 @@ and on Graviton 4 for several.  Flat-tree synthetics (`uniform` /
 flat-subtree path bypasses the `indices[]` materialisation and prefill
 memset that the old dedicated prefix backend still paid.
 
-Platform coverage of wins after flat-subtree + flat-aware tree
-restructurer
-([ffbfeac2ae9f56bf9f435574cb21dedbdef13ae5](../)):
-- **Apple M4 Max (NEON)**: 18/19 wins (proba14 only at 0.91× before;
-  the flat-aware tree pulled it to 1.06× as the second-to-last
-  win).  All other distributions ≥ 1.06×.
-- **Intel Xeon 6975P-C (AVX-512)**: 17/19 wins.  Remaining losses are
-  proba14 (0.67× → 1.07×, parity-flipped) joined by english (1.00× →
-  1.23×, parity-flipped); only proba14-derivative cases stay below
-  parity.
-- **AWS Graviton 4 (NEON)**: 14/19 wins.  proba02 newly flips to
-  1.02× from the flat-aware tree; bell_s30 lifts to 0.99× (parity).
-  Moderate-entropy losses on `english` / `zipfian` / `bell_s10` /
-  `proba14` linger at 0.69–0.84× — Graviton 4's `tbl` per-cycle
-  throughput is below M4's, so partition cost outside flat subtrees
-  dominates.
-- **AMD EPYC 7R13 (Zen 3 SSE4.1)**: 8/19 wins.  flat_* / sparse_* /
-  uniform / proba80 / bell_s80 all win cleanly; moderate-entropy
-  cluster lifted 12-16% by the flat-aware tree but still below parity
-  (Zen 3 has fewer shuffle ports — per-cycle partition cost already
-  smaller, so flat-subtree's absolute savings are smaller too).
+Platform coverage of wins across the **29-distribution grid** (19
+synthetic + 10 real-world from the
+[20260425-2344 mega sweep](results/20260425-2344-a1e742c-mega-sweep.md)):
+- **Apple M4 Max (NEON)**: 28/29 wins.  Loss is only `bell_s30` ≈
+  parity (1.00×); everything else ≥ 1.08×.  Real-world distributions
+  all win 1.08–2.48×.
+- **Intel Xeon 6975P-C (AVX-512)**: 25/29 wins.  Remaining losses are
+  `proba14` 0.69× ⚠ wait that's Graviton — Xeon losses are deepest
+  real text: `prose_pride` 0.90×, `html_wiki` 0.92×, `json_api`
+  0.97×, plus synthetic `proba14` is at parity (1.08×) just barely
+  winning.  AVX-512's `vpcompressw` partition stays fast but real
+  prose's max_len 15 amortises poorly.
+- **AWS Graviton 4 (NEON)**: 16/29 wins.  Most real-world text loses
+  at 0.63–0.78× (`prose_pride` 0.64×, `html_wiki` 0.65×,
+  `json_api` 0.63×, `chinese_text` 0.78×).  Only `image_jpeg` 1.34×
+  and `gzip_random` 2.72× win on real data.  Graviton 4 NEON `tbl`
+  throughput is below M4's; partition cost outside flat subtrees
+  dominates on deep trees.
+- **AMD EPYC 7R13 (Zen 3 SSE4.1)**: 8/29 wins.  Flat-tree synthetics
+  win cleanly (`uniform` 3.78×, `flat_M*` 1.4–2.4×, `sparse_16`
+  12.4×).  Real-world text crashes to 0.44–0.55× — pure SSE4.1 lacks
+  the `vpcompressw`-class partition primitive, so the per-cycle
+  partition cost matters more here.  See IDEAS.md "Zen 3 hybrid
+  block decoder" for the remediation plan (per-table fallback to
+  huf0_x2 when flat-subtree coverage is low).
 
 ### Data Distributions
 
@@ -493,10 +569,27 @@ restructurer
 | geometric     | freq[i] = 2^(30-i), steep skew                     | 15          |
 | two_sym_eq    | 2 symbols, 50/50                                   | 1           |
 | two_sym_90/10 | 2 symbols, 90%/10%                                 | ~2          |
+| flat_M3..M7   | 8/32/64/128 equal-frequency symbols (flat trees)   | 3/5/6/7     |
+| `html_wiki`   | en.wikipedia.org/wiki/Cat HTML                     | 15          |
+| `prose_pride` | Project Gutenberg *Pride and Prejudice*            | 15          |
+| `image_jpeg`  | Wikimedia Commons cat photo (JPEG)                 | 10          |
+| `json_api`    | GitHub API commits feed JSON                       | 14          |
+| `source_c`    | zstd `lib/compress/zstd_compress.c`                | 12          |
+| `log_apache`  | Apache HTTP access log sample                      | 13          |
+| `dna_fasta`   | NCBI E. coli K-12 genome FASTA                     | 8           |
+| `csv_numeric` | OWID CO2 dataset CSV                               | 12          |
+| `gzip_random` | gzip(`cat-wiki.html`) — near-random bytes          | 8           |
+| `chinese_text`| Project Gutenberg 紅樓夢 (Chinese, UTF-8)         | 14          |
 
 The proba distributions are generated identically to FiniteStateEntropy's
 benchmark: a 2048-entry table where each symbol gets p% of remaining
 entries, then symbols are sampled uniformly from the table.
+
+The 10 real-world distributions are derived from the byte-frequency
+of actual files (sources in [`extras/datasets/`](extras/datasets/)).
+Run `pivco_file_to_dist FILE` to generate a freq table for any
+input.  Tree-shape visualisations of every distribution are
+pre-rendered in [`extras/figures/`](extras/figures/).
 
 ### Compression Ratio
 
@@ -609,30 +702,29 @@ memset.
 
 ### Where PIVCO Still Loses
 
-**proba14 still loses on Graviton 4 / Zen 3** (0.69× / 0.47×).  The
-flat-aware tree restructurer pulled `proba14` from 0.91× to 1.06× on
-M4 and from 0.67× to 1.07× on Xeon (commit
-[ffbfeac2ae9f56bf9f435574cb21dedbdef13ae5](../)) — the rule "max-
-chunk per length" lifted leaf coverage 33%→83% and freq coverage
-0.9%→54.7%.  The remaining gap on Graviton / Zen 3 is residual
-partition-cost: even with optimal tree shape, those uarchs partition
-slower than M4/Xeon per element.
+**Real-world prose / markup outside Apple silicon** — the headline
+gap exposed by the 2026-04-25 mega sweep.  On Xeon AVX-512 PIVCO
+loses 0.90–0.97× to huf0_x2 on `prose_pride` / `html_wiki` /
+`json_api`; on Graviton 4 those drop to 0.63–0.78×; on Zen 3 SSE4.1
+to 0.44–0.55×.  These are deep-tree (max_len 13–15), high-entropy
+(4.5–5.5 b/B), wide-alphabet (85–200 distinct) workloads — the
+exact case where huf0_x2's two-symbol-per-table-lookup dominates.
 
-**Graviton 4 moderate-entropy cluster** (english 0.73×, zipfian
-0.82×, bell_s10 0.84×).  Graviton 4 `tbl` throughput is measurably
-below M4's; the partition cost outside flat subtrees dominates.
-D=5/D=6 NEON paths fall through to scalar on this uarch
-([cee2366bb2372cd173e1900db0b5ea99f4c0c65b](../)) since the multi-
-register `vqtbl{2,4}q_u8` instructions retire too slowly to beat the
-scalar switch — see the "Graviton 4 D=5/D=6 fix" callout above.
+**Graviton 4 / Zen 3 synthetic moderate-entropy** (`proba14`,
+`zipfian`, `bell_s10`) at 0.46–0.85×.  Same root cause as the real-
+text losses — both uarchs have weaker per-cycle partition throughput
+than M4 (NEON `tbl` slower on Neoverse-V2) or Xeon (no
+`vpcompressw`-class primitive on SSE4.1).  D=5/D=6 NEON paths fall
+through to scalar on Graviton 4
+([cee2366bb2372cd173e1900db0b5ea99f4c0c65b](../)).
 
-**Zen 3 SSE4.1 moderate-entropy cluster** (0.47-0.75× across
-proba14/proba02/english/zipfian/bell_*).  Zen 3 has fewer shuffle
-execution ports than Xeon / M4 / Graviton, so the per-cycle
-partition cost is already smaller — making flat-subtree's absolute
-savings smaller in turn.  The flat-aware tree restructurer
-([ffbfeac2ae9f56bf9f435574cb21dedbdef13ae5](../)) moved Zen 3
-moderate-entropy numbers up another 12-16% but didn't flip them yet.
+**Remediation plan** for the real-text gap on Graviton 4 / Zen 3:
+the existing IDEAS.md "Zen 3 hybrid block decoder" entry — gate per
+table on flat-subtree coverage, fall back to huf0_x2 below a
+threshold (e.g., D=2 coverage < 30% AND max_len > 10).  This would
+give up PIVCO's marginal moderate-entropy wins for huf0_x2's
+strength on those distributions.  Apple silicon and Xeon AVX-512
+would stay on PIVCO unconditionally.
 
 ### The Core Tradeoff
 

@@ -1,0 +1,55 @@
+=== PIVCO-Huffman Benchmark Results ===
+Date: 2026-04-25 23:44 UTC
+Commit: a1e742cded9f059d4e165177deca1ac8e26ba49e
+Host: ip-172-31-30-232.us-west-1.compute.internal (AWS test-c8g, c8g.large)
+Platform: AWS Graviton 4 (Neoverse-V2)
+Architecture: aarch64
+OS: Amazon Linux 2023, kernel 6.1.166-197.305.amzn2023.aarch64
+Compiler: gcc (GCC) 11.5.0 20240719 (Red Hat 11.5.0-5)
+SIMD: NEON (ARMv9-A) — PIVCO_NEON_FAST_MULTI_TBL=0 (D=5/D=6 fall through to scalar switch)
+Block size: 8192
+Run pinned: taskset -c 0 (c8g.large is 2 vCPU, dedicated)
+
+  Note: first sweep across all 29 distributions (synthetic + 10 real-world).
+
+=== PIVCO-Huffman Benchmarks ===
+Sequence: 4M, Repeats: 30 (120M/run), Block: 8192, Runs: 5 (drop 2)
+
+DECODE M/s    | pivco_s pivco_n pivco_p | trad_1s trad_4s | huf0_1s huf0_x1 huf0_x2 | rans_x2 |   ratio
+--------------|-------------------------|-----------------|----------------------------|---------|--------
+proba80       |     394    4034     425 |     320    1020 |     264     939    1680 |     234 |  2.40x
+proba50       |     138    2007     371 |     304     838 |     264     933    1686 |     202 |  1.19x
+proba14       |      88    1132     389 |     281     815 |     264     936    1636 |     205 |  0.69x
+proba02       |      91    1015     383 |     260     823 |     263     926     980 |     204 |  1.04x
+bell_s10      |     132    1293     397 |     281     229 |     263     926    1519 |     209 |  0.85x
+bell_s30      |      85     925     406 |     265     229 |     263     926     927 |     208 |  1.00x
+bell_s80      |     151    1314     367 |     269     910 |       0       0       0 |     245 |  1.44x
+uniform       |     958    2549    2453 |     285     933 |       0       0       0 |     267 |  2.73x
+english       |     115    1167     396 |     282     892 |     263     931    1640 |     212 |  0.71x
+zipfian       |      85    1003     395 |     251     889 |     263     925    1189 |     175 |  0.84x
+sparse_4      |     971   15217    2940 |     328    1021 |     264     940    1686 |     278 |  9.02x
+sparse_16     |     966   15830    2436 |     312    1011 |     264     941    1651 |     274 |  9.59x
+geometric     |     138    1957     371 |     303     229 |     264     933    1680 |     202 |  1.17x
+two_sym_eq    |     262   16000    4389 |     337    1021 |     264     938    1684 |     280 |  9.50x
+two_sym_90/10 |     652   16042    4386 |     338    1022 |     264     938    1666 |     255 |  9.63x
+flat_M3       |     932    6997    1089 |     321    1013 |     264     940    1685 |     275 |  4.15x
+flat_M5       |     844    3188    1089 |     304    1007 |     264     941    1655 |     272 |  1.93x
+flat_M6       |     919    2460    1391 |     297     979 |     263     937    1541 |     269 |  1.60x
+flat_M7       |     896    2786    1088 |     291     953 |     263     936     858 |     268 |  2.92x
+html_wiki     |      85     925     390 |     270     229 |     263     927    1425 |     188 |  0.65x
+prose_pride   |      84     999     381 |     275     227 |     263     927    1564 |     196 |  0.64x
+image_jpeg    |     133    1236     372 |     267     872 |     263     923     849 |     243 |  1.34x
+json_api      |      84     938     368 |     270     228 |     263     929    1493 |     187 |  0.63x
+source_c      |      92    1061     385 |     265     228 |     263     930    1453 |     175 |  0.73x
+log_apache    |      87     938     401 |     272     229 |     263     930    1443 |     192 |  0.65x
+dna_fasta     |     132    1531     428 |     309     909 |     263     935    1670 |     262 |  0.92x
+csv_numeric   |     112    1288     419 |     284     228 |     263     931    1632 |     183 |  0.79x
+gzip_random   |     958    2548    2432 |     285     935 |       0       0       0 |     264 |  2.72x
+chinese_text  |      87    1030     376 |     269     229 |     263     926    1319 |     193 |  0.78x
+
+  5 runs of 120M symbols each (30x 4M), drop 2 slowest, warn if spread > 5%
+  PIVCO/trad decode in 8192-symbol blocks
+  huf0 uses 128KB chunks (its max block size)
+  rANS decodes full 4M at once
+  CPU freq drift: +0.3% (OK)
+  Total wall time: 455.5 seconds
