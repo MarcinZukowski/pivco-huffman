@@ -585,6 +585,41 @@ certainty:
    prefix-radix never became competitive.  Straight deletion clears
    ~600 lines of code + the `pivco_p` benchmark column.
 
+   **Confirming-the-retirement experiment** (canasort microbench,
+   2026-04-25):  before retiring, we tested whether a "FastLanes-
+   like" lane-interleaved phase 4 could push pivco_p past pivco_n.
+   Extended canasort's `bench_scatter` to add `stream8` (8 parallel
+   streams + private cursors + included histogram = exact pivco_p
+   phase 2+4 shape) and `stream8_pre` (placement loop only, fair
+   apples-to-apples vs `direct`).  Canasort commit `55c0adc`,
+   discussion in `extras/scatter/BENCH-SCATTER.md` Round 5.
+
+   Apple M, n=10M, elem=4B (ns/elem):
+
+   | P  | direct | stream8 | stream8_pre |
+   |----|-------:|--------:|------------:|
+   |  8 | 0.68   | 0.55    | **0.35**    |
+   | 16 | 0.62   | 0.53    | **0.36**    |
+   | 32 | 0.54   | 0.57    | **0.40**    |
+   | 64 | 0.48   | 0.64    | **0.44**    |
+
+   `stream8_pre` wins at P ≤ 64, validating that pivco_p's existing
+   8-way SWCB code in `pivco_huffman_neon_prefix.c` is the right
+   algorithm for K=8.  The implementation is already at the
+   algorithmic ceiling for the problem shape — TBL-compaction would
+   be ~5-6× slower for K=8 (wrong tool), and any further phase-4
+   optimisation cannot meaningfully improve on the measured
+   ~0.35 ns/elem floor.
+
+   **But pivco_n on `english` runs at 0.30 ns/elem total decode**
+   (3333 M/s on M4) — faster than pivco_p's *phase 4 alone*, never
+   mind phases 1, 2, 5.  pivco_p cannot catch pivco_n by phase-4
+   optimisation; the flat-subtree mechanism is fundamentally faster
+   for these distributions.
+
+   Conclusion: retire as planned.  Phase 4 is fine; the algorithm
+   above it is the loser.
+
    Concrete scope (TODO):
    - Delete `src/pivco_huffman_neon_prefix.c` (~600 lines).
    - Remove `pivco_huffman_{encode,decode}_neon_prefix` from
