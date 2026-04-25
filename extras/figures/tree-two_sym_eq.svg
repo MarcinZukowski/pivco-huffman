@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 28 256" width="28" height="256">
+<style>
+  text { dominant-baseline: middle; }
+</style>
+<rect width="100%" height="100%" fill="#fafafa"/>
+<g transform="translate(0, 8.0)">
+  <text x="4" y="14" font-family="sans-serif" font-size="13" font-weight="bold" fill="#000">two_sym_eq</text>
+</g>
+<g transform="translate(8.0, 80.0)">
+  <text x="6.0" y="-6" text-anchor="middle" font-family="sans-serif" font-size="11" fill="#222">canonical</text>
+  <rect x="-3.0" y="6.5" width="18.0" height="31.0" fill="#a8c3e0" fill-opacity="0.55" stroke="#a8c3e0" stroke-width="0.6" rx="2"/>
+  <text x="6.0" y="44.5" text-anchor="middle" font-family="sans-serif" font-size="7" fill="#1d3b5e">D=1</text>
+  <line x1="6.0" y1="11.0" x2="3.0" y2="33.0" stroke="#888" stroke-width="0.5"/>
+  <circle cx="3.0" cy="33.0" r="1.5" fill="#222"/>
+  <line x1="6.0" y1="11.0" x2="9.0" y2="33.0" stroke="#888" stroke-width="0.5"/>
+  <circle cx="9.0" cy="33.0" r="1.5" fill="#222"/>
+  <circle cx="6.0" cy="11.0" r="1.0" fill="none" stroke="#aaa" stroke-width="0.4"/>
+  <text x="6.0" y="60.0" text-anchor="middle" font-family="sans-serif" font-size="9" fill="#444">2 leaves, max_len 1, 1 box | D&gt;=2 covers 0/2 (0%) | D&gt;=1 covers 2/2 (100%) | ops/leaf 1.00 (freq-weighted 1.00)</text>
+</g>
+<g transform="translate(8.0, 168.0)">
+  <text x="6.0" y="-6" text-anchor="middle" font-family="sans-serif" font-size="11" fill="#222">flat-aware (production)</text>
+  <rect x="-3.0" y="6.5" width="18.0" height="31.0" fill="#a8c3e0" fill-opacity="0.55" stroke="#a8c3e0" stroke-width="0.6" rx="2"/>
+  <text x="6.0" y="44.5" text-anchor="middle" font-family="sans-serif" font-size="7" fill="#1d3b5e">D=1</text>
+  <line x1="6.0" y1="11.0" x2="3.0" y2="33.0" stroke="#888" stroke-width="0.5"/>
+  <circle cx="3.0" cy="33.0" r="1.5" fill="#222"/>
+  <line x1="6.0" y1="11.0" x2="9.0" y2="33.0" stroke="#888" stroke-width="0.5"/>
+  <circle cx="9.0" cy="33.0" r="1.5" fill="#222"/>
+  <circle cx="6.0" cy="11.0" r="1.0" fill="none" stroke="#aaa" stroke-width="0.4"/>
+  <text x="6.0" y="60.0" text-anchor="middle" font-family="sans-serif" font-size="9" fill="#444">2 leaves, max_len 1, 1 box | D&gt;=2 covers 0/2 (0%) | D&gt;=1 covers 2/2 (100%) | ops/leaf 1.00 (freq-weighted 1.00)</text>
+</g>
+</svg>
