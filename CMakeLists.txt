@@ -134,6 +134,13 @@ if(BUILD_BENCH)
     )
     target_link_libraries(pivco_dist_stats pivco_huffman m)
 
+    add_executable(pivco_bench_multicore
+        extras/bench_multicore.c
+        bench/bench_distributions.c
+    )
+    target_link_libraries(pivco_bench_multicore pivco_huffman huf0 pthread m)
+    target_include_directories(pivco_bench_multicore PRIVATE ext/fse/lib)
+
     add_executable(pivco_flat_optimal
         extras/bench_flat_optimal.c
         bench/bench_distributions.c

@@ -217,6 +217,44 @@ static void bench_partition_root_half_neon(const uint8_t *bitmap,
     }
 }
 
+/* ---- Store-pressure isolation tests ---- */
+
+/* Every iteration uses mask=0x00: all 8 src elements go to the left
+ * side, n_left advances by 8 (= 16 bytes) each iter, so the left
+ * vst1q_u8 produces a tight non-overlapping run of 16-byte stores.
+ * Output is a raw byte buffer so the caller can deliberately
+ * misalign by passing left_bytes + offset. */
+__attribute__((noinline))
+static void bench_partition_left_full(const uint16_t *src,
+                                       uint8_t *left_bytes,
+                                       int n, int reps)
+{
+    const uint8_t *tab = compress_tab[0x00];
+    uint8x16_t shuf_l = vld1q_u8(tab + 16);
+    for (int r = 0; r < reps; r++) {
+        int n_left_bytes = 0;
+        for (int j = 0; j + 8 <= n; j += 8) {
+            uint8x16_t data = vld1q_u8((const uint8_t *)(src + j));
+            uint8x16_t left = vqtbl1q_u8(data, shuf_l);
+            vst1q_u8(left_bytes + n_left_bytes, left);
+            n_left_bytes += 16;
+        }
+    }
+}
+
+/* Helper: fill a bitmap with `pct_full` percent of bytes = 0xFF
+ * (popcount 8 → advance 8, no overlap) and the rest = 0x1F
+ * (popcount 5 → advance 5, 6-byte overlap on right + 10-byte
+ * overlap on left).  Lets the partition bench measure how store
+ * overlap affects throughput. */
+static void fill_bitmap_density(uint8_t *bitmap, int n_bytes, int pct_full)
+{
+    srand(0x1234);
+    for (int i = 0; i < n_bytes; i++) {
+        bitmap[i] = ((rand() % 100) < pct_full) ? 0xFF : 0x1F;
+    }
+}
+
 /* ---- Both-leaves sequential vst1 ---- */
 
 __attribute__((noinline)) static void bench_both_leaves_vst1(uint8_t *symbols, const uint8_t *bitmap,
@@ -1176,6 +1214,56 @@ int main(void)
     ns_per_elem = (t1 - t0) / ((double)N * REPS) * 1e9;
     printf("partition_root_half (gen+1):  %5.2f ns/elem  (%5.1f GB/s)\n",
            ns_per_elem, 1.0 / ns_per_elem);
+
+    /* ---- Store-pressure isolation tests ----
+     *
+     * partition_left_full: mask=0x00 every iter, all 8 elements go left,
+     * n_left advances by 16 bytes per iter (no overlap).  Compare aligned
+     * vs +1-byte-misaligned output buffer to isolate alignment cost.
+     *
+     * Then run partition (both sides) on bitmaps with X% of bytes = 0xFF
+     * (popcount 8, advance 8 = no overlap on right; advance 0 = full
+     * overlap on left) and (100-X)% = 0x1F (popcount 5, advance 5 = 6 B
+     * overlap on right; advance 3 = 10 B overlap on left).  Varying X
+     * shows how store-overlap pressure scales. */
+    printf("\n-- store-pressure isolation --\n");
+
+    /* Need a large-enough byte buffer to hold all left writes per rep
+     * (n=8192 elements × 2 bytes = 16384, plus the +1 misalignment) */
+    static uint8_t left_buf_aligned[8192 * 2 + 32] __attribute__((aligned(64)));
+    static uint8_t * const left_buf_misaligned = left_buf_aligned + 1;
+
+    t0 = now_sec();
+    bench_partition_left_full(indices, left_buf_aligned, N, REPS);
+    t1 = now_sec();
+    ns_per_elem = (t1 - t0) / ((double)N * REPS) * 1e9;
+    printf("partition_left_full ALIGNED:  %5.2f ns/elem  (%5.1f GB/s)\n",
+           ns_per_elem, 1.0 / ns_per_elem);
+
+    t0 = now_sec();
+    bench_partition_left_full(indices, left_buf_misaligned, N, REPS);
+    t1 = now_sec();
+    ns_per_elem = (t1 - t0) / ((double)N * REPS) * 1e9;
+    printf("partition_left_full +1-byte:  %5.2f ns/elem  (%5.1f GB/s)\n",
+           ns_per_elem, 1.0 / ns_per_elem);
+
+    int densities[] = {100, 95, 90, 80, 75};
+    for (int di = 0; di < (int)(sizeof(densities)/sizeof(*densities)); di++) {
+        int pct = densities[di];
+        fill_bitmap_density(bitmap, (N + 7) / 8, pct);
+        t0 = now_sec();
+        bench_partition_neon(indices, bitmap, left, right, N, REPS);
+        t1 = now_sec();
+        ns_per_elem = (t1 - t0) / ((double)N * REPS) * 1e9;
+        printf("partition mix %3d%%/0xFF + %2d%%/0x1F:  "
+               "%5.2f ns/elem  (%5.1f GB/s)\n",
+               pct, 100 - pct, ns_per_elem, 1.0 / ns_per_elem);
+    }
+
+    /* Restore the original random bitmap so the rest of the bench
+     * (memset, both_leaves_*, flat_*) sees its expected ~50% input. */
+    srand(42);
+    for (int i = 0; i < (N + 7) / 8; i++) bitmap[i] = (uint8_t)rand();
 
     /* Memset */
     t0 = now_sec();

@@ -1,0 +1,41 @@
+## bench_multicore on M4 Max — 2026-04-26T17:37Z
+## host: MBP14-M4
+
+== bench_multicore: prose_pride, 50 reps × 4194304-symbol stream per thread, codec scaling ==
+PIVCO encoded: 2403270 B (4.6 bits/symbol)
+huf0  encoded: 2403956 B (4.6 bits/symbol)
+
+threads | PIVCO M/s | scale | huf0_x2 M/s | scale | PIVCO/huf0
+--------+-----------+-------+-------------+-------+-----------
+      1 |      2720 | 1.00x |        2688 | 1.00x |     1.01x
+      2 |      5300 | 1.95x |        4735 | 1.76x |     1.12x
+      4 |     10230 | 3.76x |        9430 | 3.51x |     1.08x
+      6 |     15312 | 5.63x |       13975 | 5.20x |     1.10x
+      8 |     20485 | 7.53x |       18659 | 6.94x |     1.10x
+     12 |     30369 | 11.16x |       26789 | 9.97x |     1.13x
+
+== bench_multicore: proba80, 100 reps × 4194304-symbol stream per thread, codec scaling ==
+PIVCO encoded: 656299 B (1.3 bits/symbol)
+huf0  encoded: 655802 B (1.3 bits/symbol)
+
+threads | PIVCO M/s | scale | huf0_x2 M/s | scale | PIVCO/huf0
+--------+-----------+-------+-------------+-------+-----------
+      1 |      9407 | 1.00x |        2887 | 1.00x |     3.26x
+      2 |     18834 | 2.00x |        5686 | 1.97x |     3.31x
+      4 |     36192 | 3.85x |       10409 | 3.61x |     3.48x
+      6 |     53555 | 5.69x |       15360 | 5.32x |     3.49x
+      8 |     71432 | 7.59x |       20521 | 7.11x |     3.48x
+     12 |    106938 | 11.37x |       30776 | 10.66x |     3.47x
+
+== bench_multicore: english, 100 reps × 4194304-symbol stream per thread, codec scaling ==
+PIVCO encoded: 2230250 B (4.3 bits/symbol)
+huf0  encoded: 2228088 B (4.2 bits/symbol)
+
+threads | PIVCO M/s | scale | huf0_x2 M/s | scale | PIVCO/huf0
+--------+-----------+-------+-------------+-------+-----------
+      1 |      3353 | 1.00x |        2694 | 1.00x |     1.24x
+      2 |      6588 | 1.97x |        5295 | 1.97x |     1.24x
+      4 |     12919 | 3.85x |        9753 | 3.62x |     1.32x
+      6 |     19280 | 5.75x |       14543 | 5.40x |     1.33x
+      8 |     25653 | 7.65x |       19401 | 7.20x |     1.32x
+     12 |     37170 | 11.09x |       29060 | 10.79x |     1.28x
