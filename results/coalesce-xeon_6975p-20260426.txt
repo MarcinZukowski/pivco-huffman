@@ -1,0 +1,13 @@
+== bench_coalesce_avx512: store-coalescing experiments for partition_32 ==
+N = 8192, REPS = 50000, total = 409600000 elems per row
+
+-- 50% random --
+  baseline       (vpcompressw + vmovdqu64): 0.048 ns/elem  (20.67 GB/s)
+  compressstoreu (1-instr compress+store):  0.105 ns/elem  ( 9.54 GB/s)
+  macro          (2-iter coalesce):         0.064 ns/elem  (15.55 GB/s)
+
+-- skewed (popcount ~8 / 32) --
+  baseline       (vpcompressw + vmovdqu64): 0.050 ns/elem  (20.03 GB/s)
+  compressstoreu (1-instr compress+store):  0.105 ns/elem  ( 9.52 GB/s)
+  macro          (2-iter coalesce):         0.064 ns/elem  (15.56 GB/s)
+

@@ -12,14 +12,15 @@ the standalone binary.
 
 ## TL;DR
 
-Six variants tested across **two NEON platforms** (Apple M4 P-core,
-AWS Graviton 4 Neoverse-V2).  All six lose to baseline on both
-platforms, even after eliminating every obvious failure mode (branch
-mispredict, cross-iter dep chains, depth-3 OR-chain latency, 1-sided
-specialization).  The store-port saturation in the production
-kernel is a tight Pareto-optimal point on both NEON
-implementations: any non-trivial SIMD work to enable store reduction
-exceeds the cycles saved.
+Six NEON variants + three AVX-512 variants tested across three
+modern uarches (Apple M4 P-core, AWS Graviton 4 Neoverse-V2, Intel
+Xeon Sapphire Rapids).  **All variants lose to baseline on every
+platform**, even after eliminating every obvious failure mode (branch
+mispredict, cross-iter dep chains, depth-3 OR-chain latency,
+1-sided specialization, AVX-512 single-instruction compress-store).
+The store-port saturation in the production kernel is a tight
+Pareto-optimal point on all three uarches: any non-trivial SIMD work
+to enable store reduction exceeds the cycles saved.
 
 Cross-platform summary (50% random masks, GB/s, ratio vs same-shape baseline):
 
@@ -319,23 +320,69 @@ What this tells us: the loss is from raw **SIMD throughput consumption**
 pipes / 2-wide G4 SIMD pipes), not from any specific dependency
 chain.  Reducing latency doesn't help when throughput is the limit.
 
+## AVX-512 (Xeon Sapphire Rapids)
+
+A separate AVX-512 port lives at
+[`extras/bench_coalesce_avx512.c`](extras/bench_coalesce_avx512.c) —
+32-wide partition (instead of 8-wide on NEON) using `vpcompressw`.
+Three variants:
+
+  - `baseline`       — production form: `vpcompressw` (register)
+                       followed by `vmovdqu64` (full 64-byte store).
+  - `compressstoreu` — `_mm512_mask_compressstoreu_epi16`, the
+                       single-instruction compress-and-store form
+                       that writes only `popcount*2` bytes.
+  - `macro`          — 2-iter macro-block coalesce: accumulate two
+                       iterations into one zmm via `vpermb`-based
+                       runtime byte-shift, store always at the end.
+
+Xeon 6975P (Sapphire Rapids), random 32-bit masks:
+
+| Variant | GB/s | vs baseline |
+|---|---:|---:|
+| **baseline** (vpcompressw + vmovdqu64) | 20.7 | 1.00× |
+| compressstoreu (1-instr compress+store) | 9.6 | **0.46×** |
+| macro (2-iter coalesce) | 15.6 | 0.75× |
+
+Two findings worth recording:
+
+1. **`vpcompressw mem, k, zmm` is microcoded on Sapphire Rapids.**
+   Per Agner Fog / uops.info, the memory-form decomposes to ~6
+   micro-ops (internally: compress + masked-store + address-adjust),
+   while the production register-form `vpcompressw` is 1 µop and
+   `vmovdqu64` is 1 µop, retiring in parallel.  So production's
+   "old-school" form is **2 µops total**, compressstoreu is **6 µops**
+   — and we measure ~0.46× the throughput.  The AVX-512 production
+   backend is already at the optimal shape.  *Don't* migrate it to
+   compressstoreu.
+
+2. **The macro coalesce variant loses by 25%** — same shape as the
+   NEON results.  `vpermb` is 1/cycle on Sapphire Rapids; the SIMD
+   work to compute the place-shift exceeds the saved store cycle, even
+   on the platform where the compress instruction is "free."
+
+So AVX-512 confirms the conclusion: **store coalescing fails on every
+modern uarch tested** (M4, Graviton 4, Xeon Sapphire Rapids).  The
+pattern is consistent regardless of SIMD ISA: the SIMD overhead to
+enable coalescing always exceeds the saved store cycle.
+
 ## Could it win on another platform?
 
-Tested on M4 and Graviton 4 — both lose.  Plausible remaining candidates:
+Tested on M4, Graviton 4, and Xeon Sapphire Rapids — all lose.
+Remaining candidate:
 
-- **Xeon AVX-512 (Sapphire/Granite Rapids)**: `vpcompressw` already
-  does compress-and-place in one instruction; the analogue of this
-  whole investigation is moot — production AVX-512 backend already
-  uses `vpcompressw` and gets the optimal store pattern for free.
 - **Zen 3 SSE4.1**: store port is the documented bottleneck on the
   Zen 3 partition path (see `bench_micro` data).  Worth running the
   same prototypes — but the absence of efficient cross-byte permute
   primitives in pure SSE4.1 makes the place-shift expensive on Zen 3.
-  Would need a new SSE4.1 port (~150 lines) to test.
+  Would need a new SSE4.1 port (~150 lines) to test.  Given the
+  consistent failure across 3 different uarches we tested, the
+  expected outcome is "also loses."
 
-If anyone re-runs these on a different platform, the standalone bench
-(`./build/pivco_bench_coalesce`) reproduces the cross-platform numbers
-in ~30 seconds (ARM64 only as written; ports welcome).
+If anyone re-runs these on a different platform, the standalone benches
+reproduce the cross-platform numbers in ~30 seconds:
+- ARM64: `./build/pivco_bench_coalesce`
+- AVX-512: `cc -O3 -march=native extras/bench_coalesce_avx512.c -o ...`
 
 ## Conclusion
 
