@@ -22,6 +22,7 @@
   - [Data Distributions](#data-distributions)
   - [Compression Ratio](#compression-ratio)
   - [Block Size Sweep](#block-size-sweep)
+- [Key Compute Primitives](#key-compute-primitives)
 - [Profiling](#profiling)
 - [Analysis](#analysis)
   - [Where PIVCO Wins](#where-pivco-wins)
@@ -620,6 +621,80 @@ PIVCO NEON decode throughput (M/s) by block size. Measured with the
   65536 regresses on proba50/english as index arrays spill L1.
 - **Compared to pre-optimization**: all block sizes roughly doubled
   (e.g. proba80 4.1-4.3 GB/s → 9.1-9.9 GB/s).
+
+## Key Compute Primitives
+
+Bottoms-up per-element cost of every SIMD primitive the decoder uses,
+isolated from the surrounding control flow.  Useful for reasoning about
+which inner-loop pieces are the bottleneck at a given D / table shape.
+
+Measured by [`bench/bench_micro.c`](bench/bench_micro.c) on **Apple M4
+Max** (block N = 8192, 100k repeats, ~820M elements per row).  Build:
+`cc -O2 -o bench_micro bench/bench_micro.c -I include -I src` and run.
+
+| Primitive                            | What it does                                              | ns/elem | GB/s |
+|--------------------------------------|-----------------------------------------------------------|--------:|-----:|
+| **Reference floors**                 |                                                           |         |      |
+| `memset`                             | absolute lower bound on byte-write throughput             |   0.01  | 93.4 |
+| `scatter_scalar`                     | one byte per index, no SIMD                               |   0.23  |  4.3 |
+| **Partition (2-way tree-walk core)** |                                                           |         |      |
+| `partition_neon` (load+TBL, 2 sides) | load 8 indices, popcnt mask, 2× `vqtbl1q`, 2 stores       |   0.06  | 15.5 |
+| `partition_root` (gen+TBL, 2 sides)  | identity index gen, 2× `vqtbl1q`, 2 stores                |   0.07  | 14.6 |
+| `partition_half` (load+1 TBL)        | half-tree variant: 1 store, no second side                |   0.04  | 22.6 |
+| `partition_root_half`                | identity gen, 1 `vqtbl1q`, 1 store                        |   0.05  | 20.0 |
+| **Indexed scatter (leaf write)**     |                                                           |         |      |
+| `scatter_neon` (const sym)           | broadcast one byte to N random positions                  |   0.14  |  7.1 |
+| `both_leaves_vst1` (seq)             | sequential `vst1q` (root identity, no scatter)            |   0.03  | 33.1 |
+| `both_leaves_scatter` (idx)          | indexed scalar stores from a 2-symbol selector            |   0.15  |  6.6 |
+| **Flat-subtree decode (per D)** — direct = sequential `vst1q` (root); scatter = indexed stores |  |   |      |
+| `flat_direct_d2` (`vqtbl1q`)         | 4 packed bytes → 16 codes, 1 TBL, c2s 4 B                 |   0.02  | 52.2 |
+| `flat_scatter_d2` (`vqtbl1q`)        | same spread + 16 indexed stores                           |   0.14  |  7.0 |
+| `flat_direct_d3` (`vqtbl1q`)         | 6 packed bytes → 16 codes via 2× 8-spread, 1 TBL, c2s 8 B |   0.04  | 24.1 |
+| `flat_scatter_d3` (`vqtbl1`)         | 3 bytes → 8 codes + 8 indexed stores                      |   0.16  |  6.1 |
+| `flat_direct_d4` (`vqtbl1q`)         | 8 packed bytes → 16 codes, 1 TBL, c2s 16 B                |   0.02  | 50.9 |
+| `flat_scatter_d4` (`vqtbl1q`)        | same spread + 16 indexed stores                           |   0.14  |  7.0 |
+| `flat_direct_d5` (`vqtbl2q`)         | 10 packed bytes → 16 codes, 2-reg TBL, c2s 32 B           |   0.04  | 25.8 |
+| `flat_scatter_d5` (`vqtbl2`)         | 5 bytes → 8 codes + 8 indexed stores                      |   0.17  |  5.8 |
+| `flat_direct_d6` (`vqtbl4q`)         | 12 packed bytes → 16 codes, 4-reg TBL, c2s 64 B           |   0.04  | 22.4 |
+| `flat_scatter_d6` (`vqtbl4`)         | 6 bytes → 8 codes + 8 indexed stores                      |   0.18  |  5.4 |
+
+Reading the table:
+
+- **Indexed scatter is the per-element floor everywhere it appears.**
+  `scatter_neon` (0.14), `both_leaves_scatter` (0.15) and every
+  `flat_scatter_dN` row (0.14–0.18) all land in a tight band around
+  ~0.14–0.18 ns/elem — the indexed scalar store cost dominates and the
+  spread+TBL upstream of it is essentially free.
+
+- **Direct (sequential `vst1q`) reveals the SIMD work itself.**
+  D=2 / D=4 are fastest at 0.02 ns/elem (50–52 GB/s) — single
+  `vqtbl1q_u8` per 16 codes, with the c2s table fitting in one register.
+  D=3 / D=5 / D=6 land at 0.04 ns/elem because they either produce only
+  8 codes per spread (D=3 has byte-crossing 3-bit codes; D=5/6 use 5/6
+  packed bytes per 8 codes) or use a 2- / 4-register `vqtbl` for the
+  larger c2s table.  All D paths still beat huf0's table-lookup throughput.
+
+- **Partition (the 2-way core) is fast** at 0.04–0.07 ns/elem — and
+  the half-tree variant is materially cheaper, validating the
+  one-leaf-per-internal-node optimisation.
+
+- **The flat-subtree fast path has a real edge** when the output is
+  sequential (root flat or large flat subtree): 0.02 ns/elem at D=2/D=4
+  vs. 0.07 ns/elem for the partition-and-scatter route.  Once stores
+  are indexed (non-root flat subtree), the gap collapses — both paths
+  are bound by the same scatter floor.
+
+These primitives explain the per-distribution numbers in the
+[Apple M4 Max bench table](#apple-m4-max-neon-128kb-l1d-block-8192):
+flat-heavy distributions (`uniform`, `flat_M*`, `sparse_*`) cash in
+the 0.02 ns/elem direct path; deep-tree distributions
+(`prose_pride`, `html_wiki`) pay the 0.06 ns/elem partition cost
+per level repeatedly.
+
+The `bench_micro` tool can be ported to other platforms to compare
+per-primitive costs; it currently has the NEON path only.  See
+[Ideas That Can Make Things Faster](#ideas-that-can-make-things-faster)
+for the Zen 3 / Graviton 4 follow-ups motivated by these floors.
 
 ## Profiling
 
