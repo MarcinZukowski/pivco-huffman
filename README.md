@@ -773,41 +773,78 @@ the cheap direct path; deep-tree distributions (`prose_pride`,
 
 ## Profiling
 
-*(as of a pre-flat-subtree commit; measures the 2-way partition path only
-— on moderate-entropy / flat-heavy distributions the flat-subtree fast
-path now bypasses most of this.  Still representative for stick-tree
-shapes where flat-subtree doesn't fire.)*
+**Last refreshed:** 2026-04-26 06:25 UTC, commit
+[`28b7f53`](../) (post AVX-512 / SSE4.1 bench port, leaf-child fusion +
+flat-subtree fast path both shipped).  Workload changed from `zipfian`
+(synthetic stick-tree) to **`prose_pride`** — real Project Gutenberg
+prose, 96 distinct bytes, max code length 15, ~47% flat-subtree
+coverage — the real-world deep-tree distribution that PIVCO most
+closely contests against huf0_x2.
 
-Profiled with macOS `sample` on zipfian decode (10M iterations, N=4096).
-Self-time extracted from 25K weighted leaf samples in the call tree.
+Profiled with macOS `sample` on Apple M4 Max (10 s wall window,
+8600 samples × 1 ms).  Raw output:
+[`results/profile-m4_max-prose_pride-20260426-0625.txt`](results/profile-m4_max-prose_pride-20260426-0625.txt).
+Build / run:
 
-**After NEON scatter optimization:**
+```sh
+cmake --build build --target pivco_huffman_profile_english
+./build/pivco_huffman_profile_english prose_pride &
+sample $! 10 -file profile.txt
+```
 
-| Region                          | % of self-time | Description |
-|---------------------------------|---------------:|-------------|
-| SIMD partition (TBL core)       |          44.4% | `partition_8` — the actual useful work |
-| Function prologue (reg saves)   |          14.1% | 6 stp instructions per recursive call |
-| Leaf scatter NEON (vld+lane+strb) |        12.3% | Bulk-load 8 indices, 8 scalar stores |
-| Leaf scatter scalar remainder   |           9.5% | Tail loop for n % 8 != 0 |
-| n==0 + leaf check               |           6.5% | Per-node early-exit tests |
-| Partition loop bookkeeping      |           4.1% | Loop control, n_left/n_right updates |
-| Partition scalar remainder      |           3.5% | Leftover < 8 indices per partition |
-| Recursive calls                 |           2.2% | Argument setup (mov x0..x6, bl) |
-| Stream advance                  |           2.0% | Bitmap pointer read |
-| Other                           |           1.4% | |
+(The harness is hard-named `pivco_huffman_profile_english` for
+back-compat; it now takes the dist name as an optional argv[1].)
 
-The SIMD partition dominates at 44% — this is the core work and
-expected to be the largest cost. The function prologue at 14% looks
-like a target, but **an iterative DFS with explicit stack showed no
-measurable improvement** (~1% within noise on M4). The stp/ldp
-instructions pipeline perfectly with the partition work — they occupy
-execution slots but don't stall the critical path. The M4's deep OoO
-window hides the latency completely.
+### Top-of-stack symbol breakdown
 
-**Profiling lesson**: "occupies 14% of execution slots" is not the same
-as "removing it would be 14% faster." On an OoO core, non-critical-path
-work is essentially free if it doesn't compete for the bottleneck
-resource (in this case, the NEON execution units doing TBL shuffles).
+| Symbol                        | Self samples | Self %  | Description                                                |
+|-------------------------------|-------------:|--------:|------------------------------------------------------------|
+| `decode_node_neon`            |         6870 | **80%** | Recursive 2-way partition + leaf scatter (the hot loop)    |
+| `pivco_huffman_decode_neon`   |         1497 |   17%   | Wrapper: prefill memset call site, table walk init, root   |
+| `_platform_memset`            |          230 |    3%   | Phase-0 prefill of most-frequent leaf (`prefill_sym`)      |
+| **Total**                     |     **8597** |  100%   |                                                            |
+
+### Reading the result
+
+- **80% of CPU time is the recursive partition body.**  On a deep-tree
+  real-world workload like `prose_pride` (max_len 15, 53% of elements
+  fall outside flat subtrees) the partition path dominates, exactly as
+  expected.  This is the core work the decoder is *for*; there is no
+  hidden hotspot to remove.
+- **17% in `pivco_huffman_decode_neon`** is the per-block frame: read
+  the encoded header, set up the root partition, walk the table.  At
+  N = 8192 with prose ~4.7 KB/block, this comes out to ~10 ns per
+  block — the expected fixed cost of a table-driven decoder, not a
+  target.
+- **3% in `_platform_memset`** is the phase-0 prefill: writing the
+  most-frequent leaf symbol across the entire output buffer so the
+  hot path can skip its scatter (validated as a +20-30% win on
+  skewed distributions in earlier sweeps).
+- **No `huffman_table.c` / `pivco_huffman_build_table` time** —
+  encode is amortised per-block; decode reuses the prebuilt table.
+
+The previous (zipfian, pre-flat-subtree) breakdown was finer-grained
+(SIMD partition core 44%, function prologue 14%, leaf scatter 12%,
+…) — that decomposition was generated by hand-mapping
+`decode_node_neon` instruction offsets to source regions.  We're not
+reproducing it in this update because:
+
+1. The workload changed from a synthetic stick-tree to a real-world
+   deep tree where the flat-subtree fast path branches out a chunk of
+   the old "leaf scatter" region — the regions don't map cleanly
+   anymore.
+2. The headline conclusions still hold from the old breakdown
+   (M4's OoO engine hides recursion-frame stp/ldp; the iterative-DFS
+   experiment was run and showed no measurable improvement) — see
+   commit history if needed.
+
+### Profiling lesson (preserved from earlier)
+
+"Occupies X% of execution slots" is not the same as "removing it
+would be X% faster."  On an OoO core, non-critical-path work is
+essentially free if it doesn't compete for the bottleneck resource
+— which on the partition path is NEON TBL throughput, not
+instruction issue.
 
 ## Analysis
 

@@ -1,11 +1,8 @@
-/* Profile harness: decode English distribution with PIVCO NEON only.
-   Runs 10M block decodes — enough wall time for sample/perf profiling.
-   Build: (from pivco-huffman/)
-     cmake --build build --parallel
-     cc -O2 -arch arm64 -I include -o build/bench_profile_english \
-       bench/bench_profile_english.c bench/bench_distributions.c \
-       -L build -lpivco_huffman -lm
-   Run:  ./build/bench_profile_english
+/* Profile harness: decode a chosen distribution with PIVCO NEON only.
+   Runs ~10M block decodes — enough wall time for sample/perf profiling.
+   Usage: ./build/pivco_huffman_profile_english [dist_name]
+     dist_name defaults to "english" for back-compat; pass "prose_pride"
+     etc. to profile a different distribution.
    Profile: sample <pid> 10 -f profile.txt */
 
 #include "pivco_huffman.h"
@@ -29,20 +26,21 @@ static double now_sec(void)
     return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
 }
 
-int main(void)
+int main(int argc, char **argv)
 {
     bench_init();
 
-    /* Find "english" distribution */
-    int english_idx = -1;
+    const char *dist_name = (argc > 1) ? argv[1] : "english";
+
+    int dist_idx = -1;
     for (int i = 0; i < bench_num_distributions(); i++) {
-        if (strcmp(bench_dist_name(i), "english") == 0) {
-            english_idx = i;
+        if (strcmp(bench_dist_name(i), dist_name) == 0) {
+            dist_idx = i;
             break;
         }
     }
-    if (english_idx < 0) {
-        fprintf(stderr, "english distribution not found\n");
+    if (dist_idx < 0) {
+        fprintf(stderr, "distribution '%s' not found\n", dist_name);
         return 1;
     }
 
@@ -52,11 +50,11 @@ int main(void)
 
     /* Generate symbols and encode */
     uint8_t *symbols = malloc(NBLOCKS * N);
-    bench_generate_symbols(english_idx, symbols, NBLOCKS * N,
+    bench_generate_symbols(dist_idx, symbols, NBLOCKS * N,
                            0xBEEFCAFE12345678ULL);
 
     pivco_huffman_table_t table;
-    pivco_huffman_build_table(bench_dist_freq(english_idx), &table);
+    pivco_huffman_build_table(bench_dist_freq(dist_idx), &table);
 
     /* Encode all blocks */
     /* English can exceed PIVCO_MAX_ENCODED_SIZE (deep tree, many nodes
@@ -96,8 +94,8 @@ int main(void)
     if (!out) { fprintf(stderr, "malloc out failed\n"); return 1; }
     printf("out=%p enc_buf=%p\n", (void*)out, (void*)enc_buf);
 
-    printf("Decoding %d blocks x %d reps = %lld symbols (english)\n",
-           NBLOCKS, REPS, (long long)NBLOCKS * N * REPS);
+    printf("Decoding %d blocks x %d reps = %lld symbols (%s)\n",
+           NBLOCKS, REPS, (long long)NBLOCKS * N * REPS, dist_name);
     fflush(stdout);
 
     printf("Starting decode loop...\n"); fflush(stdout);
