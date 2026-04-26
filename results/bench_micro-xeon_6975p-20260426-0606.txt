@@ -1,0 +1,18 @@
+N = 8192, REPS = 100000, total = 819200000 elements per test
+
+
+-- AVX-512 VBMI2 backend --
+partition_avx512 (vpcompressw):  0.05 ns/elem  ( 21.3 GB/s)
+
+-- flat-subtree decode (spread + TBL + store), AVX-512 --
+flat_direct_d2 (pshufb):        0.03 ns/elem  ( 31.3 GB/s)
+flat_scatter_d2 (pshufb):       0.26 ns/elem  (  3.9 GB/s)
+flat_direct_d3 (pshufb):        0.03 ns/elem  ( 30.3 GB/s)
+flat_scatter_d3 (pshufb):       0.26 ns/elem  (  3.9 GB/s)
+flat_direct_d4 (pshufb):        0.03 ns/elem  ( 31.7 GB/s)
+flat_scatter_d4 (pshufb):       0.26 ns/elem  (  3.9 GB/s)
+flat_direct_d5 (vpermb-ymm):    0.04 ns/elem  ( 27.3 GB/s)
+flat_scatter_d5 (vpermb-ymm):   0.26 ns/elem  (  3.9 GB/s)
+flat_direct_d6 (vpermb-zmm):    0.05 ns/elem  ( 20.7 GB/s)
+flat_scatter_d6 (vpermb-zmm):   0.32 ns/elem  (  3.1 GB/s)
+scatter_scalar:                0.17 ns/elem  (  5.8 GB/s)

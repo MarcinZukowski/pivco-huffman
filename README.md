@@ -662,73 +662,97 @@ Bottoms-up per-element cost of every SIMD primitive the decoder uses,
 isolated from the surrounding control flow.  Useful for reasoning about
 which inner-loop pieces are the bottleneck at a given D / table shape.
 
-Measured by [`bench/bench_micro.c`](bench/bench_micro.c) on **Apple M4
-Max** (block N = 8192, 100k repeats, ~820M elements per row).  Build:
-`cc -O2 -o bench_micro bench/bench_micro.c -I include -I src` and run.
+Measured by [`bench/bench_micro.c`](bench/bench_micro.c) on all four
+test platforms (block N = 8192, 100k repeats per row, ~820M elements
+total per row).  Numbers are **ns / elem** (lower is better).  Build:
 
-| Primitive                            | What it does                                              | ns/elem | GB/s |
-|--------------------------------------|-----------------------------------------------------------|--------:|-----:|
-| **Reference floors**                 |                                                           |         |      |
-| `memset`                             | absolute lower bound on byte-write throughput             |   0.01  | 93.4 |
-| `scatter_scalar`                     | one byte per index, no SIMD                               |   0.23  |  4.3 |
-| **Partition (2-way tree-walk core)** |                                                           |         |      |
-| `partition_neon` (load+TBL, 2 sides) | load 8 indices, popcnt mask, 2× `vqtbl1q`, 2 stores       |   0.06  | 15.5 |
-| `partition_root` (gen+TBL, 2 sides)  | identity index gen, 2× `vqtbl1q`, 2 stores                |   0.07  | 14.6 |
-| `partition_half` (load+1 TBL)        | half-tree variant: 1 store, no second side                |   0.04  | 22.6 |
-| `partition_root_half`                | identity gen, 1 `vqtbl1q`, 1 store                        |   0.05  | 20.0 |
-| **Indexed scatter (leaf write)**     |                                                           |         |      |
-| `scatter_neon` (const sym)           | broadcast one byte to N random positions                  |   0.14  |  7.1 |
-| `both_leaves_vst1` (seq)             | sequential `vst1q` (root identity, no scatter)            |   0.03  | 33.1 |
-| `both_leaves_scatter` (idx)          | indexed scalar stores from a 2-symbol selector            |   0.15  |  6.6 |
-| **Flat-subtree decode (per D)** — direct = sequential `vst1q` (root); scatter = indexed stores |  |   |      |
-| `flat_direct_d2` (`vqtbl1q`)         | 4 packed bytes → 16 codes, 1 TBL, c2s 4 B                 |   0.02  | 52.2 |
-| `flat_scatter_d2` (`vqtbl1q`)        | same spread + 16 indexed stores                           |   0.14  |  7.0 |
-| `flat_direct_d3` (`vqtbl1q`)         | 6 packed bytes → 16 codes via 2× 8-spread, 1 TBL, c2s 8 B |   0.04  | 24.1 |
-| `flat_scatter_d3` (`vqtbl1`)         | 3 bytes → 8 codes + 8 indexed stores                      |   0.16  |  6.1 |
-| `flat_direct_d4` (`vqtbl1q`)         | 8 packed bytes → 16 codes, 1 TBL, c2s 16 B                |   0.02  | 50.9 |
-| `flat_scatter_d4` (`vqtbl1q`)        | same spread + 16 indexed stores                           |   0.14  |  7.0 |
-| `flat_direct_d5` (`vqtbl2q`)         | 10 packed bytes → 16 codes, 2-reg TBL, c2s 32 B           |   0.04  | 25.8 |
-| `flat_scatter_d5` (`vqtbl2`)         | 5 bytes → 8 codes + 8 indexed stores                      |   0.17  |  5.8 |
-| `flat_direct_d6` (`vqtbl4q`)         | 12 packed bytes → 16 codes, 4-reg TBL, c2s 64 B           |   0.04  | 22.4 |
-| `flat_scatter_d6` (`vqtbl4`)         | 6 bytes → 8 codes + 8 indexed stores                      |   0.18  |  5.4 |
+```sh
+# NEON (M4 / Graviton 4):
+cc -O2 -o bench_micro bench/bench_micro.c -I include -I src
+# x86_64 (Xeon AVX-512 / Zen 3 SSE4.1+AVX2):
+cc -O3 -march=native -o bench_micro bench/bench_micro.c -I include -I src
+```
+
+Raw outputs in [`results/bench_micro-*-20260426-0606.txt`](results/).
+
+### Cross-platform primitive costs (ns/elem)
+
+| Primitive                              | M4 (NEON) | Graviton 4 (NEON) | Xeon (AVX-512 VBMI2) | Zen 3 (SSE4.1+AVX2) |
+|----------------------------------------|----------:|------------------:|---------------------:|--------------------:|
+| **Reference floors**                   |           |                   |                      |                     |
+| `memset`                               |     0.01  |             0.01  |       *(scalar)*     |     *(scalar)*      |
+| `scatter_scalar`                       |     0.23  |             0.45  |             **0.17** |               0.28  |
+| **Partition (2-way decoder core)**     |           |                   |                      |                     |
+| `partition` (load + TBL/compress)      |     0.06  |             0.16  |             **0.05** |               0.19  |
+| `partition_root` (identity + TBL)      |     0.07  |             0.16  |              —       |                —    |
+| `partition_half` (load + 1 TBL)        |     0.05  |             0.11  |              —       |                —    |
+| `partition_root_half`                  |     0.05  |             0.11  |              —       |                —    |
+| **Indexed scatter (leaf write)**       |           |                   |                      |                     |
+| `scatter_simd` (const sym)             |     0.16  |             0.36  | *(= scatter_scalar)* |               0.32  |
+| `both_leaves_vst1` (root flat 2-sym)   |     0.03  |             0.07  |              —       |                —    |
+| `both_leaves_scatter` (idx 2-sym)      |     0.15  |             0.40  |              —       |                —    |
+| **Flat-subtree direct** (sequential output) |       |                   |                      |                     |
+| `flat_direct_d2`                       | **0.02**  |             0.05  |               0.03  |          *(scalar)* |
+| `flat_direct_d3`                       |     0.04  |             0.14  |               0.03  |          *(scalar)* |
+| `flat_direct_d4`                       | **0.02**  |             0.06  |               0.03  |               0.04  |
+| `flat_direct_d5`                       |     0.04  |             0.78  |               0.04  |          *(scalar)* |
+| `flat_direct_d6`                       |     0.04  |             0.84  |               0.05  |          *(scalar)* |
+| **Flat-subtree scatter** (indexed output) |        |                   |                      |                     |
+| `flat_scatter_d2`                      | **0.14**  |             0.66  |               0.26  |          *(scalar)* |
+| `flat_scatter_d3`                      |     0.16  |             0.67  |               0.26  |          *(scalar)* |
+| `flat_scatter_d4`                      | **0.14**  |             0.66  |               0.26  |               0.66  |
+| `flat_scatter_d5`                      |     0.17  |             1.41  |               0.26  |          *(scalar)* |
+| `flat_scatter_d6`                      |     0.18  |             1.50  |               0.32  |          *(scalar)* |
+
+TBL primitive used per platform / D:
+
+| D | NEON          | AVX-512        | SSE4.1                              |
+|---|---------------|----------------|-------------------------------------|
+| 2 | `vqtbl1q_u8`  | `pshufb`       | scalar (no per-byte var-shift)      |
+| 3 | `vqtbl1`      | `pshufb`       | scalar                              |
+| 4 | `vqtbl1q_u8`  | `pshufb`       | `pshufb` (only D with SIMD spread)  |
+| 5 | `vqtbl2q_u8`  | `vpermb` (ymm) | scalar                              |
+| 6 | `vqtbl4q_u8`  | `vpermb` (zmm) | scalar                              |
 
 Reading the table:
 
-- **Indexed scatter is the per-element floor everywhere it appears.**
-  `scatter_neon` (0.14), `both_leaves_scatter` (0.15) and every
-  `flat_scatter_dN` row (0.14–0.18) all land in a tight band around
-  ~0.14–0.18 ns/elem — the indexed scalar store cost dominates and the
-  spread+TBL upstream of it is essentially free.
+- **The indexed scatter floor varies hugely across platforms.**  M4
+  hits ~0.14–0.18 ns/elem and the SIMD spread upstream of it is
+  essentially free.  Xeon's floor is ~0.26 (1.5× M4) — `_mm_extract_epi8`
+  is a 1-cycle uop but emits ~16 of them per 16-element chunk.
+  Graviton 4 (0.66) and Zen 3 (0.66 even on D=4 SIMD) are 4× M4 — the
+  per-element scalar store throughput is the bottleneck on these uarches,
+  not the TBL.
 
-- **Direct (sequential `vst1q`) reveals the SIMD work itself.**
-  D=2 / D=4 are fastest at 0.02 ns/elem (50–52 GB/s) — single
-  `vqtbl1q_u8` per 16 codes, with the c2s table fitting in one register.
-  D=3 / D=5 / D=6 land at 0.04 ns/elem because they either produce only
-  8 codes per spread (D=3 has byte-crossing 3-bit codes; D=5/6 use 5/6
-  packed bytes per 8 codes) or use a 2- / 4-register `vqtbl` for the
-  larger c2s table.  All D paths still beat huf0's table-lookup throughput.
+- **The flat-subtree direct path is fastest on M4** at 0.02 ns/elem
+  for D=2 / D=4 (50+ GB/s).  Xeon is within a couple-percent at 0.03
+  for D ≤ 4 (single `pshufb`); D=6 `vpermb-zmm` lands at 0.05 — broadly
+  the same ballpark.
 
-- **Partition (the 2-way core) is fast** at 0.04–0.07 ns/elem — and
-  the half-tree variant is materially cheaper, validating the
-  one-leaf-per-internal-node optimisation.
+- **Graviton 4's `vqtbl{2,4}q_u8` regression is real and visible at
+  the primitive level.**  D=5 / D=6 are 0.78 / 0.84 ns/elem — **20× the
+  M4 cost**, even at the same NEON ISA.  This is the empirical
+  motivation for the production `PIVCO_NEON_FAST_MULTI_TBL=0` gate
+  (see IDEAS.md "Graviton 4 NEON D=5/D=6 regression").
 
-- **The flat-subtree fast path has a real edge** when the output is
-  sequential (root flat or large flat subtree): 0.02 ns/elem at D=2/D=4
-  vs. 0.07 ns/elem for the partition-and-scatter route.  Once stores
-  are indexed (non-root flat subtree), the gap collapses — both paths
-  are bound by the same scatter floor.
+- **Zen 3 has the slowest partition** at 0.19 ns/elem — 4× M4's NEON
+  partition (0.06) and 4× Xeon's `vpcompressw` (0.05).  Combined with
+  the 0.66-ns indexed scatter, Zen 3 has the highest absolute floor on
+  the 2-way decoder hot path of any tested platform — this is the
+  primitive-level evidence behind the IDEAS.md "Zen 3 hybrid block
+  decoder" recommendation.
+
+- **The flat-subtree fast path has a real edge over partition-and-
+  scatter** when the output is sequential (root flat).  M4 0.02
+  vs. partition's 0.06 — 3× cheaper.  Once stores are indexed
+  (non-root flat subtree), the gap collapses to the per-platform scatter
+  floor and most of the SIMD spread savings are absorbed.
 
 These primitives explain the per-distribution numbers in the
-[Apple M4 Max bench table](#apple-m4-max-neon-128kb-l1d-block-8192):
+[per-platform decode tables above](#apple-m4-max-neon-128kb-l1d-block-8192):
 flat-heavy distributions (`uniform`, `flat_M*`, `sparse_*`) cash in
-the 0.02 ns/elem direct path; deep-tree distributions
-(`prose_pride`, `html_wiki`) pay the 0.06 ns/elem partition cost
-per level repeatedly.
-
-The `bench_micro` tool can be ported to other platforms to compare
-per-primitive costs; it currently has the NEON path only.  See
-[Ideas That Can Make Things Faster](#ideas-that-can-make-things-faster)
-for the Zen 3 / Graviton 4 follow-ups motivated by these floors.
+the cheap direct path; deep-tree distributions (`prose_pride`,
+`html_wiki`) pay the partition cost per level repeatedly.
 
 ## Profiling
 

@@ -1,6 +1,13 @@
 /* Microbenchmark: scatter vs partition vs flat-decode per-element cost.
-   Build: cc -O2 -o bench_micro bench/bench_micro.c -I include -I src
-   (NEON version auto-detected on aarch64) */
+ *
+ * Build (NEON, M4 / Graviton 4):
+ *   cc -O2 -o bench_micro bench/bench_micro.c -I include -I src
+ * Build (AVX-512 VBMI2, Xeon):
+ *   cc -O3 -march=native -o bench_micro bench/bench_micro.c -I include -I src
+ * Build (SSE4.1 / AVX2, Zen 3):
+ *   cc -O3 -march=native -o bench_micro bench/bench_micro.c -I include -I src
+ *
+ * Backend is auto-detected by the platform predefined macros below. */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -14,6 +21,22 @@
 #define HAS_NEON 1
 #else
 #define HAS_NEON 0
+#endif
+
+#if defined(__AVX512BW__) && defined(__AVX512VBMI__) && defined(__AVX512VBMI2__)
+#include <immintrin.h>
+#include "pivco_huffman_avx512_flat.h"  /* flat_d{2..6}_spread_avx512* */
+#define HAS_AVX512 1
+#else
+#define HAS_AVX512 0
+#endif
+
+#if defined(__SSE4_1__)
+#include <smmintrin.h>
+#include "pivco_huffman_x86_flat.h"     /* flat_d4_spread_x86 */
+#define HAS_SSE4 1
+#else
+#define HAS_SSE4 0
 #endif
 
 #ifndef PIVCO_BLOCK_SIZE
@@ -459,6 +482,368 @@ static void bench_flat_scatter_d6(uint8_t *out, const uint16_t *idx,
 
 #endif /* HAS_NEON */
 
+/* ============================================================
+ * AVX-512 VBMI2 backend (Intel Xeon Sapphire/Granite Rapids).
+ *
+ * partition primitive: 32-wide vpcompressw (one mask → packed lane order).
+ * flat-decode TBL: pshufb (D=2/3/4), vpermb-ymm (D=5), vpermb-zmm (D=6).
+ *
+ * Lane-extract macro: AVX-512 has no per-lane gather store, so leaf
+ * scatter writes go through scalar lane extracts (matches production).
+ * ============================================================ */
+#if HAS_AVX512
+
+#define X16(syms, idx, base)                                                  \
+    out[(idx)[(base) +  0]] = (uint8_t)_mm_extract_epi8((syms),  0);          \
+    out[(idx)[(base) +  1]] = (uint8_t)_mm_extract_epi8((syms),  1);          \
+    out[(idx)[(base) +  2]] = (uint8_t)_mm_extract_epi8((syms),  2);          \
+    out[(idx)[(base) +  3]] = (uint8_t)_mm_extract_epi8((syms),  3);          \
+    out[(idx)[(base) +  4]] = (uint8_t)_mm_extract_epi8((syms),  4);          \
+    out[(idx)[(base) +  5]] = (uint8_t)_mm_extract_epi8((syms),  5);          \
+    out[(idx)[(base) +  6]] = (uint8_t)_mm_extract_epi8((syms),  6);          \
+    out[(idx)[(base) +  7]] = (uint8_t)_mm_extract_epi8((syms),  7);          \
+    out[(idx)[(base) +  8]] = (uint8_t)_mm_extract_epi8((syms),  8);          \
+    out[(idx)[(base) +  9]] = (uint8_t)_mm_extract_epi8((syms),  9);          \
+    out[(idx)[(base) + 10]] = (uint8_t)_mm_extract_epi8((syms), 10);          \
+    out[(idx)[(base) + 11]] = (uint8_t)_mm_extract_epi8((syms), 11);          \
+    out[(idx)[(base) + 12]] = (uint8_t)_mm_extract_epi8((syms), 12);          \
+    out[(idx)[(base) + 13]] = (uint8_t)_mm_extract_epi8((syms), 13);          \
+    out[(idx)[(base) + 14]] = (uint8_t)_mm_extract_epi8((syms), 14);          \
+    out[(idx)[(base) + 15]] = (uint8_t)_mm_extract_epi8((syms), 15);
+
+/* Note: there is no AVX-512 byte-scatter advantage worth measuring as a
+ * standalone primitive — `_mm512_i32scatter_epi8` only exists on
+ * AVX-512BW + spec-VL, and production uses scalar lane extracts
+ * (matches the scalar scatter floor).  Use `scatter_scalar` as the
+ * comparable scatter row on x86_64. */
+
+__attribute__((noinline))
+static void bench_partition_avx512(const uint16_t *src,
+                                    const uint32_t *masks32,
+                                    uint16_t *left, uint16_t *right,
+                                    int n, int reps)
+{
+    for (int r = 0; r < reps; r++) {
+        int n_left = 0, n_right = 0;
+        for (int j = 0; j + 32 <= n; j += 32) {
+            __m512i data = _mm512_loadu_si512((const __m512i *)(src + j));
+            __mmask32 mask = (__mmask32)masks32[j >> 5];
+            __m512i r_v = _mm512_maskz_compress_epi16(mask, data);
+            __m512i l_v = _mm512_maskz_compress_epi16(~mask, data);
+            int nr = _mm_popcnt_u32((uint32_t)mask);
+            _mm512_storeu_si512((__m512i *)(right + n_right), r_v);
+            _mm512_storeu_si512((__m512i *)(left  + n_left ), l_v);
+            n_right += nr;
+            n_left  += 32 - nr;
+        }
+    }
+}
+
+/* ---- D=2 (pshufb on 4-byte c2s) ---- */
+__attribute__((noinline))
+static void bench_flat_direct_d2_avx512(uint8_t *out, const uint8_t *bm,
+                                         const uint8_t *c2s, int n, int reps)
+{
+    uint32_t c2s_lo;
+    memcpy(&c2s_lo, c2s, 4);
+    __m128i c2s_vec = _mm_set1_epi32((int32_t)c2s_lo);
+    for (int r = 0; r < reps; r++) {
+        for (int i = 0; i + 16 <= n; i += 16) {
+            __m128i codes = flat_d2_spread_avx512(bm + (i >> 2));
+            __m128i syms  = _mm_shuffle_epi8(c2s_vec, codes);
+            _mm_storeu_si128((__m128i *)(out + i), syms);
+        }
+    }
+}
+
+__attribute__((noinline))
+static void bench_flat_scatter_d2_avx512(uint8_t *out, const uint16_t *idx,
+                                          const uint8_t *bm, const uint8_t *c2s,
+                                          int n, int reps)
+{
+    uint32_t c2s_lo;
+    memcpy(&c2s_lo, c2s, 4);
+    __m128i c2s_vec = _mm_set1_epi32((int32_t)c2s_lo);
+    for (int r = 0; r < reps; r++) {
+        for (int i = 0; i + 16 <= n; i += 16) {
+            __m128i codes = flat_d2_spread_avx512(bm + (i >> 2));
+            __m128i syms  = _mm_shuffle_epi8(c2s_vec, codes);
+            X16(syms, idx, i)
+        }
+    }
+}
+
+/* ---- D=3 (pshufb on 8-byte c2s) ---- */
+__attribute__((noinline))
+static void bench_flat_direct_d3_avx512(uint8_t *out, const uint8_t *bm,
+                                         const uint8_t *c2s, int n, int reps)
+{
+    uint64_t c2s_lo;
+    memcpy(&c2s_lo, c2s, 8);
+    __m128i c2s_vec = _mm_cvtsi64_si128((int64_t)c2s_lo);
+    for (int r = 0; r < reps; r++) {
+        for (int i = 0; i + 16 <= n; i += 16) {
+            __m128i codes = flat_d3_spread_avx512_fast(bm + ((i * 3) >> 3));
+            __m128i syms  = _mm_shuffle_epi8(c2s_vec, codes);
+            _mm_storeu_si128((__m128i *)(out + i), syms);
+        }
+    }
+}
+
+__attribute__((noinline))
+static void bench_flat_scatter_d3_avx512(uint8_t *out, const uint16_t *idx,
+                                          const uint8_t *bm, const uint8_t *c2s,
+                                          int n, int reps)
+{
+    uint64_t c2s_lo;
+    memcpy(&c2s_lo, c2s, 8);
+    __m128i c2s_vec = _mm_cvtsi64_si128((int64_t)c2s_lo);
+    for (int r = 0; r < reps; r++) {
+        for (int i = 0; i + 16 <= n; i += 16) {
+            __m128i codes = flat_d3_spread_avx512_fast(bm + ((i * 3) >> 3));
+            __m128i syms  = _mm_shuffle_epi8(c2s_vec, codes);
+            X16(syms, idx, i)
+        }
+    }
+}
+
+/* ---- D=4 (pshufb on 16-byte c2s) ---- */
+__attribute__((noinline))
+static void bench_flat_direct_d4_avx512(uint8_t *out, const uint8_t *bm,
+                                         const uint8_t *c2s, int n, int reps)
+{
+    __m128i c2s_vec = _mm_loadu_si128((const __m128i *)c2s);
+    for (int r = 0; r < reps; r++) {
+        for (int i = 0; i + 16 <= n; i += 16) {
+            __m128i codes = flat_d4_spread_avx512(bm + (i >> 1));
+            __m128i syms  = _mm_shuffle_epi8(c2s_vec, codes);
+            _mm_storeu_si128((__m128i *)(out + i), syms);
+        }
+    }
+}
+
+__attribute__((noinline))
+static void bench_flat_scatter_d4_avx512(uint8_t *out, const uint16_t *idx,
+                                          const uint8_t *bm, const uint8_t *c2s,
+                                          int n, int reps)
+{
+    __m128i c2s_vec = _mm_loadu_si128((const __m128i *)c2s);
+    for (int r = 0; r < reps; r++) {
+        for (int i = 0; i + 16 <= n; i += 16) {
+            __m128i codes = flat_d4_spread_avx512(bm + (i >> 1));
+            __m128i syms  = _mm_shuffle_epi8(c2s_vec, codes);
+            X16(syms, idx, i)
+        }
+    }
+}
+
+/* ---- D=5 (vpermb on 32-byte ymm c2s) ---- */
+__attribute__((noinline))
+static void bench_flat_direct_d5_avx512(uint8_t *out, const uint8_t *bm,
+                                         const uint8_t *c2s, int n, int reps)
+{
+    __m256i c2s_vec = _mm256_loadu_si256((const __m256i *)c2s);
+    for (int r = 0; r < reps; r++) {
+        for (int i = 0; i + 16 <= n; i += 16) {
+            __m128i codes = flat_d5_spread_avx512_fast(bm + ((i * 5) >> 3));
+            __m256i ext   = _mm256_zextsi128_si256(codes);
+            __m256i full  = _mm256_permutexvar_epi8(ext, c2s_vec);
+            _mm_storeu_si128((__m128i *)(out + i), _mm256_castsi256_si128(full));
+        }
+    }
+}
+
+__attribute__((noinline))
+static void bench_flat_scatter_d5_avx512(uint8_t *out, const uint16_t *idx,
+                                          const uint8_t *bm, const uint8_t *c2s,
+                                          int n, int reps)
+{
+    __m256i c2s_vec = _mm256_loadu_si256((const __m256i *)c2s);
+    for (int r = 0; r < reps; r++) {
+        for (int i = 0; i + 16 <= n; i += 16) {
+            __m128i codes = flat_d5_spread_avx512_fast(bm + ((i * 5) >> 3));
+            __m256i ext   = _mm256_zextsi128_si256(codes);
+            __m256i full  = _mm256_permutexvar_epi8(ext, c2s_vec);
+            __m128i syms  = _mm256_castsi256_si128(full);
+            X16(syms, idx, i)
+        }
+    }
+}
+
+/* ---- D=6 (vpermb on 64-byte zmm c2s) ---- */
+__attribute__((noinline))
+static void bench_flat_direct_d6_avx512(uint8_t *out, const uint8_t *bm,
+                                         const uint8_t *c2s, int n, int reps)
+{
+    __m512i c2s_vec = _mm512_loadu_si512((const __m512i *)c2s);
+    for (int r = 0; r < reps; r++) {
+        for (int i = 0; i + 16 <= n; i += 16) {
+            __m128i codes = flat_d6_spread_avx512_fast(bm + ((i * 6) >> 3));
+            __m512i ext   = _mm512_castsi128_si512(codes);
+            __m512i full  = _mm512_permutexvar_epi8(ext, c2s_vec);
+            _mm_storeu_si128((__m128i *)(out + i), _mm512_castsi512_si128(full));
+        }
+    }
+}
+
+__attribute__((noinline))
+static void bench_flat_scatter_d6_avx512(uint8_t *out, const uint16_t *idx,
+                                          const uint8_t *bm, const uint8_t *c2s,
+                                          int n, int reps)
+{
+    __m512i c2s_vec = _mm512_loadu_si512((const __m512i *)c2s);
+    for (int r = 0; r < reps; r++) {
+        for (int i = 0; i + 16 <= n; i += 16) {
+            __m128i codes = flat_d6_spread_avx512_fast(bm + ((i * 6) >> 3));
+            __m512i ext   = _mm512_castsi128_si512(codes);
+            __m512i full  = _mm512_permutexvar_epi8(ext, c2s_vec);
+            __m128i syms  = _mm512_castsi512_si128(full);
+            X16(syms, idx, i)
+        }
+    }
+}
+
+#undef X16
+#endif /* HAS_AVX512 */
+
+/* ============================================================
+ * SSE4.1 backend (AMD Zen 3, older Intel without AVX-512).
+ *
+ * partition primitive: 8-wide pshufb via compress_tab (same layout as
+ * the NEON path).  Only D=4 has a SIMD flat-decode under pure SSE4.1
+ * (no per-byte variable shift / no vpmultishiftqb); D=2/3/5/6 fall
+ * through to scalar in production.
+ * ============================================================ */
+#if HAS_SSE4
+
+/* Local compress shuffle table; same shape as the NEON one. */
+static uint8_t compress_tab_sse[256][32] __attribute__((aligned(32)));
+static uint8_t compress_popcnt_sse[256] __attribute__((aligned(64)));
+static int     compress_table_sse_ready = 0;
+
+static void init_compress_table_sse(void)
+{
+    if (compress_table_sse_ready) return;
+    for (int mask = 0; mask < 256; mask++) {
+        int out_r = 0;
+        for (int i = 0; i < 8; i++) {
+            if (mask & (1 << i)) {
+                compress_tab_sse[mask][out_r * 2]     = (uint8_t)(i * 2);
+                compress_tab_sse[mask][out_r * 2 + 1] = (uint8_t)(i * 2 + 1);
+                out_r++;
+            }
+        }
+        compress_popcnt_sse[mask] = (uint8_t)out_r;
+        for (int j = out_r * 2; j < 16; j++) compress_tab_sse[mask][j] = 0x80;
+        int out_l = 0;
+        for (int i = 0; i < 8; i++) {
+            if (!(mask & (1 << i))) {
+                compress_tab_sse[mask][16 + out_l * 2]     = (uint8_t)(i * 2);
+                compress_tab_sse[mask][16 + out_l * 2 + 1] = (uint8_t)(i * 2 + 1);
+                out_l++;
+            }
+        }
+        for (int j = out_l * 2; j < 16; j++) compress_tab_sse[mask][16 + j] = 0x80;
+    }
+    compress_table_sse_ready = 1;
+}
+
+#define X16_SSE(syms, idx, base)                                              \
+    out[(idx)[(base) +  0]] = (uint8_t)_mm_extract_epi8((syms),  0);          \
+    out[(idx)[(base) +  1]] = (uint8_t)_mm_extract_epi8((syms),  1);          \
+    out[(idx)[(base) +  2]] = (uint8_t)_mm_extract_epi8((syms),  2);          \
+    out[(idx)[(base) +  3]] = (uint8_t)_mm_extract_epi8((syms),  3);          \
+    out[(idx)[(base) +  4]] = (uint8_t)_mm_extract_epi8((syms),  4);          \
+    out[(idx)[(base) +  5]] = (uint8_t)_mm_extract_epi8((syms),  5);          \
+    out[(idx)[(base) +  6]] = (uint8_t)_mm_extract_epi8((syms),  6);          \
+    out[(idx)[(base) +  7]] = (uint8_t)_mm_extract_epi8((syms),  7);          \
+    out[(idx)[(base) +  8]] = (uint8_t)_mm_extract_epi8((syms),  8);          \
+    out[(idx)[(base) +  9]] = (uint8_t)_mm_extract_epi8((syms),  9);          \
+    out[(idx)[(base) + 10]] = (uint8_t)_mm_extract_epi8((syms), 10);          \
+    out[(idx)[(base) + 11]] = (uint8_t)_mm_extract_epi8((syms), 11);          \
+    out[(idx)[(base) + 12]] = (uint8_t)_mm_extract_epi8((syms), 12);          \
+    out[(idx)[(base) + 13]] = (uint8_t)_mm_extract_epi8((syms), 13);          \
+    out[(idx)[(base) + 14]] = (uint8_t)_mm_extract_epi8((syms), 14);          \
+    out[(idx)[(base) + 15]] = (uint8_t)_mm_extract_epi8((syms), 15);
+
+__attribute__((noinline))
+static void bench_scatter_sse(uint8_t *symbols, const uint16_t *indices,
+                               int n, uint8_t sym, int reps)
+{
+    for (int r = 0; r < reps; r++) {
+        int j = 0;
+        for (; j + 8 <= n; j += 8) {
+            __m128i idx = _mm_loadu_si128((const __m128i *)(indices + j));
+            symbols[(uint16_t)_mm_extract_epi16(idx, 0)] = sym;
+            symbols[(uint16_t)_mm_extract_epi16(idx, 1)] = sym;
+            symbols[(uint16_t)_mm_extract_epi16(idx, 2)] = sym;
+            symbols[(uint16_t)_mm_extract_epi16(idx, 3)] = sym;
+            symbols[(uint16_t)_mm_extract_epi16(idx, 4)] = sym;
+            symbols[(uint16_t)_mm_extract_epi16(idx, 5)] = sym;
+            symbols[(uint16_t)_mm_extract_epi16(idx, 6)] = sym;
+            symbols[(uint16_t)_mm_extract_epi16(idx, 7)] = sym;
+        }
+        for (; j < n; j++) symbols[indices[j]] = sym;
+    }
+}
+
+__attribute__((noinline))
+static void bench_partition_sse(const uint16_t *src, const uint8_t *bitmap,
+                                 uint16_t *left, uint16_t *right,
+                                 int n, int reps)
+{
+    for (int r = 0; r < reps; r++) {
+        int n_left = 0, n_right = 0;
+        for (int j = 0; j + 8 <= n; j += 8) {
+            __m128i data = _mm_loadu_si128((const __m128i *)(src + j));
+            uint8_t mask = bitmap[j >> 3];
+            const uint8_t *tab = compress_tab_sse[mask];
+            __m128i shuf_r = _mm_load_si128((const __m128i *)tab);
+            __m128i shuf_l = _mm_load_si128((const __m128i *)(tab + 16));
+            __m128i r_v = _mm_shuffle_epi8(data, shuf_r);
+            __m128i l_v = _mm_shuffle_epi8(data, shuf_l);
+            int nr = compress_popcnt_sse[mask];
+            _mm_storeu_si128((__m128i *)(right + n_right), r_v);
+            _mm_storeu_si128((__m128i *)(left + n_left), l_v);
+            n_right += nr;
+            n_left  += 8 - nr;
+        }
+    }
+}
+
+/* D=4 only (others fall through to scalar in production). */
+__attribute__((noinline))
+static void bench_flat_direct_d4_sse(uint8_t *out, const uint8_t *bm,
+                                      const uint8_t *c2s, int n, int reps)
+{
+    __m128i c2s_vec = _mm_loadu_si128((const __m128i *)c2s);
+    for (int r = 0; r < reps; r++) {
+        for (int i = 0; i + 16 <= n; i += 16) {
+            __m128i codes = flat_d4_spread_x86(bm + (i >> 1));
+            __m128i syms  = _mm_shuffle_epi8(c2s_vec, codes);
+            _mm_storeu_si128((__m128i *)(out + i), syms);
+        }
+    }
+}
+
+__attribute__((noinline))
+static void bench_flat_scatter_d4_sse(uint8_t *out, const uint16_t *idx,
+                                       const uint8_t *bm, const uint8_t *c2s,
+                                       int n, int reps)
+{
+    __m128i c2s_vec = _mm_loadu_si128((const __m128i *)c2s);
+    for (int r = 0; r < reps; r++) {
+        for (int i = 0; i + 16 <= n; i += 16) {
+            __m128i codes = flat_d4_spread_x86(bm + (i >> 1));
+            __m128i syms  = _mm_shuffle_epi8(c2s_vec, codes);
+            X16_SSE(syms, idx, i)
+        }
+    }
+}
+
+#undef X16_SSE
+#endif /* HAS_SSE4 */
+
 int main(void)
 {
     uint8_t  *symbols = calloc(N, 1);
@@ -601,7 +986,89 @@ int main(void)
     BENCH_FLAT("flat_scatter_d6 (vqtbl4):",
                bench_flat_scatter_d6(symbols, shuffled, flat_bm, c2s, N, REPS));
 #undef BENCH_FLAT
-#endif
+#endif /* HAS_NEON main dispatch */
+
+#if HAS_AVX512
+    printf("\n-- AVX-512 VBMI2 backend --\n");
+    /* (scatter floor: see scatter_scalar row at end) */
+
+    t0 = now_sec();
+    bench_partition_avx512(indices, (const uint32_t *)bitmap,
+                            left, right, N, REPS);
+    t1 = now_sec();
+    ns_per_elem = (t1 - t0) / ((double)N * REPS) * 1e9;
+    printf("%-30s %5.2f ns/elem  (%5.1f GB/s)\n",
+           "partition_avx512 (vpcompressw):", ns_per_elem, 1.0 / ns_per_elem);
+
+    printf("\n-- flat-subtree decode (spread + TBL + store), AVX-512 --\n");
+#define BENCH_FLAT_X86(label_, fn_)                                          \
+    do {                                                                     \
+        t0 = now_sec();                                                      \
+        fn_;                                                                 \
+        t1 = now_sec(); sink = symbols[0];                                   \
+        ns_per_elem = (t1 - t0) / ((double)N * REPS) * 1e9;                  \
+        printf("%-30s %5.2f ns/elem  (%5.1f GB/s)\n", label_,                \
+               ns_per_elem, 1.0 / ns_per_elem);                              \
+    } while (0)
+
+    BENCH_FLAT_X86("flat_direct_d2 (pshufb):",
+                   bench_flat_direct_d2_avx512(symbols, flat_bm, c2s, N, REPS));
+    BENCH_FLAT_X86("flat_scatter_d2 (pshufb):",
+                   bench_flat_scatter_d2_avx512(symbols, shuffled, flat_bm, c2s, N, REPS));
+    BENCH_FLAT_X86("flat_direct_d3 (pshufb):",
+                   bench_flat_direct_d3_avx512(symbols, flat_bm, c2s, N, REPS));
+    BENCH_FLAT_X86("flat_scatter_d3 (pshufb):",
+                   bench_flat_scatter_d3_avx512(symbols, shuffled, flat_bm, c2s, N, REPS));
+    BENCH_FLAT_X86("flat_direct_d4 (pshufb):",
+                   bench_flat_direct_d4_avx512(symbols, flat_bm, c2s, N, REPS));
+    BENCH_FLAT_X86("flat_scatter_d4 (pshufb):",
+                   bench_flat_scatter_d4_avx512(symbols, shuffled, flat_bm, c2s, N, REPS));
+    BENCH_FLAT_X86("flat_direct_d5 (vpermb-ymm):",
+                   bench_flat_direct_d5_avx512(symbols, flat_bm, c2s, N, REPS));
+    BENCH_FLAT_X86("flat_scatter_d5 (vpermb-ymm):",
+                   bench_flat_scatter_d5_avx512(symbols, shuffled, flat_bm, c2s, N, REPS));
+    BENCH_FLAT_X86("flat_direct_d6 (vpermb-zmm):",
+                   bench_flat_direct_d6_avx512(symbols, flat_bm, c2s, N, REPS));
+    BENCH_FLAT_X86("flat_scatter_d6 (vpermb-zmm):",
+                   bench_flat_scatter_d6_avx512(symbols, shuffled, flat_bm, c2s, N, REPS));
+#undef BENCH_FLAT_X86
+#endif /* HAS_AVX512 main dispatch */
+
+#if HAS_SSE4 && !HAS_AVX512
+    printf("\n-- SSE4.1 backend --\n");
+    init_compress_table_sse();
+
+    t0 = now_sec();
+    bench_scatter_sse(symbols, indices, N, 0x42, REPS);
+    t1 = now_sec(); sink = symbols[0];
+    ns_per_elem = (t1 - t0) / ((double)N * REPS) * 1e9;
+    printf("%-30s %5.2f ns/elem  (%5.1f GB/s)\n",
+           "scatter_sse (8-wide):", ns_per_elem, 1.0 / ns_per_elem);
+
+    t0 = now_sec();
+    bench_partition_sse(indices, bitmap, left, right, N, REPS);
+    t1 = now_sec();
+    ns_per_elem = (t1 - t0) / ((double)N * REPS) * 1e9;
+    printf("%-30s %5.2f ns/elem  (%5.1f GB/s)\n",
+           "partition_sse (pshufb):", ns_per_elem, 1.0 / ns_per_elem);
+
+    printf("\n-- flat-subtree decode (D=4 only on pure SSE4.1) --\n");
+    t0 = now_sec();
+    bench_flat_direct_d4_sse(symbols, flat_bm, c2s, N, REPS);
+    t1 = now_sec(); sink = symbols[0];
+    ns_per_elem = (t1 - t0) / ((double)N * REPS) * 1e9;
+    printf("%-30s %5.2f ns/elem  (%5.1f GB/s)\n",
+           "flat_direct_d4 (pshufb):", ns_per_elem, 1.0 / ns_per_elem);
+
+    t0 = now_sec();
+    bench_flat_scatter_d4_sse(symbols, shuffled, flat_bm, c2s, N, REPS);
+    t1 = now_sec(); sink = symbols[0];
+    ns_per_elem = (t1 - t0) / ((double)N * REPS) * 1e9;
+    printf("%-30s %5.2f ns/elem  (%5.1f GB/s)\n",
+           "flat_scatter_d4 (pshufb):", ns_per_elem, 1.0 / ns_per_elem);
+
+    printf("(D=2/3/5/6: pure SSE4.1 falls through to scalar in production.)\n");
+#endif /* HAS_SSE4 main dispatch */
 
     /* Scatter scalar */
     t0 = now_sec();

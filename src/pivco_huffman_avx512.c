@@ -4,6 +4,7 @@
 
 #ifdef PIVCO_HAS_AVX512
 #include <immintrin.h>
+#include "pivco_huffman_avx512_flat.h"
 
 /* ---------- AVX-512 VBMI2 Partition ----------
  *
@@ -120,123 +121,8 @@ static inline uint32_t extract_D_bits_avx512(const uint8_t *in,
     return (val >> bit_off) & ((1u << D) - 1);
 }
 
-/* ---------- SIMD D-bit spread helpers (VBMI2) ----------
- * vpmultishiftqb extracts 8-bit fields from uint64 lanes at per-byte bit
- * offsets — a natural fit for D-bit unpacking.  For each D we broadcast
- * the packed bytes to fill a register, then multishift + mask. */
-
-/* D=2: 16 codes from 4 bytes of bm.  Replicate 4 bytes to 16 bytes, then
- * multishift with offsets {0,2,..,14, 16,18,..,30} across 2 uint64 lanes. */
-static inline __m128i flat_d2_spread_avx512(const uint8_t *bm_ptr)
-{
-    uint32_t packed;
-    memcpy(&packed, bm_ptr, 4);
-    __m128i data = _mm_set1_epi32((int32_t)packed);
-    const __m128i ctrl = _mm_setr_epi8(
-        0, 2, 4, 6, 8, 10, 12, 14,
-        16, 18, 20, 22, 24, 26, 28, 30);
-    __m128i raw = _mm_multishift_epi64_epi8(ctrl, data);
-    return _mm_and_si128(raw, _mm_set1_epi8(0x03));
-}
-
-/* D=3 spread, fast unsafe form: loads 8 bytes (2 past the end of
- * the 6-valid-byte region).  Caller must guarantee buffer slack, e.g.
- * by stopping the SIMD loop one iteration before the final 16-code
- * chunk.  GCC compiles the 8-byte memcpy to a single movq, whereas
- * a 6-byte memcpy splits into 2 loads + OR and adds 2-3 cycles of
- * serial latency that kills the fast path's win. */
-static inline __m128i flat_d3_spread_avx512_fast(const uint8_t *bm_ptr)
-{
-    uint64_t packed;
-    memcpy(&packed, bm_ptr, 8);
-    __m128i data = _mm_set1_epi64x((int64_t)packed);
-    const __m128i ctrl = _mm_setr_epi8(
-        0, 3, 6, 9, 12, 15, 18, 21,
-        24, 27, 30, 33, 36, 39, 42, 45);
-    __m128i raw = _mm_multishift_epi64_epi8(ctrl, data);
-    return _mm_and_si128(raw, _mm_set1_epi8(0x07));
-}
-
-/* D=3 spread, safe form: 6-byte memcpy, for the last chunk where the
- * 8-byte load would overread. */
-static inline __m128i flat_d3_spread_avx512_safe(const uint8_t *bm_ptr)
-{
-    uint64_t packed = 0;
-    memcpy(&packed, bm_ptr, 6);
-    __m128i data = _mm_set1_epi64x((int64_t)packed);
-    const __m128i ctrl = _mm_setr_epi8(
-        0, 3, 6, 9, 12, 15, 18, 21,
-        24, 27, 30, 33, 36, 39, 42, 45);
-    __m128i raw = _mm_multishift_epi64_epi8(ctrl, data);
-    return _mm_and_si128(raw, _mm_set1_epi8(0x07));
-}
-
-/* D=4: 16 codes from 8 bytes of bm.  2 codes per byte, no cross-byte
- * carries.  Broadcast 8 bytes to both uint64 lanes; multishift with
- * offsets {0,4,..,28, 32,36,..,60} extracts codes 0..7 from lane 0
- * (byte 0..3) and codes 8..15 from lane 1 (bytes 4..7).  Wait —
- * offsets 32..60 in a 64-bit lane still hit bm[4..7]. */
-static inline __m128i flat_d4_spread_avx512(const uint8_t *bm_ptr)
-{
-    uint64_t packed;
-    memcpy(&packed, bm_ptr, 8);
-    __m128i data = _mm_set1_epi64x((int64_t)packed);
-    const __m128i ctrl = _mm_setr_epi8(
-        0, 4,  8, 12, 16, 20, 24, 28,
-        32, 36, 40, 44, 48, 52, 56, 60);
-    __m128i raw = _mm_multishift_epi64_epi8(ctrl, data);
-    return _mm_and_si128(raw, _mm_set1_epi8(0x0F));
-}
-
-/* D=5: 16 codes from 10 valid bytes.  Broadcast-to-lanes via pshufb
- * then multishift.  Fast path loads 16 bytes directly; the shuffle
- * control only touches bytes 0..9 so the top 6 are don't-care. */
-static inline __m128i flat_d5_spread_avx512_fast(const uint8_t *bm_ptr)
-{
-    __m128i raw = _mm_loadu_si128((const __m128i *)bm_ptr);
-    const __m128i shuf = _mm_setr_epi8(
-        0, 1, 2, 3, 4, 5, 6, 7,
-        2, 3, 4, 5, 6, 7, 8, 9);
-    __m128i data = _mm_shuffle_epi8(raw, shuf);
-    const __m128i ctrl = _mm_setr_epi8(
-        0,   5, 10, 15, 20, 25, 30, 35,
-        24, 29, 34, 39, 44, 49, 54, 59);
-    __m128i ms = _mm_multishift_epi64_epi8(ctrl, data);
-    return _mm_and_si128(ms, _mm_set1_epi8(0x1F));
-}
-
-/* D=5 safe form for the last chunk (10-byte memcpy into a stack buf). */
-static inline __m128i flat_d5_spread_avx512_safe(const uint8_t *bm_ptr)
-{
-    uint8_t buf[16] = {0};
-    memcpy(buf, bm_ptr, 10);
-    return flat_d5_spread_avx512_fast(buf);
-}
-
-/* D=6: 16 codes from 12 valid bytes.  Same pattern as D=5.  Lane
- * layout: lane 0 = bm[0..7] (codes 0..7 at offsets 0,6,12,18,24,30,
- * 36,42), lane 1 = bm[4..11] (codes 8..15 at offsets 16,22,28,34,
- * 40,46,52,58 = stream_bit - 32). */
-static inline __m128i flat_d6_spread_avx512_fast(const uint8_t *bm_ptr)
-{
-    __m128i raw = _mm_loadu_si128((const __m128i *)bm_ptr);
-    const __m128i shuf = _mm_setr_epi8(
-        0, 1, 2, 3, 4, 5, 6, 7,
-        4, 5, 6, 7, 8, 9, 10, 11);
-    __m128i data = _mm_shuffle_epi8(raw, shuf);
-    const __m128i ctrl = _mm_setr_epi8(
-        0,   6, 12, 18, 24, 30, 36, 42,
-        16, 22, 28, 34, 40, 46, 52, 58);
-    __m128i ms = _mm_multishift_epi64_epi8(ctrl, data);
-    return _mm_and_si128(ms, _mm_set1_epi8(0x3F));
-}
-
-static inline __m128i flat_d6_spread_avx512_safe(const uint8_t *bm_ptr)
-{
-    uint8_t buf[16] = {0};
-    memcpy(buf, bm_ptr, 12);
-    return flat_d6_spread_avx512_fast(buf);
-}
+/* flat_d{2..6}_spread_avx512* helpers + tables live in
+ * pivco_huffman_avx512_flat.h (shared with bench/bench_micro.c). */
 
 #define FLAT_UNPACK_SWITCH_IDX(dst_expr)                                 \
     int i = 0;                                                            \

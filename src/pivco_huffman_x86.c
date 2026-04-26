@@ -7,6 +7,7 @@
 #ifdef PIVCO_HAS_AVX2
 #include <immintrin.h>  /* AVX2 */
 #endif
+#include "pivco_huffman_x86_flat.h"
 
 /* ---------- SSE4.1 Compress Shuffle Table ----------
  *
@@ -160,31 +161,8 @@ static inline uint32_t extract_D_bits_x86(const uint8_t *in,
  * PIVCO and trad_huffman_decode_4s) is the right escape for
  * bell_* / proba02 / english / zipfian. */
 
-/* D=4 SSE4.1 spread: 16 codes from 8 bytes of bm.
- *
- * 8 bytes loaded, duplicated to 16 bytes via pshufb: [b0,b0,b1,b1,..].
- * Treating each pair (dup_{2i}, dup_{2i+1}) as uint16 (low byte, high byte):
- *   masked = dup & 0xF00F → (b_i & 0x0F, b_i & 0xF0) in low/high bytes.
- *   shifted = masked >> 4 (uint16 shift) → (0, b_i >> 4) in low/high bytes
- *     (the low nibble shifts out of the low byte; the high nibble shifts
- *      across the byte boundary into the low byte but also the high byte
- *      via a 4-bit move — specifically: pair value (b_i&0xF0)*256 + (b_i&0x0F)
- *      right-shifted 4 = (b_i&0xF0)*16, bytes = (0, b_i>>4)).
- *   blend with mask [0,0xFF,0,0xFF,..] to pick shifted's odd bytes and
- *   masked's even bytes → (b_i&0x0F, b_i>>4) per pair = codes 0,1,2,..,15. */
-static inline __m128i flat_d4_spread_x86(const uint8_t *bm_ptr)
-{
-    __m128i raw = _mm_loadl_epi64((const __m128i *)bm_ptr);
-    const __m128i dup_idx = _mm_setr_epi8(
-        0,0, 1,1, 2,2, 3,3, 4,4, 5,5, 6,6, 7,7);
-    __m128i dup = _mm_shuffle_epi8(raw, dup_idx);
-    __m128i masked = _mm_and_si128(dup, _mm_set1_epi16(0xF00F));
-    __m128i shifted = _mm_srli_epi16(masked, 4);
-    /* Blend: take high byte of each pair from shifted (= b_i >> 4),
-     * low byte from masked (= b_i & 0xF). */
-    __m128i blend_mask = _mm_set1_epi16((int16_t)0xFF00);
-    return _mm_blendv_epi8(masked, shifted, blend_mask);
-}
+/* flat_d4_spread_x86 lives in pivco_huffman_x86_flat.h (shared with
+ * bench/bench_micro.c). */
 
 /* Decode n elements through a D-bit packed region + code_to_sym table,
  * scattering to symbols[indices[i]].  Same per-D specialised unpackers

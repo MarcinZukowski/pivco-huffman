@@ -1,0 +1,12 @@
+N = 8192, REPS = 100000, total = 819200000 elements per test
+
+
+-- SSE4.1 backend --
+scatter_sse (8-wide):           0.32 ns/elem  (  3.2 GB/s)
+partition_sse (pshufb):         0.19 ns/elem  (  5.1 GB/s)
+
+-- flat-subtree decode (D=4 only on pure SSE4.1) --
+flat_direct_d4 (pshufb):        0.04 ns/elem  ( 28.1 GB/s)
+flat_scatter_d4 (pshufb):       0.66 ns/elem  (  1.5 GB/s)
+(D=2/3/5/6: pure SSE4.1 falls through to scalar in production.)
+scatter_scalar:                0.28 ns/elem  (  3.6 GB/s)
