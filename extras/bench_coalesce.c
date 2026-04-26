@@ -291,6 +291,218 @@ static void bench_coalesce_macro(const uint16_t *src, const uint8_t *bitmap,
     }
 }
 
+/* ---------- Half-partition baseline & coalesce ---------------------
+ *
+ * The OTHER question: production has a half-partition kernel
+ * `partition_8_right` (used when the LEFT child is a prefilled leaf
+ * via memset).  That kernel issues 1 store/iter, store-port-bound at
+ * ~22 GB/s on M4.  Could coalescing it (saving half the stores) win?
+ *
+ * `bench_half_baseline`: regular partition_8_right, 1 vst1q per iter.
+ * `bench_half_macro`:    4-iter macro-block coalesce, single side.
+ *                        2 stores per macro = 0.5 stores/iter.
+ */
+__attribute__((noinline))
+static void bench_half_baseline(const uint16_t *src, const uint8_t *bitmap,
+                                 uint8_t *right_bytes, int n, int reps)
+{
+    for (int r = 0; r < reps; r++) {
+        int n_right_bytes = 0;
+        for (int j = 0; j + 8 <= n; j += 8) {
+            uint8_t mask = bitmap[j >> 3];
+            uint8x16_t data = vld1q_u8((const uint8_t *)(src + j));
+            uint8x16_t shuf_r = vld1q_u8(compress_tab[mask]);
+            vst1q_u8(right_bytes + n_right_bytes, vqtbl1q_u8(data, shuf_r));
+            n_right_bytes += compress_popcnt[mask] * 2;
+        }
+    }
+}
+
+__attribute__((noinline))
+static void bench_half_coalesce_macro(const uint16_t *src, const uint8_t *bitmap,
+                                       uint8_t *right_bytes, int n, int reps)
+{
+    const uint8x16_t zero_v = vdupq_n_u8(0);
+    static const uint8_t iota_init[16] = {0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15};
+    const uint8x16_t iota = vld1q_u8(iota_init);
+
+    for (int r = 0; r < reps; r++) {
+        int n_right_bytes = 0;
+        for (int j = 0; j + 32 <= n; j += 32) {
+            uint8_t m0 = bitmap[(j >> 3) + 0];
+            uint8_t m1 = bitmap[(j >> 3) + 1];
+            uint8_t m2 = bitmap[(j >> 3) + 2];
+            uint8_t m3 = bitmap[(j >> 3) + 3];
+            int pr0 = compress_popcnt[m0], pr1 = compress_popcnt[m1];
+            int pr2 = compress_popcnt[m2], pr3 = compress_popcnt[m3];
+            int cr1 = pr0, cr2 = cr1 + pr1, cr3 = cr2 + pr2;
+            int total_r = cr3 + pr3;
+
+            uint8x16_t d0 = vld1q_u8((const uint8_t *)(src + j +  0));
+            uint8x16_t d1 = vld1q_u8((const uint8_t *)(src + j +  8));
+            uint8x16_t d2 = vld1q_u8((const uint8_t *)(src + j + 16));
+            uint8x16_t d3 = vld1q_u8((const uint8_t *)(src + j + 24));
+
+            uint8x16_t r0 = vqtbl1q_u8(d0, vld1q_u8(compress_tab[m0]));
+            uint8x16_t r1 = vqtbl1q_u8(d1, vld1q_u8(compress_tab[m1]));
+            uint8x16_t r2 = vqtbl1q_u8(d2, vld1q_u8(compress_tab[m2]));
+            uint8x16_t r3 = vqtbl1q_u8(d3, vld1q_u8(compress_tab[m3]));
+
+            #define PLACE(side_v, cum, lo_acc, hi_acc) do {                                 \
+                uint8x16_t _shuf_lo = vsubq_u8(iota, vdupq_n_u8((uint8_t)((cum) * 2)));      \
+                uint8x16_t _shuf_hi = vaddq_u8(iota, vdupq_n_u8((uint8_t)(16 - (cum) * 2))); \
+                (lo_acc) = vorrq_u8((lo_acc), vqtbl1q_u8((side_v), _shuf_lo));              \
+                (hi_acc) = vorrq_u8((hi_acc), vqtbl1q_u8((side_v), _shuf_hi));              \
+            } while (0)
+
+            uint8x16_t lo_r = r0, hi_r = zero_v;
+            PLACE(r1, cr1, lo_r, hi_r);
+            PLACE(r2, cr2, lo_r, hi_r);
+            PLACE(r3, cr3, lo_r, hi_r);
+            #undef PLACE
+
+            vst1q_u8(right_bytes + n_right_bytes,      lo_r);
+            vst1q_u8(right_bytes + n_right_bytes + 16, hi_r);
+            n_right_bytes += total_r * 2;
+        }
+    }
+}
+
+/* ---------- Variant 4: coalesce-macro 1-sided (left only) ----------
+ *
+ * Coalesce only the left side (assumed small for skewed inputs); right
+ * side uses regular per-iter vst1q.  Per macro-block: 4 right stores +
+ * 2 left stores = 6 stores = 1.5 / iter (vs 2 / iter baseline, save
+ * 0.5).  Compute overhead is half of the 2-sided macro variant.
+ * Branchless. */
+__attribute__((noinline))
+static void bench_coalesce_macro_one_sided(const uint16_t *src, const uint8_t *bitmap,
+                                            uint8_t *left_bytes, uint8_t *right_bytes,
+                                            int n, int reps)
+{
+    const uint8x16_t zero_v = vdupq_n_u8(0);
+    static const uint8_t iota_init[16] = {0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15};
+    const uint8x16_t iota = vld1q_u8(iota_init);
+
+    for (int r = 0; r < reps; r++) {
+        int n_left_bytes = 0, n_right_bytes = 0;
+        for (int j = 0; j + 32 <= n; j += 32) {
+            uint8_t m0 = bitmap[(j >> 3) + 0];
+            uint8_t m1 = bitmap[(j >> 3) + 1];
+            uint8_t m2 = bitmap[(j >> 3) + 2];
+            uint8_t m3 = bitmap[(j >> 3) + 3];
+            int pr0 = compress_popcnt[m0], pl0 = 8 - pr0;
+            int pr1 = compress_popcnt[m1], pl1 = 8 - pr1;
+            int pr2 = compress_popcnt[m2], pl2 = 8 - pr2;
+            int pr3 = compress_popcnt[m3], pl3 = 8 - pr3;
+            /* Left-only prefix sums */
+            int cl1 = pl0, cl2 = cl1 + pl1, cl3 = cl2 + pl2;
+            int total_l = cl3 + pl3;
+
+            uint8x16_t d0 = vld1q_u8((const uint8_t *)(src + j +  0));
+            uint8x16_t d1 = vld1q_u8((const uint8_t *)(src + j +  8));
+            uint8x16_t d2 = vld1q_u8((const uint8_t *)(src + j + 16));
+            uint8x16_t d3 = vld1q_u8((const uint8_t *)(src + j + 24));
+
+            /* Right side: compress + per-iter store, baseline-style */
+            const uint8_t *t0 = compress_tab[m0], *t1 = compress_tab[m1];
+            const uint8_t *t2 = compress_tab[m2], *t3 = compress_tab[m3];
+            vst1q_u8(right_bytes + n_right_bytes, vqtbl1q_u8(d0, vld1q_u8(t0)));
+            n_right_bytes += pr0 * 2;
+            vst1q_u8(right_bytes + n_right_bytes, vqtbl1q_u8(d1, vld1q_u8(t1)));
+            n_right_bytes += pr1 * 2;
+            vst1q_u8(right_bytes + n_right_bytes, vqtbl1q_u8(d2, vld1q_u8(t2)));
+            n_right_bytes += pr2 * 2;
+            vst1q_u8(right_bytes + n_right_bytes, vqtbl1q_u8(d3, vld1q_u8(t3)));
+            n_right_bytes += pr3 * 2;
+
+            /* Left side: compress + place into 32-byte (lo_l, hi_l) accumulator */
+            uint8x16_t l0 = vqtbl1q_u8(d0, vld1q_u8(t0 + 16));
+            uint8x16_t l1 = vqtbl1q_u8(d1, vld1q_u8(t1 + 16));
+            uint8x16_t l2 = vqtbl1q_u8(d2, vld1q_u8(t2 + 16));
+            uint8x16_t l3 = vqtbl1q_u8(d3, vld1q_u8(t3 + 16));
+
+            #define PLACE(side_v, cum, lo_acc, hi_acc) do {                                 \
+                uint8x16_t _shuf_lo = vsubq_u8(iota, vdupq_n_u8((uint8_t)((cum) * 2)));      \
+                uint8x16_t _shuf_hi = vaddq_u8(iota, vdupq_n_u8((uint8_t)(16 - (cum) * 2))); \
+                (lo_acc) = vorrq_u8((lo_acc), vqtbl1q_u8((side_v), _shuf_lo));              \
+                (hi_acc) = vorrq_u8((hi_acc), vqtbl1q_u8((side_v), _shuf_hi));              \
+            } while (0)
+
+            uint8x16_t lo_l = l0, hi_l = zero_v;
+            PLACE(l1, cl1, lo_l, hi_l);
+            PLACE(l2, cl2, lo_l, hi_l);
+            PLACE(l3, cl3, lo_l, hi_l);
+            #undef PLACE
+
+            vst1q_u8(left_bytes + n_left_bytes,      lo_l);
+            vst1q_u8(left_bytes + n_left_bytes + 16, hi_l);
+            n_left_bytes += total_l * 2;
+        }
+    }
+}
+
+/* ---------- Variant 5: half_coalesce_macro_tree --------------------
+ *
+ * Same as half_coalesce_macro but uses a balanced OR-tree (depth 2
+ * instead of linear depth 3) when merging the 4 placed contributions
+ * into the (lo, hi) accumulator.  Saves 1 cycle of latency on the
+ * lo critical path. */
+__attribute__((noinline))
+static void bench_half_coalesce_macro_tree(const uint16_t *src, const uint8_t *bitmap,
+                                            uint8_t *right_bytes, int n, int reps)
+{
+    const uint8x16_t zero_v = vdupq_n_u8(0);
+    static const uint8_t iota_init[16] = {0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15};
+    const uint8x16_t iota = vld1q_u8(iota_init);
+
+    for (int r = 0; r < reps; r++) {
+        int n_right_bytes = 0;
+        for (int j = 0; j + 32 <= n; j += 32) {
+            uint8_t m0 = bitmap[(j >> 3) + 0];
+            uint8_t m1 = bitmap[(j >> 3) + 1];
+            uint8_t m2 = bitmap[(j >> 3) + 2];
+            uint8_t m3 = bitmap[(j >> 3) + 3];
+            int pr0 = compress_popcnt[m0], pr1 = compress_popcnt[m1];
+            int pr2 = compress_popcnt[m2], pr3 = compress_popcnt[m3];
+            int cr1 = pr0, cr2 = cr1 + pr1, cr3 = cr2 + pr2;
+            int total_r = cr3 + pr3;
+
+            uint8x16_t d0 = vld1q_u8((const uint8_t *)(src + j +  0));
+            uint8x16_t d1 = vld1q_u8((const uint8_t *)(src + j +  8));
+            uint8x16_t d2 = vld1q_u8((const uint8_t *)(src + j + 16));
+            uint8x16_t d3 = vld1q_u8((const uint8_t *)(src + j + 24));
+
+            uint8x16_t r0 = vqtbl1q_u8(d0, vld1q_u8(compress_tab[m0]));
+            uint8x16_t r1 = vqtbl1q_u8(d1, vld1q_u8(compress_tab[m1]));
+            uint8x16_t r2 = vqtbl1q_u8(d2, vld1q_u8(compress_tab[m2]));
+            uint8x16_t r3 = vqtbl1q_u8(d3, vld1q_u8(compress_tab[m3]));
+
+            /* Compute shifted contributions independently — no
+             * accumulator dep yet. */
+            uint8x16_t s1_lo = vqtbl1q_u8(r1, vsubq_u8(iota, vdupq_n_u8((uint8_t)(cr1 * 2))));
+            uint8x16_t s1_hi = vqtbl1q_u8(r1, vaddq_u8(iota, vdupq_n_u8((uint8_t)(16 - cr1 * 2))));
+            uint8x16_t s2_lo = vqtbl1q_u8(r2, vsubq_u8(iota, vdupq_n_u8((uint8_t)(cr2 * 2))));
+            uint8x16_t s2_hi = vqtbl1q_u8(r2, vaddq_u8(iota, vdupq_n_u8((uint8_t)(16 - cr2 * 2))));
+            uint8x16_t s3_lo = vqtbl1q_u8(r3, vsubq_u8(iota, vdupq_n_u8((uint8_t)(cr3 * 2))));
+            uint8x16_t s3_hi = vqtbl1q_u8(r3, vaddq_u8(iota, vdupq_n_u8((uint8_t)(16 - cr3 * 2))));
+
+            /* OR-tree: lo has 4 contributions (r0 + 3 shifted), depth 2. */
+            uint8x16_t lo_a = vorrq_u8(r0,    s1_lo);
+            uint8x16_t lo_b = vorrq_u8(s2_lo, s3_lo);
+            uint8x16_t lo_r = vorrq_u8(lo_a,  lo_b);
+            /* OR-tree: hi has 3 contributions (iter 0's hi is zero), depth 2. */
+            uint8x16_t hi_a = vorrq_u8(s1_hi, s2_hi);
+            uint8x16_t hi_r = vorrq_u8(hi_a,  s3_hi);
+            (void)zero_v;
+
+            vst1q_u8(right_bytes + n_right_bytes,      lo_r);
+            vst1q_u8(right_bytes + n_right_bytes + 16, hi_r);
+            n_right_bytes += total_r * 2;
+        }
+    }
+}
+
 /* ---------- Bitmap generators ---------- */
 static void fill_random(uint8_t *bitmap, int n_bytes, unsigned seed)
 {
@@ -369,6 +581,35 @@ int main(void)
         t1 = now_sec();
         ns = (t1 - t0) / ((double)N * REPS) * 1e9;
         printf("  coalesce_macro (4-iter):   %5.2f ns/elem  (%5.2f GB/s)\n",
+               ns, 1.0 / ns);
+
+        t0 = now_sec();
+        bench_coalesce_macro_one_sided(src, bitmap, (uint8_t *)left, (uint8_t *)right, N, REPS);
+        t1 = now_sec();
+        ns = (t1 - t0) / ((double)N * REPS) * 1e9;
+        printf("  coalesce_macro_1side (L):  %5.2f ns/elem  (%5.2f GB/s)\n",
+               ns, 1.0 / ns);
+
+        /* Half-partition (= partition_8_right) baseline + coalesce. */
+        t0 = now_sec();
+        bench_half_baseline(src, bitmap, (uint8_t *)right, N, REPS);
+        t1 = now_sec();
+        ns = (t1 - t0) / ((double)N * REPS) * 1e9;
+        printf("  half_baseline (1 store):   %5.2f ns/elem  (%5.2f GB/s)\n",
+               ns, 1.0 / ns);
+
+        t0 = now_sec();
+        bench_half_coalesce_macro(src, bitmap, (uint8_t *)right, N, REPS);
+        t1 = now_sec();
+        ns = (t1 - t0) / ((double)N * REPS) * 1e9;
+        printf("  half_coalesce_macro:       %5.2f ns/elem  (%5.2f GB/s)\n",
+               ns, 1.0 / ns);
+
+        t0 = now_sec();
+        bench_half_coalesce_macro_tree(src, bitmap, (uint8_t *)right, N, REPS);
+        t1 = now_sec();
+        ns = (t1 - t0) / ((double)N * REPS) * 1e9;
+        printf("  half_coalesce_macro_tree:  %5.2f ns/elem  (%5.2f GB/s)\n",
                ns, 1.0 / ns);
         printf("\n");
     }

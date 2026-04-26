@@ -1,0 +1,23 @@
+== bench_coalesce: store-coalescing experiments for partition_8 ==
+N = 8192, REPS = 100000, total = 819200000 elems per row
+
+-- 50% random --
+  baseline       (2 vst1q):   0.16 ns/elem  ( 6.36 GB/s)
+  coalesce_vext  (switch):    0.37 ns/elem  ( 2.68 GB/s)
+  coalesce_tbl   (no switch): 0.28 ns/elem  ( 3.56 GB/s)
+  coalesce_macro (4-iter):    0.25 ns/elem  ( 4.08 GB/s)
+  coalesce_macro_1side (L):   0.16 ns/elem  ( 6.10 GB/s)
+  half_baseline (1 store):    0.10 ns/elem  (10.13 GB/s)
+  half_coalesce_macro:        0.13 ns/elem  ( 7.81 GB/s)
+  half_coalesce_macro_tree:   0.13 ns/elem  ( 7.82 GB/s)
+
+-- skew popcount 2/6 --
+  baseline       (2 vst1q):   0.16 ns/elem  ( 6.33 GB/s)
+  coalesce_vext  (switch):    0.30 ns/elem  ( 3.33 GB/s)
+  coalesce_tbl   (no switch): 0.28 ns/elem  ( 3.54 GB/s)
+  coalesce_macro (4-iter):    0.25 ns/elem  ( 4.08 GB/s)
+  coalesce_macro_1side (L):   0.16 ns/elem  ( 6.07 GB/s)
+  half_baseline (1 store):    0.10 ns/elem  (10.10 GB/s)
+  half_coalesce_macro:        0.13 ns/elem  ( 7.86 GB/s)
+  half_coalesce_macro_tree:   0.13 ns/elem  ( 7.87 GB/s)
+

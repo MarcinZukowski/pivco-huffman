@@ -12,21 +12,35 @@ the standalone binary.
 
 ## TL;DR
 
-Three increasingly clever variants tested.  All three lose to baseline
-on M4, even after eliminating the obvious failure modes (branch
-mispredict, cross-iter dep chains).  The store-port saturation in the
-production kernel is a tight Pareto-optimal point on M4: any added
-SIMD work to enable store reduction exceeds what coalescing saves.
+Six variants tested across **two NEON platforms** (Apple M4 P-core,
+AWS Graviton 4 Neoverse-V2).  All six lose to baseline on both
+platforms, even after eliminating every obvious failure mode (branch
+mispredict, cross-iter dep chains, depth-3 OR-chain latency, 1-sided
+specialization).  The store-port saturation in the production
+kernel is a tight Pareto-optimal point on both NEON
+implementations: any non-trivial SIMD work to enable store reduction
+exceeds the cycles saved.
 
-| Variant | 50% random | skew popcount 2/6 | vs baseline |
-|---|---:|---:|---:|
-| **baseline** (2× vst1q per iter) | 12.5–15.5 GB/s | 15.5 GB/s | 1.00× |
-| coalesce_vext (switch on so_far) | 3.8 GB/s | 4.6 GB/s | **0.30×** |
-| coalesce_tbl (runtime shuf) | 7.6 GB/s | 7.6 GB/s | **0.55×** |
-| coalesce_macro (4-iter lookahead) | 9.6 GB/s | 9.6 GB/s | **0.66×** |
+Cross-platform summary (50% random masks, GB/s, ratio vs same-shape baseline):
 
-GB/s figures vary across runs by ~5% (M4 thermal/boost variance);
+| Variant | M4 | G4 | M4 ratio | G4 ratio |
+|---|---:|---:|---:|---:|
+| **2-sided baseline** (2× vst1q/iter) | 15.5 | 6.4 | 1.00× | 1.00× |
+| coalesce_vext (switch on so_far) | 3.8 | 2.7 | 0.25× | 0.42× |
+| coalesce_tbl (runtime shuf) | 8.1 | 3.6 | 0.52× | 0.56× |
+| coalesce_macro (2-sided) | 9.6 | 4.1 | 0.62× | 0.64× |
+| coalesce_macro_1side (L only) | 13.7 | 6.1 | 0.88× | **0.96×** |
+| **half-partition baseline** (1 vst1q/iter) | 22.7 | 10.1 | 1.00× | 1.00× |
+| half_coalesce_macro | 17.2 | 7.8 | 0.76× | 0.77× |
+| half_coalesce_macro_tree (OR-tree depth 2) | 17.1 | 7.8 | 0.75× | 0.77× |
+
+GB/s figures vary across runs by ~5% (thermal/boost variance);
 ratios are stable.
+
+The cleanest negative result is **half_coalesce_macro_tree on
+Graviton 4**: maximally favorable case (1 store/iter baseline, 4-iter
+branchless macro, balanced OR-tree depth 2, on the platform with the
+more favorable SIMD-to-store ratio) — and it still loses by 23%.
 
 ## Motivation
 
@@ -258,27 +272,70 @@ The optimization assumes a uarch where:
 
 None of these apply on M4.
 
+## 1-sided variants (added after the user observed they're simpler)
+
+The 2-sided macro pays for two parallel place-shift chains.
+Coalescing only ONE side keeps the other side at the cheap baseline
+shape, halving the SIMD overhead.  Two natural targets:
+
+1. **`coalesce_macro_1side` (L only)** — keeps the right side as
+   regular per-iter `vst1q`, coalesces only the left.  Saves 0.5
+   stores/iter (vs 2-sided's 1.0).  Halved SIMD overhead.
+2. **`half_coalesce_macro`** — applied to the *production
+   half-partition kernel* `partition_8_right`, which already issues
+   only 1 store/iter (used when one child is a prefilled leaf).
+   Coalescing this brings it to 0.5 stores/iter.
+
+Result: the 1-sided variant gets MUCH closer to baseline (0.88× M4,
+0.96× G4) but still loses on both.  The half-partition coalesce
+loses by ~23% on both platforms.  See the cross-platform table at
+the top.
+
+## Did the 3-deep OR chain matter?
+
+The 2-sided macro had a 3-deep linear chain on `lo_l` and `lo_r`
+through the accumulator merge (each PLACE call ORs into the running
+accumulator).  That's a per-macro critical path of 3 OR latencies
+that doesn't pipeline freely.
+
+Tested with `half_coalesce_macro_tree`: same operations but
+balanced into an OR-tree of depth 2:
+
+```c
+/* Linear chain (depth 3): */
+lo |= s1; lo |= s2; lo |= s3;
+
+/* Tree (depth 2): */
+a = vorrq(r0, s1);  b = vorrq(s2, s3);  /* parallel */
+lo = vorrq(a, b);
+```
+
+**The OR-tree didn't help on either platform** — both at 17.1 GB/s
+on M4 and 7.8 GB/s on G4, identical to the linear version.  So the
+OR chain wasn't the actual bottleneck.
+
+What this tells us: the loss is from raw **SIMD throughput consumption**
+(place TBLs + ORs + shuf-vector ALU competing for the 4-wide M4 SIMD
+pipes / 2-wide G4 SIMD pipes), not from any specific dependency
+chain.  Reducing latency doesn't help when throughput is the limit.
+
 ## Could it win on another platform?
 
-Open question.  Plausible candidates:
+Tested on M4 and Graviton 4 — both lose.  Plausible remaining candidates:
 
-- **Graviton 4 (Neoverse-V2)**: store port may be similar to M4 (1
-  SIMD store/cycle); SIMD is also ~4 ops/cycle but `vqtbl{2,4}q_u8`
-  is much slower than M4 (per [Key Compute Primitives](README.md)).
-  Would need a new throughput probe to estimate.
 - **Xeon AVX-512 (Sapphire/Granite Rapids)**: `vpcompressw` already
-  does the compress-and-place in one instruction; the analogue of
-  this whole investigation is moot — production AVX-512 backend
-  already uses `vpcompressw` and gets the optimal store pattern for
-  free.
+  does compress-and-place in one instruction; the analogue of this
+  whole investigation is moot — production AVX-512 backend already
+  uses `vpcompressw` and gets the optimal store pattern for free.
 - **Zen 3 SSE4.1**: store port is the documented bottleneck on the
   Zen 3 partition path (see `bench_micro` data).  Worth running the
   same prototypes — but the absence of efficient cross-byte permute
   primitives in pure SSE4.1 makes the place-shift expensive on Zen 3.
+  Would need a new SSE4.1 port (~150 lines) to test.
 
 If anyone re-runs these on a different platform, the standalone bench
-(`./build/pivco_bench_coalesce`) reproduces the four numbers in ~30
-seconds.
+(`./build/pivco_bench_coalesce`) reproduces the cross-platform numbers
+in ~30 seconds (ARM64 only as written; ports welcome).
 
 ## Conclusion
 
@@ -304,12 +361,14 @@ Everything has already been done that can be done.
 
 ## Files
 
-- [`extras/bench_coalesce.c`](extras/bench_coalesce.c) — the three
-  prototypes + baseline, self-contained (~370 lines).
-- [`results/coalesce-m4_max-20260426.txt`](results/coalesce-m4_max-20260426.txt)
-  — raw measurement output.
+- [`extras/bench_coalesce.c`](extras/bench_coalesce.c) — six variants
+  + two baselines, self-contained.
+- [`results/coalesce-m4_max-20260426-tree.txt`](results/coalesce-m4_max-20260426-tree.txt)
+  — final M4 measurements (full set).
+- [`results/coalesce-graviton4-20260426.txt`](results/coalesce-graviton4-20260426.txt)
+  — Graviton 4 measurements (full set).
 - [`extras/bench_partition_skew.c`](extras/bench_partition_skew.c) —
-  the per-distribution skewness histogram tool used in the
-  pre-experiment analysis.
+  per-distribution skewness histogram tool used in the pre-experiment
+  analysis.
 - [`bench/bench_micro.c`](bench/bench_micro.c) — TBL/vext throughput
   probes, store-port topology probe.
