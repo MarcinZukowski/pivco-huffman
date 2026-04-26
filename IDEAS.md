@@ -293,6 +293,56 @@ width, not this dep chain.  Change doubled the loop body line count
 for no measurable win, so reverted.  Recorded here so the next person
 reading the assembly output doesn't repeat the experiment.
 
+## ~~Mix scalar `str d` with `str q` to use a 2nd store AGU on M-series~~ — tried, slower
+
+`partition_8`'s two `vst1q_u8` stores account for ~38 % of decode CPU
+on M4 (per the `prose_pride` xctrace profile).  Hypothesis worth
+testing: M-series chips reportedly have separate SIMD-store and
+scalar-store dispatch (1 SIMD store/cycle + extra scalar AGU
+capacity), so replacing one or both `str q`s with paired `str d`s
+might hit a 2nd dispatch port and run faster.
+
+Variants benchmarked (`bench/bench_micro.c`, "store-port topology probe"):
+
+  - `simd_only`    — 2× `str q` per iter (baseline, current code)
+  - `mixed`        — 1× `str q` + 2× `str d` per iter (forced via
+                     inline asm; without `volatile` the compiler
+                     fuses `str d, str d` back to `str q`)
+  - `scalar_only`  — 4× `str d` per iter (also forced via asm)
+
+Apple M4 Max @ 4 GHz, partition_neon-shape inner loop, 4 stable runs:
+
+| variant      | stores/iter | bench GB/s | ns/iter | cycles | stores/cyc |
+|--------------|------------:|-----------:|--------:|-------:|-----------:|
+| simd_only    |           2 |       15.6 |    0.51 |  ~2.05 |       0.97 |
+| mixed        |           3 |       14.6 |    0.55 |  ~2.19 |       1.37 |
+| scalar_only  |           4 |       13.0 |    0.61 |  ~2.46 |       1.63 |
+
+Two readings:
+
+1. M4 *can* dispatch >1 store per cycle (`scalar_only` issues 1.6
+   stores/cycle on average), so the topology probably *is* something
+   like "1 SIMD port + extra scalar AGU bandwidth".
+
+2. **But you can't usefully exploit it from partition_8.**  The data
+   lives in NEON registers (output of `vqtbl1q_u8`); reaching it via
+   `str d` requires `ext.16b v_, v_, v_, #8` to extract the high
+   half, which adds a register-rename op and a critical-path cycle
+   between `tbl` and the second store.  The "saved" port-issue
+   bandwidth is exactly absorbed by the longer dep chain — both sides
+   together cost ~0.4 extra cycles per iter, which matches the
+   measured slowdown (2.46 − 2.05 = 0.41 cycles).
+
+Implication: there's no clever store-port trick that rescues
+partition_8 on M4.  The 0.06 ns/elem (= 1 vst1q/cycle) floor is the
+true ceiling for this kernel shape; the only way to go faster is to
+issue *fewer* stores per element — exactly what `partition_8_right`
+(half-tree) and `scatter_both_leaves` (no partition at all) already
+do.
+
+Recorded here so the next person profiling the partition store cost
+doesn't repeat the experiment.
+
 ## AVX-512 improvement: better small-node tail
 
 `src/pivco_huffman_avx512.c` does a strong 32-wide partition using

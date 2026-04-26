@@ -255,6 +255,108 @@ static void fill_bitmap_density(uint8_t *bitmap, int n_bytes, int pct_full)
     }
 }
 
+/* Store-port hypothesis test: Apple M-series chips reportedly have 2
+ * scalar store AGUs but only 1 SIMD store port.  These three kernels
+ * all do the same partition work but with different store mixes:
+ *
+ *   simd_only:    2 × vst1q_u8 (16 B each) per iter — full partition, baseline
+ *   scalar_only:  4 × vst1_u8 (8 B each) per iter   — same bytes, all scalar
+ *   mixed:        1 × vst1q + 2 × vst1_u8 per iter  — 32 B total, mixed issue
+ *
+ * If the hypothesis holds, `mixed` issues all 3 stores in 1 cycle (1
+ * SIMD + 2 scalar in parallel) and runs ~2x faster than baseline. */
+
+__attribute__((noinline))
+static void bench_partition_simd_only(const uint16_t *src, const uint8_t *bitmap,
+                                       uint16_t *left, uint16_t *right,
+                                       int n, int reps)
+{
+    /* Identical to bench_partition_neon — re-defined here for clarity
+     * of comparison. */
+    for (int r = 0; r < reps; r++) {
+        int n_left = 0, n_right = 0;
+        for (int j = 0; j + 8 <= n; j += 8) {
+            uint8_t mask = bitmap[j >> 3];
+            uint8x16_t data = vld1q_u8((const uint8_t *)(src + j));
+            const uint8_t *tab = compress_tab[mask];
+            uint8x16_t shuf_r = vld1q_u8(tab);
+            uint8x16_t shuf_l = vld1q_u8(tab + 16);
+            uint8x16_t r_v = vqtbl1q_u8(data, shuf_r);
+            uint8x16_t l_v = vqtbl1q_u8(data, shuf_l);
+            vst1q_u8((uint8_t *)(right + n_right), r_v);
+            vst1q_u8((uint8_t *)(left + n_left), l_v);
+            n_right += compress_popcnt[mask];
+            n_left += (8 - compress_popcnt[mask]);
+        }
+    }
+}
+
+/* Force the compiler to emit literal `str d` (8-byte scalar) stores
+ * rather than fusing two adjacent ones into a single `str q` or
+ * `stp d, d`.  Without `volatile` + explicit asm the optimizer
+ * coalesces them and the test becomes a no-op. */
+#define FORCE_STR_D_PAIR(ptr, lo64, hi64)                              \
+    __asm__ volatile(                                                  \
+        "str %d[a], [%[p]]\n\t"                                        \
+        "str %d[b], [%[p], #8]\n\t"                                    \
+        : : [a] "w"(lo64), [b] "w"(hi64), [p] "r"(ptr) : "memory")
+
+__attribute__((noinline))
+static void bench_partition_scalar_only(const uint16_t *src, const uint8_t *bitmap,
+                                         uint16_t *left, uint16_t *right,
+                                         int n, int reps)
+{
+    /* 4 × str d (8-byte scalar) per iter, forced via inline asm so
+     * the compiler can't fold them back into str q's.  Same total
+     * 32 bytes per iter as simd_only. */
+    for (int r = 0; r < reps; r++) {
+        int n_left = 0, n_right = 0;
+        for (int j = 0; j + 8 <= n; j += 8) {
+            uint8_t mask = bitmap[j >> 3];
+            uint8x16_t data = vld1q_u8((const uint8_t *)(src + j));
+            const uint8_t *tab = compress_tab[mask];
+            uint8x16_t shuf_r = vld1q_u8(tab);
+            uint8x16_t shuf_l = vld1q_u8(tab + 16);
+            uint8x16_t r_v = vqtbl1q_u8(data, shuf_r);
+            uint8x16_t l_v = vqtbl1q_u8(data, shuf_l);
+            uint8_t *rp = (uint8_t *)(right + n_right);
+            uint8_t *lp = (uint8_t *)(left + n_left);
+            FORCE_STR_D_PAIR(rp, vget_low_u8(r_v), vget_high_u8(r_v));
+            FORCE_STR_D_PAIR(lp, vget_low_u8(l_v), vget_high_u8(l_v));
+            n_right += compress_popcnt[mask];
+            n_left += (8 - compress_popcnt[mask]);
+        }
+    }
+}
+
+__attribute__((noinline))
+static void bench_partition_mixed(const uint16_t *src, const uint8_t *bitmap,
+                                   uint16_t *left, uint16_t *right,
+                                   int n, int reps)
+{
+    /* 1 × str q + 2 × str d per iter.  If M4 has 1 SIMD port + 2
+     * scalar AGUs running in parallel, the 3 stores issue in 1
+     * cycle.  If only 1 store dispatch slot exists regardless of
+     * width, this should be slower than simd_only (3 vs 2 dispatches). */
+    for (int r = 0; r < reps; r++) {
+        int n_left = 0, n_right = 0;
+        for (int j = 0; j + 8 <= n; j += 8) {
+            uint8_t mask = bitmap[j >> 3];
+            uint8x16_t data = vld1q_u8((const uint8_t *)(src + j));
+            const uint8_t *tab = compress_tab[mask];
+            uint8x16_t shuf_r = vld1q_u8(tab);
+            uint8x16_t shuf_l = vld1q_u8(tab + 16);
+            uint8x16_t r_v = vqtbl1q_u8(data, shuf_r);
+            uint8x16_t l_v = vqtbl1q_u8(data, shuf_l);
+            vst1q_u8((uint8_t *)(right + n_right), r_v);
+            uint8_t *lp = (uint8_t *)(left + n_left);
+            FORCE_STR_D_PAIR(lp, vget_low_u8(l_v), vget_high_u8(l_v));
+            n_right += compress_popcnt[mask];
+            n_left += (8 - compress_popcnt[mask]);
+        }
+    }
+}
+
 /* ---- Both-leaves sequential vst1 ---- */
 
 __attribute__((noinline)) static void bench_both_leaves_vst1(uint8_t *symbols, const uint8_t *bitmap,
@@ -1259,6 +1361,35 @@ int main(void)
                "%5.2f ns/elem  (%5.1f GB/s)\n",
                pct, 100 - pct, ns_per_elem, 1.0 / ns_per_elem);
     }
+
+    /* Store-port hypothesis: 2× vst1q vs 4× vst1_u8 vs 1×vst1q+2×vst1_u8.
+     * If M-series has 1 SIMD store port + 2 scalar AGUs running in
+     * parallel, the mixed variant should run ~2x faster than simd_only. */
+    printf("\n-- store-port topology probe --\n");
+    /* Use the now-restored ~50% bitmap (above; will be reset before flat tests) */
+    srand(42);
+    for (int i = 0; i < (N + 7) / 8; i++) bitmap[i] = (uint8_t)rand();
+
+    t0 = now_sec();
+    bench_partition_simd_only(indices, bitmap, left, right, N, REPS);
+    t1 = now_sec();
+    ns_per_elem = (t1 - t0) / ((double)N * REPS) * 1e9;
+    printf("simd_only   (2× vst1q):       %5.2f ns/elem  (%5.1f GB/s)\n",
+           ns_per_elem, 1.0 / ns_per_elem);
+
+    t0 = now_sec();
+    bench_partition_scalar_only(indices, bitmap, left, right, N, REPS);
+    t1 = now_sec();
+    ns_per_elem = (t1 - t0) / ((double)N * REPS) * 1e9;
+    printf("scalar_only (4× vst1_u8):     %5.2f ns/elem  (%5.1f GB/s)\n",
+           ns_per_elem, 1.0 / ns_per_elem);
+
+    t0 = now_sec();
+    bench_partition_mixed(indices, bitmap, left, right, N, REPS);
+    t1 = now_sec();
+    ns_per_elem = (t1 - t0) / ((double)N * REPS) * 1e9;
+    printf("mixed       (1×vst1q+2×vst1): %5.2f ns/elem  (%5.1f GB/s)\n",
+           ns_per_elem, 1.0 / ns_per_elem);
 
     /* Restore the original random bitmap so the rest of the bench
      * (memset, both_leaves_*, flat_*) sees its expected ~50% input. */
