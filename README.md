@@ -801,18 +801,20 @@ backtraces that contain `decode_node_neon` or
 `pivco_huffman_decode_neon` (excludes the encode-phase setup the
 harness runs before the decode loop).
 
+All five steps are wrapped in
+[`extras/profile_m4.sh`](extras/profile_m4.sh) for a one-line
+re-run:
+
 ```sh
-cmake -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
-cmake --build build --target pivco_huffman_profile_english
-dsymutil ./build/pivco_huffman_profile_english
-xctrace record --template "Time Profiler" --time-limit 12s \
-    --output /tmp/profile.trace \
-    --launch -- ./build/pivco_huffman_profile_english prose_pride
-xctrace export --input /tmp/profile.trace \
-    --xpath '/trace-toc/run/data/table[@schema="time-profile"]' \
-    --output /tmp/time_profile.xml
-# Parse with python (filter to decode-loop, count by leaf frame)
+./extras/profile_m4.sh prose_pride 12   # dist, duration_s
 ```
+
+The script (1) configures+builds RelWithDebInfo, (2) generates the
+`.dSYM`, (3) records an xctrace Time Profiler trace, (4) exports
+the `time-profile` table to XML, (5) runs
+[`extras/profile_xctrace_parse.py`](extras/profile_xctrace_parse.py)
+to filter to decode-loop samples and aggregate by leaf frame.
+Output goes to `results/profile-${HOST}-${DIST}-xctrace-${TS}.txt`.
 
 10 s wall window → 9996 decode-loop samples × 1 ms.  Parsed
 summary:
