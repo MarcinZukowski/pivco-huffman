@@ -374,10 +374,25 @@ that's worth ~0.5 cycles/iter — **25% on the partition hot path**, in
 principle.  But three things eat the win:
 
 1. **One extra TBL per iter** to place the compacted data at lane
-   offset `so_far*2`.  M4 has TBL throughput probably 1/cycle (matching
-   store-port); going from 2 TBL/iter to 3 TBL/iter would re-saturate
-   on TBL instead of stores — net null.  A 4-pipe TBL uarch would help
-   here.
+   offset `so_far*2`.  Initial concern was "TBL throughput is 1/cycle
+   on M4 (matching the store port), so adding TBLs re-saturates."
+   **Wrong, per microbenchmark** — M4 P-core actually runs `vqtbl1q_u8`
+   and `vqtbl2q_u8` at ~4 ops/cycle (16 independent chains, see
+   `bench_tbl1_throughput` in `bench/bench_micro.c`):
+
+   ```
+   vqtbl1q_u8:  3.8 ops/cycle
+   vqtbl2q_u8:  4.0 ops/cycle
+   vqtbl4q_u8:  1.4 ops/cycle  ← multi-source variant is 3x slower
+   vextq_u8:    3.6 ops/cycle  ← different pipe, similar throughput
+   ```
+
+   So adding 2 TBLs/iter costs ~0.5 cycles of TBL bandwidth, not 2.
+   This **reverses the conclusion** — the optimization is viable from
+   a throughput perspective on M4.  Bonus: a `vextq_u8` + `vorrq_u8`
+   alternative to the place-at-offset TBL avoids the TBL pipe entirely
+   (vextq runs on standard SIMD pipes), via a switch on `so_far`
+   in [0, 7] dispatching to 8 vextq immediates.
 2. **Serial dependency through `accum` across iterations** kills the
    ILP that currently lets OoO overlap iter N+1's load/TBL with iter
    N's stores.
@@ -401,12 +416,26 @@ principle.  But three things eat the win:
 
 So the workloads that would benefit most don't go through the kernel
 this would optimise, and the workloads that do go through it have
-unpredictable branches.  Recorded as an idea worth re-examining when
-either the uarch (e.g., higher TBL throughput, masked stores) or the
-representative workload mix shifts.
+unpredictable branches.
+
+**Updated outlook (after TBL throughput probe):** the TBL-throughput
+concern is gone (M4 has 4× the throughput we needed).  The remaining
+risk is the branch-mispredict cost on real-text workloads, but the
+4-iter macro-block dispatch (switch on total popcount over 4 iters,
+which has stdev ≈ 2.8 around mean 16, far more concentrated than
+per-iter popcount) might reduce the mispredict rate enough to be
+viable.
+
+Concrete next step if revisiting: prototype both variants on the
+random-mask probe (`partition mix 50/50`) and `prose_pride`,
+expecting ~25% speedup if it works:
+1. Per-iter coalesce with vextq + vorr (no extra TBL).
+2. 4-iter macro-block dispatch on total popcount.
 
 Run `./build/pivco_partition_skew` for the per-distribution
-skewness histogram (committed alongside this entry).
+skewness histogram, and `./build/bench_micro | grep -E "vqtbl|vextq"`
+for the M4 throughput numbers (see also
+`results/throughput_probes-m4_max-20260426.txt`).
 
 ## AVX-512 improvement: better small-node tail
 

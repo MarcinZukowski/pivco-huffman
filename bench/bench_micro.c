@@ -242,6 +242,121 @@ static void bench_partition_left_full(const uint16_t *src,
     }
 }
 
+/* TBL throughput probes: 16 independent chains per iter, exceeds the
+ * throughput × latency product of any plausible NEON TBL pipeline so
+ * the port throughput shows up directly. */
+__attribute__((noinline))
+static void bench_tbl1_throughput(int reps)
+{
+    static const uint8_t init[16] = {0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15};
+    uint8x16_t tab = vld1q_u8(init);
+    uint8x16_t a0=tab, a1=tab, a2=tab, a3=tab, a4=tab, a5=tab, a6=tab, a7=tab;
+    uint8x16_t a8=tab, a9=tab, aA=tab, aB=tab, aC=tab, aD=tab, aE=tab, aF=tab;
+    for (int r = 0; r < reps; r++) {
+        a0 = vqtbl1q_u8(a0, tab);  a1 = vqtbl1q_u8(a1, tab);
+        a2 = vqtbl1q_u8(a2, tab);  a3 = vqtbl1q_u8(a3, tab);
+        a4 = vqtbl1q_u8(a4, tab);  a5 = vqtbl1q_u8(a5, tab);
+        a6 = vqtbl1q_u8(a6, tab);  a7 = vqtbl1q_u8(a7, tab);
+        a8 = vqtbl1q_u8(a8, tab);  a9 = vqtbl1q_u8(a9, tab);
+        aA = vqtbl1q_u8(aA, tab);  aB = vqtbl1q_u8(aB, tab);
+        aC = vqtbl1q_u8(aC, tab);  aD = vqtbl1q_u8(aD, tab);
+        aE = vqtbl1q_u8(aE, tab);  aF = vqtbl1q_u8(aF, tab);
+    }
+    volatile uint8_t sink8 =
+        vgetq_lane_u8(a0,0) ^ vgetq_lane_u8(a1,0) ^ vgetq_lane_u8(a2,0) ^
+        vgetq_lane_u8(a3,0) ^ vgetq_lane_u8(a4,0) ^ vgetq_lane_u8(a5,0) ^
+        vgetq_lane_u8(a6,0) ^ vgetq_lane_u8(a7,0) ^ vgetq_lane_u8(a8,0) ^
+        vgetq_lane_u8(a9,0) ^ vgetq_lane_u8(aA,0) ^ vgetq_lane_u8(aB,0) ^
+        vgetq_lane_u8(aC,0) ^ vgetq_lane_u8(aD,0) ^ vgetq_lane_u8(aE,0) ^
+        vgetq_lane_u8(aF,0);
+    (void)sink8;
+}
+
+__attribute__((noinline))
+static void bench_tbl2_throughput(int reps)
+{
+    static const uint8_t init[16] = {0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15};
+    uint8x16_t v = vld1q_u8(init);
+    uint8x16x2_t tab = {{ v, v }};
+    uint8x16_t a0=v, a1=v, a2=v, a3=v, a4=v, a5=v, a6=v, a7=v;
+    uint8x16_t a8=v, a9=v, aA=v, aB=v, aC=v, aD=v, aE=v, aF=v;
+    for (int r = 0; r < reps; r++) {
+        a0 = vqtbl2q_u8(tab, a0);  a1 = vqtbl2q_u8(tab, a1);
+        a2 = vqtbl2q_u8(tab, a2);  a3 = vqtbl2q_u8(tab, a3);
+        a4 = vqtbl2q_u8(tab, a4);  a5 = vqtbl2q_u8(tab, a5);
+        a6 = vqtbl2q_u8(tab, a6);  a7 = vqtbl2q_u8(tab, a7);
+        a8 = vqtbl2q_u8(tab, a8);  a9 = vqtbl2q_u8(tab, a9);
+        aA = vqtbl2q_u8(tab, aA);  aB = vqtbl2q_u8(tab, aB);
+        aC = vqtbl2q_u8(tab, aC);  aD = vqtbl2q_u8(tab, aD);
+        aE = vqtbl2q_u8(tab, aE);  aF = vqtbl2q_u8(tab, aF);
+    }
+    volatile uint8_t sink8 =
+        vgetq_lane_u8(a0,0) ^ vgetq_lane_u8(a1,0) ^ vgetq_lane_u8(a2,0) ^
+        vgetq_lane_u8(a3,0) ^ vgetq_lane_u8(a4,0) ^ vgetq_lane_u8(a5,0) ^
+        vgetq_lane_u8(a6,0) ^ vgetq_lane_u8(a7,0) ^ vgetq_lane_u8(a8,0) ^
+        vgetq_lane_u8(a9,0) ^ vgetq_lane_u8(aA,0) ^ vgetq_lane_u8(aB,0) ^
+        vgetq_lane_u8(aC,0) ^ vgetq_lane_u8(aD,0) ^ vgetq_lane_u8(aE,0) ^
+        vgetq_lane_u8(aF,0);
+    (void)sink8;
+}
+
+__attribute__((noinline))
+static void bench_tbl4_throughput(int reps)
+{
+    static const uint8_t init[16] = {0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15};
+    uint8x16_t v = vld1q_u8(init);
+    uint8x16x4_t tab = {{ v, v, v, v }};
+    uint8x16_t a0=v, a1=v, a2=v, a3=v, a4=v, a5=v, a6=v, a7=v;
+    uint8x16_t a8=v, a9=v, aA=v, aB=v, aC=v, aD=v, aE=v, aF=v;
+    for (int r = 0; r < reps; r++) {
+        a0 = vqtbl4q_u8(tab, a0);  a1 = vqtbl4q_u8(tab, a1);
+        a2 = vqtbl4q_u8(tab, a2);  a3 = vqtbl4q_u8(tab, a3);
+        a4 = vqtbl4q_u8(tab, a4);  a5 = vqtbl4q_u8(tab, a5);
+        a6 = vqtbl4q_u8(tab, a6);  a7 = vqtbl4q_u8(tab, a7);
+        a8 = vqtbl4q_u8(tab, a8);  a9 = vqtbl4q_u8(tab, a9);
+        aA = vqtbl4q_u8(tab, aA);  aB = vqtbl4q_u8(tab, aB);
+        aC = vqtbl4q_u8(tab, aC);  aD = vqtbl4q_u8(tab, aD);
+        aE = vqtbl4q_u8(tab, aE);  aF = vqtbl4q_u8(tab, aF);
+    }
+    volatile uint8_t sink8 =
+        vgetq_lane_u8(a0,0) ^ vgetq_lane_u8(a1,0) ^ vgetq_lane_u8(a2,0) ^
+        vgetq_lane_u8(a3,0) ^ vgetq_lane_u8(a4,0) ^ vgetq_lane_u8(a5,0) ^
+        vgetq_lane_u8(a6,0) ^ vgetq_lane_u8(a7,0) ^ vgetq_lane_u8(a8,0) ^
+        vgetq_lane_u8(a9,0) ^ vgetq_lane_u8(aA,0) ^ vgetq_lane_u8(aB,0) ^
+        vgetq_lane_u8(aC,0) ^ vgetq_lane_u8(aD,0) ^ vgetq_lane_u8(aE,0) ^
+        vgetq_lane_u8(aF,0);
+    (void)sink8;
+}
+
+/* vextq_u8 throughput probe — relevant to the no-extra-TBL coalesce
+ * variant.  16 independent chains, each doing one vextq_u8 per iter. */
+__attribute__((noinline))
+static void bench_vext_throughput(int reps)
+{
+    static const uint8_t init[16] = {0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15};
+    uint8x16_t v = vld1q_u8(init);
+    uint8x16_t a0=v, a1=v, a2=v, a3=v, a4=v, a5=v, a6=v, a7=v;
+    uint8x16_t a8=v, a9=v, aA=v, aB=v, aC=v, aD=v, aE=v, aF=v;
+    for (int r = 0; r < reps; r++) {
+        a0 = vextq_u8(a0, v, 4);  a1 = vextq_u8(a1, v, 4);
+        a2 = vextq_u8(a2, v, 4);  a3 = vextq_u8(a3, v, 4);
+        a4 = vextq_u8(a4, v, 4);  a5 = vextq_u8(a5, v, 4);
+        a6 = vextq_u8(a6, v, 4);  a7 = vextq_u8(a7, v, 4);
+        a8 = vextq_u8(a8, v, 4);  a9 = vextq_u8(a9, v, 4);
+        aA = vextq_u8(aA, v, 4);  aB = vextq_u8(aB, v, 4);
+        aC = vextq_u8(aC, v, 4);  aD = vextq_u8(aD, v, 4);
+        aE = vextq_u8(aE, v, 4);  aF = vextq_u8(aF, v, 4);
+    }
+    volatile uint8_t sink8 =
+        vgetq_lane_u8(a0,0) ^ vgetq_lane_u8(a1,0) ^ vgetq_lane_u8(a2,0) ^
+        vgetq_lane_u8(a3,0) ^ vgetq_lane_u8(a4,0) ^ vgetq_lane_u8(a5,0) ^
+        vgetq_lane_u8(a6,0) ^ vgetq_lane_u8(a7,0) ^ vgetq_lane_u8(a8,0) ^
+        vgetq_lane_u8(a9,0) ^ vgetq_lane_u8(aA,0) ^ vgetq_lane_u8(aB,0) ^
+        vgetq_lane_u8(aC,0) ^ vgetq_lane_u8(aD,0) ^ vgetq_lane_u8(aE,0) ^
+        vgetq_lane_u8(aF,0);
+    (void)sink8;
+}
+
 /* Helper: fill a bitmap with `pct_full` percent of bytes = 0xFF
  * (popcount 8 → advance 8, no overlap) and the rest = 0x1F
  * (popcount 5 → advance 5, 6-byte overlap on right + 10-byte
@@ -1360,6 +1475,30 @@ int main(void)
         printf("partition mix %3d%%/0xFF + %2d%%/0x1F:  "
                "%5.2f ns/elem  (%5.1f GB/s)\n",
                pct, 100 - pct, ns_per_elem, 1.0 / ns_per_elem);
+    }
+
+    /* TBL & vext throughput probes — 16 independent chains per iter. */
+    {
+        const int probe_reps = (int)((double)REPS * 8);   /* ≈ equal total work */
+        printf("\n-- TBL/vext throughput probes (16 indep chains) --\n");
+
+        #define PROBE(label_, fn_)                                                  \
+            do {                                                                    \
+                t0 = now_sec();                                                     \
+                fn_(probe_reps);                                                    \
+                t1 = now_sec();                                                     \
+                double ops = 16.0 * probe_reps;                                     \
+                double ns_op = (t1 - t0) / ops * 1e9;                               \
+                double cyc_op = ns_op * 4.4;                                        \
+                printf("%-22s %5.3f ns/op  (%.2f cyc/op @4.4GHz, %.2f ops/cyc)\n",  \
+                       label_, ns_op, cyc_op, 1.0 / cyc_op);                        \
+            } while (0)
+
+        PROBE("vqtbl1q_u8:",      bench_tbl1_throughput);
+        PROBE("vqtbl2q_u8:",      bench_tbl2_throughput);
+        PROBE("vqtbl4q_u8:",      bench_tbl4_throughput);
+        PROBE("vextq_u8:",        bench_vext_throughput);
+        #undef PROBE
     }
 
     /* Store-port hypothesis: 2× vst1q vs 4× vst1_u8 vs 1×vst1q+2×vst1_u8.
