@@ -134,6 +134,12 @@ if(BUILD_BENCH)
     )
     target_link_libraries(pivco_dist_stats pivco_huffman m)
 
+    add_executable(pivco_partition_skew
+        extras/bench_partition_skew.c
+        bench/bench_distributions.c
+    )
+    target_link_libraries(pivco_partition_skew pivco_huffman m)
+
     add_executable(pivco_bench_multicore
         extras/bench_multicore.c
         bench/bench_distributions.c

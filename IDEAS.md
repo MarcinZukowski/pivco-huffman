@@ -343,6 +343,71 @@ do.
 Recorded here so the next person profiling the partition store cost
 doesn't repeat the experiment.
 
+## Coalesce small-side partition stores into a register accumulator
+
+`partition_8` writes a full 16-byte `vst1q_u8` to *both* sides every
+iteration even when the popcount would have only filled `cnt` of the
+8 lanes; subsequent iterations overwrite the unused bytes.  This
+*is* the M4 store-port saturated at 1 vst1q/cycle (per the
+"store-port topology probe" entry above), so the only way to issue
+fewer stores is to accumulate variable-sized contributions into a
+register and flush only when a full 16-byte chunk is ready.
+
+Sketch:
+
+```c
+/* per-iter, after computing compacted left-side data 'l_v' (cnt valid lanes) */
+uint8x16_t placed = vqtbl1q_u8(l_v, place_at_offset[so_far]);  /* shift to lanes [so_far*2..] */
+accum = vorrq_u8(accum, placed);
+so_far += cnt;
+if (so_far >= 8) {
+    vst1q_u8(left_out + n_left, accum);
+    n_left += 8;
+    /* shift remainder, set up next accum */
+    so_far -= 8;
+    accum = ...;
+}
+```
+
+If we save 0.5 left-stores/iter (avg popcount 4, flush every ~2 iters)
+that's worth ~0.5 cycles/iter — **25% on the partition hot path**, in
+principle.  But three things eat the win:
+
+1. **One extra TBL per iter** to place the compacted data at lane
+   offset `so_far*2`.  M4 has TBL throughput probably 1/cycle (matching
+   store-port); going from 2 TBL/iter to 3 TBL/iter would re-saturate
+   on TBL instead of stores — net null.  A 4-pipe TBL uarch would help
+   here.
+2. **Serial dependency through `accum` across iterations** kills the
+   ILP that currently lets OoO overlap iter N+1's load/TBL with iter
+   N's stores.
+3. **The flush branch is unpredictable on real workloads.** The
+   `extras/bench_partition_skew.c` analysis (added with this entry)
+   shows the per-distribution skewness histogram of internal
+   partition nodes:
+
+   - **Real prose / HTML / JSON / source / log / chinese**: mean
+     smaller-side fraction ≈ **46 %** (close to perfectly balanced).
+     Branch on "so_far + cnt ≥ 8" is essentially i.i.d. coin flips →
+     ~50% mispredict on a 1-bit predictor → ~6 cycles penalty per
+     branch → **~3 cycles overhead per iter** vs the 0.5-cycle
+     potential gain.  Net loss of ~2.5 cycles/iter.
+   - **`proba80` / `two_sym_90/10`**: mean skew 22.5 % / 12.5 %.
+     Branch is highly predictable — coalescing *would* win here.  But
+     these distributions already win 3.4× / 5× via prefill-memset +
+     half-partition leaf-fusion, so marginal upside is small.
+   - **`uniform` / `sparse_*` / `flat_M*` / `proba50` / `two_sym_eq`**:
+     root-flat → never invoke `partition_8` → not relevant.
+
+So the workloads that would benefit most don't go through the kernel
+this would optimise, and the workloads that do go through it have
+unpredictable branches.  Recorded as an idea worth re-examining when
+either the uarch (e.g., higher TBL throughput, masked stores) or the
+representative workload mix shifts.
+
+Run `./build/pivco_partition_skew` for the per-distribution
+skewness histogram (committed alongside this entry).
+
 ## AVX-512 improvement: better small-node tail
 
 `src/pivco_huffman_avx512.c` does a strong 32-wide partition using

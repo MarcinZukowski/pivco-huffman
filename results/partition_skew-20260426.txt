@@ -1,0 +1,42 @@
+Partition-node skewness histogram, weighted by element count.
+Each cell = % of decoded elements that pass through an internal
+node whose smaller-side fraction (min(L,R) / total) falls in that bin.
+
+distribution    |  0–5  5–10 10–15 15–20 20–25 25–30 30–35 35–40 40–45 45–50    .   | mean
+                |  (one-sided)  ←──── more balanced ────→  (50/50)        | skew
+----------------+-----------------------------------------------------------+------
+proba80         |    .     .     .     .   100   0.2     .     .     .     .     . | 22.5
+proba50         |    .     .     .     .     .     .     .     .     .     .   100 | 52.5
+proba14         |    .     .     .     .     .     .     .   0.3    23    76   0.5 | 46.3
+proba02         |    .     .     .     .     .     .     .     .    10    75    15 | 47.7
+bell_s10        |    .   0.1     .   0.2     .   0.2     .   0.4    23    74   1.6 | 46.2
+bell_s30        |    .     .     .     .     .     .     .   8.5    11    73   8.1 | 46.5
+bell_s80        |    .     .     .     .     .     .     .     .    30    70     . | 46.0
+uniform         |    .     .     .     .     .     .     .     .     .     .   100 | 52.5
+english         |    .     .     .     .     .     .     .   0.1    24    75   0.8 | 46.3
+zipfian         |    .     .     .     .     .     .     .   2.2    26    70   1.7 | 46.0
+sparse_4        |    .     .     .     .     .     .     .     .     .     .   100 | 52.5
+sparse_16       |    .     .     .     .     .     .     .     .     .     .   100 | 52.5
+geometric       |  1.5   0.2     .     .   0.2     .   0.2     .     .    98     . | 46.7
+two_sym_eq      |    .     .     .     .     .     .     .     .     .     .   100 | 52.5
+two_sym_90/10   |    .     .   100     .     .     .     .     .     .     .     . | 12.5
+flat_M3         |    .     .     .     .     .     .     .     .     .     .   100 | 52.5
+flat_M5         |    .     .     .     .     .     .     .     .     .     .   100 | 52.5
+flat_M6         |    .     .     .     .     .     .     .     .     .     .   100 | 52.5
+flat_M7         |    .     .     .     .     .     .     .     .     .     .   100 | 52.5
+html_wiki       |    .     .     .     .     .     .     .   4.5    15    81     . | 46.3
+prose_pride     |    .     .     .     .     .     .   0.1   9.4    11    79   0.3 | 46.0
+image_jpeg      |    .     .     .     .     .     .   0.1     .    29    69   1.1 | 46.1
+json_api        |    .     .     .     .     .     .     .     .    24    76     . | 46.3
+source_c        |    .     .     .     .     .     .     .   0.6    19    81   0.1 | 46.5
+log_apache      |    .     .     .     .     .     .     .   0.3    28    71   0.8 | 46.1
+dna_fasta       |  0.6    11     .     .     .     .     .     .     .    88     . | 42.8
+csv_numeric     |    .     .     .     .     .     .     .    16   1.9    82   0.2 | 45.8
+gzip_random     |    .     .     .     .     .     .     .     .     .    92   8.1 | 47.9
+chinese_text    |    .     .     .     .     .     .   0.1   2.3    19    78   0.4 | 46.3
+
+Legend:
+  bins are 5% wide, covering smaller-side fractions 0–50%
+  '.' = <0.05%   mean skew = element-weighted average min(L,R)/total
+  high mean (closer to 50%) → balanced partitions, branch-on-popcount unpredictable
+  low mean (closer to 0%)  → one-sided partitions, branch-on-popcount predictable
