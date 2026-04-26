@@ -53,6 +53,15 @@ static double now_sec(void)
     return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
 }
 
+/* ---- Memset (universal reference floor) ---- */
+
+__attribute__((noinline))
+static void bench_memset(uint8_t *symbols, int n, uint8_t sym, int reps)
+{
+    for (int r = 0; r < reps; r++)
+        memset(symbols, sym, (size_t)n);
+}
+
 /* ---- Scatter: write one constant byte to n random positions ---- */
 
 __attribute__((noinline)) static void bench_scatter_scalar(uint8_t *symbols, const uint16_t *indices,
@@ -206,14 +215,6 @@ static void bench_partition_root_half_neon(const uint8_t *bitmap,
             n_right += compress_popcnt[mask];
         }
     }
-}
-
-/* ---- Memset ---- */
-
-__attribute__((noinline)) static void bench_memset(uint8_t *symbols, int n, uint8_t sym, int reps)
-{
-    for (int r = 0; r < reps; r++)
-        memset(symbols, sym, (size_t)n);
 }
 
 /* ---- Both-leaves sequential vst1 ---- */
@@ -539,6 +540,144 @@ static void bench_partition_avx512(const uint16_t *src,
     }
 }
 
+/* Identity-gen variant: no index load, generate base + lane offset on the fly. */
+__attribute__((noinline))
+static void bench_partition_root_avx512(const uint32_t *masks32,
+                                         uint16_t *left, uint16_t *right,
+                                         int n, int reps)
+{
+    static const int16_t lane_off_arr[32] __attribute__((aligned(64))) = {
+         0, 1, 2, 3, 4, 5, 6, 7, 8, 9,10,11,12,13,14,15,
+        16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31};
+    const __m512i lane_off = _mm512_loadu_si512((const __m512i *)lane_off_arr);
+    for (int r = 0; r < reps; r++) {
+        int n_left = 0, n_right = 0;
+        for (int j = 0; j + 32 <= n; j += 32) {
+            __m512i data = _mm512_add_epi16(_mm512_set1_epi16((short)j), lane_off);
+            __mmask32 mask = (__mmask32)masks32[j >> 5];
+            __m512i r_v = _mm512_maskz_compress_epi16(mask, data);
+            __m512i l_v = _mm512_maskz_compress_epi16(~mask, data);
+            int nr = _mm_popcnt_u32((uint32_t)mask);
+            _mm512_storeu_si512((__m512i *)(right + n_right), r_v);
+            _mm512_storeu_si512((__m512i *)(left  + n_left ), l_v);
+            n_right += nr;
+            n_left  += 32 - nr;
+        }
+    }
+}
+
+/* Half-tree variant: only emit the right side. */
+__attribute__((noinline))
+static void bench_partition_half_avx512(const uint16_t *src,
+                                         const uint32_t *masks32,
+                                         uint16_t *right,
+                                         int n, int reps)
+{
+    for (int r = 0; r < reps; r++) {
+        int n_right = 0;
+        for (int j = 0; j + 32 <= n; j += 32) {
+            __m512i data = _mm512_loadu_si512((const __m512i *)(src + j));
+            __mmask32 mask = (__mmask32)masks32[j >> 5];
+            __m512i r_v = _mm512_maskz_compress_epi16(mask, data);
+            int nr = _mm_popcnt_u32((uint32_t)mask);
+            _mm512_storeu_si512((__m512i *)(right + n_right), r_v);
+            n_right += nr;
+        }
+    }
+}
+
+__attribute__((noinline))
+static void bench_partition_root_half_avx512(const uint32_t *masks32,
+                                              uint16_t *right,
+                                              int n, int reps)
+{
+    static const int16_t lane_off_arr[32] __attribute__((aligned(64))) = {
+         0, 1, 2, 3, 4, 5, 6, 7, 8, 9,10,11,12,13,14,15,
+        16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31};
+    const __m512i lane_off = _mm512_loadu_si512((const __m512i *)lane_off_arr);
+    for (int r = 0; r < reps; r++) {
+        int n_right = 0;
+        for (int j = 0; j + 32 <= n; j += 32) {
+            __m512i data = _mm512_add_epi16(_mm512_set1_epi16((short)j), lane_off);
+            __mmask32 mask = (__mmask32)masks32[j >> 5];
+            __m512i r_v = _mm512_maskz_compress_epi16(mask, data);
+            int nr = _mm_popcnt_u32((uint32_t)mask);
+            _mm512_storeu_si512((__m512i *)(right + n_right), r_v);
+            n_right += nr;
+        }
+    }
+}
+
+/* Both-leaves: 32 bits of bitmap → 32-byte mask-blend → sequential store. */
+__attribute__((noinline))
+static void bench_both_leaves_vst1_avx512(uint8_t *symbols,
+                                           const uint32_t *masks32,
+                                           uint8_t sym0, uint8_t sym1,
+                                           int n, int reps)
+{
+    __m256i s0 = _mm256_set1_epi8((char)sym0);
+    __m256i s1 = _mm256_set1_epi8((char)sym1);
+    for (int r = 0; r < reps; r++) {
+        for (int j = 0; j + 32 <= n; j += 32) {
+            __mmask32 m = (__mmask32)masks32[j >> 5];
+            __m256i v = _mm256_mask_blend_epi8(m, s0, s1);
+            _mm256_storeu_si256((__m256i *)(symbols + j), v);
+        }
+    }
+}
+
+/* Both-leaves indexed: 32-byte blend then 32 indexed lane-byte stores. */
+__attribute__((noinline))
+static void bench_both_leaves_scatter_avx512(uint8_t *symbols,
+                                              const uint16_t *indices,
+                                              const uint32_t *masks32,
+                                              uint8_t sym0, uint8_t sym1,
+                                              int n, int reps)
+{
+    __m256i s0 = _mm256_set1_epi8((char)sym0);
+    __m256i s1 = _mm256_set1_epi8((char)sym1);
+    for (int r = 0; r < reps; r++) {
+        for (int j = 0; j + 32 <= n; j += 32) {
+            __mmask32 m = (__mmask32)masks32[j >> 5];
+            __m256i v = _mm256_mask_blend_epi8(m, s0, s1);
+            __m128i lo = _mm256_castsi256_si128(v);
+            __m128i hi = _mm256_extracti128_si256(v, 1);
+            symbols[indices[j +  0]] = (uint8_t)_mm_extract_epi8(lo,  0);
+            symbols[indices[j +  1]] = (uint8_t)_mm_extract_epi8(lo,  1);
+            symbols[indices[j +  2]] = (uint8_t)_mm_extract_epi8(lo,  2);
+            symbols[indices[j +  3]] = (uint8_t)_mm_extract_epi8(lo,  3);
+            symbols[indices[j +  4]] = (uint8_t)_mm_extract_epi8(lo,  4);
+            symbols[indices[j +  5]] = (uint8_t)_mm_extract_epi8(lo,  5);
+            symbols[indices[j +  6]] = (uint8_t)_mm_extract_epi8(lo,  6);
+            symbols[indices[j +  7]] = (uint8_t)_mm_extract_epi8(lo,  7);
+            symbols[indices[j +  8]] = (uint8_t)_mm_extract_epi8(lo,  8);
+            symbols[indices[j +  9]] = (uint8_t)_mm_extract_epi8(lo,  9);
+            symbols[indices[j + 10]] = (uint8_t)_mm_extract_epi8(lo, 10);
+            symbols[indices[j + 11]] = (uint8_t)_mm_extract_epi8(lo, 11);
+            symbols[indices[j + 12]] = (uint8_t)_mm_extract_epi8(lo, 12);
+            symbols[indices[j + 13]] = (uint8_t)_mm_extract_epi8(lo, 13);
+            symbols[indices[j + 14]] = (uint8_t)_mm_extract_epi8(lo, 14);
+            symbols[indices[j + 15]] = (uint8_t)_mm_extract_epi8(lo, 15);
+            symbols[indices[j + 16]] = (uint8_t)_mm_extract_epi8(hi,  0);
+            symbols[indices[j + 17]] = (uint8_t)_mm_extract_epi8(hi,  1);
+            symbols[indices[j + 18]] = (uint8_t)_mm_extract_epi8(hi,  2);
+            symbols[indices[j + 19]] = (uint8_t)_mm_extract_epi8(hi,  3);
+            symbols[indices[j + 20]] = (uint8_t)_mm_extract_epi8(hi,  4);
+            symbols[indices[j + 21]] = (uint8_t)_mm_extract_epi8(hi,  5);
+            symbols[indices[j + 22]] = (uint8_t)_mm_extract_epi8(hi,  6);
+            symbols[indices[j + 23]] = (uint8_t)_mm_extract_epi8(hi,  7);
+            symbols[indices[j + 24]] = (uint8_t)_mm_extract_epi8(hi,  8);
+            symbols[indices[j + 25]] = (uint8_t)_mm_extract_epi8(hi,  9);
+            symbols[indices[j + 26]] = (uint8_t)_mm_extract_epi8(hi, 10);
+            symbols[indices[j + 27]] = (uint8_t)_mm_extract_epi8(hi, 11);
+            symbols[indices[j + 28]] = (uint8_t)_mm_extract_epi8(hi, 12);
+            symbols[indices[j + 29]] = (uint8_t)_mm_extract_epi8(hi, 13);
+            symbols[indices[j + 30]] = (uint8_t)_mm_extract_epi8(hi, 14);
+            symbols[indices[j + 31]] = (uint8_t)_mm_extract_epi8(hi, 15);
+        }
+    }
+}
+
 /* ---- D=2 (pshufb on 4-byte c2s) ---- */
 __attribute__((noinline))
 static void bench_flat_direct_d2_avx512(uint8_t *out, const uint8_t *bm,
@@ -811,6 +950,116 @@ static void bench_partition_sse(const uint16_t *src, const uint8_t *bitmap,
     }
 }
 
+__attribute__((noinline))
+static void bench_partition_root_sse(const uint8_t *bitmap,
+                                      uint16_t *left, uint16_t *right,
+                                      int n, int reps)
+{
+    const __m128i lane_off = _mm_setr_epi16(0, 1, 2, 3, 4, 5, 6, 7);
+    for (int r = 0; r < reps; r++) {
+        int n_left = 0, n_right = 0;
+        for (int j = 0; j + 8 <= n; j += 8) {
+            __m128i data = _mm_add_epi16(_mm_set1_epi16((short)j), lane_off);
+            uint8_t mask = bitmap[j >> 3];
+            const uint8_t *tab = compress_tab_sse[mask];
+            __m128i shuf_r = _mm_load_si128((const __m128i *)tab);
+            __m128i shuf_l = _mm_load_si128((const __m128i *)(tab + 16));
+            __m128i r_v = _mm_shuffle_epi8(data, shuf_r);
+            __m128i l_v = _mm_shuffle_epi8(data, shuf_l);
+            int nr = compress_popcnt_sse[mask];
+            _mm_storeu_si128((__m128i *)(right + n_right), r_v);
+            _mm_storeu_si128((__m128i *)(left + n_left), l_v);
+            n_right += nr;
+            n_left  += 8 - nr;
+        }
+    }
+}
+
+__attribute__((noinline))
+static void bench_partition_half_sse(const uint16_t *src, const uint8_t *bitmap,
+                                      uint16_t *right, int n, int reps)
+{
+    for (int r = 0; r < reps; r++) {
+        int n_right = 0;
+        for (int j = 0; j + 8 <= n; j += 8) {
+            __m128i data = _mm_loadu_si128((const __m128i *)(src + j));
+            uint8_t mask = bitmap[j >> 3];
+            __m128i shuf_r = _mm_load_si128((const __m128i *)compress_tab_sse[mask]);
+            __m128i r_v = _mm_shuffle_epi8(data, shuf_r);
+            _mm_storeu_si128((__m128i *)(right + n_right), r_v);
+            n_right += compress_popcnt_sse[mask];
+        }
+    }
+}
+
+__attribute__((noinline))
+static void bench_partition_root_half_sse(const uint8_t *bitmap,
+                                           uint16_t *right, int n, int reps)
+{
+    const __m128i lane_off = _mm_setr_epi16(0, 1, 2, 3, 4, 5, 6, 7);
+    for (int r = 0; r < reps; r++) {
+        int n_right = 0;
+        for (int j = 0; j + 8 <= n; j += 8) {
+            __m128i data = _mm_add_epi16(_mm_set1_epi16((short)j), lane_off);
+            uint8_t mask = bitmap[j >> 3];
+            __m128i shuf_r = _mm_load_si128((const __m128i *)compress_tab_sse[mask]);
+            __m128i r_v = _mm_shuffle_epi8(data, shuf_r);
+            _mm_storeu_si128((__m128i *)(right + n_right), r_v);
+            n_right += compress_popcnt_sse[mask];
+        }
+    }
+}
+
+/* Both-leaves: 8 bits of mask → 8-byte mask-blend → 8-byte sequential store. */
+__attribute__((noinline))
+static void bench_both_leaves_vst1_sse(uint8_t *symbols, const uint8_t *bitmap,
+                                        uint8_t sym0, uint8_t sym1,
+                                        int n, int reps)
+{
+    __m128i s0 = _mm_set1_epi8((char)sym0);
+    __m128i s1 = _mm_set1_epi8((char)sym1);
+    const __m128i bpt = _mm_setr_epi8(1, 2, 4, 8, 16, 32, 64, (char)128,
+                                       0, 0, 0, 0, 0, 0, 0, 0);
+    for (int r = 0; r < reps; r++) {
+        for (int j = 0; j + 8 <= n; j += 8) {
+            __m128i bcast = _mm_set1_epi8((char)bitmap[j >> 3]);
+            __m128i bits  = _mm_and_si128(bcast, bpt);
+            __m128i sel   = _mm_cmpeq_epi8(bits, bpt);  /* 0xFF where set */
+            __m128i v     = _mm_blendv_epi8(s0, s1, sel);
+            _mm_storel_epi64((__m128i *)(symbols + j), v);
+        }
+    }
+}
+
+__attribute__((noinline))
+static void bench_both_leaves_scatter_sse(uint8_t *symbols,
+                                           const uint16_t *indices,
+                                           const uint8_t *bitmap,
+                                           uint8_t sym0, uint8_t sym1,
+                                           int n, int reps)
+{
+    __m128i s0 = _mm_set1_epi8((char)sym0);
+    __m128i s1 = _mm_set1_epi8((char)sym1);
+    const __m128i bpt = _mm_setr_epi8(1, 2, 4, 8, 16, 32, 64, (char)128,
+                                       0, 0, 0, 0, 0, 0, 0, 0);
+    for (int r = 0; r < reps; r++) {
+        for (int j = 0; j + 8 <= n; j += 8) {
+            __m128i bcast = _mm_set1_epi8((char)bitmap[j >> 3]);
+            __m128i bits  = _mm_and_si128(bcast, bpt);
+            __m128i sel   = _mm_cmpeq_epi8(bits, bpt);
+            __m128i v     = _mm_blendv_epi8(s0, s1, sel);
+            symbols[indices[j + 0]] = (uint8_t)_mm_extract_epi8(v, 0);
+            symbols[indices[j + 1]] = (uint8_t)_mm_extract_epi8(v, 1);
+            symbols[indices[j + 2]] = (uint8_t)_mm_extract_epi8(v, 2);
+            symbols[indices[j + 3]] = (uint8_t)_mm_extract_epi8(v, 3);
+            symbols[indices[j + 4]] = (uint8_t)_mm_extract_epi8(v, 4);
+            symbols[indices[j + 5]] = (uint8_t)_mm_extract_epi8(v, 5);
+            symbols[indices[j + 6]] = (uint8_t)_mm_extract_epi8(v, 6);
+            symbols[indices[j + 7]] = (uint8_t)_mm_extract_epi8(v, 7);
+        }
+    }
+}
+
 /* D=4 only (others fall through to scalar in production). */
 __attribute__((noinline))
 static void bench_flat_direct_d4_sse(uint8_t *out, const uint8_t *bm,
@@ -993,12 +1242,56 @@ int main(void)
     /* (scatter floor: see scatter_scalar row at end) */
 
     t0 = now_sec();
+    bench_memset(symbols, N, 0x42, REPS);
+    t1 = now_sec();
+    ns_per_elem = (t1 - t0) / ((double)N * REPS) * 1e9;
+    printf("%-30s %5.2f ns/elem  (%5.1f GB/s)\n",
+           "memset:", ns_per_elem, 1.0 / ns_per_elem);
+
+    t0 = now_sec();
     bench_partition_avx512(indices, (const uint32_t *)bitmap,
                             left, right, N, REPS);
     t1 = now_sec();
     ns_per_elem = (t1 - t0) / ((double)N * REPS) * 1e9;
     printf("%-30s %5.2f ns/elem  (%5.1f GB/s)\n",
            "partition_avx512 (vpcompressw):", ns_per_elem, 1.0 / ns_per_elem);
+
+    t0 = now_sec();
+    bench_partition_root_avx512((const uint32_t *)bitmap, left, right, N, REPS);
+    t1 = now_sec();
+    ns_per_elem = (t1 - t0) / ((double)N * REPS) * 1e9;
+    printf("%-30s %5.2f ns/elem  (%5.1f GB/s)\n",
+           "partition_root (gen+compress):", ns_per_elem, 1.0 / ns_per_elem);
+
+    t0 = now_sec();
+    bench_partition_half_avx512(indices, (const uint32_t *)bitmap, right, N, REPS);
+    t1 = now_sec();
+    ns_per_elem = (t1 - t0) / ((double)N * REPS) * 1e9;
+    printf("%-30s %5.2f ns/elem  (%5.1f GB/s)\n",
+           "partition_half (load+1):", ns_per_elem, 1.0 / ns_per_elem);
+
+    t0 = now_sec();
+    bench_partition_root_half_avx512((const uint32_t *)bitmap, right, N, REPS);
+    t1 = now_sec();
+    ns_per_elem = (t1 - t0) / ((double)N * REPS) * 1e9;
+    printf("%-30s %5.2f ns/elem  (%5.1f GB/s)\n",
+           "partition_root_half (gen+1):", ns_per_elem, 1.0 / ns_per_elem);
+
+    t0 = now_sec();
+    bench_both_leaves_vst1_avx512(symbols, (const uint32_t *)bitmap,
+                                   0x41, 0x42, N, REPS);
+    t1 = now_sec(); sink = symbols[0];
+    ns_per_elem = (t1 - t0) / ((double)N * REPS) * 1e9;
+    printf("%-30s %5.2f ns/elem  (%5.1f GB/s)\n",
+           "both_leaves_vst1 (seq):", ns_per_elem, 1.0 / ns_per_elem);
+
+    t0 = now_sec();
+    bench_both_leaves_scatter_avx512(symbols, indices, (const uint32_t *)bitmap,
+                                      0x41, 0x42, N, REPS);
+    t1 = now_sec(); sink = symbols[0];
+    ns_per_elem = (t1 - t0) / ((double)N * REPS) * 1e9;
+    printf("%-30s %5.2f ns/elem  (%5.1f GB/s)\n",
+           "both_leaves_scatter (idx):", ns_per_elem, 1.0 / ns_per_elem);
 
     printf("\n-- flat-subtree decode (spread + TBL + store), AVX-512 --\n");
 #define BENCH_FLAT_X86(label_, fn_)                                          \
@@ -1039,6 +1332,13 @@ int main(void)
     init_compress_table_sse();
 
     t0 = now_sec();
+    bench_memset(symbols, N, 0x42, REPS);
+    t1 = now_sec();
+    ns_per_elem = (t1 - t0) / ((double)N * REPS) * 1e9;
+    printf("%-30s %5.2f ns/elem  (%5.1f GB/s)\n",
+           "memset:", ns_per_elem, 1.0 / ns_per_elem);
+
+    t0 = now_sec();
     bench_scatter_sse(symbols, indices, N, 0x42, REPS);
     t1 = now_sec(); sink = symbols[0];
     ns_per_elem = (t1 - t0) / ((double)N * REPS) * 1e9;
@@ -1051,6 +1351,41 @@ int main(void)
     ns_per_elem = (t1 - t0) / ((double)N * REPS) * 1e9;
     printf("%-30s %5.2f ns/elem  (%5.1f GB/s)\n",
            "partition_sse (pshufb):", ns_per_elem, 1.0 / ns_per_elem);
+
+    t0 = now_sec();
+    bench_partition_root_sse(bitmap, left, right, N, REPS);
+    t1 = now_sec();
+    ns_per_elem = (t1 - t0) / ((double)N * REPS) * 1e9;
+    printf("%-30s %5.2f ns/elem  (%5.1f GB/s)\n",
+           "partition_root (gen+pshufb):", ns_per_elem, 1.0 / ns_per_elem);
+
+    t0 = now_sec();
+    bench_partition_half_sse(indices, bitmap, right, N, REPS);
+    t1 = now_sec();
+    ns_per_elem = (t1 - t0) / ((double)N * REPS) * 1e9;
+    printf("%-30s %5.2f ns/elem  (%5.1f GB/s)\n",
+           "partition_half (load+1):", ns_per_elem, 1.0 / ns_per_elem);
+
+    t0 = now_sec();
+    bench_partition_root_half_sse(bitmap, right, N, REPS);
+    t1 = now_sec();
+    ns_per_elem = (t1 - t0) / ((double)N * REPS) * 1e9;
+    printf("%-30s %5.2f ns/elem  (%5.1f GB/s)\n",
+           "partition_root_half (gen+1):", ns_per_elem, 1.0 / ns_per_elem);
+
+    t0 = now_sec();
+    bench_both_leaves_vst1_sse(symbols, bitmap, 0x41, 0x42, N, REPS);
+    t1 = now_sec(); sink = symbols[0];
+    ns_per_elem = (t1 - t0) / ((double)N * REPS) * 1e9;
+    printf("%-30s %5.2f ns/elem  (%5.1f GB/s)\n",
+           "both_leaves_vst1 (seq):", ns_per_elem, 1.0 / ns_per_elem);
+
+    t0 = now_sec();
+    bench_both_leaves_scatter_sse(symbols, indices, bitmap, 0x41, 0x42, N, REPS);
+    t1 = now_sec(); sink = symbols[0];
+    ns_per_elem = (t1 - t0) / ((double)N * REPS) * 1e9;
+    printf("%-30s %5.2f ns/elem  (%5.1f GB/s)\n",
+           "both_leaves_scatter (idx):", ns_per_elem, 1.0 / ns_per_elem);
 
     printf("\n-- flat-subtree decode (D=4 only on pure SSE4.1) --\n");
     t0 = now_sec();
