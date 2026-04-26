@@ -343,99 +343,43 @@ do.
 Recorded here so the next person profiling the partition store cost
 doesn't repeat the experiment.
 
-## Coalesce small-side partition stores into a register accumulator
+## ~~Coalesce small-side partition stores into a register accumulator~~ — tried, lost on M4
 
-`partition_8` writes a full 16-byte `vst1q_u8` to *both* sides every
-iteration even when the popcount would have only filled `cnt` of the
-8 lanes; subsequent iterations overwrite the unused bytes.  This
-*is* the M4 store-port saturated at 1 vst1q/cycle (per the
-"store-port topology probe" entry above), so the only way to issue
-fewer stores is to accumulate variable-sized contributions into a
-register and flush only when a full 16-byte chunk is ready.
+`partition_8` writes a full 16-byte `vst1q_u8` to both sides every
+iter even when the popcount fills only `cnt` of the 8 lanes.  The
+natural follow-up to the store-port saturation finding was:
+accumulate variable-sized contributions into a register and flush
+only when a full 16-byte chunk is ready, halving the store rate.
 
-Sketch:
+Three variants tested ([extras/bench_coalesce.c](extras/bench_coalesce.c),
+full investigation in [COALESCE.md](COALESCE.md)):
 
-```c
-/* per-iter, after computing compacted left-side data 'l_v' (cnt valid lanes) */
-uint8x16_t placed = vqtbl1q_u8(l_v, place_at_offset[so_far]);  /* shift to lanes [so_far*2..] */
-accum = vorrq_u8(accum, placed);
-so_far += cnt;
-if (so_far >= 8) {
-    vst1q_u8(left_out + n_left, accum);
-    n_left += 8;
-    /* shift remainder, set up next accum */
-    so_far -= 8;
-    accum = ...;
-}
-```
+| Variant | M4 random-mask | vs baseline |
+|---|---:|---:|
+| baseline (2× vst1q per iter) | 12.5 GB/s | 1.00× |
+| coalesce_vext (switch on so_far) | 3.8 GB/s | 0.30× |
+| coalesce_tbl (runtime shuf) | 7.6 GB/s | 0.55× |
+| coalesce_macro (4-iter lookahead) | 9.6 GB/s | 0.66× |
 
-If we save 0.5 left-stores/iter (avg popcount 4, flush every ~2 iters)
-that's worth ~0.5 cycles/iter — **25% on the partition hot path**, in
-principle.  But three things eat the win:
+Each variant ruled out one suspected failure mode and exposed the
+next: indirect-branch mispredict (variant 1) → cross-iter dep chain
+(variant 2) → SIMD-throughput-bound place-shift cost (variant 3).
+The 4-iter macro-block has none of those problems, but the SIMD
+work to enable coalescing (~2.5 cycles/iter of place TBLs +
+shuf-vector ALU) exceeds the saved store cycle (1 cycle/iter on M4's
+1-store/cycle port).  Net **−1.3 cycles/iter** vs baseline.
 
-1. **One extra TBL per iter** to place the compacted data at lane
-   offset `so_far*2`.  Initial concern was "TBL throughput is 1/cycle
-   on M4 (matching the store port), so adding TBLs re-saturates."
-   **Wrong, per microbenchmark** — M4 P-core actually runs `vqtbl1q_u8`
-   and `vqtbl2q_u8` at ~4 ops/cycle (16 independent chains, see
-   `bench_tbl1_throughput` in `bench/bench_micro.c`):
+This isn't a clever-coding problem — it's the M4's resource balance.
+The 4 SIMD-ops/cycle to 1 store/cycle ratio means the original
+kernel is already at a Pareto-optimal point: any non-trivial SIMD
+work added to enable store reduction immediately re-balances the
+bottleneck.
 
-   ```
-   vqtbl1q_u8:  3.8 ops/cycle
-   vqtbl2q_u8:  4.0 ops/cycle
-   vqtbl4q_u8:  1.4 ops/cycle  ← multi-source variant is 3x slower
-   vextq_u8:    3.6 ops/cycle  ← different pipe, similar throughput
-   ```
-
-   So adding 2 TBLs/iter costs ~0.5 cycles of TBL bandwidth, not 2.
-   This **reverses the conclusion** — the optimization is viable from
-   a throughput perspective on M4.  Bonus: a `vextq_u8` + `vorrq_u8`
-   alternative to the place-at-offset TBL avoids the TBL pipe entirely
-   (vextq runs on standard SIMD pipes), via a switch on `so_far`
-   in [0, 7] dispatching to 8 vextq immediates.
-2. **Serial dependency through `accum` across iterations** kills the
-   ILP that currently lets OoO overlap iter N+1's load/TBL with iter
-   N's stores.
-3. **The flush branch is unpredictable on real workloads.** The
-   `extras/bench_partition_skew.c` analysis (added with this entry)
-   shows the per-distribution skewness histogram of internal
-   partition nodes:
-
-   - **Real prose / HTML / JSON / source / log / chinese**: mean
-     smaller-side fraction ≈ **46 %** (close to perfectly balanced).
-     Branch on "so_far + cnt ≥ 8" is essentially i.i.d. coin flips →
-     ~50% mispredict on a 1-bit predictor → ~6 cycles penalty per
-     branch → **~3 cycles overhead per iter** vs the 0.5-cycle
-     potential gain.  Net loss of ~2.5 cycles/iter.
-   - **`proba80` / `two_sym_90/10`**: mean skew 22.5 % / 12.5 %.
-     Branch is highly predictable — coalescing *would* win here.  But
-     these distributions already win 3.4× / 5× via prefill-memset +
-     half-partition leaf-fusion, so marginal upside is small.
-   - **`uniform` / `sparse_*` / `flat_M*` / `proba50` / `two_sym_eq`**:
-     root-flat → never invoke `partition_8` → not relevant.
-
-So the workloads that would benefit most don't go through the kernel
-this would optimise, and the workloads that do go through it have
-unpredictable branches.
-
-**Updated outlook (after TBL throughput probe):** the TBL-throughput
-concern is gone (M4 has 4× the throughput we needed).  The remaining
-risk is the branch-mispredict cost on real-text workloads, but the
-4-iter macro-block dispatch (switch on total popcount over 4 iters,
-which has stdev ≈ 2.8 around mean 16, far more concentrated than
-per-iter popcount) might reduce the mispredict rate enough to be
-viable.
-
-Concrete next step if revisiting: prototype both variants on the
-random-mask probe (`partition mix 50/50`) and `prose_pride`,
-expecting ~25% speedup if it works:
-1. Per-iter coalesce with vextq + vorr (no extra TBL).
-2. 4-iter macro-block dispatch on total popcount.
-
-Run `./build/pivco_partition_skew` for the per-distribution
-skewness histogram, and `./build/bench_micro | grep -E "vqtbl|vextq"`
-for the M4 throughput numbers (see also
-`results/throughput_probes-m4_max-20260426.txt`).
+Worth re-trying on a uarch where SIMD-to-store ratio is 8:1 or
+larger, where unaligned stores cost half-rate, or where a
+"compress-and-shift" instruction exists (AVX-512 `vpcompressw`
+already does this — and the AVX-512 backend already exploits it).
+See [COALESCE.md](COALESCE.md) for the full analysis.
 
 ## AVX-512 improvement: better small-node tail
 

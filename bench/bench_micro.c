@@ -357,6 +357,247 @@ static void bench_vext_throughput(int reps)
     (void)sink8;
 }
 
+/* Coalesce-store partition prototype (vextq variant).
+ *
+ * For each side, maintains (accum, so_far) where accum is a 16-byte
+ * register holding `so_far` already-placed elements (= so_far*2 valid
+ * bytes at low lanes, rest zero).  Each iter:
+ *   1. Compute the compacted side's data via the existing TBL.
+ *   2. Shift the compacted data left by `so_far * 2` bytes (vextq with
+ *      compile-time immediate; switch on so_far in [0,7]).
+ *   3. OR into accum.
+ *   4. If so_far + cnt >= 8, flush accum (vst1q), set up new accum from
+ *      the overflow bytes (right-shifted from compacted).
+ *   5. Otherwise, store the merged result back into accum and bump so_far.
+ *
+ * Saves stores: ~1 per iter on average (vs 2 in baseline) for random
+ * masks where popcount averages 4.  Adds 1 vextq + 1 vorr per side per
+ * iter, plus 1 indirect branch per side (switch jump table).
+ *
+ * Each of the 8 cases per side has a runtime "is this iter going to
+ * flush?" branch; that's 1 nested branch per case.  Each is keyed by
+ * a different so_far value, so the predictor can track them
+ * independently — and most cases are themselves predictable (e.g.,
+ * so_far=0 only flushes when cnt=8, so_far=7 always flushes).
+ */
+/* Store-coalescing prototypes (per-iter switch / per-iter TBL / 4-iter
+ * macro-block) lived here briefly; all three lost to baseline on M4
+ * (38–78% slower).  They're moved to extras/bench_coalesce.c with a
+ * full discussion in COALESCE.md.  Keeping only the throughput probes
+ * and store-port topology probe here. */
+#if 0
+/* 4-iter macro-block coalesce with lookahead.
+ *
+ * Process 4 mask bytes per macro-block.  Compute popcounts and prefix
+ * sums upfront (scalar), so each iter's destination offset within the
+ * macro-block is precomputed and *independent* of the other iters'
+ * accumulator state — breaking the cross-iter dep chain that killed
+ * the per-iter version.
+ *
+ * Per macro-block, we maintain a 32-byte accumulator (lo + hi
+ * registers) for each side.  Each iter contributes its compressed
+ * data to lo and hi via two place-shift TBLs (one for each half).
+ * After 4 iters, we always emit exactly 2 vst1q_u8 stores per side
+ * (lo, then hi), and advance the side's byte count by total*2.
+ *
+ * Stores per macro-block: 4 (2 per side).  Stores per iter: 1.
+ * Baseline is 2 stores/iter.  So this saves 50% of stores. */
+__attribute__((noinline))
+static void bench_partition_coalesce_macro(const uint16_t *src, const uint8_t *bitmap,
+                                            uint8_t *left_bytes, uint8_t *right_bytes,
+                                            int n, int reps)
+{
+    const uint8x16_t zero_v = vdupq_n_u8(0);
+    static const uint8_t iota_init[16] = {0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15};
+    const uint8x16_t iota = vld1q_u8(iota_init);
+
+    for (int r = 0; r < reps; r++) {
+        int n_left_bytes = 0, n_right_bytes = 0;
+        int j = 0;
+        for (; j + 32 <= n; j += 32) {
+            /* Read 4 masks */
+            uint8_t m0 = bitmap[(j >> 3) + 0];
+            uint8_t m1 = bitmap[(j >> 3) + 1];
+            uint8_t m2 = bitmap[(j >> 3) + 2];
+            uint8_t m3 = bitmap[(j >> 3) + 3];
+            int pr0 = compress_popcnt[m0], pl0 = 8 - pr0;
+            int pr1 = compress_popcnt[m1], pl1 = 8 - pr1;
+            int pr2 = compress_popcnt[m2], pl2 = 8 - pr2;
+            int pr3 = compress_popcnt[m3], pl3 = 8 - pr3;
+
+            /* Right-side prefix sums (in elements; *2 for byte offsets) */
+            int cr1 = pr0, cr2 = cr1 + pr1, cr3 = cr2 + pr2;
+            int total_r = cr3 + pr3;
+            /* Left-side prefix sums */
+            int cl1 = pl0, cl2 = cl1 + pl1, cl3 = cl2 + pl2;
+            int total_l = cl3 + pl3;
+
+            /* Load 4 data registers (32 input elements = 64 bytes total) */
+            uint8x16_t d0 = vld1q_u8((const uint8_t *)(src + j + 0));
+            uint8x16_t d1 = vld1q_u8((const uint8_t *)(src + j + 8));
+            uint8x16_t d2 = vld1q_u8((const uint8_t *)(src + j + 16));
+            uint8x16_t d3 = vld1q_u8((const uint8_t *)(src + j + 24));
+
+            /* Compress each iter's right + left side */
+            const uint8_t *t0 = compress_tab[m0], *t1 = compress_tab[m1];
+            const uint8_t *t2 = compress_tab[m2], *t3 = compress_tab[m3];
+            uint8x16_t r0 = vqtbl1q_u8(d0, vld1q_u8(t0));
+            uint8x16_t r1 = vqtbl1q_u8(d1, vld1q_u8(t1));
+            uint8x16_t r2 = vqtbl1q_u8(d2, vld1q_u8(t2));
+            uint8x16_t r3 = vqtbl1q_u8(d3, vld1q_u8(t3));
+            uint8x16_t l0 = vqtbl1q_u8(d0, vld1q_u8(t0 + 16));
+            uint8x16_t l1 = vqtbl1q_u8(d1, vld1q_u8(t1 + 16));
+            uint8x16_t l2 = vqtbl1q_u8(d2, vld1q_u8(t2 + 16));
+            uint8x16_t l3 = vqtbl1q_u8(d3, vld1q_u8(t3 + 16));
+
+            /* Place each iter's compressed data into the (lo, hi) 32-byte
+             * accumulator per side.  Iter 0 has cum=0 so no shift; iters 1-3
+             * shift left by `cum*2` bytes via runtime-computed TBL.
+             * `shuf_lo[i] = i - cum*2`  (mod 256, vqtbl1q maps >=16 → 0)
+             * `shuf_hi[i] = i + 16 - cum*2` */
+            #define PLACE(side_v, cum, lo_acc, hi_acc) do {                       \
+                uint8x16_t _shuf_lo = vsubq_u8(iota, vdupq_n_u8((uint8_t)((cum) * 2))); \
+                uint8x16_t _shuf_hi = vaddq_u8(iota, vdupq_n_u8((uint8_t)(16 - (cum) * 2))); \
+                (lo_acc) = vorrq_u8((lo_acc), vqtbl1q_u8((side_v), _shuf_lo));    \
+                (hi_acc) = vorrq_u8((hi_acc), vqtbl1q_u8((side_v), _shuf_hi));    \
+            } while (0)
+
+            uint8x16_t lo_r = r0, hi_r = zero_v;          /* iter 0: cum=0 */
+            PLACE(r1, cr1, lo_r, hi_r);
+            PLACE(r2, cr2, lo_r, hi_r);
+            PLACE(r3, cr3, lo_r, hi_r);
+
+            uint8x16_t lo_l = l0, hi_l = zero_v;
+            PLACE(l1, cl1, lo_l, hi_l);
+            PLACE(l2, cl2, lo_l, hi_l);
+            PLACE(l3, cl3, lo_l, hi_l);
+            #undef PLACE
+
+            /* Always store both halves (32 bytes per side); advance by
+             * the actual element count so the next macro-block overwrites
+             * the don't-care tail. */
+            vst1q_u8(right_bytes + n_right_bytes,      lo_r);
+            vst1q_u8(right_bytes + n_right_bytes + 16, hi_r);
+            n_right_bytes += total_r * 2;
+            vst1q_u8(left_bytes  + n_left_bytes,       lo_l);
+            vst1q_u8(left_bytes  + n_left_bytes + 16,  hi_l);
+            n_left_bytes  += total_l  * 2;
+        }
+        /* Tail: small, ignore for the bench (n=8192 → 256 macro-blocks, no tail). */
+    }
+}
+
+/* Same coalescing strategy but without the switch.  The shift
+ * amount is computed at runtime via `vsubq_u8(iota, broadcast(so_far*2))`,
+ * applied via a single TBL.  Only 1 conditional branch per side
+ * per iter (the flush check).  With M4 TBL throughput at ~4/cycle
+ * this avoids the indirect-branch mispredict storm of the switch
+ * variant. */
+__attribute__((noinline))
+static void bench_partition_coalesce_tbl(const uint16_t *src, const uint8_t *bitmap,
+                                          uint8_t *left_bytes, uint8_t *right_bytes,
+                                          int n, int reps)
+{
+    const uint8x16_t zero_v = vdupq_n_u8(0);
+    static const uint8_t iota_init[16] = {0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15};
+    const uint8x16_t iota = vld1q_u8(iota_init);
+
+    for (int r = 0; r < reps; r++) {
+        uint8x16_t accum_l = zero_v, accum_r = zero_v;
+        int so_far_l = 0, so_far_r = 0;
+        int n_left_bytes = 0, n_right_bytes = 0;
+
+        for (int j = 0; j + 8 <= n; j += 8) {
+            uint8_t mask = bitmap[j >> 3];
+            uint8x16_t data = vld1q_u8((const uint8_t *)(src + j));
+            const uint8_t *tab = compress_tab[mask];
+            uint8x16_t shuf_r = vld1q_u8(tab);
+            uint8x16_t shuf_l = vld1q_u8(tab + 16);
+            uint8x16_t r_v = vqtbl1q_u8(data, shuf_r);
+            uint8x16_t l_v = vqtbl1q_u8(data, shuf_l);
+            int cnt_r = compress_popcnt[mask];
+            int cnt_l = 8 - cnt_r;
+
+            /* Right side */
+            {
+                /* shift compacted left by so_far_r elements (= 2 bytes each):
+                 * shuf[i] = i - so_far_r*2  (mod 256, vqtbl1q maps >=16 → 0) */
+                uint8x16_t shuf_left = vsubq_u8(iota, vdupq_n_u8((uint8_t)(so_far_r * 2)));
+                uint8x16_t shifted   = vqtbl1q_u8(r_v, shuf_left);
+                uint8x16_t merged    = vorrq_u8(accum_r, shifted);
+                int new_sf = so_far_r + cnt_r;
+                if (new_sf >= 8) {
+                    vst1q_u8(right_bytes + n_right_bytes, merged);
+                    n_right_bytes += 16;
+                    /* New accum = compacted right-shifted by (8-so_far_r) elements */
+                    uint8x16_t shuf_rt = vaddq_u8(iota, vdupq_n_u8((uint8_t)((8 - so_far_r) * 2)));
+                    accum_r = vqtbl1q_u8(r_v, shuf_rt);
+                    so_far_r = new_sf - 8;
+                } else {
+                    accum_r = merged;
+                    so_far_r = new_sf;
+                }
+            }
+            /* Left side, same shape */
+            {
+                uint8x16_t shuf_left = vsubq_u8(iota, vdupq_n_u8((uint8_t)(so_far_l * 2)));
+                uint8x16_t shifted   = vqtbl1q_u8(l_v, shuf_left);
+                uint8x16_t merged    = vorrq_u8(accum_l, shifted);
+                int new_sf = so_far_l + cnt_l;
+                if (new_sf >= 8) {
+                    vst1q_u8(left_bytes + n_left_bytes, merged);
+                    n_left_bytes += 16;
+                    uint8x16_t shuf_rt = vaddq_u8(iota, vdupq_n_u8((uint8_t)((8 - so_far_l) * 2)));
+                    accum_l = vqtbl1q_u8(l_v, shuf_rt);
+                    so_far_l = new_sf - 8;
+                } else {
+                    accum_l = merged;
+                    so_far_l = new_sf;
+                }
+            }
+        }
+
+        if (so_far_l > 0) vst1q_u8(left_bytes  + n_left_bytes,  accum_l);
+        if (so_far_r > 0) vst1q_u8(right_bytes + n_right_bytes, accum_r);
+    }
+}
+
+__attribute__((noinline))
+static void bench_partition_coalesce(const uint16_t *src, const uint8_t *bitmap,
+                                      uint8_t *left_bytes, uint8_t *right_bytes,
+                                      int n, int reps)
+{
+    const uint8x16_t zero_v = vdupq_n_u8(0);
+
+    for (int r = 0; r < reps; r++) {
+        uint8x16_t accum_l = zero_v, accum_r = zero_v;
+        int so_far_l = 0, so_far_r = 0;
+        int n_left_bytes = 0, n_right_bytes = 0;
+
+        for (int j = 0; j + 8 <= n; j += 8) {
+            uint8_t mask = bitmap[j >> 3];
+            uint8x16_t data = vld1q_u8((const uint8_t *)(src + j));
+            const uint8_t *tab = compress_tab[mask];
+            uint8x16_t shuf_r = vld1q_u8(tab);
+            uint8x16_t shuf_l = vld1q_u8(tab + 16);
+            uint8x16_t r_v = vqtbl1q_u8(data, shuf_r);
+            uint8x16_t l_v = vqtbl1q_u8(data, shuf_l);
+            int cnt_r = compress_popcnt[mask];
+            int cnt_l = 8 - cnt_r;
+
+            COALESCE_SWITCH(r_v, cnt_r, accum_r, so_far_r, right_bytes, n_right_bytes)
+            COALESCE_SWITCH(l_v, cnt_l, accum_l, so_far_l, left_bytes,  n_left_bytes)
+        }
+
+        /* End-of-rep tail: flush partial accums if anything remains.
+         * Negligible cost at REPS=100k, but ensures we touch the tail
+         * each rep so the compiler doesn't optimise the bookkeeping. */
+        if (so_far_l > 0) vst1q_u8(left_bytes  + n_left_bytes,  accum_l);
+        if (so_far_r > 0) vst1q_u8(right_bytes + n_right_bytes, accum_r);
+    }
+}
+#endif /* 0 — coalesce variants moved to extras/bench_coalesce.c */
+
 /* Helper: fill a bitmap with `pct_full` percent of bytes = 0xFF
  * (popcount 8 → advance 8, no overlap) and the rest = 0x1F
  * (popcount 5 → advance 5, 6-byte overlap on right + 10-byte
@@ -1530,10 +1771,9 @@ int main(void)
     printf("mixed       (1×vst1q+2×vst1): %5.2f ns/elem  (%5.1f GB/s)\n",
            ns_per_elem, 1.0 / ns_per_elem);
 
-    /* Restore the original random bitmap so the rest of the bench
-     * (memset, both_leaves_*, flat_*) sees its expected ~50% input. */
-    srand(42);
-    for (int i = 0; i < (N + 7) / 8; i++) bitmap[i] = (uint8_t)rand();
+    /* Coalesce-store partition prototypes were tested here; all three
+     * lost to baseline on M4.  Code moved to extras/bench_coalesce.c
+     * with the full investigation in COALESCE.md. */
 
     /* Memset */
     t0 = now_sec();
