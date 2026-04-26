@@ -1,0 +1,37 @@
+Decode-loop samples: 9996
+
+By function (leaf):
+   3786  ( 37.9%)  partition_8
+   1622  ( 16.2%)  flat_decode_scatter_neon
+   1181  ( 11.8%)  decode_node_neon
+    987  (  9.9%)  scatter_both_leaves
+    857  (  8.6%)  scatter_sym
+    407  (  4.1%)  flat_d3_spread
+    390  (  3.9%)  flat_d2_spread
+    369  (  3.7%)  partition_8_right
+    316  (  3.2%)  _platform_memset
+     54  (  0.5%)  pivco_huffman_decode_neon
+     12  (  0.1%)  bitmap_get
+      8  (  0.1%)  bitmap_bytes
+      6  (  0.1%)  extract_D_bits
+      1  (  0.0%)  ___chkstk_darwin
+
+By (function, file, line):
+   2846  ( 28.5%)  partition_8 @ pivco_huffman_neon.c:98
+   1622  ( 16.2%)  flat_decode_scatter_neon @ pivco_huffman_neon.c:242
+   1181  ( 11.8%)  decode_node_neon @ pivco_huffman_neon.c:847
+    954  (  9.5%)  scatter_both_leaves @ pivco_huffman_neon.c:729
+    940  (  9.4%)  partition_8 @ pivco_huffman_neon.c:95
+    827  (  8.3%)  scatter_sym @ pivco_huffman_neon.c:680
+    407  (  4.1%)  flat_d3_spread @ pivco_huffman_neon_flat.h:71
+    390  (  3.9%)  flat_d2_spread @ pivco_huffman_neon_flat.h:44
+    369  (  3.7%)  partition_8_right @ pivco_huffman_neon.c:641
+    316  (  3.2%)  _platform_memset @ :None
+     54  (  0.5%)  pivco_huffman_decode_neon @ pivco_huffman_neon.c:1061
+     33  (  0.3%)  scatter_both_leaves @ pivco_huffman_neon.c:705
+     30  (  0.3%)  scatter_sym @ pivco_huffman_neon.c:662
+     12  (  0.1%)  bitmap_get @ pivco_huffman_common.h:74
+      8  (  0.1%)  bitmap_bytes @ pivco_huffman_common.h:80
+      5  (  0.1%)  extract_D_bits @ pivco_huffman_neon.c:138
+      1  (  0.0%)  ___chkstk_darwin @ :None
+      1  (  0.0%)  extract_D_bits @ pivco_huffman_neon.c:137
