@@ -799,44 +799,93 @@ back-compat; it now takes the dist name as an optional argv[1].)
 
 | Symbol                        | Self samples | Self %  | Description                                                |
 |-------------------------------|-------------:|--------:|------------------------------------------------------------|
-| `decode_node_neon`            |         6870 | **80%** | Recursive 2-way partition + leaf scatter (the hot loop)    |
+| `decode_node_neon`            |         6870 | **80%** | Recursive 2-way partition + leaf scatter + flat-subtree    |
 | `pivco_huffman_decode_neon`   |         1497 |   17%   | Wrapper: prefill memset call site, table walk init, root   |
 | `_platform_memset`            |          230 |    3%   | Phase-0 prefill of most-frequent leaf (`prefill_sym`)      |
 | **Total**                     |     **8597** |  100%   |                                                            |
 
+`pivco_huffman_build_table` doesn't appear — encode is amortised
+per-block, decode reuses the prebuilt table.
+
+### Per-region breakdown of `decode_node_neon` (the 80%)
+
+`decode_node_neon` is one big function at `-O2`: `partition_8`,
+`scatter_sym`, `scatter_both_leaves`, and `flat_decode_scatter_neon`
+are all `static inline` and welded into it.  To recover the regional
+view, instruction offsets in the `sample` call graph are mapped to
+source regions by hand (same methodology as the original profile
+commit `05375b4`).  Hot offsets:
+
+| Offset | Instruction               | Source region                           |
+|-------:|---------------------------|-----------------------------------------|
+|     +0 | `cmp w1, w7`              | function entry / leaf check             |
+|   +496 | `ldrb [bm + j>>3]`        | partition bitmap byte load              |
+|   +684 | `ldrb [bm + (j>>3)+1]`    | partition body (16-elem unroll, 2nd load)|
+|   +740 | `str q0, [tmp + n_right]` | partition body — TBL output store       |
+|  +1408 | `strb [symbols + idx]`    | leaf scatter byte store                 |
+|  +1444 | `umov.h w, v[lane]`       | leaf scatter index extract              |
+|  +1496 | `strb [symbols + idx]`    | leaf scatter byte store                 |
+|  +1684 | `sub`                     | loop bookkeeping                        |
+|  +2572 | `movi v4, #0`             | flat-subtree spread (init)              |
+|  +2656 | `ldurh [bm-6]`            | flat-subtree bitstream load             |
+|  +4072 | `ldur h4, [bm-2]`         | flat-subtree bitstream load             |
+|  +4424 | `ldp [sp]`                | function epilogue                       |
+
+Bucketing the leaf rows from the call graph into these regions (some
+rows have collapsed offsets like `+740,4072,...` so attribution is
+**approximate** — split between the two listed offsets):
+
+| Region                                           | % of `decode_node_neon` self | Notes                                                |
+|--------------------------------------------------|-----------------------------:|------------------------------------------------------|
+| **Partition body** (bitmap load + TBL + store)   |                       **56%** | lines 835–864 of `pivco_huffman_neon.c`              |
+| **Flat-subtree spread** (D-bit unpack + lookup)  |                       **27%** | lines 771–781 — inlined `flat_decode_scatter_neon`   |
+| **Leaf scatter** (`strb` + `umov.h` lane extract)|                       **11%** | inlined `scatter_sym` / `scatter_both_leaves`        |
+| **Loop / recursion bookkeeping**                 |                        **6%** | `cmp`, `sub`, recursive `bl` setup                   |
+| **Frame entry / epilogue**                       |                        **<1%** | `stp` / `ldp` — OoO hides almost all of it           |
+
+(Total: ~100%.  Adds to **80% of all CPU time** when multiplied by
+`decode_node_neon`'s share.)
+
 ### Reading the result
 
-- **80% of CPU time is the recursive partition body.**  On a deep-tree
-  real-world workload like `prose_pride` (max_len 15, 53% of elements
-  fall outside flat subtrees) the partition path dominates, exactly as
-  expected.  This is the core work the decoder is *for*; there is no
-  hidden hotspot to remove.
-- **17% in `pivco_huffman_decode_neon`** is the per-block frame: read
-  the encoded header, set up the root partition, walk the table.  At
-  N = 8192 with prose ~4.7 KB/block, this comes out to ~10 ns per
-  block — the expected fixed cost of a table-driven decoder, not a
-  target.
-- **3% in `_platform_memset`** is the phase-0 prefill: writing the
-  most-frequent leaf symbol across the entire output buffer so the
-  hot path can skip its scatter (validated as a +20-30% win on
-  skewed distributions in earlier sweeps).
-- **No `huffman_table.c` / `pivco_huffman_build_table` time** —
-  encode is amortised per-block; decode reuses the prebuilt table.
+- **The partition body is now ~45% of total CPU time** (56% × 80%).
+  This is the core work the decoder is *for*.  The previous profile
+  (zipfian, pre-flat-subtree) reported 44.4% in the same region —
+  unchanged, as expected: the partition algorithm itself hasn't
+  changed.
+- **The flat-subtree fast path takes ~22% of total CPU time** (27% ×
+  80%), even though only ~47% of `prose_pride` elements actually flow
+  through it.  This row didn't exist in the old profile because the
+  fast path didn't yet exist — the elements it now handles were
+  going through the partition path (and being slower for it).  The
+  flat-subtree path is *cheaper per element* than partition (~0.02
+  ns/elem direct vs ~0.06 partition; see Key Compute Primitives) so
+  shifting elements onto it is a net win even though the region as a
+  whole is non-trivial.
+- **Leaf scatter (~9% of total)** is where the per-element scatter
+  floor (0.14–0.18 ns/elem on M4 — see Key Compute Primitives) lives.
+  Old profile reported 12.3% in the same region; the drop is partly
+  from the flat-subtree path absorbing some of it, partly from the
+  half-partition / leaf-fusion optimisations shipped since.
+- **No "function prologue 14%" hotspot** any more.  The previous
+  profile flagged this as a candidate for iterative-DFS replacement;
+  the experiment showed no measurable win at the time, and on the
+  current code base it's <1% — the work moved into the more useful
+  flat-subtree and partition regions.
 
-The previous (zipfian, pre-flat-subtree) breakdown was finer-grained
-(SIMD partition core 44%, function prologue 14%, leaf scatter 12%,
-…) — that decomposition was generated by hand-mapping
-`decode_node_neon` instruction offsets to source regions.  We're not
-reproducing it in this update because:
+### Profiling caveats
 
-1. The workload changed from a synthetic stick-tree to a real-world
-   deep tree where the flat-subtree fast path branches out a chunk of
-   the old "leaf scatter" region — the regions don't map cleanly
-   anymore.
-2. The headline conclusions still hold from the old breakdown
-   (M4's OoO engine hides recursion-frame stp/ldp; the iterative-DFS
-   experiment was run and showed no measurable improvement) — see
-   commit history if needed.
+- macOS `sample` attributes a 1 ms timer fire to whatever instruction
+  is *retiring* at that moment.  On M4's deep OoO engine, this often
+  pins to a cheap mov or branch downstream of the actual stall (a
+  TBL or store).  The regional bucketing above papers over this by
+  grouping nearby instructions; finer-grained per-instruction
+  attribution would need PMC-based tools (`Instruments` Time Profiler
+  with source annotations, or `kperf` / `dtrace`).
+- `sample` collapses the offset list on lines with many distinct
+  offsets (`+740,4072,...`).  This makes single-instruction
+  attribution lossy when, as here, two different regions both have
+  hot offsets attached to the same call-tree leaf.
 
 ### Profiling lesson (preserved from earlier)
 
