@@ -673,11 +673,32 @@ int pivco_huffman_decode_x86(const uint8_t *in, size_t in_len,
     int right_leaf = (right_child->symbol >= 0);
 
     if (left_leaf && right_leaf) {
-        /* Both-leaves at root — sequential stores, no scatter */
-        uint8_t syms[2] = {(uint8_t)left_child->symbol,
-                           (uint8_t)right_child->symbol};
-        for (int j = 0; j < N; j++)
+        /* Both-leaves at root — sequential stores, no scatter.
+         * Vectorized: 2 bitmap bytes -> 16 output bytes per iter.
+         * Each bitmap byte broadcast to 8 lanes via pshufb, ANDed with
+         * the bit-position table, then cmpeq to produce a 0xFF/0x00
+         * byte-mask, then pblendvb selects sym0 / sym1. */
+        uint8_t sym0 = (uint8_t)left_child->symbol;
+        uint8_t sym1 = (uint8_t)right_child->symbol;
+        __m128i vsym0 = _mm_set1_epi8((char)sym0);
+        __m128i vsym1 = _mm_set1_epi8((char)sym1);
+        __m128i bits  = _mm_setr_epi8(1,2,4,8,16,32,64,(char)128,
+                                       1,2,4,8,16,32,64,(char)128);
+        __m128i shuf  = _mm_setr_epi8(0,0,0,0,0,0,0,0,
+                                       1,1,1,1,1,1,1,1);
+        int j = 0;
+        for (; j + 16 <= N; j += 16) {
+            __m128i bm_pair = _mm_cvtsi32_si128(*(const uint16_t *)(bm + (j >> 3)));
+            __m128i bm_dup  = _mm_shuffle_epi8(bm_pair, shuf);
+            __m128i masked  = _mm_and_si128(bm_dup, bits);
+            __m128i mask8   = _mm_cmpeq_epi8(masked, bits);
+            __m128i out     = _mm_blendv_epi8(vsym0, vsym1, mask8);
+            _mm_storeu_si128((__m128i *)(symbols + j), out);
+        }
+        for (; j < N; j++) {
+            uint8_t syms[2] = {sym0, sym1};
             symbols[j] = syms[(bm[j >> 3] >> (j & 7)) & 1];
+        }
         *consumed = (size_t)(ptr - in);
         return PIVCO_OK;
     }

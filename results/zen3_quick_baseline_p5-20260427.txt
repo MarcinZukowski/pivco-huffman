@@ -1,0 +1,42 @@
+  WARNING: proba80/pivco_n spread 12.7% (1743..1996)
+=== PIVCO-Huffman Benchmarks (QUICK) ===
+Sequence: 4M, Repeats: 5 (20M/run), Block: 4096, Runs: 2 (drop 0)
+
+DECODE M/s    | pivco_n
+--------------|--------
+proba80       |    1743
+proba50       |    1253
+proba14       |     784
+proba02       |     711
+bell_s10      |     873
+bell_s30      |     645
+bell_s80      |     919
+uniform       |    1763
+english       |     886
+zipfian       |     743
+sparse_4      |    2687
+sparse_16     |   19742
+geometric     |    1273
+two_sym_eq    |    1508
+two_sym_90/10 |    1506
+flat_M3       |    2448
+flat_M5       |    2573
+flat_M6       |    2236
+flat_M7       |    2190
+html_wiki     |     647
+prose_pride   |     705
+image_jpeg    |     862
+json_api      |     697
+source_c      |     745
+log_apache    |     681
+dna_fasta     |    1143
+csv_numeric   |     922
+gzip_random   |    1766
+chinese_text  |     728
+
+  2 runs of 20M symbols each (5x 4M), drop 0 slowest, warn if spread > 5%
+  PIVCO/trad decode in 4096-symbol blocks
+  huf0 uses 128KB chunks (its max block size)
+  rANS decodes full 4M at once
+  CPU freq drift: +0.1% (OK)
+  Total wall time: 10.6 seconds

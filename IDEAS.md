@@ -386,6 +386,29 @@ new port; expected to lose given the cross-platform pattern).
 
 See [COALESCE.md](COALESCE.md) for the full investigation.
 
+## ~~SSE root both-leaves vectorisation~~ — SHIPPED
+
+**Status (2026-04-27): SHIPPED.**
+
+`pivco_huffman_decode_x86` had a scalar byte-by-byte loop for the
+"root both children leaves" case (`two_sym_eq` / `two_sym_90/10`).
+Replaced with a 16-output-bytes-per-iter SSE4.1 path using
+`pshufb` (broadcast each bitmap byte to 8 lanes), `pcmpeqb`
+(bit-to-byte-mask), and `pblendvb` (sym0/sym1 select).
+
+A/B headline (Zen 3, paired-t over 5 alternated pairs, see
+[`results/SSE_BOTH_LEAVES-AB-20260427.md`](results/SSE_BOTH_LEAVES-AB-20260427.md)):
+
+- two_sym_eq: 1507 → 22677 M/s (**+1405%**, t=357)
+- two_sym_90/10: 1502 → 22660 M/s (**+1409%**, t=197)
+
+Bonus (codegen, not direct from this patch): uniform +71.8%,
+gzip_random +73.1% — both restored to morning's pre-rename level.
+The larger parent function changes how the compiler inlines/schedules
+the inlined `flat_decode_direct_x86` path; net positive.
+
+Other distributions: ±1.5% noise, no significant losses.
+
 ## ~~AVX-512 leaf-fusion port~~ — SHIPPED
 
 **Status (2026-04-27): SHIPPED.**
