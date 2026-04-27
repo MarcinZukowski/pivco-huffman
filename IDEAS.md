@@ -735,7 +735,49 @@ load-bearing — Graviton 4 didn't show the M4 microbench gap at all
 (both at ~6.3 GB/s), so today only Apple silicon would benefit, and
 even there end-to-end is a wash.
 
-## Graviton 4 NEON D=5/D=6 unpack — SIMD path still broken
+## ~~Graviton 4 NEON D=5/D=6 unpack — SIMD path still broken~~ — SHIPPED
+
+**Status (2026-04-27): SHIPPED.**
+
+Two-part fix:
+
+1. **Byte-wise vector lane loads in `flat_d5/d6_unpack`.**  The old
+   `memcpy(&packed, bm_ptr, 5/6) + vsetq_lane_u64(packed, ...)` form
+   compiled to a stack round-trip on G4 (int-load → stack-store →
+   vector-load-from-stack), causing a store-forward stall on every
+   iteration that cost ~5x throughput.  Replaced with the same byte-wise
+   pattern `flat_d3_unpack` already uses
+   (`vdupq_n_u8(0) + vsetq_lane_u8(bm_ptr[k], ., k)` × N).  Compiler
+   emits direct `ldr b` / `ld1 {v.b}[k]` / `ins` — no stack, no stall.
+   Microbench: G4 D=5 1.3 → 5.8 GB/s (+345%), D=6 1.3 → 5.2 GB/s
+   (+300%); M4 D=5/D=6 +12-17%.
+
+2. **Re-enabled SIMD in flat_decode_direct path (still gated in
+   scatter path).**  With the unpack 5x faster, the direct-path SIMD
+   beats scalar by 60% on flat_M5/M6 (n=8192, plenty of work to
+   amortise vqtbl{2,4}q_u8 setup).  Scatter path stays gated to
+   scalar on non-Apple because the smaller n there means the TBL
+   setup overhead still dominates.
+
+Final A/B on G4 (5 paired pairs, full write-up in
+[`results/G4_D5D6_FIX-AB-20260427.md`](results/G4_D5D6_FIX-AB-20260427.md)):
+
+| Distribution | Δ | t |
+|---|---:|---:|
+| flat_M5      | +59.8% | 102 |
+| flat_M6      | +64.1% | 307 |
+| flat_M7      | +0.3%  | 2.5 |
+
+No significant losses on any other distribution; bell_s30/s80/zipfian
+unchanged because the scatter gate keeps them scalar.
+
+The store-forward-stall pathology on Neoverse-V2 (stale `flat_d5/6`
+text below in this file) is fully resolved.  The D=3 throughput
+on G4 is *also* uint16x8-bound at ~7-8 GB/s, which is the natural
+ceiling for that layout — improving past it requires the FL-layout
+work tracked in BITPACKING.md (~30 GB/s on G4 in microbench).
+
+## ~~Graviton 4 NEON D=5/D=6 unpack — SIMD path still broken~~ (historical)
 
 **Status (2026-04-27): production gates around the pathology with
 `PIVCO_NEON_FAST_MULTI_TBL=0`, but the SIMD unpack itself is still

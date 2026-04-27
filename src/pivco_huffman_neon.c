@@ -445,7 +445,12 @@ static inline void flat_decode_direct_neon(uint8_t *symbols, int n,
         }
         return;
     }
-#if PIVCO_NEON_FAST_MULTI_TBL
+    /* D=5 / D=6 in the *direct* (root-flat) path always use the SIMD
+     * unpack regardless of `PIVCO_NEON_FAST_MULTI_TBL` — n is the full
+     * block size (8192) here, so the per-call TBL setup is amortised
+     * over enough work that even Neoverse-V2's slower vqtbl{2,4}q_u8
+     * still beats the scalar switch.  The gate stays on the scatter
+     * path below where n is much smaller and the overhead dominates. */
     if (D == 5) {
         /* 16 codes per iter via two 8-code unpacks + vqtbl2q_u8 on the
          * 32-byte c2s table, single vst1q_u8. */
@@ -499,7 +504,6 @@ static inline void flat_decode_direct_neon(uint8_t *symbols, int n,
         }
         return;
     }
-#endif /* PIVCO_NEON_FAST_MULTI_TBL */
     if (D == 4) {
         /* 16 codes per iter, single vst1q_u8 — indices are identity. */
         uint8x16_t c2s_vec = vld1q_u8(c2s);

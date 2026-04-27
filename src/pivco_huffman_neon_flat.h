@@ -111,15 +111,25 @@ static const int16_t flat_d5_shift_tab[8] = {
     0, -5, -10, -7, -4, -9, -6, -11
 };
 
-/* Unpack 8 consecutive D=5 codes from 5 bytes starting at bm_ptr. */
+/* Unpack 8 consecutive D=5 codes from 5 bytes starting at bm_ptr.
+ *
+ * Bytes are inserted into vector lanes one-by-one via `vsetq_lane_u8`.
+ * The compiler emits direct byte-into-vector loads (`ldr b` / `ld1
+ * {v.b}[k]` / `ins`).  An earlier version used
+ * `memcpy(&packed, bm_ptr, 5) + vsetq_lane_u64(packed, ...)`, which
+ * the compiler implemented via a stack round-trip
+ * (int-load -> stack-store -> vector-load-from-stack).  On Neoverse-V2
+ * (Graviton 4) the int-store -> vector-load forward stalls hard,
+ * costing ~20x throughput vs the byte-wise pattern.  M4 absorbs the
+ * stall, so the old form looked fine there. */
 static inline uint8x8_t flat_d5_unpack(const uint8_t *bm_ptr)
 {
-    /* 5-byte load via memcpy into the low 40 bits of a uint64 — doesn't
-     * overrun the stream. */
-    uint64_t packed = 0;
-    memcpy(&packed, bm_ptr, 5);
-    uint8x16_t bm_lo = vreinterpretq_u8_u64(
-        vsetq_lane_u64(packed, vdupq_n_u64(0), 0));
+    uint8x16_t bm_lo = vdupq_n_u8(0);
+    bm_lo = vsetq_lane_u8(bm_ptr[0], bm_lo, 0);
+    bm_lo = vsetq_lane_u8(bm_ptr[1], bm_lo, 1);
+    bm_lo = vsetq_lane_u8(bm_ptr[2], bm_lo, 2);
+    bm_lo = vsetq_lane_u8(bm_ptr[3], bm_lo, 3);
+    bm_lo = vsetq_lane_u8(bm_ptr[4], bm_lo, 4);
     uint8x16_t shuffled = vqtbl1q_u8(bm_lo, vld1q_u8(flat_d5_shuf_tab));
     uint16x8_t w = vreinterpretq_u16_u8(shuffled);
     uint16x8_t shifted = vshlq_u16(w, vld1q_s16(flat_d5_shift_tab));
@@ -141,13 +151,18 @@ static const int16_t flat_d6_shift_tab[8] = {
     0, -6, -4, -10,  0, -6, -4, -10
 };
 
-/* Unpack 8 consecutive D=6 codes from 6 bytes starting at bm_ptr. */
+/* Unpack 8 consecutive D=6 codes from 6 bytes starting at bm_ptr.
+ * Same byte-wise vector-lane load as flat_d5_unpack — see that
+ * function's comment for the Neoverse-V2 store-forward rationale. */
 static inline uint8x8_t flat_d6_unpack(const uint8_t *bm_ptr)
 {
-    uint64_t packed = 0;
-    memcpy(&packed, bm_ptr, 6);
-    uint8x16_t bm_lo = vreinterpretq_u8_u64(
-        vsetq_lane_u64(packed, vdupq_n_u64(0), 0));
+    uint8x16_t bm_lo = vdupq_n_u8(0);
+    bm_lo = vsetq_lane_u8(bm_ptr[0], bm_lo, 0);
+    bm_lo = vsetq_lane_u8(bm_ptr[1], bm_lo, 1);
+    bm_lo = vsetq_lane_u8(bm_ptr[2], bm_lo, 2);
+    bm_lo = vsetq_lane_u8(bm_ptr[3], bm_lo, 3);
+    bm_lo = vsetq_lane_u8(bm_ptr[4], bm_lo, 4);
+    bm_lo = vsetq_lane_u8(bm_ptr[5], bm_lo, 5);
     uint8x16_t shuffled = vqtbl1q_u8(bm_lo, vld1q_u8(flat_d6_shuf_tab));
     uint16x8_t w = vreinterpretq_u16_u8(shuffled);
     uint16x8_t shifted = vshlq_u16(w, vld1q_s16(flat_d6_shift_tab));
