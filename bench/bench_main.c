@@ -49,10 +49,11 @@ static int dbl_cmp_desc(const void *a, const void *b) {
     return (da < db) - (da > db);
 }
 
-static double stable_median(double *results, const char *label)
+static double stable_median(double *results, int runs, int drop_worst,
+                             const char *label)
 {
-    qsort(results, RUNS, sizeof(double), dbl_cmp_desc);
-    int kept = RUNS - DROP_WORST;
+    qsort(results, runs, sizeof(double), dbl_cmp_desc);
+    int kept = runs - drop_worst;
     double best = results[0], worst_kept = results[kept - 1];
     double spread = best > 0 ? (best - worst_kept) / best : 0;
     if (spread > MAX_SPREAD && label)
@@ -85,24 +86,37 @@ int main(int argc, char **argv)
     if (argc > 1) repeats = atoi(argv[1]);
     if (repeats < 1) repeats = 1;
 
+    /* PIVCO_BENCH_QUICK: skip every comparator (run only pivco_n), reduce
+       runs to 2 (no drop).  ~5-10x faster wall, used for iteration; the
+       documented sweeps still use the full 5-runs-drop-2 methodology by
+       leaving the env var unset. */
+    int quick = getenv("PIVCO_BENCH_QUICK") != NULL;
+    int runs        = quick ? 2 : RUNS;
+    int drop_worst  = quick ? 0 : DROP_WORST;
+
     bench_init();
     int n_dist = bench_num_distributions();
     double freq_before = cpu_freq_check();
     double wall_start = now_sec();
 
-    printf("=== PIVCO-Huffman Benchmarks ===\n");
+    printf("=== PIVCO-Huffman Benchmarks%s ===\n", quick ? " (QUICK)" : "");
     printf("Sequence: %dM, Repeats: %d (%dM/run), Block: %d, Runs: %d (drop %d)\n\n",
            TOTAL_SYMBOLS / (1024*1024), repeats,
            (int)((size_t)TOTAL_SYMBOLS * repeats / (1024*1024)),
-           BLK, RUNS, DROP_WORST);
+           BLK, runs, drop_worst);
 
-    printf("%-13s | %7s %7s %7s | %7s %7s | %7s %7s %7s | %7s | %7s\n",
-           "DECODE M/s", "pivco_s", "pivco_n", "pivco_p",
-           "trad_1s", "trad_4s",
-           "huf0_1s", "huf0_x1", "huf0_x2",
-           "rans_x2", "ratio");
-    printf("--------------|-------------------------|-----------------|------"
-           "----------------------|---------|--------\n");
+    if (quick) {
+        printf("%-13s | %7s\n", "DECODE M/s", "pivco_n");
+        printf("--------------|--------\n");
+    } else {
+        printf("%-13s | %7s %7s %7s | %7s %7s | %7s %7s %7s | %7s | %7s\n",
+               "DECODE M/s", "pivco_s", "pivco_n", "pivco_p",
+               "trad_1s", "trad_4s",
+               "huf0_1s", "huf0_x1", "huf0_x2",
+               "rans_x2", "ratio");
+        printf("--------------|-------------------------|-----------------|------"
+               "----------------------|---------|--------\n");
+    }
 
     for (int d = 0; d < n_dist; d++) {
         const char *name = bench_dist_name(d);
@@ -264,7 +278,7 @@ int main(int argc, char **argv)
 
         /* ---- Benchmark ---- */
         uint8_t *dec_buf = (uint8_t *)malloc(TOTAL_SYMBOLS);
-        double runs_arr[RUNS];
+        double runs_arr[RUNS];   /* RUNS is the max; we use `runs` of them */
         double t0, t1;
         char label[64];
 
@@ -274,36 +288,27 @@ int main(int argc, char **argv)
 #define BENCH(var, block, lbl) do { \
     snprintf(label, sizeof(label), "%s/%s", name, lbl); \
     uint64_t cksum_first = 0, cksum_last = 0; \
-    for (int r = 0; r < RUNS; r++) { \
+    for (int r = 0; r < runs; r++) { \
         t0 = now_sec(); \
         for (int rep = 0; rep < repeats; rep++) { block; } \
         t1 = now_sec(); \
         runs_arr[r] = (double)TOTAL_SYMBOLS * repeats / (t1 - t0) / 1e6; \
         if (r == 0) cksum_first = fnv1a(dec_buf, TOTAL_SYMBOLS); \
-        if (r == RUNS - 1) cksum_last = fnv1a(dec_buf, TOTAL_SYMBOLS); \
+        if (r == runs - 1) cksum_last = fnv1a(dec_buf, TOTAL_SYMBOLS); \
     } \
     if (cksum_first != cksum_last) \
         fprintf(stderr, "  ERROR: %s checksum mismatch between runs!\n", label); \
     if (cksum_first != expected_cksum && expected_cksum != 0) \
         fprintf(stderr, "  ERROR: %s checksum differs from reference!\n", label); \
     if (expected_cksum == 0) expected_cksum = cksum_first; \
-    var = stable_median(runs_arr, label); \
+    var = stable_median(runs_arr, runs, drop_worst, label); \
 } while(0)
 
-        double p_dec_s, p_dec_n = 0, p_dec_pfx = 0, t_dec_1s, t_dec_4s;
-        double h_dec_1s = 0, h_dec_4s = 0;
+        double p_dec_s = 0, p_dec_n = 0, p_dec_pfx = 0;
+        double t_dec_1s = 0, t_dec_4s = 0;
+        double h_dec_1s = 0, h_dec_4s = 0, h_dec_x2 = 0;
+        double r_dec_2 = 0;
         uint64_t expected_cksum = 0; /* set by first BENCH, checked by rest */
-
-        /* PIVCO scalar: decode NBLOCKS blocks */
-        BENCH(p_dec_s, {
-            for (int b = 0; b < NBLOCKS; b++) {
-                size_t consumed;
-                pivco_huffman_decode_scalar(
-                    pivco_enc_buf + pivco_enc_off[b],
-                    pivco_enc_off[b+1] - pivco_enc_off[b],
-                    table, dec_buf + (size_t)b * BLK, &consumed);
-            }
-        }, "pivco_s");
 
 #if defined(PIVCO_HAS_NEON) || defined(PIVCO_HAS_SSE4) || defined(PIVCO_HAS_AVX512) || defined(PIVCO_HAS_SVE)
         BENCH(p_dec_n, {
@@ -316,6 +321,18 @@ int main(int argc, char **argv)
             }
         }, "pivco_n");
 #endif
+
+      if (!quick) {
+        /* PIVCO scalar: decode NBLOCKS blocks */
+        BENCH(p_dec_s, {
+            for (int b = 0; b < NBLOCKS; b++) {
+                size_t consumed;
+                pivco_huffman_decode_scalar(
+                    pivco_enc_buf + pivco_enc_off[b],
+                    pivco_enc_off[b+1] - pivco_enc_off[b],
+                    table, dec_buf + (size_t)b * BLK, &consumed);
+            }
+        }, "pivco_s");
 
 #ifdef PIVCO_HAS_NEON
         if (pfx_applicable) {
@@ -377,7 +394,6 @@ int main(int argc, char **argv)
         }
 
         /* huf0 4-stream X2: decode chunks (double-symbol per lookup) */
-        double h_dec_x2 = 0;
         if (huf0_ok) {
             BENCH(h_dec_x2, {
                 for (int c = 0; c < huf0_nchunks; c++) {
@@ -391,11 +407,11 @@ int main(int argc, char **argv)
         }
 
         /* rANS 2-stream: full 4M at once */
-        double r_dec_2 = 0;
         BENCH(r_dec_2, {
             rans_alias_decode_x2(rans_ctx, rans_x2_enc, rans_x2_enc_len,
                                   dec_buf, TOTAL_SYMBOLS);
         }, "rans_2");
+      } /* !quick */
 #undef BENCH
 
         double p_best = p_dec_n > p_dec_s ? p_dec_n : p_dec_s;
@@ -408,9 +424,14 @@ int main(int argc, char **argv)
         if (r_dec_2 > t_best)  t_best = r_dec_2;
         double ratio = t_best > 0 ? p_best / t_best : 0;
 
-        printf("%-13s | %7.0f %7.0f %7.0f | %7.0f %7.0f | %7.0f %7.0f %7.0f | %7.0f | %5.2fx\n",
-               name, p_dec_s, p_dec_n, p_dec_pfx, t_dec_1s, t_dec_4s,
-               h_dec_1s, h_dec_4s, h_dec_x2, r_dec_2, ratio);
+        if (quick) {
+            (void)ratio;
+            printf("%-13s | %7.0f\n", name, p_dec_n);
+        } else {
+            printf("%-13s | %7.0f %7.0f %7.0f | %7.0f %7.0f | %7.0f %7.0f %7.0f | %7.0f | %5.2fx\n",
+                   name, p_dec_s, p_dec_n, p_dec_pfx, t_dec_1s, t_dec_4s,
+                   h_dec_1s, h_dec_4s, h_dec_x2, r_dec_2, ratio);
+        }
 
 cleanup:
         free(dec_buf);
@@ -434,9 +455,9 @@ cleanup:
     double drift = (freq_after - freq_before) / freq_before;
 
     printf("\n  %d runs of %dM symbols each (%dx %dM), drop %d slowest, warn if spread > %.0f%%\n",
-           RUNS, (int)((size_t)TOTAL_SYMBOLS * repeats / (1024*1024)),
+           runs, (int)((size_t)TOTAL_SYMBOLS * repeats / (1024*1024)),
            repeats, TOTAL_SYMBOLS / (1024*1024),
-           DROP_WORST, MAX_SPREAD * 100);
+           drop_worst, MAX_SPREAD * 100);
     printf("  PIVCO/trad decode in %d-symbol blocks\n", BLK);
     printf("  huf0 uses 128KB chunks (its max block size)\n");
     printf("  rANS decodes full 4M at once\n");
