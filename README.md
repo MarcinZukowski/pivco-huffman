@@ -239,7 +239,7 @@ vector lengths (e.g. Fujitsu A64FX).
    per-node headers or metadata.
 
 For step-by-step traces of the hot SIMD kernels (`partition_8`,
-`flat_dN_spread`, `scatter_both_leaves`) with worked examples and
+`flat_dN_unpack`, `scatter_both_leaves`) with worked examples and
 register-state-per-instruction walkthroughs, see
 [`KERNELS.md`](KERNELS.md).
 
@@ -723,14 +723,14 @@ TBL primitive used per platform / D:
 |---|---------------|----------------|-------------------------------------|
 | 2 | `vqtbl1q_u8`  | `pshufb`       | scalar (no per-byte var-shift)      |
 | 3 | `vqtbl1`      | `pshufb`       | scalar                              |
-| 4 | `vqtbl1q_u8`  | `pshufb`       | `pshufb` (only D with SIMD spread)  |
+| 4 | `vqtbl1q_u8`  | `pshufb`       | `pshufb` (only D with SIMD unpack)  |
 | 5 | `vqtbl2q_u8`  | `vpermb` (ymm) | scalar                              |
 | 6 | `vqtbl4q_u8`  | `vpermb` (zmm) | scalar                              |
 
 Reading the table:
 
 - **The indexed scatter floor varies hugely across platforms.**  M4
-  hits ~0.14–0.18 ns/elem (5–7 GB/s) and the SIMD spread upstream of it
+  hits ~0.14–0.18 ns/elem (5–7 GB/s) and the SIMD unpack upstream of it
   is essentially free.  Xeon AVX-512 sits at ~0.26–0.32 (3–4 GB/s, 2×
   M4) — `_mm_extract_epi8` is a 1-cycle uop but emits ~16 of them per
   16-element chunk.  Graviton 4 (0.66 / 1.5 GB/s) and Zen 3 (0.66 even
@@ -770,7 +770,7 @@ Reading the table:
   scatter when the output is sequential** (root-flat or covered
   subtree).  M4 0.02 vs partition's 0.06 — 3× cheaper.  Once stores
   are indexed (non-root flat subtree), the gap collapses to the
-  per-platform scatter floor and most of the SIMD spread savings are
+  per-platform scatter floor and most of the SIMD unpack savings are
   absorbed — visible in the `flat_scatter_dN` rows being tightly
   bunched within each platform regardless of D.
 
@@ -803,7 +803,7 @@ This refresh uses **Instruments / `xctrace` Time Profiler with
 DWARF inlined-frame attribution** instead.  The profile binary is
 built `RelWithDebInfo` and `dsymutil`'d so DWARF debug info covers
 every inlined helper (`partition_8`, `scatter_sym`,
-`scatter_both_leaves`, `flat_decode_scatter_neon`, `flat_dN_spread`,
+`scatter_both_leaves`, `flat_decode_scatter_neon`, `flat_dN_unpack`,
 …), letting the trace attribute each sample directly to a source
 function and line.  Decode-loop samples are isolated by filtering
 backtraces that contain `decode_node_neon` or
@@ -843,8 +843,8 @@ into `decode_node_neon` at `-O2`.
 | `decode_node_neon`         | **11.8%** | `pivco_huffman_neon.c:754+` | recursion glue + leaf checks + recurse setup    |
 | `scatter_both_leaves`      |    9.9% | `pivco_huffman_neon.c:704+` | both-leaves stage fusion (sequential write)     |
 | `scatter_sym`              |    8.6% | `pivco_huffman_neon.c:660+` | leaf scatter (one child = leaf)                 |
-| `flat_d3_spread`           |    4.1% | `pivco_huffman_neon_flat.h:71` | D=3 bit-unpack inside flat path                 |
-| `flat_d2_spread`           |    3.9% | `pivco_huffman_neon_flat.h:44` | D=2 bit-unpack                                   |
+| `flat_d3_unpack`           |    4.1% | `pivco_huffman_neon_flat.h:71` | D=3 bit-unpack inside flat path                 |
+| `flat_d2_unpack`           |    3.9% | `pivco_huffman_neon_flat.h:44` | D=2 bit-unpack                                   |
 | `partition_8_right`        |    3.7% | `pivco_huffman_neon.c:638+` | half-partition (one side store, leaf-fusion)    |
 | `_platform_memset`         |    3.2% | (libsystem)            | phase-0 `prefill_sym` of most-frequent leaf       |
 | `pivco_huffman_decode_neon`|    0.5% | `pivco_huffman_neon.c:1061` | per-block wrapper (root partition setup)        |
@@ -864,7 +864,7 @@ port bound, not TBL-throughput bound.
 | Region                         | %        | Comprises                                                |
 |--------------------------------|---------:|----------------------------------------------------------|
 | **Partition body**             | **41.6%** | `partition_8` + `partition_8_right`                      |
-| **Flat-subtree path**          | **24.2%** | `flat_decode_scatter_neon` + `flat_d2_spread` + `flat_d3_spread` |
+| **Flat-subtree path**          | **24.2%** | `flat_decode_scatter_neon` + `flat_d2_unpack` + `flat_d3_unpack` |
 | **Leaf scatter**               | **18.4%** | `scatter_sym` + `scatter_both_leaves`                    |
 | **Recursion glue**             | **11.8%** | `decode_node_neon` (non-inlined: leaf checks, recurse)   |
 | **Phase-0 prefill**            |     3.2% | `_platform_memset`                                        |

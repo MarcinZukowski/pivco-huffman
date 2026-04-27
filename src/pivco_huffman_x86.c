@@ -146,12 +146,12 @@ static inline uint32_t extract_D_bits_x86(const uint8_t *in,
  *
  * - D=2, D=3, D=5, D=6, D=7 all require either per-byte variable shifts
  *   (AVX2's _mm_srlv_*) or vpmultishiftqb (AVX-512 VBMI2) to build the
- *   per-byte code values efficiently.  Without those, the spread would
+ *   per-byte code values efficiently.  Without those, the unpack would
  *   need ~4-8 separate pshufb + immediate shifts + blends, which
  *   benchmarked slower than the scalar FLAT_UNPACK_SWITCH_IDX on AVX-512
  *   (where even vpmultishiftqb wasn't enough for D=3/5/6), so the
  *   SSE4.1 variant is definitely not viable.
- * - D=4 is the special case where the spread is simple: duplicate +
+ * - D=4 is the special case where the unpack is simple: duplicate +
  *   mask + single-immediate-shift + blend gives (b_i & 0x0F, b_i >> 4)
  *   per input byte without any variable-shift primitive.
  * - D=8 has 256-entry c2s, too big for pshufb; scalar LDR wins.
@@ -161,7 +161,7 @@ static inline uint32_t extract_D_bits_x86(const uint8_t *in,
  * PIVCO and trad_huffman_decode_4s) is the right escape for
  * bell_* / proba02 / english / zipfian. */
 
-/* flat_d4_spread_x86 lives in pivco_huffman_x86_flat.h (shared with
+/* flat_d4_unpack_x86 lives in pivco_huffman_x86_flat.h (shared with
  * bench/bench_micro.c). */
 
 /* Decode n elements through a D-bit packed region + code_to_sym table,
@@ -177,7 +177,7 @@ static inline void flat_decode_scatter_x86(uint8_t *symbols,
         __m128i c2s_vec = _mm_loadu_si128((const __m128i *)c2s);
         int i = 0;
         for (; i + 16 <= n; i += 16) {
-            __m128i codes = flat_d4_spread_x86(bm + (i >> 1));
+            __m128i codes = flat_d4_unpack_x86(bm + (i >> 1));
             __m128i syms  = _mm_shuffle_epi8(c2s_vec, codes);
             symbols[indices[i     ]] = (uint8_t)_mm_extract_epi8(syms, 0);
             symbols[indices[i +  1]] = (uint8_t)_mm_extract_epi8(syms, 1);
@@ -302,7 +302,7 @@ static inline void flat_decode_direct_x86(uint8_t *symbols, int n,
         __m128i c2s_vec = _mm_loadu_si128((const __m128i *)c2s);
         int i = 0;
         for (; i + 16 <= n; i += 16) {
-            __m128i codes = flat_d4_spread_x86(bm + (i >> 1));
+            __m128i codes = flat_d4_unpack_x86(bm + (i >> 1));
             __m128i syms  = _mm_shuffle_epi8(c2s_vec, codes);
             _mm_storeu_si128((__m128i *)(symbols + i), syms);
         }

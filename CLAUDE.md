@@ -65,7 +65,7 @@ revisions and cite prior numbers.
 - `include/pivco_huffman.h` — public API + table struct
 - `src/huffman_table.c` — `pivco_huffman_build_table` + flat-subtree detection
 - `src/pivco_huffman_neon.c` — main NEON decode/encode (hot path)
-- `src/pivco_huffman_neon_flat.h` — D=2..6 spread helpers (shared with bench_micro)
+- `src/pivco_huffman_neon_flat.h` — D=2..6 unpack helpers (shared with bench_micro)
 - `src/pivco_huffman_avx512.c` + `_flat.h` — AVX-512 VBMI2 backend
 - `src/pivco_huffman_x86.c` + `_flat.h` — SSE4.1 backend
 - `src/pivco_huffman_scalar.c` — reference scalar backend

@@ -1,6 +1,6 @@
-/* pivco_huffman_x86_flat.h — flat-subtree D-bit code spreader (SSE4.1).
+/* pivco_huffman_x86_flat.h — flat-subtree D-bit code unpacker (SSE4.1).
  *
- * Internal header.  Only D=4 has a SIMD spread under pure SSE4.1: there
+ * Internal header.  Only D=4 has a SIMD unpack under pure SSE4.1: there
  * is no per-byte variable shift (no `_mm_srlv_epi8` / no `vpsrlvw` until
  * AVX2) and no `vpmultishiftqb` (VBMI2), so D=2/3/5/6 require ~4-8
  * separate pshufb + immediate shifts + blends — slower than the
@@ -24,11 +24,11 @@
 #include <stdint.h>
 #include <smmintrin.h>
 
-/* D=4 SSE4.1 spread: 16 codes from 8 bytes of bm.
+/* D=4 SSE4.1 unpack: 16 codes from 8 bytes of bm.
  * 8 bytes loaded, duplicated to 16 bytes via pshufb: [b0,b0,b1,b1,..].
  * Treat each pair as uint16: mask & 0xF00F → (b&0x0F, b&0xF0); shift right 4
  * → (0, b>>4); blend with 0xFF00 mask picks (b&0x0F, b>>4) per pair. */
-static inline __m128i flat_d4_spread_x86(const uint8_t *bm_ptr)
+static inline __m128i flat_d4_unpack_x86(const uint8_t *bm_ptr)
 {
     __m128i raw = _mm_loadl_epi64((const __m128i *)bm_ptr);
     const __m128i dup_idx = _mm_setr_epi8(

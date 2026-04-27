@@ -224,7 +224,7 @@ static inline uint32_t extract_D_bits(const uint8_t *in, int bit_pos, int D)
         DST(i) = c2s[code];                                                    \
     }
 
-/* flat_d{2,3,4,5,6}_spread() and their tables live in
+/* flat_d{2,3,4,5,6}_unpack() and their tables live in
  * pivco_huffman_neon_flat.h (shared with bench/bench_micro.c). */
 
 /* Unpack n D-bit codes from bm, look up in c2s, scatter to
@@ -240,7 +240,7 @@ static inline void flat_decode_scatter_neon(uint8_t *symbols,
         uint8x16_t c2s_vec = vld1q_u8(c2s);  /* upper 12 bytes are unused */
         int i = 0;
         for (; i + 16 <= n; i += 16) {
-            uint8x16_t codes = flat_d2_spread(bm + (i >> 2));
+            uint8x16_t codes = flat_d2_unpack(bm + (i >> 2));
             uint8x16_t syms  = vqtbl1q_u8(c2s_vec, codes);
             symbols[indices[i     ]] = vgetq_lane_u8(syms, 0);
             symbols[indices[i +  1]] = vgetq_lane_u8(syms, 1);
@@ -279,7 +279,7 @@ static inline void flat_decode_scatter_neon(uint8_t *symbols,
         uint8x16_t c2s_vec = vld1q_u8(c2s);  /* upper 8 bytes unused */
         int i = 0;
         for (; i + 8 <= n; i += 8) {
-            uint8x8_t codes = flat_d3_spread(bm + ((i * 3) >> 3));
+            uint8x8_t codes = flat_d3_unpack(bm + ((i * 3) >> 3));
             uint8x8_t syms  = vqtbl1_u8(c2s_vec, codes);
             symbols[indices[i    ]] = vget_lane_u8(syms, 0);
             symbols[indices[i + 1]] = vget_lane_u8(syms, 1);
@@ -305,7 +305,7 @@ static inline void flat_decode_scatter_neon(uint8_t *symbols,
         c2s_vec.val[1] = vld1q_u8(c2s + 16);
         int i = 0;
         for (; i + 8 <= n; i += 8) {
-            uint8x8_t codes = flat_d5_spread(bm + ((i * 5) >> 3));
+            uint8x8_t codes = flat_d5_unpack(bm + ((i * 5) >> 3));
             uint8x8_t syms  = vqtbl2_u8(c2s_vec, codes);
             symbols[indices[i    ]] = vget_lane_u8(syms, 0);
             symbols[indices[i + 1]] = vget_lane_u8(syms, 1);
@@ -332,7 +332,7 @@ static inline void flat_decode_scatter_neon(uint8_t *symbols,
         c2s_vec.val[3] = vld1q_u8(c2s + 48);
         int i = 0;
         for (; i + 8 <= n; i += 8) {
-            uint8x8_t codes = flat_d6_spread(bm + ((i * 6) >> 3));
+            uint8x8_t codes = flat_d6_unpack(bm + ((i * 6) >> 3));
             uint8x8_t syms  = vqtbl4_u8(c2s_vec, codes);
             symbols[indices[i    ]] = vget_lane_u8(syms, 0);
             symbols[indices[i + 1]] = vget_lane_u8(syms, 1);
@@ -356,7 +356,7 @@ static inline void flat_decode_scatter_neon(uint8_t *symbols,
         uint8x16_t c2s_vec = vld1q_u8(c2s);
         int i = 0;
         for (; i + 16 <= n; i += 16) {
-            uint8x16_t codes = flat_d4_spread(bm + (i >> 1));
+            uint8x16_t codes = flat_d4_unpack(bm + (i >> 1));
             uint8x16_t syms  = vqtbl1q_u8(c2s_vec, codes);
             symbols[indices[i     ]] = vgetq_lane_u8(syms, 0);
             symbols[indices[i +  1]] = vgetq_lane_u8(syms, 1);
@@ -404,7 +404,7 @@ static inline void flat_decode_direct_neon(uint8_t *symbols, int n,
         uint8x16_t c2s_vec = vld1q_u8(c2s);
         int i = 0;
         for (; i + 16 <= n; i += 16) {
-            uint8x16_t codes = flat_d2_spread(bm + (i >> 2));
+            uint8x16_t codes = flat_d2_unpack(bm + (i >> 2));
             uint8x16_t syms  = vqtbl1q_u8(c2s_vec, codes);
             vst1q_u8(symbols + i, syms);
         }
@@ -422,20 +422,20 @@ static inline void flat_decode_direct_neon(uint8_t *symbols, int n,
         return;
     }
     if (D == 3) {
-        /* 16 codes per iter via two 8-code spreads combined into uint8x16
+        /* 16 codes per iter via two 8-code unpacks combined into uint8x16
          * for a single vst1q_u8. */
         uint8x16_t c2s_vec = vld1q_u8(c2s);
         int i = 0;
         for (; i + 16 <= n; i += 16) {
-            uint8x8_t codes_lo = flat_d3_spread(bm + ((i      * 3) >> 3));
-            uint8x8_t codes_hi = flat_d3_spread(bm + (((i + 8) * 3) >> 3));
+            uint8x8_t codes_lo = flat_d3_unpack(bm + ((i      * 3) >> 3));
+            uint8x8_t codes_hi = flat_d3_unpack(bm + (((i + 8) * 3) >> 3));
             uint8x16_t codes = vcombine_u8(codes_lo, codes_hi);
             uint8x16_t syms  = vqtbl1q_u8(c2s_vec, codes);
             vst1q_u8(symbols + i, syms);
         }
         /* 8-code tail (also NEON-fast) then 1-wide scalar. */
         for (; i + 8 <= n; i += 8) {
-            uint8x8_t codes = flat_d3_spread(bm + ((i * 3) >> 3));
+            uint8x8_t codes = flat_d3_unpack(bm + ((i * 3) >> 3));
             uint8x8_t syms  = vqtbl1_u8(c2s_vec, codes);
             vst1_u8(symbols + i, syms);
         }
@@ -447,22 +447,22 @@ static inline void flat_decode_direct_neon(uint8_t *symbols, int n,
     }
 #if PIVCO_NEON_FAST_MULTI_TBL
     if (D == 5) {
-        /* 16 codes per iter via two 8-code spreads + vqtbl2q_u8 on the
+        /* 16 codes per iter via two 8-code unpacks + vqtbl2q_u8 on the
          * 32-byte c2s table, single vst1q_u8. */
         uint8x16x2_t c2s_vec;
         c2s_vec.val[0] = vld1q_u8(c2s);
         c2s_vec.val[1] = vld1q_u8(c2s + 16);
         int i = 0;
         for (; i + 16 <= n; i += 16) {
-            uint8x8_t codes_lo = flat_d5_spread(bm + ((i      * 5) >> 3));
-            uint8x8_t codes_hi = flat_d5_spread(bm + (((i + 8) * 5) >> 3));
+            uint8x8_t codes_lo = flat_d5_unpack(bm + ((i      * 5) >> 3));
+            uint8x8_t codes_hi = flat_d5_unpack(bm + (((i + 8) * 5) >> 3));
             uint8x16_t codes = vcombine_u8(codes_lo, codes_hi);
             uint8x16_t syms  = vqtbl2q_u8(c2s_vec, codes);
             vst1q_u8(symbols + i, syms);
         }
         /* 8-code tail. */
         for (; i + 8 <= n; i += 8) {
-            uint8x8_t codes = flat_d5_spread(bm + ((i * 5) >> 3));
+            uint8x8_t codes = flat_d5_unpack(bm + ((i * 5) >> 3));
             uint8x8_t syms  = vqtbl2_u8(c2s_vec, codes);
             vst1_u8(symbols + i, syms);
         }
@@ -473,7 +473,7 @@ static inline void flat_decode_direct_neon(uint8_t *symbols, int n,
         return;
     }
     if (D == 6) {
-        /* 16 codes per iter via two 8-code spreads + vqtbl4q_u8 on the
+        /* 16 codes per iter via two 8-code unpacks + vqtbl4q_u8 on the
          * 64-byte c2s table, single vst1q_u8. */
         uint8x16x4_t c2s_vec;
         c2s_vec.val[0] = vld1q_u8(c2s);
@@ -482,14 +482,14 @@ static inline void flat_decode_direct_neon(uint8_t *symbols, int n,
         c2s_vec.val[3] = vld1q_u8(c2s + 48);
         int i = 0;
         for (; i + 16 <= n; i += 16) {
-            uint8x8_t codes_lo = flat_d6_spread(bm + ((i      * 6) >> 3));
-            uint8x8_t codes_hi = flat_d6_spread(bm + (((i + 8) * 6) >> 3));
+            uint8x8_t codes_lo = flat_d6_unpack(bm + ((i      * 6) >> 3));
+            uint8x8_t codes_hi = flat_d6_unpack(bm + (((i + 8) * 6) >> 3));
             uint8x16_t codes = vcombine_u8(codes_lo, codes_hi);
             uint8x16_t syms  = vqtbl4q_u8(c2s_vec, codes);
             vst1q_u8(symbols + i, syms);
         }
         for (; i + 8 <= n; i += 8) {
-            uint8x8_t codes = flat_d6_spread(bm + ((i * 6) >> 3));
+            uint8x8_t codes = flat_d6_unpack(bm + ((i * 6) >> 3));
             uint8x8_t syms  = vqtbl4_u8(c2s_vec, codes);
             vst1_u8(symbols + i, syms);
         }
@@ -505,7 +505,7 @@ static inline void flat_decode_direct_neon(uint8_t *symbols, int n,
         uint8x16_t c2s_vec = vld1q_u8(c2s);
         int i = 0;
         for (; i + 16 <= n; i += 16) {
-            uint8x16_t codes = flat_d4_spread(bm + (i >> 1));
+            uint8x16_t codes = flat_d4_unpack(bm + (i >> 1));
             uint8x16_t syms  = vqtbl1q_u8(c2s_vec, codes);
             vst1q_u8(symbols + i, syms);
         }

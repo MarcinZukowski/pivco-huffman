@@ -121,7 +121,7 @@ static inline uint32_t extract_D_bits_avx512(const uint8_t *in,
     return (val >> bit_off) & ((1u << D) - 1);
 }
 
-/* flat_d{2..6}_spread_avx512* helpers + tables live in
+/* flat_d{2..6}_unpack_avx512* helpers + tables live in
  * pivco_huffman_avx512_flat.h (shared with bench/bench_micro.c). */
 
 #define FLAT_UNPACK_SWITCH_IDX(dst_expr)                                 \
@@ -214,7 +214,7 @@ static inline void flat_decode_scatter_avx512(uint8_t *symbols,
         int i = 0;
         int fast_end = n >= 16 ? n - 16 : 0;
         for (; i + 16 <= fast_end; i += 16) {
-            __m128i codes = flat_d6_spread_avx512_fast(bm + ((i * 6) >> 3));
+            __m128i codes = flat_d6_unpack_avx512_fast(bm + ((i * 6) >> 3));
             __m512i codes_ext = _mm512_castsi128_si512(codes);
             __m512i syms_full = _mm512_permutexvar_epi8(codes_ext, c2s_vec);
             __m128i syms = _mm512_castsi512_si128(syms_full);
@@ -236,7 +236,7 @@ static inline void flat_decode_scatter_avx512(uint8_t *symbols,
             symbols[indices[i + 15]] = (uint8_t)_mm_extract_epi8(syms, 15);
         }
         if (i + 16 <= n) {
-            __m128i codes = flat_d6_spread_avx512_safe(bm + ((i * 6) >> 3));
+            __m128i codes = flat_d6_unpack_avx512_safe(bm + ((i * 6) >> 3));
             __m512i codes_ext = _mm512_castsi128_si512(codes);
             __m512i syms_full = _mm512_permutexvar_epi8(codes_ext, c2s_vec);
             __m128i syms = _mm512_castsi512_si128(syms_full);
@@ -270,7 +270,7 @@ static inline void flat_decode_scatter_avx512(uint8_t *symbols,
         int i = 0;
         int fast_end = n >= 16 ? n - 16 : 0;
         for (; i + 16 <= fast_end; i += 16) {
-            __m128i codes = flat_d5_spread_avx512_fast(bm + ((i * 5) >> 3));
+            __m128i codes = flat_d5_unpack_avx512_fast(bm + ((i * 5) >> 3));
             __m256i codes_ext = _mm256_zextsi128_si256(codes);
             __m256i syms_full = _mm256_permutexvar_epi8(codes_ext, c2s_vec);
             __m128i syms = _mm256_castsi256_si128(syms_full);
@@ -292,7 +292,7 @@ static inline void flat_decode_scatter_avx512(uint8_t *symbols,
             symbols[indices[i + 15]] = (uint8_t)_mm_extract_epi8(syms, 15);
         }
         if (i + 16 <= n) {
-            __m128i codes = flat_d5_spread_avx512_safe(bm + ((i * 5) >> 3));
+            __m128i codes = flat_d5_unpack_avx512_safe(bm + ((i * 5) >> 3));
             __m256i codes_ext = _mm256_zextsi128_si256(codes);
             __m256i syms_full = _mm256_permutexvar_epi8(codes_ext, c2s_vec);
             __m128i syms = _mm256_castsi256_si128(syms_full);
@@ -331,7 +331,7 @@ static inline void flat_decode_scatter_avx512(uint8_t *symbols,
          * overreads into the NEXT chunk's valid bytes). */
         int fast_end = n >= 16 ? n - 16 : 0;
         for (; i + 16 <= fast_end; i += 16) {
-            __m128i codes = flat_d3_spread_avx512_fast(bm + ((i * 3) >> 3));
+            __m128i codes = flat_d3_unpack_avx512_fast(bm + ((i * 3) >> 3));
             __m128i syms  = _mm_shuffle_epi8(c2s_vec, codes);
             symbols[indices[i     ]] = (uint8_t)_mm_extract_epi8(syms, 0);
             symbols[indices[i +  1]] = (uint8_t)_mm_extract_epi8(syms, 1);
@@ -352,7 +352,7 @@ static inline void flat_decode_scatter_avx512(uint8_t *symbols,
         }
         /* Final 16-code chunk (if any): safe 6-byte-memcpy variant. */
         if (i + 16 <= n) {
-            __m128i codes = flat_d3_spread_avx512_safe(bm + ((i * 3) >> 3));
+            __m128i codes = flat_d3_unpack_avx512_safe(bm + ((i * 3) >> 3));
             __m128i syms  = _mm_shuffle_epi8(c2s_vec, codes);
             symbols[indices[i     ]] = (uint8_t)_mm_extract_epi8(syms, 0);
             symbols[indices[i +  1]] = (uint8_t)_mm_extract_epi8(syms, 1);
@@ -383,7 +383,7 @@ static inline void flat_decode_scatter_avx512(uint8_t *symbols,
         __m128i c2s_vec = _mm_loadu_si128((const __m128i *)c2s);
         int i = 0;
         for (; i + 16 <= n; i += 16) {
-            __m128i codes = flat_d4_spread_avx512(bm + (i >> 1));
+            __m128i codes = flat_d4_unpack_avx512(bm + (i >> 1));
             __m128i syms  = _mm_shuffle_epi8(c2s_vec, codes);
             symbols[indices[i     ]] = (uint8_t)_mm_extract_epi8(syms, 0);
             symbols[indices[i +  1]] = (uint8_t)_mm_extract_epi8(syms, 1);
@@ -415,7 +415,7 @@ static inline void flat_decode_scatter_avx512(uint8_t *symbols,
         __m128i c2s_vec = _mm_set1_epi32((int32_t)c2s_lo);
         int i = 0;
         for (; i + 16 <= n; i += 16) {
-            __m128i codes = flat_d2_spread_avx512(bm + (i >> 2));
+            __m128i codes = flat_d2_unpack_avx512(bm + (i >> 2));
             __m128i syms  = _mm_shuffle_epi8(c2s_vec, codes);
             /* 16 lane-extract + strbs.  Using _mm_extract_epi8 for
              * compile-time lanes. */
@@ -464,14 +464,14 @@ static inline void flat_decode_direct_avx512(uint8_t *symbols, int n,
         int i = 0;
         int fast_end = n >= 16 ? n - 16 : 0;
         for (; i + 16 <= fast_end; i += 16) {
-            __m128i codes = flat_d6_spread_avx512_fast(bm + ((i * 6) >> 3));
+            __m128i codes = flat_d6_unpack_avx512_fast(bm + ((i * 6) >> 3));
             __m512i codes_ext = _mm512_castsi128_si512(codes);
             __m512i syms_full = _mm512_permutexvar_epi8(codes_ext, c2s_vec);
             _mm_storeu_si128((__m128i *)(symbols + i),
                              _mm512_castsi512_si128(syms_full));
         }
         if (i + 16 <= n) {
-            __m128i codes = flat_d6_spread_avx512_safe(bm + ((i * 6) >> 3));
+            __m128i codes = flat_d6_unpack_avx512_safe(bm + ((i * 6) >> 3));
             __m512i codes_ext = _mm512_castsi128_si512(codes);
             __m512i syms_full = _mm512_permutexvar_epi8(codes_ext, c2s_vec);
             _mm_storeu_si128((__m128i *)(symbols + i),
@@ -489,14 +489,14 @@ static inline void flat_decode_direct_avx512(uint8_t *symbols, int n,
         int i = 0;
         int fast_end = n >= 16 ? n - 16 : 0;
         for (; i + 16 <= fast_end; i += 16) {
-            __m128i codes = flat_d5_spread_avx512_fast(bm + ((i * 5) >> 3));
+            __m128i codes = flat_d5_unpack_avx512_fast(bm + ((i * 5) >> 3));
             __m256i codes_ext = _mm256_zextsi128_si256(codes);
             __m256i syms_full = _mm256_permutexvar_epi8(codes_ext, c2s_vec);
             _mm_storeu_si128((__m128i *)(symbols + i),
                              _mm256_castsi256_si128(syms_full));
         }
         if (i + 16 <= n) {
-            __m128i codes = flat_d5_spread_avx512_safe(bm + ((i * 5) >> 3));
+            __m128i codes = flat_d5_unpack_avx512_safe(bm + ((i * 5) >> 3));
             __m256i codes_ext = _mm256_zextsi128_si256(codes);
             __m256i syms_full = _mm256_permutexvar_epi8(codes_ext, c2s_vec);
             _mm_storeu_si128((__m128i *)(symbols + i),
@@ -516,12 +516,12 @@ static inline void flat_decode_direct_avx512(uint8_t *symbols, int n,
         int i = 0;
         int fast_end = n >= 16 ? n - 16 : 0;
         for (; i + 16 <= fast_end; i += 16) {
-            __m128i codes = flat_d3_spread_avx512_fast(bm + ((i * 3) >> 3));
+            __m128i codes = flat_d3_unpack_avx512_fast(bm + ((i * 3) >> 3));
             __m128i syms  = _mm_shuffle_epi8(c2s_vec, codes);
             _mm_storeu_si128((__m128i *)(symbols + i), syms);
         }
         if (i + 16 <= n) {
-            __m128i codes = flat_d3_spread_avx512_safe(bm + ((i * 3) >> 3));
+            __m128i codes = flat_d3_unpack_avx512_safe(bm + ((i * 3) >> 3));
             __m128i syms  = _mm_shuffle_epi8(c2s_vec, codes);
             _mm_storeu_si128((__m128i *)(symbols + i), syms);
             i += 16;
@@ -536,7 +536,7 @@ static inline void flat_decode_direct_avx512(uint8_t *symbols, int n,
         __m128i c2s_vec = _mm_loadu_si128((const __m128i *)c2s);
         int i = 0;
         for (; i + 16 <= n; i += 16) {
-            __m128i codes = flat_d4_spread_avx512(bm + (i >> 1));
+            __m128i codes = flat_d4_unpack_avx512(bm + (i >> 1));
             __m128i syms  = _mm_shuffle_epi8(c2s_vec, codes);
             _mm_storeu_si128((__m128i *)(symbols + i), syms);
         }
@@ -547,13 +547,13 @@ static inline void flat_decode_direct_avx512(uint8_t *symbols, int n,
         return;
     }
     if (D == 2) {
-        /* Same spread/lookup as scatter, but block-store 16 bytes. */
+        /* Same unpack/lookup as scatter, but block-store 16 bytes. */
         uint32_t c2s_lo;
         memcpy(&c2s_lo, c2s, 4);
         __m128i c2s_vec = _mm_set1_epi32((int32_t)c2s_lo);
         int i = 0;
         for (; i + 16 <= n; i += 16) {
-            __m128i codes = flat_d2_spread_avx512(bm + (i >> 2));
+            __m128i codes = flat_d2_unpack_avx512(bm + (i >> 2));
             __m128i syms  = _mm_shuffle_epi8(c2s_vec, codes);
             _mm_storeu_si128((__m128i *)(symbols + i), syms);
         }

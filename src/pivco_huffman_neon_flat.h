@@ -1,11 +1,11 @@
-/* pivco_huffman_neon_flat.h — flat-subtree D-bit code spreaders (NEON).
+/* pivco_huffman_neon_flat.h — flat-subtree D-bit code unpackers (NEON).
  *
- * Internal header.  Each `flat_dN_spread()` reads N D-bit codes from a
+ * Internal header.  Each `flat_dN_unpack()` reads N D-bit codes from a
  * packed bitstream and returns them in NEON vector lanes (one byte per
  * code, value < 2^D).  Used by the production decoder
  * (pivco_huffman_neon.c) and the per-D microbench (bench/bench_micro.c).
  *
- * All helpers + spread tables live here so the two TUs share a single
+ * All helpers + unpack tables live here so the two TUs share a single
  * source of truth without giving up inlining.  Tables are `static const`
  * (per-TU) and helpers are `static inline` — values fold into the
  * inlined function and no extern symbols are emitted.
@@ -24,7 +24,7 @@
 #include <string.h>
 #include <arm_neon.h>
 
-/* D=2 spread constants: each byte of input holds 4 codes; replicate each
+/* D=2 unpack constants: each byte of input holds 4 codes; replicate each
  * input byte to 4 output lanes, then right-shift lane k by 2k to align
  * the desired 2-bit code at the low bits. */
 static const uint8_t flat_d2_dup_tab[16] = {
@@ -36,7 +36,7 @@ static const int8_t flat_d2_shift_tab[16] = {
 
 /* Unpack 16 consecutive D=2 codes from 4 bytes of bm into a 16-lane byte
  * vector (values 0..3). */
-static inline uint8x16_t flat_d2_spread(const uint8_t *bm_ptr)
+static inline uint8x16_t flat_d2_unpack(const uint8_t *bm_ptr)
 {
     uint32_t packed;
     memcpy(&packed, bm_ptr, 4);
@@ -47,7 +47,7 @@ static inline uint8x16_t flat_d2_spread(const uint8_t *bm_ptr)
     return vandq_u8(shifted, vdupq_n_u8(0x03));
 }
 
-/* D=3 spread: 3 bytes = 24 bits = 8 codes.  Two of the 8 codes cross a
+/* D=3 unpack: 3 bytes = 24 bits = 8 codes.  Two of the 8 codes cross a
  * byte boundary, so we work in uint16 lanes (each holding a 16-bit
  * window with enough bits to shift out any one 3-bit code). */
 static const uint8_t flat_d3_shuf_tab[16] = {
@@ -62,7 +62,7 @@ static const int16_t flat_d3_shift_tab[8] = {
 
 /* Unpack 8 consecutive D=3 codes from 3 bytes starting at bm_ptr into
  * the low 8 lanes of a uint8x8 vector (values 0..7). */
-static inline uint8x8_t flat_d3_spread(const uint8_t *bm_ptr)
+static inline uint8x8_t flat_d3_unpack(const uint8_t *bm_ptr)
 {
     /* Load 3 bytes byte-by-byte into a vector with top bytes zero.
      * Avoid a 4-byte read so we don't run past the end of the stream. */
@@ -77,7 +77,7 @@ static inline uint8x8_t flat_d3_spread(const uint8_t *bm_ptr)
     return vmovn_u16(masked);
 }
 
-/* D=4 spread: 8 bytes hold 16 codes (2 per byte, no byte-crossings).
+/* D=4 unpack: 8 bytes hold 16 codes (2 per byte, no byte-crossings).
  * Replicate each byte to 2 lanes and shift lane k by (k & 1) * 4. */
 static const uint8_t flat_d4_dup_tab[16] = {
     0,0, 1,1, 2,2, 3,3, 4,4, 5,5, 6,6, 7,7
@@ -87,7 +87,7 @@ static const int8_t flat_d4_shift_tab[16] = {
 };
 
 /* Unpack 16 consecutive D=4 codes from 8 bytes of bm. */
-static inline uint8x16_t flat_d4_spread(const uint8_t *bm_ptr)
+static inline uint8x16_t flat_d4_unpack(const uint8_t *bm_ptr)
 {
     uint64_t packed;
     memcpy(&packed, bm_ptr, 8);
@@ -98,7 +98,7 @@ static inline uint8x16_t flat_d4_spread(const uint8_t *bm_ptr)
     return vandq_u8(shifted, vdupq_n_u8(0x0F));
 }
 
-/* D=5 spread: 5 bytes = 40 bits = 8 codes.  5 of 8 codes cross byte
+/* D=5 unpack: 5 bytes = 40 bits = 8 codes.  5 of 8 codes cross byte
  * boundaries, so we work in uint16 lanes.  Lane layout:
  *   lanes 0,1,2: (b0, b1)  — codes 0,1,2 (shifts  0, 5, 10)
  *   lane    3: (b1, b2)  — code  3        (shift    7)
@@ -112,7 +112,7 @@ static const int16_t flat_d5_shift_tab[8] = {
 };
 
 /* Unpack 8 consecutive D=5 codes from 5 bytes starting at bm_ptr. */
-static inline uint8x8_t flat_d5_spread(const uint8_t *bm_ptr)
+static inline uint8x8_t flat_d5_unpack(const uint8_t *bm_ptr)
 {
     /* 5-byte load via memcpy into the low 40 bits of a uint64 — doesn't
      * overrun the stream. */
@@ -127,7 +127,7 @@ static inline uint8x8_t flat_d5_spread(const uint8_t *bm_ptr)
     return vmovn_u16(masked);
 }
 
-/* D=6 spread: 3 bytes = 24 bits = 4 codes.  2 of 4 codes cross byte
+/* D=6 unpack: 3 bytes = 24 bits = 4 codes.  2 of 4 codes cross byte
  * boundaries (codes 1 and 2).  To produce 8 codes we process 6 bytes.
  * Lane layout:
  *   lanes 0,1: (b0, b1)  — codes 0, 1 (shifts  0, 6)
@@ -142,7 +142,7 @@ static const int16_t flat_d6_shift_tab[8] = {
 };
 
 /* Unpack 8 consecutive D=6 codes from 6 bytes starting at bm_ptr. */
-static inline uint8x8_t flat_d6_spread(const uint8_t *bm_ptr)
+static inline uint8x8_t flat_d6_unpack(const uint8_t *bm_ptr)
 {
     uint64_t packed = 0;
     memcpy(&packed, bm_ptr, 6);

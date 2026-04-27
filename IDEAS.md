@@ -160,7 +160,7 @@ counted once).  Results on the standard bench distributions:
 | **proba02** | **98.4%** | D=3: 35%, D=4: 52%, D=2: 8% | 0.73× |
 | **bell_s30** | **95.9%** | D=5: 32%, D=4: 30%, D=3: 23%, D=2: 11% | 0.83× |
 | **bell_s10** | **94.4%** | D=4: 55%, D=3: 34%, D=2: 5% | 0.74× |
-| **zipfian** | **69.4%** | spread D=2..7+ | 0.66× |
+| **zipfian** | **69.4%** | unpack D=2..7+ | 0.66× |
 | **english** | **54.8%** | D=2: 54.8% (all at one depth) | 0.98× |
 | proba14 | 0.9% | negligible | 0.93× |
 | proba50 / proba80 / geometric | 0 | stick-tree shape | — |
@@ -284,7 +284,7 @@ Codegen transform was dramatic — clang merged both data vectors into a
 single `ldp q0, q1`, issued both popcount loads consecutively, and
 grouped all four TBLs.  Runtime delta on `pivco_n` across all 19
 benchmarked distributions: ±2%, symmetric around zero, within
-thermal-drift noise (CPU freq drift alone covered the spread).
+thermal-drift noise (CPU freq drift alone covered the unpack).
 
 Interpretation: M4's OoO engine was already renaming through the
 textual serialization.  The bottleneck of `pivco_n` at ~0.25 c/elem is
@@ -497,7 +497,7 @@ was skipped because:
 Sketch if someone does attempt it:
 ```c
 /* Split 7-bit code by high bit, do two vqtbl4q_u8 and blend. */
-uint8x16_t codes = flat_d7_spread(...);         /* 16 × (0..127) */
+uint8x16_t codes = flat_d7_unpack(...);         /* 16 × (0..127) */
 uint8x16_t hi    = vshrq_n_u8(codes, 6);        /* 0 or 1 (top bit) */
 uint8x16_t lo    = vandq_u8(codes, vdupq_n_u8(0x3F));
 uint8x16_t lo_syms = vqtbl4q_u8(c2s_lo64, lo);
@@ -511,9 +511,9 @@ Expected win: <2% on zipfian; 3-4× on flat_M7 direct root-flat (via
 the same vst1q_u8 pattern as D=2..6).  flat_M7 is already winning so
 the marginal EV is low.
 
-## Check `flat_dX_spread` helpers against FastLanes unpackers
+## Check `flat_dX_unpack` helpers against FastLanes unpackers
 
-The `flat_d2_spread` / `flat_d3_spread` / ... routines in
+The `flat_d2_unpack` / `flat_d3_unpack` / ... routines in
 `src/pivco_huffman_neon.c` turn a packed D-bit stream into a
 byte-per-code NEON vector via a small shuffle + shift + mask sequence.
 This is exactly the same primitive as **FastLanes**'
@@ -521,16 +521,16 @@ This is exactly the same primitive as **FastLanes**'
 "unpack N-bit values" operation), which the FL authors have tuned
 heavily on NEON and AVX-512.
 
-**Worth comparing**: our spread sequence vs FastLanes's for each D.
+**Worth comparing**: our unpack sequence vs FastLanes's for each D.
 FL may use slightly different permute constants or a smarter
-shift-mask combo that we're missing.  Even a few percent per spread
+shift-mask combo that we're missing.  Even a few percent per unpack
 compounds across bell/zipfian/proba02 (which have the largest
 flat-subtree TBL windows).
 
 Sketch of the check:
 - Clone https://github.com/cwida/FastLanes; find the NEON unpack
   kernel for D ∈ {2,3,4,5,6}.
-- Compare instruction-level vs our `flat_dX_spread` in
+- Compare instruction-level vs our `flat_dX_unpack` in
   `src/pivco_huffman_neon.c` (offsets ~150-320 after the
   `pivco_huffman_common.h` include).
 - If FL is faster, port the trick.  Benchmark with
@@ -601,7 +601,7 @@ D=2/D=3/D=4 (single-register `vqtbl1q_u8`) are fine on c8g.
 > chains — adding 2-3 cycles of serial latency that killed the fast
 > path at 16-codes-per-iter.  Fix: load the next natural size
 > (`uint64` / `__m128i`) unconditionally, relying on the fact that
-> the spread control only references the valid-byte range; add a
+> the unpack control only references the valid-byte range; add a
 > `_safe` variant with the original `N`-byte memcpy for the final
 > chunk so we don't overread past a page boundary.  Fast variant is
 > 1 instruction, safe variant is 1 stack memcpy + 1 xmm load.
@@ -625,7 +625,7 @@ D=2/D=3/D=4 (single-register `vqtbl1q_u8`) are fine on c8g.
 
 **Status (as of `ae14323`, 2026-04-24):** skipped.  Pure SSE4.1 has no
 per-byte variable shift (no `vpsrlv*` until AVX2) and no
-`vpmultishiftqb` (VBMI2), so the spread would need 4–8 separate
+`vpmultishiftqb` (VBMI2), so the unpack would need 4–8 separate
 `pshufb` + immediate shifts + blends — which benchmarked slower than
 scalar even on AVX-512 (§"Revisit AVX-512 D=3, D=5, D=6").
 
@@ -659,8 +659,8 @@ loop and the TBL-accelerated variants) are *shipped*:
 Remaining outstanding work, roughly in increasing cost / decreasing
 certainty:
 
-1. **Check `flat_dX_spread` against FastLanes' unpack kernels**
-   (see §"Check flat_dX_spread against FastLanes unpackers" above).
+1. **Check `flat_dX_unpack` against FastLanes' unpack kernels**
+   (see §"Check flat_dX_unpack against FastLanes unpackers" above).
    Maybe a few percent per D.
 2. **Revisit SSE4.1 D=2, D=3, D=5, D=6** with AVX2 `_mm_srlv_epi16`
    or GFNI — see section above.

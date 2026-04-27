@@ -18,12 +18,12 @@ The five kernels covered:
 | Kernel                 | Profile share | Why it's interesting                                                |
 |------------------------|--------------:|---------------------------------------------------------------------|
 | `partition_8`          |        37.9 % | The 2-way partition core — TBL + popcount-driven split              |
-| `flat_d2_spread`       |         3.9 % | Simplest D-bit unpacker — 4 bytes → 16 codes via 1 TBL + 1 shift    |
-| `flat_d3_spread`       |         4.1 % | First cross-byte case — works in `uint16` lanes                     |
-| `flat_d4_spread`       |       (~3 %)  | Clean even-D case — 8 bytes → 16 codes via dup + half-byte shift    |
-| `scatter_both_leaves`  |         9.9 % | Both-leaves stage fusion — bit-test + blend, no spread step         |
+| `flat_d2_unpack`       |         3.9 % | Simplest D-bit unpacker — 4 bytes → 16 codes via 1 TBL + 1 shift    |
+| `flat_d3_unpack`       |         4.1 % | First cross-byte case — works in `uint16` lanes                     |
+| `flat_d4_unpack`       |       (~3 %)  | Clean even-D case — 8 bytes → 16 codes via dup + half-byte shift    |
+| `scatter_both_leaves`  |         9.9 % | Both-leaves stage fusion — bit-test + blend, no unpack step         |
 
-D=5 and D=6 spreads follow the same `uint16`-lane pattern as D=3 with
+D=5 and D=6 unpacks follow the same `uint16`-lane pattern as D=3 with
 bigger byte counts; see notes at the end.
 
 ---
@@ -162,7 +162,7 @@ are *written* but never *read*.
 
 ---
 
-## 2. `flat_d2_spread` — unpack 16 × 2-bit codes
+## 2. `flat_d2_unpack` — unpack 16 × 2-bit codes
 
 > Reads 4 packed bytes (= 32 bits = 16 × 2-bit codes) and returns the
 > 16 codes as a `uint8x16_t`, one byte per code, value in {0, 1, 2, 3}.
@@ -170,7 +170,7 @@ are *written* but never *read*.
 ### Source
 
 ```c
-/* D=2 spread constants: each byte of input holds 4 codes; replicate
+/* D=2 unpack constants: each byte of input holds 4 codes; replicate
  * each input byte to 4 output lanes, then right-shift lane k by 2k
  * to align the desired 2-bit code at the low bits. */
 static const uint8_t flat_d2_dup_tab[16] = {
@@ -180,7 +180,7 @@ static const int8_t flat_d2_shift_tab[16] = {
     0,-2,-4,-6,  0,-2,-4,-6,  0,-2,-4,-6,  0,-2,-4,-6
 };
 
-static inline uint8x16_t flat_d2_spread(const uint8_t *bm_ptr)
+static inline uint8x16_t flat_d2_unpack(const uint8_t *bm_ptr)
 {
     uint32_t packed;
     memcpy(&packed, bm_ptr, 4);
@@ -283,7 +283,7 @@ result = [00,01,02,03, 03,02,01,00, 00,00,03,03, 03,03,00,00]
 
 ---
 
-## 3. `flat_d3_spread` — unpack 8 × 3-bit codes (cross-byte)
+## 3. `flat_d3_unpack` — unpack 8 × 3-bit codes (cross-byte)
 
 > 3-bit codes don't divide a byte cleanly.  3 bytes = 24 bits = 8 codes,
 > and **5 of those 8 codes cross a byte boundary** (code 0 starts at bit
@@ -304,7 +304,7 @@ static const int16_t flat_d3_shift_tab[8] = {
     0, -3, -6, -9, -12, -7, -10, -13
 };
 
-static inline uint8x8_t flat_d3_spread(const uint8_t *bm_ptr)
+static inline uint8x8_t flat_d3_unpack(const uint8_t *bm_ptr)
 {
     /* Load 3 bytes byte-by-byte into a vector with top bytes zero.
      * Avoid a 4-byte read so we don't run past the end of the stream. */
@@ -349,7 +349,7 @@ Pack into bytes LSB-first (so byte k = bits 8k..8k+7, bit 8k is LSB):
 
 Code locations:
 - Codes 0–4 live entirely in bits 0–14, i.e. inside `bm[0..1]` →
-  the spread reads them out of a uint16 window `(bm[1]<<8) | bm[0]`.
+  the unpack reads them out of a uint16 window `(bm[1]<<8) | bm[0]`.
 - Codes 5–7 live in bits 15–23, with code 5 straddling `bm[1]/bm[2]` →
   reads from window `(bm[2]<<8) | bm[1]`.
 
@@ -445,17 +445,17 @@ result = [01, 02, 03, 04, 05, 06, 07, 00]
 - **`vmovn_u16` narrows 8 × uint16 → 8 × uint8** for free (the codes
   fit in 3 bits, top byte is always zero after the mask).
 
-The whole spread is **5 NEON ops for 8 codes** — about 0.7 ops/code,
-in the ballpark of D=2's 0.4 ops/code.  D=3 has fewer codes per spread
+The whole unpack is **5 NEON ops for 8 codes** — about 0.7 ops/code,
+in the ballpark of D=2's 0.4 ops/code.  D=3 has fewer codes per unpack
 (8 vs 16) which is why its profile share (4.1 %) is comparable to
 D=2's (3.9 %) despite the higher per-iteration cost.
 
 ---
 
-## 4. `flat_d4_spread` — unpack 16 × 4-bit codes (clean)
+## 4. `flat_d4_unpack` — unpack 16 × 4-bit codes (clean)
 
 > 4-bit codes pack 2 to a byte with no cross-byte boundary.  Cleanest of
-> the spreads: 8 input bytes → 16 output codes via dup + half-byte shift.
+> the unpacks: 8 input bytes → 16 output codes via dup + half-byte shift.
 
 ### Source
 
@@ -467,7 +467,7 @@ static const int8_t flat_d4_shift_tab[16] = {
     0,-4, 0,-4, 0,-4, 0,-4, 0,-4, 0,-4, 0,-4, 0,-4
 };
 
-static inline uint8x16_t flat_d4_spread(const uint8_t *bm_ptr)
+static inline uint8x16_t flat_d4_unpack(const uint8_t *bm_ptr)
 {
     uint64_t packed;
     memcpy(&packed, bm_ptr, 8);
@@ -565,7 +565,7 @@ result = [00,01, 02,03, 04,05, 06,07, 08,09, 0A,0B, 0C,0D, 0E,0F]
 > Stage fusion: when both children of a tree node are leaves
 > (sym0 if bit=0, sym1 if bit=1), skip the partition entirely.  For
 > each input index, emit `sym0` or `sym1` directly based on the
-> bitmap.  No spread, no recursion.  ~10 % of decode time on
+> bitmap.  No unpack, no recursion.  ~10 % of decode time on
 > `prose_pride`.
 
 ### Source (16-elem unrolled loop body)
@@ -673,7 +673,7 @@ table: ~0.14–0.18 ns/elem on M4, ~0.66 on Graviton 4 / Zen 3.
 
 ### What makes this fast
 
-- **No spread, no recursion** — 8 codes processed with 3 NEON ops
+- **No unpack, no recursion** — 8 codes processed with 3 NEON ops
   (test + and + xor) plus 8 scalar lane stores.
 - **`vtst` + `veor`-blend** is faster than a `vbsl` (bit-select) here
   because we already had `delta` precomputed.  Saves one register.
@@ -684,7 +684,7 @@ table: ~0.14–0.18 ns/elem on M4, ~0.66 on Graviton 4 / Zen 3.
 
 ## D=5 / D=6 — same pattern as D=3, scaled up
 
-The D=5 and D=6 spreads are mechanically identical to D=3 (uint16-lane
+The D=5 and D=6 unpacks are mechanically identical to D=3 (uint16-lane
 window + per-lane shift) but operate on more bytes per iteration:
 
 | D | Bytes read | Codes/iter | Operations | Special tail (last chunk)            |
@@ -693,9 +693,9 @@ window + per-lane shift) but operate on more bytes per iteration:
 | 5 |          5 |          8 |       ~5   | 5-byte memcpy via stack buf           |
 | 6 |          6 |          8 |       ~5   | 6-byte memcpy via stack buf           |
 
-The spread sequences are in
+The unpack sequences are in
 [`src/pivco_huffman_neon_flat.h`](src/pivco_huffman_neon_flat.h);
-each is ~10 lines and reads exactly like `flat_d3_spread` with
+each is ~10 lines and reads exactly like `flat_d3_unpack` with
 different shuffle / shift constants.
 
 The downstream c2s lookup is what changes: D=2/D=3/D=4 use
@@ -717,7 +717,7 @@ otool -tvV ./build/pivco_huffman_profile_english | \
     awk '/^_decode_node_neon:/,/^_[a-zA-Z]/' | head -80
 ```
 
-Or for any specific function (`partition_8`, `flat_d2_spread`, …),
+Or for any specific function (`partition_8`, `flat_d2_unpack`, …),
 grep on the symbol name.  The xctrace profile (see
 [`extras/profile_m4.sh`](extras/profile_m4.sh)) maps each retired-IP
 sample back to source lines so you can see which instructions are

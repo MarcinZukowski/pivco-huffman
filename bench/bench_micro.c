@@ -17,7 +17,7 @@
 
 #ifdef __aarch64__
 #include <arm_neon.h>
-#include "pivco_huffman_neon_flat.h"  /* flat_d{2..6}_spread() + tables */
+#include "pivco_huffman_neon_flat.h"  /* flat_d{2..6}_unpack() + tables */
 #define HAS_NEON 1
 #else
 #define HAS_NEON 0
@@ -25,7 +25,7 @@
 
 #if defined(__AVX512BW__) && defined(__AVX512VBMI__) && defined(__AVX512VBMI2__)
 #include <immintrin.h>
-#include "pivco_huffman_avx512_flat.h"  /* flat_d{2..6}_spread_avx512* */
+#include "pivco_huffman_avx512_flat.h"  /* flat_d{2..6}_unpack_avx512* */
 #define HAS_AVX512 1
 #else
 #define HAS_AVX512 0
@@ -33,7 +33,7 @@
 
 #if defined(__SSE4_1__)
 #include <smmintrin.h>
-#include "pivco_huffman_x86_flat.h"     /* flat_d4_spread_x86 */
+#include "pivco_huffman_x86_flat.h"     /* flat_d4_unpack_x86 */
 #define HAS_SSE4 1
 #else
 #define HAS_SSE4 0
@@ -770,12 +770,12 @@ __attribute__((noinline)) static void bench_both_leaves_scatter(uint8_t *symbols
  *   _direct  — sequential vst1q (root-flat path: indices are identity).
  *   _scatter — write via indices[]: simulates a non-root flat subtree.
  *
- * These benchmarks isolate (spread + TBL + store) per element at each
+ * These benchmarks isolate (unpack + TBL + store) per element at each
  * D, so we can compare their per-element cost against the
  * scatter/partition floors above.
  * ============================================================ */
 
-/* spread() helpers + their tables come from pivco_huffman_neon_flat.h
+/* unpack() helpers + their tables come from pivco_huffman_neon_flat.h
  * (shared with src/pivco_huffman_neon.c — single source of truth). */
 
 /* ---- D=2: 4 packed bytes → 16 codes (uint8x16_t), 1 vqtbl1q_u8 ---- */
@@ -785,7 +785,7 @@ static void bench_flat_direct_d2(uint8_t *out, const uint8_t *bm,
     uint8x16_t c2s_vec = vld1q_u8(c2s);
     for (int r = 0; r < reps; r++) {
         for (int i = 0; i + 16 <= n; i += 16) {
-            uint8x16_t codes = flat_d2_spread(bm + (i >> 2));
+            uint8x16_t codes = flat_d2_unpack(bm + (i >> 2));
             vst1q_u8(out + i, vqtbl1q_u8(c2s_vec, codes));
         }
     }
@@ -798,7 +798,7 @@ static void bench_flat_scatter_d2(uint8_t *out, const uint16_t *idx,
     uint8x16_t c2s_vec = vld1q_u8(c2s);
     for (int r = 0; r < reps; r++) {
         for (int i = 0; i + 16 <= n; i += 16) {
-            uint8x16_t codes = flat_d2_spread(bm + (i >> 2));
+            uint8x16_t codes = flat_d2_unpack(bm + (i >> 2));
             uint8x16_t syms  = vqtbl1q_u8(c2s_vec, codes);
             out[idx[i +  0]] = vgetq_lane_u8(syms,  0);
             out[idx[i +  1]] = vgetq_lane_u8(syms,  1);
@@ -827,8 +827,8 @@ static void bench_flat_direct_d3(uint8_t *out, const uint8_t *bm,
     uint8x16_t c2s_vec = vld1q_u8(c2s);
     for (int r = 0; r < reps; r++) {
         for (int i = 0; i + 16 <= n; i += 16) {
-            uint8x8_t lo = flat_d3_spread(bm + (((i)      * 3) >> 3));
-            uint8x8_t hi = flat_d3_spread(bm + (((i + 8)  * 3) >> 3));
+            uint8x8_t lo = flat_d3_unpack(bm + (((i)      * 3) >> 3));
+            uint8x8_t hi = flat_d3_unpack(bm + (((i + 8)  * 3) >> 3));
             uint8x16_t codes = vcombine_u8(lo, hi);
             vst1q_u8(out + i, vqtbl1q_u8(c2s_vec, codes));
         }
@@ -842,7 +842,7 @@ static void bench_flat_scatter_d3(uint8_t *out, const uint16_t *idx,
     uint8x16_t c2s_vec = vld1q_u8(c2s);
     for (int r = 0; r < reps; r++) {
         for (int i = 0; i + 8 <= n; i += 8) {
-            uint8x8_t codes = flat_d3_spread(bm + ((i * 3) >> 3));
+            uint8x8_t codes = flat_d3_unpack(bm + ((i * 3) >> 3));
             uint8x8_t syms  = vqtbl1_u8(c2s_vec, codes);
             out[idx[i+0]] = vget_lane_u8(syms, 0);
             out[idx[i+1]] = vget_lane_u8(syms, 1);
@@ -863,7 +863,7 @@ static void bench_flat_direct_d4(uint8_t *out, const uint8_t *bm,
     uint8x16_t c2s_vec = vld1q_u8(c2s);
     for (int r = 0; r < reps; r++) {
         for (int i = 0; i + 16 <= n; i += 16) {
-            uint8x16_t codes = flat_d4_spread(bm + (i >> 1));
+            uint8x16_t codes = flat_d4_unpack(bm + (i >> 1));
             vst1q_u8(out + i, vqtbl1q_u8(c2s_vec, codes));
         }
     }
@@ -876,7 +876,7 @@ static void bench_flat_scatter_d4(uint8_t *out, const uint16_t *idx,
     uint8x16_t c2s_vec = vld1q_u8(c2s);
     for (int r = 0; r < reps; r++) {
         for (int i = 0; i + 16 <= n; i += 16) {
-            uint8x16_t codes = flat_d4_spread(bm + (i >> 1));
+            uint8x16_t codes = flat_d4_unpack(bm + (i >> 1));
             uint8x16_t syms  = vqtbl1q_u8(c2s_vec, codes);
             out[idx[i +  0]] = vgetq_lane_u8(syms,  0);
             out[idx[i +  1]] = vgetq_lane_u8(syms,  1);
@@ -910,8 +910,8 @@ static void bench_flat_direct_d5(uint8_t *out, const uint8_t *bm,
     uint8x16x2_t c2s_vec = {{vld1q_u8(c2s), vld1q_u8(c2s + 16)}};
     for (int r = 0; r < reps; r++) {
         for (int i = 0; i + 16 <= n; i += 16) {
-            uint8x8_t lo = flat_d5_spread(bm + (((i)     * 5) >> 3));
-            uint8x8_t hi = flat_d5_spread(bm + (((i + 8) * 5) >> 3));
+            uint8x8_t lo = flat_d5_unpack(bm + (((i)     * 5) >> 3));
+            uint8x8_t hi = flat_d5_unpack(bm + (((i + 8) * 5) >> 3));
             uint8x16_t codes = vcombine_u8(lo, hi);
             vst1q_u8(out + i, vqtbl2q_u8(c2s_vec, codes));
         }
@@ -925,7 +925,7 @@ static void bench_flat_scatter_d5(uint8_t *out, const uint16_t *idx,
     uint8x16x2_t c2s_vec = {{vld1q_u8(c2s), vld1q_u8(c2s + 16)}};
     for (int r = 0; r < reps; r++) {
         for (int i = 0; i + 8 <= n; i += 8) {
-            uint8x8_t codes = flat_d5_spread(bm + ((i * 5) >> 3));
+            uint8x8_t codes = flat_d5_unpack(bm + ((i * 5) >> 3));
             uint8x8_t syms  = vqtbl2_u8(c2s_vec, codes);
             out[idx[i+0]] = vget_lane_u8(syms, 0);
             out[idx[i+1]] = vget_lane_u8(syms, 1);
@@ -947,8 +947,8 @@ static void bench_flat_direct_d6(uint8_t *out, const uint8_t *bm,
                               vld1q_u8(c2s+32),  vld1q_u8(c2s+48)}};
     for (int r = 0; r < reps; r++) {
         for (int i = 0; i + 16 <= n; i += 16) {
-            uint8x8_t lo = flat_d6_spread(bm + (((i)     * 6) >> 3));
-            uint8x8_t hi = flat_d6_spread(bm + (((i + 8) * 6) >> 3));
+            uint8x8_t lo = flat_d6_unpack(bm + (((i)     * 6) >> 3));
+            uint8x8_t hi = flat_d6_unpack(bm + (((i + 8) * 6) >> 3));
             uint8x16_t codes = vcombine_u8(lo, hi);
             vst1q_u8(out + i, vqtbl4q_u8(c2s_vec, codes));
         }
@@ -963,7 +963,7 @@ static void bench_flat_scatter_d6(uint8_t *out, const uint16_t *idx,
                               vld1q_u8(c2s+32),  vld1q_u8(c2s+48)}};
     for (int r = 0; r < reps; r++) {
         for (int i = 0; i + 8 <= n; i += 8) {
-            uint8x8_t codes = flat_d6_spread(bm + ((i * 6) >> 3));
+            uint8x8_t codes = flat_d6_unpack(bm + ((i * 6) >> 3));
             uint8x8_t syms  = vqtbl4_u8(c2s_vec, codes);
             out[idx[i+0]] = vget_lane_u8(syms, 0);
             out[idx[i+1]] = vget_lane_u8(syms, 1);
@@ -1184,7 +1184,7 @@ static void bench_flat_direct_d2_avx512(uint8_t *out, const uint8_t *bm,
     __m128i c2s_vec = _mm_set1_epi32((int32_t)c2s_lo);
     for (int r = 0; r < reps; r++) {
         for (int i = 0; i + 16 <= n; i += 16) {
-            __m128i codes = flat_d2_spread_avx512(bm + (i >> 2));
+            __m128i codes = flat_d2_unpack_avx512(bm + (i >> 2));
             __m128i syms  = _mm_shuffle_epi8(c2s_vec, codes);
             _mm_storeu_si128((__m128i *)(out + i), syms);
         }
@@ -1201,7 +1201,7 @@ static void bench_flat_scatter_d2_avx512(uint8_t *out, const uint16_t *idx,
     __m128i c2s_vec = _mm_set1_epi32((int32_t)c2s_lo);
     for (int r = 0; r < reps; r++) {
         for (int i = 0; i + 16 <= n; i += 16) {
-            __m128i codes = flat_d2_spread_avx512(bm + (i >> 2));
+            __m128i codes = flat_d2_unpack_avx512(bm + (i >> 2));
             __m128i syms  = _mm_shuffle_epi8(c2s_vec, codes);
             X16(syms, idx, i)
         }
@@ -1218,7 +1218,7 @@ static void bench_flat_direct_d3_avx512(uint8_t *out, const uint8_t *bm,
     __m128i c2s_vec = _mm_cvtsi64_si128((int64_t)c2s_lo);
     for (int r = 0; r < reps; r++) {
         for (int i = 0; i + 16 <= n; i += 16) {
-            __m128i codes = flat_d3_spread_avx512_fast(bm + ((i * 3) >> 3));
+            __m128i codes = flat_d3_unpack_avx512_fast(bm + ((i * 3) >> 3));
             __m128i syms  = _mm_shuffle_epi8(c2s_vec, codes);
             _mm_storeu_si128((__m128i *)(out + i), syms);
         }
@@ -1235,7 +1235,7 @@ static void bench_flat_scatter_d3_avx512(uint8_t *out, const uint16_t *idx,
     __m128i c2s_vec = _mm_cvtsi64_si128((int64_t)c2s_lo);
     for (int r = 0; r < reps; r++) {
         for (int i = 0; i + 16 <= n; i += 16) {
-            __m128i codes = flat_d3_spread_avx512_fast(bm + ((i * 3) >> 3));
+            __m128i codes = flat_d3_unpack_avx512_fast(bm + ((i * 3) >> 3));
             __m128i syms  = _mm_shuffle_epi8(c2s_vec, codes);
             X16(syms, idx, i)
         }
@@ -1250,7 +1250,7 @@ static void bench_flat_direct_d4_avx512(uint8_t *out, const uint8_t *bm,
     __m128i c2s_vec = _mm_loadu_si128((const __m128i *)c2s);
     for (int r = 0; r < reps; r++) {
         for (int i = 0; i + 16 <= n; i += 16) {
-            __m128i codes = flat_d4_spread_avx512(bm + (i >> 1));
+            __m128i codes = flat_d4_unpack_avx512(bm + (i >> 1));
             __m128i syms  = _mm_shuffle_epi8(c2s_vec, codes);
             _mm_storeu_si128((__m128i *)(out + i), syms);
         }
@@ -1265,7 +1265,7 @@ static void bench_flat_scatter_d4_avx512(uint8_t *out, const uint16_t *idx,
     __m128i c2s_vec = _mm_loadu_si128((const __m128i *)c2s);
     for (int r = 0; r < reps; r++) {
         for (int i = 0; i + 16 <= n; i += 16) {
-            __m128i codes = flat_d4_spread_avx512(bm + (i >> 1));
+            __m128i codes = flat_d4_unpack_avx512(bm + (i >> 1));
             __m128i syms  = _mm_shuffle_epi8(c2s_vec, codes);
             X16(syms, idx, i)
         }
@@ -1280,7 +1280,7 @@ static void bench_flat_direct_d5_avx512(uint8_t *out, const uint8_t *bm,
     __m256i c2s_vec = _mm256_loadu_si256((const __m256i *)c2s);
     for (int r = 0; r < reps; r++) {
         for (int i = 0; i + 16 <= n; i += 16) {
-            __m128i codes = flat_d5_spread_avx512_fast(bm + ((i * 5) >> 3));
+            __m128i codes = flat_d5_unpack_avx512_fast(bm + ((i * 5) >> 3));
             __m256i ext   = _mm256_zextsi128_si256(codes);
             __m256i full  = _mm256_permutexvar_epi8(ext, c2s_vec);
             _mm_storeu_si128((__m128i *)(out + i), _mm256_castsi256_si128(full));
@@ -1296,7 +1296,7 @@ static void bench_flat_scatter_d5_avx512(uint8_t *out, const uint16_t *idx,
     __m256i c2s_vec = _mm256_loadu_si256((const __m256i *)c2s);
     for (int r = 0; r < reps; r++) {
         for (int i = 0; i + 16 <= n; i += 16) {
-            __m128i codes = flat_d5_spread_avx512_fast(bm + ((i * 5) >> 3));
+            __m128i codes = flat_d5_unpack_avx512_fast(bm + ((i * 5) >> 3));
             __m256i ext   = _mm256_zextsi128_si256(codes);
             __m256i full  = _mm256_permutexvar_epi8(ext, c2s_vec);
             __m128i syms  = _mm256_castsi256_si128(full);
@@ -1313,7 +1313,7 @@ static void bench_flat_direct_d6_avx512(uint8_t *out, const uint8_t *bm,
     __m512i c2s_vec = _mm512_loadu_si512((const __m512i *)c2s);
     for (int r = 0; r < reps; r++) {
         for (int i = 0; i + 16 <= n; i += 16) {
-            __m128i codes = flat_d6_spread_avx512_fast(bm + ((i * 6) >> 3));
+            __m128i codes = flat_d6_unpack_avx512_fast(bm + ((i * 6) >> 3));
             __m512i ext   = _mm512_castsi128_si512(codes);
             __m512i full  = _mm512_permutexvar_epi8(ext, c2s_vec);
             _mm_storeu_si128((__m128i *)(out + i), _mm512_castsi512_si128(full));
@@ -1329,7 +1329,7 @@ static void bench_flat_scatter_d6_avx512(uint8_t *out, const uint16_t *idx,
     __m512i c2s_vec = _mm512_loadu_si512((const __m512i *)c2s);
     for (int r = 0; r < reps; r++) {
         for (int i = 0; i + 16 <= n; i += 16) {
-            __m128i codes = flat_d6_spread_avx512_fast(bm + ((i * 6) >> 3));
+            __m128i codes = flat_d6_unpack_avx512_fast(bm + ((i * 6) >> 3));
             __m512i ext   = _mm512_castsi128_si512(codes);
             __m512i full  = _mm512_permutexvar_epi8(ext, c2s_vec);
             __m128i syms  = _mm512_castsi512_si128(full);
@@ -1564,7 +1564,7 @@ static void bench_flat_direct_d4_sse(uint8_t *out, const uint8_t *bm,
     __m128i c2s_vec = _mm_loadu_si128((const __m128i *)c2s);
     for (int r = 0; r < reps; r++) {
         for (int i = 0; i + 16 <= n; i += 16) {
-            __m128i codes = flat_d4_spread_x86(bm + (i >> 1));
+            __m128i codes = flat_d4_unpack_x86(bm + (i >> 1));
             __m128i syms  = _mm_shuffle_epi8(c2s_vec, codes);
             _mm_storeu_si128((__m128i *)(out + i), syms);
         }
@@ -1579,7 +1579,7 @@ static void bench_flat_scatter_d4_sse(uint8_t *out, const uint16_t *idx,
     __m128i c2s_vec = _mm_loadu_si128((const __m128i *)c2s);
     for (int r = 0; r < reps; r++) {
         for (int i = 0; i + 16 <= n; i += 16) {
-            __m128i codes = flat_d4_spread_x86(bm + (i >> 1));
+            __m128i codes = flat_d4_unpack_x86(bm + (i >> 1));
             __m128i syms  = _mm_shuffle_epi8(c2s_vec, codes);
             X16_SSE(syms, idx, i)
         }
@@ -1605,7 +1605,7 @@ int main(void)
     for (int i = 0; i < (N + 7) / 8; i++) bitmap[i] = (uint8_t)rand();
 
     /* Packed code stream big enough for D=2..6 (D=6 needs N*6/8 bytes;
-     * +16 bytes pad for the 6/8-byte memcpy reads in flat_d{4,5,6}_spread). */
+     * +16 bytes pad for the 6/8-byte memcpy reads in flat_d{4,5,6}_unpack). */
     int flat_bm_bytes = (N * 6) / 8 + 16;
     uint8_t *flat_bm = calloc(flat_bm_bytes, 1);
     for (int i = 0; i < flat_bm_bytes; i++) flat_bm[i] = (uint8_t)rand();
@@ -1799,8 +1799,8 @@ int main(void)
     printf("both_leaves_scatter (idx):    %5.2f ns/elem  (%5.1f GB/s)\n",
            ns_per_elem, 1.0 / ns_per_elem);
 
-    /* ---- Flat-subtree decode: per-D (spread + TBL + store) ---- */
-    printf("\n-- flat-subtree decode (spread + TBL + store) --\n");
+    /* ---- Flat-subtree decode: per-D (unpack + TBL + store) ---- */
+    printf("\n-- flat-subtree decode (unpack + TBL + store) --\n");
 
 #define BENCH_FLAT(label_, fn_)                                            \
     do {                                                                   \
@@ -1891,7 +1891,7 @@ int main(void)
     printf("%-30s %5.2f ns/elem  (%5.1f GB/s)\n",
            "both_leaves_scatter (idx):", ns_per_elem, 1.0 / ns_per_elem);
 
-    printf("\n-- flat-subtree decode (spread + TBL + store), AVX-512 --\n");
+    printf("\n-- flat-subtree decode (unpack + TBL + store), AVX-512 --\n");
 #define BENCH_FLAT_X86(label_, fn_)                                          \
     do {                                                                     \
         t0 = now_sec();                                                      \

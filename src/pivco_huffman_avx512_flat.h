@@ -1,7 +1,7 @@
-/* pivco_huffman_avx512_flat.h — flat-subtree D-bit code spreaders (AVX-512 VBMI2).
+/* pivco_huffman_avx512_flat.h — flat-subtree D-bit code unpackers (AVX-512 VBMI2).
  *
  * Internal header.  Mirrors src/pivco_huffman_neon_flat.h: each
- * `flat_dN_spread_avx512()` (and the fast/safe pair for D ∈ {3,5,6})
+ * `flat_dN_unpack_avx512()` (and the fast/safe pair for D ∈ {3,5,6})
  * reads N D-bit codes from a packed bitstream and returns them in a
  * 128-bit vector lane (one byte per code, value < 2^D).  Used by the
  * production decoder (pivco_huffman_avx512.c) and the per-D microbench
@@ -34,7 +34,7 @@
 
 /* D=2: 16 codes from 4 bytes of bm.  Replicate 4 bytes to 16 bytes, then
  * multishift with offsets {0,2,..,14, 16,18,..,30} across 2 uint64 lanes. */
-static inline __m128i flat_d2_spread_avx512(const uint8_t *bm_ptr)
+static inline __m128i flat_d2_unpack_avx512(const uint8_t *bm_ptr)
 {
     uint32_t packed;
     memcpy(&packed, bm_ptr, 4);
@@ -48,7 +48,7 @@ static inline __m128i flat_d2_spread_avx512(const uint8_t *bm_ptr)
 
 /* D=3 fast: loads 8 bytes (2 past the end of the 6-valid-byte region).
  * Caller must guarantee buffer slack. */
-static inline __m128i flat_d3_spread_avx512_fast(const uint8_t *bm_ptr)
+static inline __m128i flat_d3_unpack_avx512_fast(const uint8_t *bm_ptr)
 {
     uint64_t packed;
     memcpy(&packed, bm_ptr, 8);
@@ -61,7 +61,7 @@ static inline __m128i flat_d3_spread_avx512_fast(const uint8_t *bm_ptr)
 }
 
 /* D=3 safe: 6-byte memcpy for the last chunk. */
-static inline __m128i flat_d3_spread_avx512_safe(const uint8_t *bm_ptr)
+static inline __m128i flat_d3_unpack_avx512_safe(const uint8_t *bm_ptr)
 {
     uint64_t packed = 0;
     memcpy(&packed, bm_ptr, 6);
@@ -75,7 +75,7 @@ static inline __m128i flat_d3_spread_avx512_safe(const uint8_t *bm_ptr)
 
 /* D=4: 16 codes from 8 bytes of bm.  2 codes per byte, no cross-byte
  * carries. */
-static inline __m128i flat_d4_spread_avx512(const uint8_t *bm_ptr)
+static inline __m128i flat_d4_unpack_avx512(const uint8_t *bm_ptr)
 {
     uint64_t packed;
     memcpy(&packed, bm_ptr, 8);
@@ -88,7 +88,7 @@ static inline __m128i flat_d4_spread_avx512(const uint8_t *bm_ptr)
 }
 
 /* D=5 fast: 16 codes from 10 valid bytes, with a 16-byte load. */
-static inline __m128i flat_d5_spread_avx512_fast(const uint8_t *bm_ptr)
+static inline __m128i flat_d5_unpack_avx512_fast(const uint8_t *bm_ptr)
 {
     __m128i raw = _mm_loadu_si128((const __m128i *)bm_ptr);
     const __m128i shuf = _mm_setr_epi8(
@@ -103,15 +103,15 @@ static inline __m128i flat_d5_spread_avx512_fast(const uint8_t *bm_ptr)
 }
 
 /* D=5 safe: 10-byte memcpy for the last chunk. */
-static inline __m128i flat_d5_spread_avx512_safe(const uint8_t *bm_ptr)
+static inline __m128i flat_d5_unpack_avx512_safe(const uint8_t *bm_ptr)
 {
     uint8_t buf[16] = {0};
     memcpy(buf, bm_ptr, 10);
-    return flat_d5_spread_avx512_fast(buf);
+    return flat_d5_unpack_avx512_fast(buf);
 }
 
 /* D=6 fast: 16 codes from 12 valid bytes, with a 16-byte load. */
-static inline __m128i flat_d6_spread_avx512_fast(const uint8_t *bm_ptr)
+static inline __m128i flat_d6_unpack_avx512_fast(const uint8_t *bm_ptr)
 {
     __m128i raw = _mm_loadu_si128((const __m128i *)bm_ptr);
     const __m128i shuf = _mm_setr_epi8(
@@ -126,11 +126,11 @@ static inline __m128i flat_d6_spread_avx512_fast(const uint8_t *bm_ptr)
 }
 
 /* D=6 safe: 12-byte memcpy for the last chunk. */
-static inline __m128i flat_d6_spread_avx512_safe(const uint8_t *bm_ptr)
+static inline __m128i flat_d6_unpack_avx512_safe(const uint8_t *bm_ptr)
 {
     uint8_t buf[16] = {0};
     memcpy(buf, bm_ptr, 12);
-    return flat_d6_spread_avx512_fast(buf);
+    return flat_d6_unpack_avx512_fast(buf);
 }
 
 #endif /* PIVCO_HUFFMAN_AVX512_FLAT_H */
