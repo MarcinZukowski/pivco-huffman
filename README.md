@@ -238,6 +238,11 @@ vector lengths (e.g. Fujitsu A64FX).
    This makes the format self-describing given the Huffman tree — no
    per-node headers or metadata.
 
+For step-by-step traces of the hot SIMD kernels (`partition_8`,
+`flat_dN_spread`, `scatter_both_leaves`) with worked examples and
+register-state-per-instruction walkthroughs, see
+[`KERNELS.md`](KERNELS.md).
+
 ## Baselines
 
 Four decode implementations for comparison:
@@ -633,9 +638,13 @@ overhead being byte-alignment rounding at each tree node.
 
 ### Block Size Sweep
 
-*(as of a pre-flat-subtree commit; numbers are stale for flat-heavy
-distributions — the N-dependence for stick-tree-shaped distributions
-(proba80/50) is still a good reference.  TODO: re-sweep post-`7c3238b`.)*
+*(Numbers below are pre-flat-subtree (early 2026-04) and stale for
+flat-heavy distributions where the new fast path dominates.  The
+N-dependence for stick-tree-shaped distributions (proba80/50) is
+still a useful reference.  A fresh block-size sweep against the
+current code is still TODO; it hasn't been re-run since the major
+flat-subtree, leaf-fusion, and Graviton 4 D=5/D=6 gate changes
+landed.)*
 
 PIVCO NEON decode throughput (M/s) by block size. Measured with the
 4M realistic workload (each block size is recompiled and re-benchmarked):
@@ -998,6 +1007,14 @@ hardware the crossover point would shift further toward uniform
 distributions.
 
 ## Ideas That Can Make Things Faster
+
+The canonical, full-detail log of optimization ideas (shipped, in
+flight, discarded, deferred, with cycle-level analysis) lives in
+[`IDEAS.md`](IDEAS.md).  The store-coalescing investigation
+(prototyped on M4 / Graviton 4 / Xeon AVX-512, all losing) has its
+own write-up in [`COALESCE.md`](COALESCE.md).
+
+This section is a summary.
 
 ### Tested and adopted
 

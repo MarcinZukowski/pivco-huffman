@@ -343,7 +343,7 @@ do.
 Recorded here so the next person profiling the partition store cost
 doesn't repeat the experiment.
 
-## ~~Coalesce small-side partition stores into a register accumulator~~ — tried, lost on M4
+## ~~Coalesce small-side partition stores into a register accumulator~~ — tried on 3 platforms, lost on all
 
 `partition_8` writes a full 16-byte `vst1q_u8` to both sides every
 iter even when the popcount fills only `cnt` of the 8 lanes.  The
@@ -351,35 +351,40 @@ natural follow-up to the store-port saturation finding was:
 accumulate variable-sized contributions into a register and flush
 only when a full 16-byte chunk is ready, halving the store rate.
 
-Three variants tested ([extras/bench_coalesce.c](extras/bench_coalesce.c),
-full investigation in [COALESCE.md](COALESCE.md)):
+Six NEON variants + three AVX-512 variants tested
+([extras/bench_coalesce.c](extras/bench_coalesce.c) /
+[extras/bench_coalesce_avx512.c](extras/bench_coalesce_avx512.c),
+full investigation in [COALESCE.md](COALESCE.md)).  Best result per
+platform:
 
-| Variant | M4 random-mask | vs baseline |
-|---|---:|---:|
-| baseline (2× vst1q per iter) | 12.5 GB/s | 1.00× |
-| coalesce_vext (switch on so_far) | 3.8 GB/s | 0.30× |
-| coalesce_tbl (runtime shuf) | 7.6 GB/s | 0.55× |
-| coalesce_macro (4-iter lookahead) | 9.6 GB/s | 0.66× |
+| Platform | Best variant | Ratio vs baseline |
+|---|---|---:|
+| Apple M4 (NEON) | 1-sided macro coalesce | 0.88× |
+| Graviton 4 (NEON) | 1-sided macro coalesce | 0.96× (closest) |
+| Xeon AVX-512 (Sapphire Rapids) | 2-iter macro coalesce | 0.75× |
 
 Each variant ruled out one suspected failure mode and exposed the
-next: indirect-branch mispredict (variant 1) → cross-iter dep chain
-(variant 2) → SIMD-throughput-bound place-shift cost (variant 3).
-The 4-iter macro-block has none of those problems, but the SIMD
-work to enable coalescing (~2.5 cycles/iter of place TBLs +
-shuf-vector ALU) exceeds the saved store cycle (1 cycle/iter on M4's
-1-store/cycle port).  Net **−1.3 cycles/iter** vs baseline.
+next: indirect-branch mispredict (switch) → cross-iter dep chain
+(per-iter TBL) → SIMD-throughput-bound place-shift cost (4-iter
+macro) → ditto with OR-tree balancing (no help — it's throughput,
+not latency).  The cleanest negative result is half-partition
+coalesce on Graviton 4 with balanced OR-tree (1 store/iter
+baseline, branchless macro, depth-2 OR-tree, on the platform with
+the more favorable SIMD-to-store ratio): still loses by 23%.
 
-This isn't a clever-coding problem — it's the M4's resource balance.
-The 4 SIMD-ops/cycle to 1 store/cycle ratio means the original
-kernel is already at a Pareto-optimal point: any non-trivial SIMD
-work added to enable store reduction immediately re-balances the
-bottleneck.
+**Bonus AVX-512 finding:** `_mm512_mask_compressstoreu_epi16` (the
+single-instruction compress-and-store) is **2× SLOWER** than the
+production `vpcompressw` + `vmovdqu64` — Sapphire Rapids decomposes
+it to ~6 µops vs production's 2 µops.  Don't migrate the AVX-512
+backend to compressstoreu.
 
-Worth re-trying on a uarch where SIMD-to-store ratio is 8:1 or
-larger, where unaligned stores cost half-rate, or where a
-"compress-and-shift" instruction exists (AVX-512 `vpcompressw`
-already does this — and the AVX-512 backend already exploits it).
-See [COALESCE.md](COALESCE.md) for the full analysis.
+This isn't a clever-coding problem — it's resource balance on every
+modern uarch tested.  The kernel is at a Pareto-optimal point: any
+non-trivial SIMD work added to enable store reduction immediately
+re-balances the bottleneck.  Untested: Zen 3 SSE4.1 (would need a
+new port; expected to lose given the cross-platform pattern).
+
+See [COALESCE.md](COALESCE.md) for the full investigation.
 
 ## AVX-512 improvement: better small-node tail
 
@@ -648,7 +653,7 @@ Leaf-child fusion and the flat-subtree fast path (both the scatter
 loop and the TBL-accelerated variants) are *shipped*:
 
 - NEON D=2..6 (commits `b0639ff` through `a77c589`)
-- AVX-512 D=2 (`210211d`) and D=4 (`ad17cdc`)
+- AVX-512 D=2..6 (`210211d`, `ad17cdc`, `3f27e81`, `7b2fb8d`)
 - SSE4.1 D=4 (`0e037ab`)
 
 Remaining outstanding work, roughly in increasing cost / decreasing
@@ -657,18 +662,15 @@ certainty:
 1. **Check `flat_dX_spread` against FastLanes' unpack kernels**
    (see §"Check flat_dX_spread against FastLanes unpackers" above).
    Maybe a few percent per D.
-2. **Revisit AVX-512 D=3, D=5, D=6** — see section above.  Wider
-   iteration, GFNI, or format tweaks may flip these from regression
-   to win.
-3. **Revisit SSE4.1 D=2, D=3, D=5, D=6** with AVX2 `_mm_srlv_epi16`
+2. **Revisit SSE4.1 D=2, D=3, D=5, D=6** with AVX2 `_mm_srlv_epi16`
    or GFNI — see section above.
-4. **Zen 3 SSE4.1 hybrid block decoder** — on Zen 3 the
+3. **Zen 3 SSE4.1 hybrid block decoder** — on Zen 3 the
    moderate-entropy distributions stay at 0.41–0.62× vs huf0_x2 even
    after flat-subtree.  A per-table fallback to `trad_huffman_decode_4s`
    (§"Product-level idea: hybrid block decoder") would plausibly
    recover most of the gap.  Gate heuristic: when flat-subtree coverage
    estimate is low (e.g., `≤ 20%`) AND `max_len > 6`, fall back to huf0.
-5. **TBL-based K-way bucket** for `decode_neon_prefix` phase 4 — only
+4. **TBL-based K-way bucket** for `decode_neon_prefix` phase 4 — only
    relevant to the non-flat prefix-radix research path, which is
    effectively unused now that flat-subtree wins on the same
    distributions.  Can drop.
@@ -689,9 +691,9 @@ certainty:
    unconditionally; making it skip them needs a hot-loop branch
    (mispredict-risky) or a separate compaction pass.  Reverted —
    gain too small to justify complexity given pivco_p retirement.
-6. **Nested (multi-stage) prefix-radix** — same as (5); subsumed by
+5. **Nested (multi-stage) prefix-radix** — same as (4); subsumed by
    flat-subtree.  Can drop.
-7. **Retire `pivco_huffman_decode_neon_prefix`** — the remaining
+6. **Retire `pivco_huffman_decode_neon_prefix`** — the remaining
    research backend.  All of its flat-tree wins are now handled by
    the flat-subtree path inside `decode_node_neon`; the non-flat
    prefix-radix never became competitive.  Straight deletion clears
