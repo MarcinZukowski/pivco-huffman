@@ -1,0 +1,39 @@
+Total samples (all phases):  12003
+Decode-loop samples:         10456
+  (filter: backtrace contains decode_node_neon or pivco_huffman_decode_neon)
+
+By function (leaf frame, % of decode-loop):
+   3774  ( 36.1%)  partition_8
+   1515  ( 14.5%)  flat_decode_scatter_neon
+   1240  ( 11.9%)  decode_node_neon
+   1021  (  9.8%)  scatter_both_leaves
+    922  (  8.8%)  scatter_sym
+    525  (  5.0%)  pivco_huffman_decode_neon
+    402  (  3.8%)  flat_d3_spread
+    365  (  3.5%)  partition_8_right
+    359  (  3.4%)  flat_d2_spread
+    306  (  2.9%)  _platform_memset
+     13  (  0.1%)  bitmap_get
+      7  (  0.1%)  bitmap_bytes
+      6  (  0.1%)  extract_D_bits
+      1  (  0.0%)  DYLD-STUB$$memset
+
+By (function, file, line) — leaf frame:
+   2819  ( 27.0%)  partition_8 @ pivco_huffman_neon.c:98
+   1515  ( 14.5%)  flat_decode_scatter_neon @ pivco_huffman_neon.c:282
+   1240  ( 11.9%)  decode_node_neon @ pivco_huffman_neon.c:796
+    974  (  9.3%)  scatter_both_leaves @ pivco_huffman_neon.c:729
+    955  (  9.1%)  partition_8 @ pivco_huffman_neon.c:95
+    895  (  8.6%)  scatter_sym @ pivco_huffman_neon.c:692
+    525  (  5.0%)  pivco_huffman_decode_neon @ pivco_huffman_neon.c:0
+    402  (  3.8%)  flat_d3_spread @ pivco_huffman_neon_flat.h:71
+    365  (  3.5%)  partition_8_right @ pivco_huffman_neon.c:658
+    359  (  3.4%)  flat_d2_spread @ pivco_huffman_neon_flat.h:44
+    306  (  2.9%)  _platform_memset @ :None
+     47  (  0.4%)  scatter_both_leaves @ pivco_huffman_neon.c:765
+     27  (  0.3%)  scatter_sym @ pivco_huffman_neon.c:679
+     13  (  0.1%)  bitmap_get @ pivco_huffman_common.h:74
+      7  (  0.1%)  bitmap_bytes @ pivco_huffman_common.h:80
+      5  (  0.0%)  extract_D_bits @ pivco_huffman_neon.c:138
+      1  (  0.0%)  extract_D_bits @ pivco_huffman_neon.c:137
+      1  (  0.0%)  DYLD-STUB$$memset @ :None

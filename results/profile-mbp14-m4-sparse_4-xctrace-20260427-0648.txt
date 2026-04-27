@@ -1,0 +1,13 @@
+Total samples (all phases):  1708
+Decode-loop samples:         36
+  (filter: backtrace contains decode_node_neon or pivco_huffman_decode_neon)
+
+By function (leaf frame, % of decode-loop):
+     29  ( 80.6%)  pivco_huffman_decode_neon
+      4  ( 11.1%)  ___chkstk_darwin
+      3  (  8.3%)  init_compress_table
+
+By (function, file, line) — leaf frame:
+     29  ( 80.6%)  pivco_huffman_decode_neon @ pivco_huffman_neon.c:958
+      4  ( 11.1%)  ___chkstk_darwin @ :None
+      3  (  8.3%)  init_compress_table @ pivco_huffman_neon.c:45

@@ -1,0 +1,13 @@
+== bench_unpack_dN: pure D-bit unpack to bytes ==
+N = 8192, REPS = 200000, total = 1638400000 output bytes per variant
+
+                   flat_dX        FL-equiv     FL/flat
+                   -------        --------     -------
+D=2 (4 codes/B):   62.5 GB/s     73.4 GB/s    1.17x
+D=3 (no FL):       25.5 GB/s        ---          ---
+D=4 (2 codes/B):   62.8 GB/s    113.1 GB/s    1.80x
+D=5 (no FL):       24.8 GB/s        ---          ---
+D=6 (no FL):       25.6 GB/s        ---          ---
+
+GB/s = output bytes per second (1 byte per code).
+FL-equiv only available when D divides 8 (D=2: vst4q; D=4: vst2q).

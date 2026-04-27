@@ -1,0 +1,31 @@
+Total samples (all phases):  9039
+Decode-loop samples:         8980
+  (filter: backtrace contains decode_node_neon or pivco_huffman_decode_neon)
+
+By function (leaf frame, % of decode-loop):
+   4281  ( 47.7%)  pivco_huffman_decode_neon
+   2321  ( 25.8%)  scatter_sym
+   1195  ( 13.3%)  partition_8
+    765  (  8.5%)  _platform_memset
+    372  (  4.1%)  decode_node_neon
+     33  (  0.4%)  scatter_both_leaves
+      5  (  0.1%)  DYLD-STUB$$memset
+      4  (  0.0%)  ___chkstk_darwin
+      3  (  0.0%)  init_compress_table
+      1  (  0.0%)  bitmap_get
+
+By (function, file, line) — leaf frame:
+   4281  ( 47.7%)  pivco_huffman_decode_neon @ pivco_huffman_neon.c:0
+   2320  ( 25.8%)  scatter_sym @ pivco_huffman_neon.c:697
+    890  (  9.9%)  partition_8 @ pivco_huffman_neon.c:98
+    765  (  8.5%)  _platform_memset @ :None
+    372  (  4.1%)  decode_node_neon @ pivco_huffman_neon.c:864
+    301  (  3.4%)  partition_8 @ pivco_huffman_neon.c:95
+     19  (  0.2%)  scatter_both_leaves @ pivco_huffman_neon.c:728
+     14  (  0.2%)  scatter_both_leaves @ pivco_huffman_neon.c:765
+      5  (  0.1%)  DYLD-STUB$$memset @ :None
+      4  (  0.0%)  partition_8 @ pivco_huffman_neon.c:97
+      4  (  0.0%)  ___chkstk_darwin @ :None
+      3  (  0.0%)  init_compress_table @ pivco_huffman_neon.c:73
+      1  (  0.0%)  scatter_sym @ pivco_huffman_neon.c:679
+      1  (  0.0%)  bitmap_get @ pivco_huffman_common.h:74

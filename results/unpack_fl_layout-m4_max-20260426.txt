@@ -1,0 +1,15 @@
+== bench_unpack_fl_layout: D-bit unpack across 3 layouts ==
+N = 8192 codes, REPS = 50000, output = 409600000 bytes total
+
+                flat_dX     fl_natural    fl_layout    layout vs flat
+                (current)   (natural+vstK)(transposed)  speedup
+                ---------   ------------- -----------   ------
+D=2:            46.5 GB/s    63.9 GB/s   109.0 GB/s   2.34x
+D=3:            26.0 GB/s        ---     105.9 GB/s   4.07x
+D=4:            65.1 GB/s   117.8 GB/s   141.2 GB/s   2.17x
+D=5:            25.6 GB/s        ---     112.9 GB/s   4.40x
+D=6:            25.9 GB/s        ---     112.1 GB/s   4.32x
+D=7:                ---             ---     101.8 GB/s    n/a
+
+GB/s = output bytes/sec.  fl_natural defined only when D|8.
+fl_layout = FastLanes 1024-vector transposed layout (16 byte-lanes).

@@ -1,0 +1,17 @@
+(correctness OK — first 64 output bytes match)
+
+== bench_fl_unpack: D=2 unpack baseline vs FL-style ==
+N = 8192, REPS = 200000, total = 1638400000 codes per row
+
+-- run 1 --
+  baseline (vqtbl1q dup + vshlq):   0.019 ns/code  ( 51.3 GB/s)
+  FL-style (vshr + vand + vst4q):   0.017 ns/code  ( 58.8 GB/s)
+
+-- run 2 --
+  baseline (vqtbl1q dup + vshlq):   0.019 ns/code  ( 51.3 GB/s)
+  FL-style (vshr + vand + vst4q):   0.017 ns/code  ( 58.1 GB/s)
+
+-- run 3 --
+  baseline (vqtbl1q dup + vshlq):   0.019 ns/code  ( 51.4 GB/s)
+  FL-style (vshr + vand + vst4q):   0.017 ns/code  ( 58.5 GB/s)
+

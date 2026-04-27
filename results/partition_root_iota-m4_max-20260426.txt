@@ -1,0 +1,6 @@
+partition_neon (load+TBL):     0.06 ns/elem  ( 15.7 GB/s)
+partition_root (gen+TBL):      0.07 ns/elem  ( 14.4 GB/s)
+partition_half (load+1 TBL):   0.05 ns/elem  ( 21.7 GB/s)
+partition_root_half (gen+1):   0.05 ns/elem  ( 20.2 GB/s)
+partition_root_iota_static:    0.06 ns/elem  ( 15.5 GB/s)
+partition_root_half_iota_st:   0.05 ns/elem  ( 22.0 GB/s)
