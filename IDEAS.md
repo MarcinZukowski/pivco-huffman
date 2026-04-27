@@ -386,6 +386,46 @@ new port; expected to lose given the cross-platform pattern).
 
 See [COALESCE.md](COALESCE.md) for the full investigation.
 
+## ~~AVX-512 leaf-fusion port~~ — SHIPPED
+
+**Status (2026-04-27): SHIPPED.**
+
+`decode_node_neon` and `decode_node_x86` had stage-fusion logic for
+shallow internal nodes (both-leaves dispatch + half-partition for
+prefilled-leaf side).  `decode_node_avx512` was missing all three —
+flagged by the Codex review.  The AVX-512 helpers `partition_32_right`
+/ `partition_32_left` already existed but weren't called from the
+dispatcher.
+
+This port adds `scatter_both_leaves_avx512` (scalar STRBs since AVX-512
+has no byte scatter) and the three early-return branches before the
+standard full-partition path.
+
+A/B headline (Xeon 6975P-C, paired-t over 7 alternated pairs, full
+write-up in [`results/LEAF_FUSION_AVX512-AB-20260427.md`](results/LEAF_FUSION_AVX512-AB-20260427.md)):
+
+| Distribution | Δ | t | sig |
+|---|---:|---:|:--:|
+| source_c    | +7.5% | 8.0 | ! |
+| english     | +6.1% | 6.2 | ! |
+| html_wiki   | +4.1% | 3.7 | ! |
+| log_apache  | +2.2% | 3.0 | ! |
+| proba80     | +4.2% | 3.9 | ! |
+| proba02     | +4.3% | 8.2 | ! |
+| bell_s10    | +3.5% | 3.2 | ! |
+| bell_s30    | +3.2% | 6.3 | ! |
+| zipfian     | +3.2% | 5.4 | ! |
+
+9 wins reach p<0.05, 0 losses reach p<0.05.  Real-text and
+moderately-skewed distributions (the hypothesis target) all gain
++3-7%; flat-only distributions (`sparse_*`, `two_sym_*`, `flat_M*`,
+`uniform`) unchanged within noise as expected (those don't trigger
+the new paths).
+
+**`PIVCO_BENCH_QUICK`** was added in the same session ([commit
+`7bbfc8e`](../)) to make this kind of A/B fast — 5 min for the full
+verification on Xeon, vs ~70 min if we'd had to run full sweeps.
+
 ## AVX-512 improvement: better small-node tail
 
 `src/pivco_huffman_avx512.c` does a strong 32-wide partition using

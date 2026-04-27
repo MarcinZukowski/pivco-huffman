@@ -1,0 +1,103 @@
+  WARNING: proba80/pivco_s spread 6.6% (272..292)
+  WARNING: proba80/trad_1s spread 9.1% (283..311)
+  WARNING: proba80/trad_4s spread 11.3% (519..585)
+  WARNING: proba80/huf0_4s spread 6.2% (695..741)
+  WARNING: proba80/huf0_x2 spread 8.3% (1162..1268)
+  WARNING: proba50/trad_1s spread 17.2% (182..220)
+  WARNING: proba14/pivco_n spread 31.0% (896..1298)
+  WARNING: proba14/trad_1s spread 13.8% (172..200)
+  WARNING: proba14/huf0_4s spread 10.3% (718..801)
+  WARNING: proba02/trad_1s spread 12.2% (164..187)
+  WARNING: proba02/trad_4s spread 6.8% (396..425)
+  WARNING: proba02/huf0_4s spread 14.2% (711..829)
+  WARNING: bell_s10/pivco_n spread 11.8% (1142..1294)
+  WARNING: bell_s10/trad_1s spread 14.0% (176..204)
+  WARNING: bell_s10/trad_4s spread 5.5% (135..143)
+  WARNING: bell_s10/huf0_4s spread 14.7% (673..790)
+  WARNING: bell_s30/trad_1s spread 16.3% (165..197)
+  WARNING: bell_s80/trad_1s spread 5.8% (198..210)
+  WARNING: uniform/trad_1s spread 7.9% (209..226)
+  WARNING: uniform/trad_4s spread 18.4% (436..534)
+  WARNING: english/trad_1s spread 7.0% (197..212)
+  WARNING: english/trad_4s spread 14.4% (415..484)
+  WARNING: english/huf0_4s spread 7.4% (681..735)
+  WARNING: zipfian/huf0_4s spread 6.4% (685..732)
+  WARNING: sparse_4/pivco_s spread 10.1% (561..624)
+  WARNING: sparse_4/trad_1s spread 7.1% (233..251)
+  WARNING: sparse_4/trad_4s spread 13.8% (493..572)
+  WARNING: sparse_16/pivco_s spread 24.0% (606..797)
+  WARNING: sparse_16/trad_1s spread 7.2% (222..239)
+  WARNING: sparse_16/trad_4s spread 14.6% (439..515)
+  WARNING: geometric/huf0_4s spread 5.4% (761..804)
+  WARNING: two_sym_eq/trad_1s spread 9.8% (223..247)
+  WARNING: two_sym_eq/trad_4s spread 22.4% (443..571)
+  WARNING: two_sym_90/10/trad_4s spread 6.4% (445..475)
+  WARNING: flat_M3/pivco_s spread 19.9% (612..764)
+  WARNING: flat_M3/trad_1s spread 7.4% (230..249)
+  WARNING: flat_M3/huf0_4s spread 9.1% (691..761)
+  WARNING: flat_M5/trad_1s spread 7.2% (217..234)
+  WARNING: flat_M6/pivco_s spread 13.5% (588..679)
+  WARNING: flat_M6/trad_1s spread 9.2% (214..236)
+  WARNING: flat_M7/pivco_s spread 10.9% (566..636)
+  WARNING: flat_M7/trad_1s spread 5.0% (215..226)
+  WARNING: flat_M7/huf0_4s spread 6.3% (694..740)
+  WARNING: html_wiki/trad_1s spread 5.4% (192..203)
+  WARNING: prose_pride/trad_1s spread 8.6% (195..213)
+  WARNING: prose_pride/trad_4s spread 6.1% (144..153)
+  WARNING: prose_pride/huf0_4s spread 5.6% (686..727)
+  WARNING: image_jpeg/trad_1s spread 6.1% (194..207)
+  WARNING: image_jpeg/trad_4s spread 18.4% (414..507)
+  WARNING: json_api/trad_1s spread 5.2% (191..202)
+  WARNING: json_api/huf0_x2 spread 7.2% (1043..1124)
+  WARNING: source_c/trad_1s spread 7.8% (184..200)
+  WARNING: log_apache/trad_1s spread 7.1% (190..205)
+  WARNING: log_apache/trad_4s spread 5.4% (138..146)
+  WARNING: dna_fasta/huf0_4s spread 14.5% (689..806)
+  WARNING: dna_fasta/huf0_x2 spread 12.7% (1214..1391)
+  WARNING: csv_numeric/trad_1s spread 6.6% (199..213)
+  WARNING: gzip_random/trad_1s spread 7.6% (204..221)
+  WARNING: chinese_text/trad_1s spread 6.0% (193..205)
+  WARNING: chinese_text/trad_4s spread 6.5% (139..149)
+  WARNING: chinese_text/huf0_4s spread 8.9% (751..824)
+  WARNING: chinese_text/huf0_x2 spread 18.9% (745..918)
+=== PIVCO-Huffman Benchmarks ===
+Sequence: 4M, Repeats: 20 (80M/run), Block: 8192, Runs: 5 (drop 2)
+
+DECODE M/s    | pivco_s pivco_n pivco_p | trad_1s trad_4s | huf0_1s huf0_x1 huf0_x2 | rans_x2 |   ratio
+--------------|-------------------------|-----------------|----------------------------|---------|--------
+proba80       |     276    4147       0 |     301     571 |     300     695    1179 |     226 |  3.52x
+proba50       |      98    2016       0 |     199     405 |     297     715    1153 |     188 |  1.75x
+proba14       |      61    1102       0 |     188     402 |     301     734    1153 |     192 |  0.96x
+proba02       |      62    1100       0 |     177     416 |     293     807     683 |     187 |  1.36x
+bell_s10      |      90    1201       0 |     192     136 |     297     714    1184 |     197 |  1.01x
+bell_s30      |      58     934       0 |     175     146 |     305     703     650 |     192 |  1.33x
+bell_s80      |     102    1239       0 |     201     425 |       0       0       0 |     240 |  2.91x
+uniform       |     591    1753       0 |     225     466 |       0       0       0 |     263 |  3.76x
+english       |      80    1530       0 |     202     466 |     306     681    1118 |     202 |  1.37x
+zipfian       |      58    1138       0 |     178     413 |     297     686     810 |     156 |  1.40x
+sparse_4      |     567   16859       0 |     251     555 |     307     686    1165 |     294 | 14.48x
+sparse_16     |     742   15660       0 |     223     440 |     306     697    1146 |     287 | 13.66x
+geometric     |      96    2096       0 |     216     142 |     307     797    1180 |     188 |  1.78x
+two_sym_eq    |     188    3613       0 |     224     507 |     308     706    1165 |     299 |  3.10x
+two_sym_90/10 |     513    6612       0 |     381     446 |     308     691    1216 |     256 |  5.44x
+flat_M3       |     694   16323       0 |     240     447 |     308     693    1203 |     286 | 13.57x
+flat_M5       |     561   11582       0 |     220     441 |     307     697    1191 |     279 |  9.73x
+flat_M6       |     643   15054       0 |     229     437 |     302     694    1127 |     276 | 13.36x
+flat_M7       |     571    1865       0 |     217     433 |     304     696     586 |     275 |  2.68x
+html_wiki     |      58     956       0 |     197     144 |     299     677     994 |     174 |  0.96x
+prose_pride   |      57    1045       0 |     211     146 |     305     692    1097 |     183 |  0.95x
+image_jpeg    |      90    1163       0 |     195     468 |     304     677     585 |     236 |  1.72x
+json_api      |      58    1058       0 |     197     144 |     299     684    1058 |     171 |  1.00x
+source_c      |      64    1114       0 |     185     145 |     305     720    1022 |     157 |  1.09x
+log_apache    |      60    1063       0 |     191     145 |     305     679    1014 |     178 |  1.05x
+dna_fasta     |      92    2055       0 |     259     418 |     300     689    1313 |     268 |  1.57x
+csv_numeric   |      78    1489       0 |     207     145 |     299     685    1145 |     167 |  1.30x
+gzip_random   |     570    1778       0 |     210     429 |       0       0       0 |     266 |  4.14x
+chinese_text  |      59    1090       0 |     195     145 |     285     765     878 |     172 |  1.24x
+
+  5 runs of 80M symbols each (20x 4M), drop 2 slowest, warn if spread > 5%
+  PIVCO/trad decode in 8192-symbol blocks
+  huf0 uses 128KB chunks (its max block size)
+  rANS decodes full 4M at once
+  CPU freq drift: +2.7% (OK)
+  Total wall time: 369.0 seconds

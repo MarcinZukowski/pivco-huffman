@@ -704,6 +704,34 @@ static inline int partition_32_left(const uint16_t *src,
     return 32 - _mm_popcnt_u32(mask);
 }
 
+/* Both children are leaves: scatter sym0 (bit=0) or sym1 (bit=1) to each
+   index position, selecting via byte-blend from the bitmap.
+   AVX-512 has no byte scatter, so the actual stores are scalar; the SIMD
+   blend at least lets the compiler keep symbol selection in registers. */
+static inline void scatter_both_leaves_avx512(uint8_t *symbols,
+                                               const uint16_t *indices, int n,
+                                               const uint8_t *bm,
+                                               uint8_t sym0, uint8_t sym1)
+{
+    uint8_t delta = (uint8_t)(sym0 ^ sym1);
+    int j = 0;
+    for (; j + 8 <= n; j += 8) {
+        uint8_t mask = bm[j >> 3];
+        symbols[indices[j    ]] = (uint8_t)(sym0 ^ (delta & (uint8_t)-((mask >> 0) & 1)));
+        symbols[indices[j + 1]] = (uint8_t)(sym0 ^ (delta & (uint8_t)-((mask >> 1) & 1)));
+        symbols[indices[j + 2]] = (uint8_t)(sym0 ^ (delta & (uint8_t)-((mask >> 2) & 1)));
+        symbols[indices[j + 3]] = (uint8_t)(sym0 ^ (delta & (uint8_t)-((mask >> 3) & 1)));
+        symbols[indices[j + 4]] = (uint8_t)(sym0 ^ (delta & (uint8_t)-((mask >> 4) & 1)));
+        symbols[indices[j + 5]] = (uint8_t)(sym0 ^ (delta & (uint8_t)-((mask >> 5) & 1)));
+        symbols[indices[j + 6]] = (uint8_t)(sym0 ^ (delta & (uint8_t)-((mask >> 6) & 1)));
+        symbols[indices[j + 7]] = (uint8_t)(sym0 ^ (delta & (uint8_t)-((mask >> 7) & 1)));
+    }
+    for (; j < n; j++) {
+        uint8_t bit = (uint8_t)((bm[j >> 3] >> (j & 7)) & 1);
+        symbols[indices[j]] = (uint8_t)(sym0 ^ (delta & (uint8_t)-(int8_t)bit));
+    }
+}
+
 static void decode_node_avx512(const pivco_huffman_table_t *table,
                                 int16_t node_id,
                                 uint16_t *indices, int n,
@@ -737,7 +765,59 @@ static void decode_node_avx512(const pivco_huffman_table_t *table,
     const uint8_t *bm = *in_ptr;
     *in_ptr += nbytes;
 
-    /* AVX-512 partition: 32 indices at a time */
+    /* Check children for stage fusion (mirrors NEON / SSE logic). */
+    const pivco_tree_node_t *left_child  = &table->tree[node->left];
+    const pivco_tree_node_t *right_child = &table->tree[node->right];
+    int left_leaf  = (left_child->symbol >= 0);
+    int right_leaf = (right_child->symbol >= 0);
+
+    if (left_leaf && right_leaf
+        && node->left != skip_node && node->right != skip_node) {
+        /* Both children are leaves (neither prefilled) — scatter directly
+           from bitmap. */
+        scatter_both_leaves_avx512(symbols, indices, n, bm,
+                                    (uint8_t)left_child->symbol,
+                                    (uint8_t)right_child->symbol);
+        return;
+    }
+
+    if (left_leaf && node->left == skip_node) {
+        /* Left child is the prefilled leaf — half-partition right only. */
+        int n_right = 0;
+        int j = 0;
+        for (; j + 32 <= n; j += 32) {
+            uint32_t mask;
+            memcpy(&mask, bm + (j >> 3), 4);
+            n_right += partition_32_right(indices + j, mask, tmp + n_right);
+        }
+        for (; j < n; j++) {
+            if (bitmap_get(bm, j))
+                tmp[n_right++] = indices[j];
+        }
+        decode_node_avx512(table, node->right, tmp, n_right,
+                            symbols, in_ptr, tmp + n_right, skip_node);
+        return;
+    }
+
+    if (right_leaf && node->right == skip_node) {
+        /* Right child is the prefilled leaf — half-partition left only. */
+        int n_left = 0;
+        int j = 0;
+        for (; j + 32 <= n; j += 32) {
+            uint32_t mask;
+            memcpy(&mask, bm + (j >> 3), 4);
+            n_left += partition_32_left(indices + j, mask, indices + n_left);
+        }
+        for (; j < n; j++) {
+            if (!bitmap_get(bm, j))
+                indices[n_left++] = indices[j];
+        }
+        decode_node_avx512(table, node->left, indices, n_left,
+                            symbols, in_ptr, tmp, skip_node);
+        return;
+    }
+
+    /* Standard full partition: 32 indices at a time */
     int n_left = 0, n_right = 0;
     int j = 0;
 

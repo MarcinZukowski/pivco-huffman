@@ -1,0 +1,56 @@
+  WARNING: proba80/pivco_n spread 24.2% (3521..4645)
+  WARNING: proba14/pivco_n spread 15.9% (1110..1320)
+  WARNING: bell_s10/pivco_n spread 20.7% (1008..1270)
+  WARNING: bell_s80/pivco_n spread 7.4% (1125..1215)
+  WARNING: sparse_16/pivco_n spread 12.6% (14241..16304)
+  WARNING: geometric/pivco_n spread 26.1% (1199..1622)
+  WARNING: two_sym_eq/pivco_n spread 9.1% (3129..3443)
+  WARNING: two_sym_90/10/pivco_n spread 10.6% (6447..7215)
+  WARNING: flat_M5/pivco_n spread 9.0% (11185..12287)
+  WARNING: flat_M6/pivco_n spread 14.7% (11607..13605)
+  WARNING: html_wiki/pivco_n spread 7.4% (899..971)
+  WARNING: prose_pride/pivco_n spread 15.7% (877..1041)
+  WARNING: json_api/pivco_n spread 6.1% (1098..1169)
+  WARNING: dna_fasta/pivco_n spread 13.7% (1822..2110)
+  WARNING: csv_numeric/pivco_n spread 17.8% (1213..1476)
+=== PIVCO-Huffman Benchmarks (QUICK) ===
+Sequence: 4M, Repeats: 5 (20M/run), Block: 8192, Runs: 2 (drop 0)
+
+DECODE M/s    | pivco_n
+--------------|--------
+proba80       |    3521
+proba50       |    2043
+proba14       |    1110
+proba02       |    1117
+bell_s10      |    1008
+bell_s30      |     970
+bell_s80      |    1125
+uniform       |    1759
+english       |    1502
+zipfian       |    1172
+sparse_4      |   17256
+sparse_16     |   14241
+geometric     |    1199
+two_sym_eq    |    3129
+two_sym_90/10 |    6447
+flat_M3       |   13073
+flat_M5       |   11185
+flat_M6       |   11607
+flat_M7       |    1740
+html_wiki     |     899
+prose_pride   |     877
+image_jpeg    |    1172
+json_api      |    1098
+source_c      |    1132
+log_apache    |    1065
+dna_fasta     |    1822
+csv_numeric   |    1213
+gzip_random   |    1759
+chinese_text  |     845
+
+  2 runs of 20M symbols each (5x 4M), drop 0 slowest, warn if spread > 5%
+  PIVCO/trad decode in 8192-symbol blocks
+  huf0 uses 128KB chunks (its max block size)
+  rANS decodes full 4M at once
+  CPU freq drift: -0.6% (OK)
+  Total wall time: 11.9 seconds
