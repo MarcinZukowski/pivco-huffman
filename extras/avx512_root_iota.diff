@@ -1,0 +1,76 @@
+From: AVX-512 root iota experiment — INVESTIGATED, NOT SHIPPED
+Date: 2026-04-27
+Apply with: patch -p2 < extras/avx512_root_iota.diff
+            (or git apply, from repo root: extras/avx512_root_iota.diff)
+
+Replaces the scalar `uint16_t id[32]; for (k=0..31) id[k] = j+k;` build
+in pivco_huffman_decode_avx512's root partition with a single read from
+a precomputed iota table.  Mirrors the NEON iota_root experiment
+(extras/bench_partition_root_iota.c).
+
+A/B on Xeon 6975P-C, 5 alternated paired-t pairs, base = leaf-fusion
+(HEAD), patched = leaf-fusion + this diff.  Mixed result, not net positive:
+
+  Wins (significant):           Losses (significant):
+    bell_s80    +2.6% (t=3.1)     uniform     -3.9% (t=-7.0)
+    english     +2.1% (t=2.2)     proba02     -1.7% (t=-2.8)
+    image_jpeg  +1.2% (t=19.3)    geometric   -1.4% (t=-2.2)
+
+  3 wins vs 3 losses at p<0.05 across 29 distributions — right at the
+  noise floor.  Same shape as the NEON iota_root experiment: microbench
+  saves a few SIMD ops on the root partition, but it's amortized across
+  many deeper levels of partition_32 that aren't affected.
+
+Codex review item #2 predicted vpcompressw being more expensive than
+NEON TBL would make the relative cost of the root partition higher on
+Xeon, and therefore the iota fix proportionally bigger.  That didn't
+hold up: end-to-end the change is a wash on Xeon too.
+
+A/B raw files: results/xeon_quick_lf_baseline_p{1..5}-20260427.txt
+                results/xeon_quick_lf_iota_p{1..5}-20260427.txt
+
+--- a/pivco-huffman/src/pivco_huffman_avx512.c
++++ b/pivco-huffman/src/pivco_huffman_avx512.c
+@@ -682,6 +682,20 @@ static int huf0_chunks(int n)
+     return (n + HUF0_CHUNK - 1) / HUF0_CHUNK;
+ }
+
++/* Static iota table: [0..PIVCO_BLOCK_SIZE-1] as uint16_t.  The root
++   partition reads its 32-element identity slice directly from here
++   instead of building a stack array in a scalar loop on every iter. */
++static uint16_t partition_root_iota_avx512[PIVCO_BLOCK_SIZE]
++    __attribute__((aligned(64)));
++static int partition_root_iota_avx512_inited = 0;
++static void init_partition_root_iota_avx512(void)
++{
++    if (partition_root_iota_avx512_inited) return;
++    for (int i = 0; i < PIVCO_BLOCK_SIZE; i++)
++        partition_root_iota_avx512[i] = (uint16_t)i;
++    partition_root_iota_avx512_inited = 1;
++}
++
+ /* Half-partition: only right (bit=1) side */
+ static inline int partition_32_right(const uint16_t *src,
+                                       uint32_t mask,
+@@ -880,6 +894,9 @@ int pivco_huffman_decode_avx512(const uint8_t *in, size_t in_len,
+     int16_t skip_node = table->prefill_node;
+     memset(symbols, table->prefill_sym, (size_t)N);
+
++    /* Partition at root — read the identity slice straight from the
++       precomputed iota table instead of building it in a scalar loop. */
++    init_partition_root_iota_avx512();
+     /* Partition at root — skip identity array init */
+     uint16_t indices[PIVCO_BLOCK_SIZE];
+     uint16_t tmp[PIVCO_BLOCK_SIZE * 2];
+@@ -888,9 +905,7 @@ int pivco_huffman_decode_avx512(const uint8_t *in, size_t in_len,
+     for (int j = 0; j + 32 <= N; j += 32) {
+         uint32_t mask;
+         memcpy(&mask, bm + (j >> 3), 4);
+-        /* Generate identity [j..j+31] */
+-        uint16_t id[32];
+-        for (int k = 0; k < 32; k++) id[k] = (uint16_t)(j + k);
+-        int nr = partition_32_full(id, mask,
++        int nr = partition_32_full(partition_root_iota_avx512 + j, mask,
+                                     indices + n_left, tmp + n_right);
+         n_right += nr;
+         n_left += (32 - nr);

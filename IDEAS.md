@@ -621,6 +621,36 @@ BITPACKING.md "Suggestions" for cost-ordered alternatives, including
 the bigger fish — partition kernel (40% of prose_pride) and per-leaf
 scatter (18%) — that FL-layout doesn't touch.
 
+## AVX-512 root iota — investigated, end-to-end wash, kept in extras
+
+**Status (2026-04-27): tested, ~0% net end-to-end on Xeon, not shipped.**
+
+`pivco_huffman_decode_avx512`'s root partition built `uint16_t id[32]`
+in a scalar `for k in 0..31: id[k] = j+k` loop on every iteration before
+calling `partition_32_full`.  Codex item #2 suggested replacing that
+with a precomputed iota-table read — the same idea as the NEON
+iota_root experiment.
+
+A/B on Xeon (5 alternated pairs, paired-t):
+
+```
+Significant wins:               Significant losses:
+  bell_s80    +2.6% (t=3.1)       uniform     -3.9% (t=-7.0)
+  english     +2.1% (t=2.2)       proba02     -1.7% (t=-2.8)
+  image_jpeg  +1.2% (t=19.3)      geometric   -1.4% (t=-2.2)
+```
+
+3 wins vs 3 losses at p<0.05 across 29 distributions — right at the
+noise floor (29 × 0.05 ≈ 1.5 false positives expected per direction).
+Codex's hypothesis (vpcompressw being more expensive than NEON TBL
+would make the iota gain bigger on Xeon than M4) didn't hold up: same
+end-to-end-wash shape as the M4 NEON case.
+
+The patch is preserved as a drop-in diff at
+[`extras/avx512_root_iota.diff`](extras/avx512_root_iota.diff) along
+with the A/B raw files in
+[`results/xeon_quick_lf_{baseline,iota}_p{1..5}-20260427.txt`](results/).
+
 ## iota-table for `partition_root_8` — investigated, microbench only
 
 **Status (2026-04-26): tested, ~0% end-to-end, kept in extras for
