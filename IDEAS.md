@@ -511,32 +511,115 @@ Expected win: <2% on zipfian; 3-4× on flat_M7 direct root-flat (via
 the same vst1q_u8 pattern as D=2..6).  flat_M7 is already winning so
 the marginal EV is low.
 
-## Check `flat_dX_unpack` helpers against FastLanes unpackers
+## FastLanes-style bitpacking — investigated, not shipped, still on the table
 
-The `flat_d2_unpack` / `flat_d3_unpack` / ... routines in
-`src/pivco_huffman_neon.c` turn a packed D-bit stream into a
-byte-per-code NEON vector via a small shuffle + shift + mask sequence.
-This is exactly the same primitive as **FastLanes**'
-[bit-unpacking](https://github.com/cwida/FastLanes) inner loop (the
-"unpack N-bit values" operation), which the FL authors have tuned
-heavily on NEON and AVX-512.
+**Status (2026-04-27): investigated.  Full write-up in
+[`BITPACKING.md`](BITPACKING.md).**
 
-**Worth comparing**: our unpack sequence vs FastLanes's for each D.
-FL may use slightly different permute constants or a smarter
-shift-mask combo that we're missing.  Even a few percent per unpack
-compounds across bell/zipfian/proba02 (which have the largest
-flat-subtree TBL windows).
+Three layouts compared in `extras/bench_unpack_dN.c` and
+`extras/bench_unpack_fl_layout.c`:
+1. **current** (`flat_dN_unpack`, dup-tbl + var-shift + and + vst1q)
+2. **FL-natural** (same wire format, shift-imm + and + `vstKq`,
+   only D ∈ {2,4})
+3. **FL-layout** (FastLanes transposed bitstream, shift-imm + and,
+   any D ∈ {2..7}, **wire-format change**)
 
-Sketch of the check:
-- Clone https://github.com/cwida/FastLanes; find the NEON unpack
-  kernel for D ∈ {2,3,4,5,6}.
-- Compare instruction-level vs our `flat_dX_unpack` in
-  `src/pivco_huffman_neon.c` (offsets ~150-320 after the
-  `pivco_huffman_common.h` include).
-- If FL is faster, port the trick.  Benchmark with
-  `./build/pivco_huffman_bench 30` and compare english / bell_* / zipfian.
+Pure-unpack microbench (M4 Max, output GB/s):
 
-Easy (lookup-only) win candidate.  5-15 minute first-look exercise.
+| D | flat | FL-natural | FL-layout |
+|---|------|------------|-----------|
+| 2 | 46.5 | 63.9       | 109.0     |
+| 3 | 26.0 | —          | 105.9     |
+| 4 | 65.1 | 117.8      | 141.2     |
+| 5 | 25.6 | —          | 112.9     |
+| 6 | 25.9 | —          | 112.1     |
+
+Graviton 4 numbers are larger relative gains, especially D=5/D=6
+(22× over the current path — the existing `flat_d{5,6}_unpack` has a
+known pathology there, fixed in production by the
+`PIVCO_NEON_FAST_MULTI_TBL` gate but still a blocking factor on
+that platform's flat-subtree throughput).
+
+**End-to-end picture (M4):**
+- FL-natural D=2 in `flat_decode_direct_neon` shipped briefly as an
+  A/B; sparse_4 +12.3%, all other distributions inside ±2% noise.
+  Reverted (synthetic-only win).
+- Profile (`extras/profile_m4.sh`) shows prose_pride spends only
+  ~7% of decode in `flat_dX_unpack` and ~14.5% in the surrounding
+  scatter loop body (which is forced scalar by the indexed scatter
+  — NEON has no vector scatter).  Realistic FL-layout end-to-end
+  ceiling on real text is ~+5–6%.
+
+**Open question.**  Whether the wire-format flip is worth ~5–6% on
+real text.  Costs: encoder rewrite (transpose bit-packing), 4 backends
+× 2 unpack styles (FL bulk + natural-layout tail for inner subtrees
+of size not a multiple of FL block), version bookkeeping.  See
+BITPACKING.md "Suggestions" for cost-ordered alternatives, including
+the bigger fish — partition kernel (40% of prose_pride) and per-leaf
+scatter (18%) — that FL-layout doesn't touch.
+
+## iota-table for `partition_root_8` — investigated, microbench only
+
+**Status (2026-04-26): tested, ~0% end-to-end, kept in extras for
+posterity.**
+
+The non-root `partition_8` reads its 8 source uint16 indices from
+memory.  The root partition has identity indices and synthesises them
+via `vdupq_n_u16(base) + vaddq_u16(off)` (2 SIMD ops).  Variant:
+replace synthesis with a `vld1q_u8` from a precomputed
+`uint16_t static_iota_tab[N]` (1 SIMD op).
+
+Standalone bench: [`extras/bench_partition_root_iota.c`](extras/bench_partition_root_iota.c).
+M4 Max:
+- `partition_root`            (vdup+vadd): 14.5 GB/s
+- `partition_root_iota`       (vld1q_u8) : 15.6 GB/s  (**+8%**)
+- `partition_root_half`       (vdup+vadd): 19.9 GB/s
+- `partition_root_half_iota`  (vld1q_u8) : 21.9 GB/s  (**+9%**)
+
+Productionised briefly in `pivco_huffman_decode_neon`; full sweep on
+M4 showed **no end-to-end win** (deltas inside ±3% noise, mostly
+trending slightly negative).  Reason: `partition_root_8` fires once
+per block (1024×) but the decoder spends most of its time in 7
+deeper levels of `partition_8`, which are unaffected by the change.
+Reverted.
+
+Might still be worth on a hypothetical future ARM uarch where
+`vld1q_u8` is materially cheaper than `vdup+vadd` and the gap is
+load-bearing — Graviton 4 didn't show the M4 microbench gap at all
+(both at ~6.3 GB/s), so today only Apple silicon would benefit, and
+even there end-to-end is a wash.
+
+## Graviton 4 NEON D=5/D=6 unpack — SIMD path still broken
+
+**Status (2026-04-27): production gates around the pathology with
+`PIVCO_NEON_FAST_MULTI_TBL=0`, but the SIMD unpack itself is still
+broken on Neoverse-V2.**
+
+`extras/bench_unpack_fl_layout.c` (today's microbench) shows the
+current `flat_d{5,6}_unpack` running at **1.3 GB/s on Graviton 4**
+vs **25 GB/s on M4** — a ~20× cliff with the same source.  M4 and G4
+microbenches saved as
+[`results/unpack_fl_layout-m4_max-20260426.txt`](results/unpack_fl_layout-m4_max-20260426.txt)
+and [`results/unpack_fl_layout-graviton4-20260426.txt`](results/unpack_fl_layout-graviton4-20260426.txt).
+
+The `PIVCO_NEON_FAST_MULTI_TBL` gate (commit `cee2366`, see the
+already-shipped section above) hides this in production by
+falling through to scalar, so distributions don't see the worst
+case.  But:
+- The fast SIMD path on Graviton 4 still doesn't exist.  Anything
+  that *would* speed up the unpack (FL-natural, FL-layout, a
+  vqtbl-free rewrite) gets a 22× microbench multiplier on D=5/D=6
+  on this platform.
+- The D=5/D=6 part of bell_s30, zipfian, and similar distributions
+  decodes through the scalar fallback today — fast, but leaves real
+  ceiling on the table.
+
+Likely root cause is the `vqtbl{2,4}q_u8` + uint16-lane shift
+pattern in `flat_d{5,6}_unpack` mapping poorly to Neoverse-V2's
+SIMD pipes.  An FL-layout (uint8x16 only, shift+mask, no TBL)
+sidesteps this entirely and hits ~30 GB/s on the same chip.
+
+Same pattern but milder for D=3 (G4: 7.7 GB/s vs M4 26.0 GB/s).
 
 ## ~~Graviton 4 NEON D=5/D=6 regression — gate or replace vqtbl{2,4}q_u8~~ — SHIPPED
 
