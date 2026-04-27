@@ -449,6 +449,59 @@ the new paths).
 `7bbfc8e`](../)) to make this kind of A/B fast — 5 min for the full
 verification on Xeon, vs ~70 min if we'd had to run full sweeps.
 
+## Tree-walk node-size histogram (prerequisite for tiny-node fast paths)
+
+**Status: idea, not yet measured.  Codex review item #6.**
+
+The recursive decoder calls `decode_node_*` at every internal node.
+For each call: read bitmap, run the 32/16/8-wide partition loop (with
+scalar tail for `n % 8`), do scratch management, recurse into both
+children.  At small `n` (deep flat-corner nodes) the fixed per-call
+overhead can dwarf the actual partition work.  Codex suggests adding
+tiny-node fast paths:
+
+- `n ≤ 8` direct scalar partition (no TBL setup, no scratch)
+- `n ≤ 16` simplified vector partition
+- tiny-both-leaves variant — *already covered by the leaf-fusion paths
+  shipped today (commits `a36546c`, `1a2dadd`)*
+- tiny one-leaf-prefilled variant — *also covered*
+
+**The data we need first.**  An n-distribution histogram of recursive
+`decode_node_*` calls per workload, weighted both by call count and
+by elements processed (= time proxy):
+
+```
+prose_pride NEON tree-walk node sizes (illustrative, not measured):
+  bucket    calls   %       n×calls  time%
+  [1..3]    48000  24.0%      96000   1.2%
+  [4..7]    52000  26.0%     260000   3.3%
+  [8..15]   32000  16.0%     320000   4.0%
+  [16..31]  24000  12.0%     528000   6.7%
+  [32..63]  18000   9.0%     864000  11.0%
+  [64+]     26000  13.0%    3360000  73.8%
+```
+
+If the smallest buckets dominate by call count but contribute <5% of
+elements processed, tiny-node paths reduce call overhead but won't
+move element-throughput much.  If [4..15] is a big slice of *time*,
+sub-32 fast paths (this section + the AVX-512 small-node-tail entry
+below) are worth the source complexity.
+
+**Implementation sketch:** ~30-line instrumentation behind
+`-DPIVCO_INSTRUMENT_NODE_SIZES` in `decode_node_neon` /
+`decode_node_avx512` / `decode_node_x86`, increment
+`static uint64_t node_size_hist[BLOCK_SIZE+1]` at function entry, dump
+at exit.  Run with `PIVCO_BENCH_QUICK=1` on prose_pride / english /
+source_c / bell_s30.  ~1 hour to measure, then decide whether to
+proceed with tiny-node paths or with the AVX-512 8-wide-tail idea
+below.
+
+**Risk of skipping the histogram and shipping tiny-node paths blind:**
+50–100 lines of branchy code that adds an `if (n ≤ K)` check at every
+internal node call.  If the call frequency is low, the dispatcher
+overhead wipes out the per-call savings — could be net-negative on
+real-text where most time is in larger-n nodes.
+
 ## AVX-512 improvement: better small-node tail
 
 `src/pivco_huffman_avx512.c` does a strong 32-wide partition using
