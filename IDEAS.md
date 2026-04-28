@@ -918,6 +918,73 @@ fallback (route per-table between PIVCO and trad_huffman_decode_4s
 when flat-subtree coverage is low) is probably the right escape
 there regardless.
 
+## RISC-V (RVV 1.0) backend — speculative, watch-and-wait
+
+**Status: open, not yet attempted.  Watch-and-wait until hardware
+becomes competitive or a cloud provider offers it.**
+
+RVV 1.0 (RISC-V Vector, ratified 2021) maps surprisingly well onto
+this decoder's hot-path primitives.  Specifically:
+
+| Op our hot path needs | NEON | AVX-512 | RVV 1.0 |
+|---|---|---|---|
+| compress (= partition kernel) | TBL via shuffle | `vpcompressw` | `vcompress` |
+| TBL (= shuffle) | `vqtbl1q` | `vpermb` | `vrgather` |
+| **Indexed byte scatter** (= leaf scatter, today's bottleneck on real-text) | **none** — scalar STRBs | **none** at byte granularity (`vpscatterdd` is dword-only — overlap clobbering) | **`vsuxei8` — native** |
+
+`vsuxei8` is the only ISA-level asymmetry that matters here: it
+addresses the per-leaf scatter cost that dominates real-text decode
+(~18% of prose_pride decode time per today's profile, all in
+`scatter_sym` / `scatter_both_leaves` doing 8 scalar STRBs per
+8 codes).  Combined with vector-length-agnostic loop bodies (one
+source for VLEN=128/256/512/...), the RVV port should look a lot like
+the disabled SVE backend (sister ISA).
+
+**Why hold off in early 2026:**
+
+- **No cloud option.**  AWS / GCP / Azure / Akamai don't offer RISC-V
+  SKUs.  Scaleway has SOPHGO SG2042 (RVV 0.7.1, the *pre-ratification*
+  draft — `vsuxei` semantics differ; not directly comparable to RVV
+  1.0).  Niche Asian providers may have RVV 1.0 boards but cross-border
+  access is friction.
+- **No competitive hardware yet.**  SpacemiT K1 (8× X60 @ 1.6 GHz,
+  256-bit VLEN) is the cheap accessible RVV 1.0 SoC.  Tenstorrent
+  Ascalon and SiFive Performance P870 are coming but not in volume.
+  All are 3-10× slower per clock than M4 / Xeon / Graviton 4 today, so
+  benchmark numbers wouldn't be apples-to-apples against the rest of
+  our cross-platform table.
+
+**When this becomes a yes:**
+
+- AWS or GCP launches a RISC-V instance class.
+- A SiFive/Tenstorrent/Andes chip lands at competitive clocks (3+ GHz
+  with 256-bit VLEN minimum to be in the ballpark).
+- We want the README's cross-platform "works everywhere" story to
+  include RISC-V regardless of perf parity.
+
+**Cheap dev path if any of those triggers fire:**
+
+| Option | Cost | Convenience |
+|---|---|---|
+| QEMU RVV emulation (correctness + asm only) | $0 | Runs on x86 dev box; not for benchmarking |
+| Banana Pi BPI-F3 / Milk-V Jupiter (SpacemiT K1) | ~$80-120 | SBC; bench-quality numbers; Ubuntu-able |
+| DC-Roma II laptop (same K1) | ~$700 | "It's just a laptop"; max friction-free |
+
+**Cross-asymmetric data point that would be interesting:**
+
+If we did port and run on a SpacemiT K1, the per-leaf scatter would
+collapse from `8× STRB` per 8 codes (today on every non-RVV backend)
+to a single `vsuxei8`.  On real-text distributions where the scatter
+is ~18% of decode time, a 5-10× speedup of that fraction could yield
++10-15% end-to-end on real-text — comparable to today's leaf-fusion
+or G4-D5/D6 wins, but as a pure architectural advantage.  That's the
+single most interesting data point for whether the algorithm shape is
+actually as ISA-portable as we claim.
+
+Until cloud RISC-V or a competitive chip lands, the work-to-data ratio
+is poor (~1-2 weeks of porting + intrinsics + build setup, for numbers
+that won't translate to anyone's production hardware).
+
 ## Suggested implementation order
 
 Leaf-child fusion and the flat-subtree fast path (both the scatter
