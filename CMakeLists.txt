@@ -183,6 +183,12 @@ if(BUILD_BENCH)
     )
     target_link_libraries(pivco_partition_skew pivco_huffman m)
 
+    add_executable(pivco_mask_pair_degeneracy
+        extras/bench_mask_pair_degeneracy.c
+        bench/bench_distributions.c
+    )
+    target_link_libraries(pivco_mask_pair_degeneracy pivco_huffman m)
+
     if(TARGET_ARCH STREQUAL "arm64" OR TARGET_ARCH STREQUAL "aarch64")
         add_executable(pivco_bench_coalesce extras/bench_coalesce.c)
     endif()
