@@ -1,0 +1,23 @@
+=== build def ===
+def: -- The C compiler identification is GNU 11.5.0
+def BLK: Sequence: 4M, Repeats: 1 (4M/run), Block: 4096, Runs: 5 (drop 2)
+=== build opt ===
+opt: -- Auto-selected compiler: clang-20 (x86 sans AVX-512) (/usr/bin/clang-20)
+opt BLK: Sequence: 4M, Repeats: 1 (4M/run), Block: 4096, Runs: 5 (drop 2)
+--- benching ---
+  round 1  tag=def  done
+  round 1  tag=opt  done
+  round 2  tag=def  done
+  round 2  tag=opt  done
+  round 3  tag=def  done
+  round 3  tag=opt  done
+  round 4  tag=def  done
+  round 4  tag=opt  done
+  round 5  tag=def  done
+  round 5  tag=opt  done
+--- header ---
+DECODE M/s    | pivco_s pivco_n pivco_p | trad_1s trad_4s | huf0_1s huf0_x1 huf0_x2 | rans_x2 |   ratio
+--------------|-------------------------|-----------------|----------------------------|---------|--------
+--- raw rows captured ---
+def	1	proba80	368    1984       0	353     834	349     959    1774	262	1.12x			
+def	1	proba50	122    1252       0	279     670	350     956    1740	223	0.72x			

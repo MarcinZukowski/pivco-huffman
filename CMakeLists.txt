@@ -1,4 +1,47 @@
 cmake_minimum_required(VERSION 3.16)
+
+# Auto-select optimal compiler per platform unless explicitly overridden
+# via CC=... or -DCMAKE_C_COMPILER=...  Recommendations distilled from
+# results/compiler-sweep-20260507/SUMMARY.md.
+#
+#   - macOS arm64:  apple-clang (default — already best for our NEON path)
+#   - Linux x86 + AVX-512 VBMI2 (Xeon): gcc-14  (best partition codegen)
+#   - Linux x86 sans AVX-512 (Zen 3):   clang-20 (huge wins on flat unpack)
+#   - Linux aarch64 (Graviton 4):       clang-20 (flat_M5/M6 +123/+136%)
+if(NOT DEFINED ENV{CC} AND NOT CMAKE_C_COMPILER)
+    # CMAKE_HOST_SYSTEM_PROCESSOR isn't set until project() — use uname.
+    execute_process(COMMAND uname -s OUTPUT_VARIABLE _AUTO_OS   OUTPUT_STRIP_TRAILING_WHITESPACE)
+    execute_process(COMMAND uname -m OUTPUT_VARIABLE _AUTO_ARCH OUTPUT_STRIP_TRAILING_WHITESPACE)
+    if(_AUTO_OS STREQUAL "Linux")
+        if(_AUTO_ARCH STREQUAL "x86_64")
+            execute_process(COMMAND grep -c avx512_vbmi2 /proc/cpuinfo
+                            OUTPUT_VARIABLE _AUTO_AVX512
+                            OUTPUT_STRIP_TRAILING_WHITESPACE
+                            ERROR_QUIET)
+            if(_AUTO_AVX512 AND NOT _AUTO_AVX512 STREQUAL "0")
+                find_program(_AUTO_CC  NAMES gcc14-gcc gcc-14)
+                find_program(_AUTO_CXX NAMES gcc14-c++ g++-14)
+                set(_AUTO_LABEL "gcc-14 (x86 + AVX-512)")
+            else()
+                find_program(_AUTO_CC  NAMES clang-20)
+                find_program(_AUTO_CXX NAMES clang++-20)
+                set(_AUTO_LABEL "clang-20 (x86 sans AVX-512)")
+            endif()
+        elseif(_AUTO_ARCH STREQUAL "aarch64")
+            find_program(_AUTO_CC  NAMES clang-20)
+            find_program(_AUTO_CXX NAMES clang++-20)
+            set(_AUTO_LABEL "clang-20 (aarch64 Linux)")
+        endif()
+        if(_AUTO_CC)
+            set(CMAKE_C_COMPILER   "${_AUTO_CC}"  CACHE FILEPATH "" FORCE)
+            if(_AUTO_CXX)
+                set(CMAKE_CXX_COMPILER "${_AUTO_CXX}" CACHE FILEPATH "" FORCE)
+            endif()
+            message(STATUS "Auto-selected compiler: ${_AUTO_LABEL} (${_AUTO_CC})")
+        endif()
+    endif()
+endif()
+
 project(pivco_huffman C CXX)
 
 set(CMAKE_C_STANDARD 11)
