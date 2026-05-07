@@ -918,6 +918,36 @@ fallback (route per-table between PIVCO and trad_huffman_decode_4s
 when flat-subtree coverage is low) is probably the right escape
 there regardless.
 
+## SSE4.1 D=5..8 flat unpack — gcc unroll pragma
+
+**Status: open, easy win for SSE-only fallback path.**
+
+The D=5..8 cases in `flat_decode_direct_x86` and `flat_decode_scatter_x86`
+are scalar dependent-load loops:
+
+```c
+for (; i < n; i++) symbols[i] = c2s[bm[i]];   /* D=8 */
+```
+
+Disassembly on test-c6a (Zen 3, gcc-11) shows a 1-byte / iter serial dep
+chain.  clang-20 manually unrolls 4× and exposes 4 independent
+`(load bm → load c2s → store)` chains, hitting Zen 3's 3-load/cycle L1d
+limit.  Measured throughput delta on uniform/gzip_random distributions:
+**+~120% (gcc 825 MB/s → clang 1859 MB/s)** end-to-end.
+
+Compiler-recommendation work (`results/compiler-sweep-20260507/`)
+already steers Zen 3 to clang-20 by default, so this is moot for the
+recommended path.  But adding `#pragma GCC unroll 8` (or `#pragma clang
+loop unroll(enable)`) on the D=5/6/7/8 cases would:
+
+- Make the SSE-only fallback (when the user pins an older gcc) match the
+  clang numbers on the dominant hot path for near-uniform distributions.
+- Cost: trivial — just a pragma above each `for` loop.  No correctness
+  risk.
+
+Files: `src/pivco_huffman_x86.c:285-292` (scatter D=8) and `:395-397`
+(direct D=8); same idea for D=5/6/7 in the same file.
+
 ## RISC-V (RVV 1.0) backend — speculative, watch-and-wait
 
 **Status: open, not yet attempted.  Watch-and-wait until hardware
