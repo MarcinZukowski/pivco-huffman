@@ -1,0 +1,21 @@
+-- Auto-selected compiler: gcc-14 (x86 + AVX-512) (/usr/bin/gcc14-gcc)
+-- The C compiler identification is GNU 14.2.1
+-- The CXX compiler identification is GNU 14.2.1
+-- Detecting C compiler ABI info
+-- Detecting C compiler ABI info - done
+-- Check for working C compiler: /usr/bin/gcc14-gcc - skipped
+-- Detecting C compile features
+-- Detecting C compile features - done
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Check for working CXX compiler: /usr/bin/gcc14-c++ - skipped
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+-- Performing Test COMPILER_HAS_AVX512_VBMI2
+-- Performing Test COMPILER_HAS_AVX512_VBMI2 - Success
+-- Performing Test COMPILER_HAS_AVX2
+-- Performing Test COMPILER_HAS_AVX2 - Success
+-- x86_64 detected — enabling AVX-512 VBMI2 + AVX2 + SSE4.1
+-- Configuring done
+-- Generating done
+-- Build files have been written to: /home/ec2-user/pivco-huffman/build-PATCH

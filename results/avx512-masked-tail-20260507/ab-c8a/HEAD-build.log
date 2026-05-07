@@ -1,0 +1,104 @@
+[ 10%] Building C object CMakeFiles/pivco_huffman.dir/src/huffman_table.c.o
+[ 10%] Building C object CMakeFiles/huf0.dir/ext/fse/lib/entropy_common.c.o
+[ 15%] Building C object CMakeFiles/pivco_huffman.dir/src/pivco_huffman.c.o
+[ 20%] Building C object CMakeFiles/huf0.dir/ext/fse/lib/huf_decompress.c.o
+[ 25%] Building C object CMakeFiles/huf0.dir/ext/fse/lib/huf_compress.c.o
+[ 30%] Building C object CMakeFiles/huf0.dir/ext/fse/lib/hist.c.o
+[ 35%] Building C object CMakeFiles/huf0.dir/ext/fse/lib/fse_compress.c.o
+/home/ec2-user/pivco-huffman/src/huffman_table.c: In function ‘limit_code_lengths’:
+/home/ec2-user/pivco-huffman/src/huffman_table.c:223:22: warning: unused variable ‘gain’ [-Wunused-variable]
+  223 |             uint64_t gain = ((uint64_t)1 << (max_len - len)) -
+      |                      ^~~~
+[ 40%] Building C object CMakeFiles/huf0.dir/ext/fse/lib/fse_decompress.c.o
+[ 45%] Building C object CMakeFiles/huf0.dir/ext/fse/lib/debug.c.o
+[ 50%] Building C object CMakeFiles/pivco_huffman.dir/src/pivco_huffman_scalar.c.o
+[ 55%] Building C object CMakeFiles/pivco_huffman.dir/src/pivco_instrumentation.c.o
+[ 60%] Building C object CMakeFiles/pivco_huffman.dir/src/traditional_huffman.c.o
+/home/ec2-user/pivco-huffman/src/pivco_instrumentation.c: In function ‘pivco_dump_node_size_hist’:
+/home/ec2-user/pivco-huffman/src/pivco_instrumentation.c:28:31: warning: format ‘%llu’ expects argument of type ‘long long unsigned int’, but argument 3 has type ‘uint64_t’ {aka ‘long unsigned int’} [-Wformat=]
+   28 |             printf("%10d %10llu %10llu %10.2f%%\n",
+      |                          ~~~~~^
+      |                               |
+      |                               long long unsigned int
+      |                          %10lu
+   29 |                 i, node_size_hist[i], total_elements_in_nodes[i],
+      |                    ~~~~~~~~~~~~~~~~~
+      |                                  |
+      |                                  uint64_t {aka long unsigned int}
+/home/ec2-user/pivco-huffman/src/pivco_instrumentation.c:28:38: warning: format ‘%llu’ expects argument of type ‘long long unsigned int’, but argument 4 has type ‘uint64_t’ {aka ‘long unsigned int’} [-Wformat=]
+   28 |             printf("%10d %10llu %10llu %10.2f%%\n",
+      |                                 ~~~~~^
+      |                                      |
+      |                                      long long unsigned int
+      |                                 %10lu
+   29 |                 i, node_size_hist[i], total_elements_in_nodes[i],
+      |                                       ~~~~~~~~~~~~~~~~~~~~~~~~~~
+      |                                                              |
+      |                                                              uint64_t {aka long unsigned int}
+/home/ec2-user/pivco-huffman/src/pivco_instrumentation.c:33:29: warning: format ‘%llu’ expects argument of type ‘long long unsigned int’, but argument 2 has type ‘uint64_t’ {aka ‘long unsigned int’} [-Wformat=]
+   33 |     printf("Total calls: %llu, Total elements: %llu\n", total_calls, total_elems);
+      |                          ~~~^                           ~~~~~~~~~~~
+      |                             |                           |
+      |                             long long unsigned int      uint64_t {aka long unsigned int}
+      |                          %lu
+/home/ec2-user/pivco-huffman/src/pivco_instrumentation.c:33:51: warning: format ‘%llu’ expects argument of type ‘long long unsigned int’, but argument 3 has type ‘uint64_t’ {aka ‘long unsigned int’} [-Wformat=]
+   33 |     printf("Total calls: %llu, Total elements: %llu\n", total_calls, total_elems);
+      |                                                ~~~^                  ~~~~~~~~~~~
+      |                                                   |                  |
+      |                                                   |                  uint64_t {aka long unsigned int}
+      |                                                   long long unsigned int
+      |                                                %lu
+[ 65%] Building C object CMakeFiles/pivco_huffman.dir/src/pivco_huffman_avx512.c.o
+/home/ec2-user/pivco-huffman/src/traditional_huffman.c: In function ‘trad_huffman_encode_4s’:
+/home/ec2-user/pivco-huffman/src/traditional_huffman.c:238:13: warning: variable ‘stream_bits’ set but not used [-Wunused-but-set-variable]
+  238 |     size_t  stream_bits[4];
+      |             ^~~~~~~~~~~
+[ 70%] Building C object CMakeFiles/pivco_huffman.dir/src/pivco_huffman_x86.c.o
+/home/ec2-user/pivco-huffman/src/pivco_huffman_avx512.c: In function ‘encode_node_avx512’:
+/home/ec2-user/pivco-huffman/src/pivco_huffman_avx512.c:630:17: warning: unused variable ‘data’ [-Wunused-variable]
+  630 |         __m128i data = _mm_loadu_si128((const __m128i *)(indices + j));
+      |                 ^~~~
+In function ‘flat_decode_direct_avx512’,
+    inlined from ‘pivco_huffman_decode_avx512’ at /home/ec2-user/pivco-huffman/src/pivco_huffman_avx512.c:870:9:
+/home/ec2-user/pivco-huffman/src/pivco_huffman_avx512.c:482:29: warning: iteration 715827882 invokes undefined behavior [-Waggressive-loop-optimizations]
+  482 |             uint32_t code = extract_D_bits_avx512(bm, i * D, D);
+      |                             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/home/ec2-user/pivco-huffman/src/pivco_huffman_avx512.c:481:18: note: within this loop
+  481 |         for (; i < n; i++) {
+      |                ~~^~~
+/home/ec2-user/pivco-huffman/src/pivco_huffman_avx512.c:507:29: warning: iteration 858993459 invokes undefined behavior [-Waggressive-loop-optimizations]
+  507 |             uint32_t code = extract_D_bits_avx512(bm, i * D, D);
+      |                             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/home/ec2-user/pivco-huffman/src/pivco_huffman_avx512.c:506:18: note: within this loop
+  506 |         for (; i < n; i++) {
+      |                ~~^~~
+/home/ec2-user/pivco-huffman/src/pivco_huffman_avx512.c:530:29: warning: iteration 1431655765 invokes undefined behavior [-Waggressive-loop-optimizations]
+  530 |             uint32_t code = extract_D_bits_avx512(bm, i * D, D);
+      |                             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/home/ec2-user/pivco-huffman/src/pivco_huffman_avx512.c:529:18: note: within this loop
+  529 |         for (; i < n; i++) {
+      |                ~~^~~
+[ 75%] Linking C static library libpivco_huffman.a
+[ 75%] Built target pivco_huffman
+[ 80%] Linking C static library libhuf0.a
+[ 80%] Built target huf0
+[ 85%] Building C object CMakeFiles/pivco_huffman_bench.dir/bench/bench_main.c.o
+[ 90%] Building C object CMakeFiles/pivco_huffman_bench.dir/bench/bench_distributions.c.o
+[ 95%] Building CXX object CMakeFiles/pivco_huffman_bench.dir/bench/bench_rans.cpp.o
+/home/ec2-user/pivco-huffman/bench/bench_rans.cpp: In function ‘size_t rans_alias_decode(void*, const uint8_t*, size_t, uint8_t*, size_t)’:
+/home/ec2-user/pivco-huffman/bench/bench_rans.cpp:187:63: warning: unused parameter ‘in_len’ [-Wunused-parameter]
+  187 | size_t rans_alias_decode(void *ctx, const uint8_t *in, size_t in_len,
+      |                                                        ~~~~~~~^~~~~~
+/home/ec2-user/pivco-huffman/bench/bench_rans.cpp: In function ‘size_t rans_alias_decode_x2(void*, const uint8_t*, size_t, uint8_t*, size_t)’:
+/home/ec2-user/pivco-huffman/bench/bench_rans.cpp:204:66: warning: unused parameter ‘in_len’ [-Wunused-parameter]
+  204 | size_t rans_alias_decode_x2(void *ctx, const uint8_t *in, size_t in_len,
+      |                                                           ~~~~~~~^~~~~~
+/home/ec2-user/pivco-huffman/bench/bench_main.c: In function ‘main’:
+/home/ec2-user/pivco-huffman/bench/bench_main.c:437:9: warning: ‘dec_buf’ may be used uninitialized [-Wmaybe-uninitialized]
+  437 |         free(dec_buf);
+      |         ^~~~~~~~~~~~~
+/home/ec2-user/pivco-huffman/bench/bench_main.c:280:18: note: ‘dec_buf’ was declared here
+  280 |         uint8_t *dec_buf = (uint8_t *)malloc(TOTAL_SYMBOLS);
+      |                  ^~~~~~~
+[100%] Linking CXX executable pivco_huffman_bench
+[100%] Built target pivco_huffman_bench

@@ -502,24 +502,53 @@ internal node call.  If the call frequency is low, the dispatcher
 overhead wipes out the per-call savings — could be net-negative on
 real-text where most time is in larger-n nodes.
 
-## AVX-512 improvement: better small-node tail
+## ~~AVX-512 small-node tail — masked vector partition~~ — SHIPPED (2026-05-07)
 
-`src/pivco_huffman_avx512.c` does a strong 32-wide partition using
-`vpcompressw`, but deeper in the tree it falls back to relatively simple scalar
-handling for smaller groups.
+Replaced the three scalar `for (; j < n; j++) { bitmap_get(...); ... }`
+tails in `decode_node_avx512` (left-only, right-only, full split) with a
+single masked `partition_32_*` call: load remaining `bm` bytes into a
+`uint32_t`, mask off bits beyond `rem = n - j`, run one
+vpcompressw-based partition.
 
-### Idea
+A/B on test-c8i (Xeon) and test-c8a (Zen 5 EPYC 9R45) — gcc-14, BLK=8192,
+5 alternated rounds × repeats=20 (results in
+[`results/avx512-masked-tail-20260507/`](results/avx512-masked-tail-20260507/SUMMARY.md)):
 
-For the `< 32` remainder, especially 8-wide chunks:
+| host  | typical real-text delta | notable                                      |
+|-------|-------------------------|----------------------------------------------|
+| c8i   | +20 to +40%             | flat/sparse/two_sym ~0% (correctly untouched) |
+| c8a   | +17 to +40%             | two_sym_eq -5.9% (Zen-5-only, vpcompress overhead at depth-1 trees) |
 
-- reuse the existing SSE `pshufb` partition helper, or
-- add an explicit 8-wide vector tail instead of scalar loops.
+The win is much bigger than "fix a tail" suggests because the partition is
+*recursive*: with stride=32 and BLK=8192, the deepest 30-40% of internal-node
+calls have `n < 32` and therefore run **purely** through what we called the
+"tail".  At those depths the bm bits are essentially random on real text, so
+the old scalar loop was eating ~15-20 cycles/element on branch mispredict.
+Masked vector partition collapses that to ~1 cycle/element regardless of `rem`.
 
-### Why
+### Follow-ups
 
-Deep nodes are small, but they are also common on moderate distributions.
-Reducing scalar fallback overhead should improve the AVX-512 backend's worst
-cases without disturbing the strong 32-wide fast path.
+- **Re-test with larger BLK.**  At BLK=16384 or 32768 the recursion still
+  fans out to small-n internal nodes (nature of Huffman trees), but the
+  fraction of work spent at those depths drops because the upper levels
+  process more elements.  Expected: smaller real-text delta, but the
+  patch should still be a free win or break-even.  Worth measuring to
+  inform "should we raise BLK on AVX-512?"
+- **Port to NEON / SSE.**  Both backends have the same shape:
+  `src/pivco_huffman_neon.c` `partition_8` stride-8 + scalar tail (search
+  for `for (; j < n; j++)` near `n_right += partition_8_*`), and
+  `src/pivco_huffman_x86.c` `partition_8_sse` ditto.  Stride-8 means the
+  tail is at most 7 elements per call (vs 31 on AVX-512), so the per-call
+  speedup is smaller — but the *number* of small-n recursive calls
+  (those with `n < 8`) is similarly large for real text.  Mechanism:
+  load remaining `bm` byte, mask to `(1u << rem) - 1`, run one
+  `partition_8_*`.  Probable shape of win: smaller percentages than
+  AVX-512 (because stride-8 already captures most of the partition work)
+  but still nonzero on the M4/Graviton/Zen 3 real-text cluster.
+- **two_sym_eq Zen-5 regression.**  Single-deep tree, masked partition
+  adds vpcompress dependency for negligible work.  If we care, add a
+  `if (n < 8) scalar` micro-fallback — but two_sym_eq is already 5.9 GS/s
+  post-patch so probably not worth a branch.
 
 ## Hybrid block decoder — back on the table after the real-data sweep
 

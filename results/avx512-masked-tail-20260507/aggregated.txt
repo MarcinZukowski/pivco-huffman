@@ -1,0 +1,68 @@
+
+=== test-c8i (Xeon AVX-512): HEAD vs PATCH (avg over 5 rounds, M/s) ===
+
+distribution   |     HEAD    PATCH    delta
+------------------------------------------------
+source_c       |     1719     2397   +39.4% *
+html_wiki      |     1469     2025   +37.8% *
+bell_s30       |     1439     1950   +35.5% *
+csv_numeric    |     2122     2791   +31.6% *
+chinese_text   |     1631     2131   +30.7% *
+prose_pride    |     1623     2096   +29.1% *
+log_apache     |     1656     2130   +28.7% *
+json_api       |     1706     2190   +28.3% *
+proba02        |     1692     2170   +28.2% *
+proba14        |     1885     2349   +24.6% *
+bell_s10       |     2045     2525   +23.5% *
+proba50        |     2785     3414   +22.6% *
+zipfian        |     1906     2314   +21.4% *
+english        |     2381     2852   +19.8% *
+geometric      |     2836     3372   +18.9% *
+image_jpeg     |     2010     2245   +11.7% *
+uniform        |     4286     4530    +5.7% *
+proba80        |     5541     5830    +5.2% *
+dna_fasta      |     2738     2873    +4.9% *
+gzip_random    |     4317     4502    +4.3% *
+flat_M7        |     3547     3656    +3.1% *
+flat_M3        |    20795    21363    +2.7%
+bell_s80       |     2249     2302    +2.3%
+flat_M6        |    16723    16659    -0.4%
+sparse_16      |    19619    19683    +0.3%
+flat_M5        |    17932    17878    -0.3%
+two_sym_eq     |     4647     4660    +0.3%
+two_sym_90/10  |     8793     8782    -0.1%
+sparse_4       |    23915    23935    +0.1%
+
+=== test-c8a (Zen 5 AVX-512): HEAD vs PATCH (avg over 5 rounds, M/s) ===
+
+distribution   |     HEAD    PATCH    delta
+------------------------------------------------
+source_c       |     1974     2754   +39.5% *
+html_wiki      |     1692     2319   +37.1% *
+bell_s30       |     1643     2224   +35.3% *
+csv_numeric    |     2536     3379   +33.2% *
+prose_pride    |     1855     2384   +28.5% *
+log_apache     |     1916     2425   +26.6% *
+bell_s10       |     2439     3086   +26.5% *
+proba02        |     1949     2461   +26.3% *
+json_api       |     1949     2459   +26.1% *
+chinese_text   |     1946     2433   +25.0% *
+proba14        |     2184     2696   +23.4% *
+proba50        |     3360     4114   +22.4% *
+zipfian        |     2132     2534   +18.9% *
+geometric      |     3484     4079   +17.1% *
+english        |     2840     3313   +16.6% *
+image_jpeg     |     2407     2690   +11.8% *
+gzip_random    |     4113     4422    +7.5% *
+two_sym_eq     |     6306     5936    -5.9% *
+uniform        |     4227     4417    +4.5% *
+sparse_4       |    48975    47576    -2.9%
+dna_fasta      |     3496     3561    +1.9%
+flat_M3        |    33853    34085    +0.7%
+bell_s80       |     2787     2805    +0.7%
+sparse_16      |    51407    51212    -0.4%
+flat_M5        |    33978    33870    -0.3%
+proba80        |     7281     7259    -0.3%
+flat_M7        |     4086     4097    +0.3%
+flat_M6        |    33668    33752    +0.2%
+two_sym_90/10  |    10698    10710    +0.1%

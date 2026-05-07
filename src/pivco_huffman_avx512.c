@@ -790,9 +790,11 @@ static void decode_node_avx512(const pivco_huffman_table_t *table,
             memcpy(&mask, bm + (j >> 3), 4);
             n_right += partition_32_right(indices + j, mask, tmp + n_right);
         }
-        for (; j < n; j++) {
-            if (bitmap_get(bm, j))
-                tmp[n_right++] = indices[j];
+        if (j < n) {
+            uint32_t mask = 0;
+            memcpy(&mask, bm + (j >> 3), (size_t)bitmap_bytes(n - j));
+            mask &= (1u << (n - j)) - 1;
+            n_right += partition_32_right(indices + j, mask, tmp + n_right);
         }
         decode_node_avx512(table, node->right, tmp, n_right,
                             symbols, in_ptr, tmp + n_right, skip_node);
@@ -808,9 +810,11 @@ static void decode_node_avx512(const pivco_huffman_table_t *table,
             memcpy(&mask, bm + (j >> 3), 4);
             n_left += partition_32_left(indices + j, mask, indices + n_left);
         }
-        for (; j < n; j++) {
-            if (!bitmap_get(bm, j))
-                indices[n_left++] = indices[j];
+        if (j < n) {
+            uint32_t mask = 0;
+            memcpy(&mask, bm + (j >> 3), (size_t)bitmap_bytes(n - j));
+            mask &= (1u << (n - j)) - 1;
+            n_left += partition_32_left(indices + j, mask, indices + n_left);
         }
         decode_node_avx512(table, node->left, indices, n_left,
                             symbols, in_ptr, tmp, skip_node);
@@ -829,11 +833,18 @@ static void decode_node_avx512(const pivco_huffman_table_t *table,
         n_right += nr;
         n_left += (32 - nr);
     }
-    for (; j < n; j++) {
-        if (bitmap_get(bm, j))
-            tmp[n_right++] = indices[j];
-        else
-            indices[n_left++] = indices[j];
+    /* Vector tail: handle remaining 1..31 elements in one masked partition */
+    if (j < n) {
+        int rem = n - j;
+        uint32_t mask = 0;
+        memcpy(&mask, bm + (j >> 3), (size_t)bitmap_bytes(rem));
+        /* Mask out bits beyond rem */
+        mask &= (1u << rem) - 1;
+        
+        int nr = partition_32(indices + j, rem, (__mmask32)mask,
+                              indices + n_left, tmp + n_right);
+        n_right += nr;
+        n_left += (rem - nr);
     }
 
     decode_node_avx512(table, node->left, indices, n_left,
