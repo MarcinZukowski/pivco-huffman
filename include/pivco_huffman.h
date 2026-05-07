@@ -219,6 +219,10 @@ int trad_huffman_decode_4s(const uint8_t *in, size_t in_len,
                            const pivco_huffman_table_t *table,
                            uint8_t *symbols, size_t n_symbols);
 
+/* ---------- Instrumentation ---------- */
+void pivco_instrument_node_size(int n);
+void pivco_dump_node_size_hist(void);
+
 #ifdef __cplusplus
 }
 #endif

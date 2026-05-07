@@ -62,6 +62,7 @@ set(PIVCO_SOURCES
     src/huffman_table.c
     src/pivco_huffman.c
     src/pivco_huffman_scalar.c
+    src/pivco_instrumentation.c
     src/traditional_huffman.c
 )
 
