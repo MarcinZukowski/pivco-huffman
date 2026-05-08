@@ -252,6 +252,83 @@ static int test_roundtrip_dist(const char *name, const uint64_t freq[PIVCO_MAX_S
 
 #endif
 
+#ifdef PIVCO_HAS_SSE4
+    /* SSE4 roundtrip + cross-check against scalar-encoded stream.
+     * Was missing for over a year; the e9a668f masked-tail bug went
+     * undetected because nothing in this file directly invoked
+     * pivco_huffman_decode_x86 on real distribution data. */
+    {
+        uint8_t sse_enc[PIVCO_MAX_ENCODED_SIZE];
+        size_t sse_len;
+        rc = pivco_huffman_encode_x86(symbols, &table, sse_enc, &sse_len);
+        if (rc != PIVCO_OK) FAIL("sse encode returned %d", rc);
+
+        uint8_t sse_dec[PIVCO_BLOCK_SIZE];
+        size_t sse_consumed;
+        rc = pivco_huffman_decode_x86(sse_enc, sse_len, &table,
+                                       sse_dec, &sse_consumed);
+        if (rc != PIVCO_OK) FAIL("sse decode returned %d", rc);
+
+        for (int i = 0; i < PIVCO_BLOCK_SIZE; i++) {
+            if (symbols[i] != sse_dec[i]) {
+                FAIL("sse mismatch at position %d: expected %d, got %d",
+                     i, symbols[i], sse_dec[i]);
+            }
+        }
+
+        /* Cross: scalar encode -> sse decode */
+        uint8_t sse_cross[PIVCO_BLOCK_SIZE];
+        size_t sse_cross_consumed;
+        rc = pivco_huffman_decode_x86(encoded, enc_len, &table,
+                                       sse_cross, &sse_cross_consumed);
+        if (rc != PIVCO_OK) FAIL("sse cross decode returned %d", rc);
+        for (int i = 0; i < PIVCO_BLOCK_SIZE; i++) {
+            if (symbols[i] != sse_cross[i]) {
+                FAIL("sse cross mismatch at position %d: expected %d, got %d",
+                     i, symbols[i], sse_cross[i]);
+            }
+        }
+    }
+#endif
+
+#ifdef PIVCO_HAS_AVX512
+    /* AVX-512 roundtrip + cross-check against scalar-encoded stream.
+     * Was missing; the b136b96 masked-tail bug went undetected for the
+     * same reason as the SSE block above. */
+    {
+        uint8_t avx_enc[PIVCO_MAX_ENCODED_SIZE];
+        size_t avx_len;
+        rc = pivco_huffman_encode_avx512(symbols, &table, avx_enc, &avx_len);
+        if (rc != PIVCO_OK) FAIL("avx512 encode returned %d", rc);
+
+        uint8_t avx_dec[PIVCO_BLOCK_SIZE];
+        size_t avx_consumed;
+        rc = pivco_huffman_decode_avx512(avx_enc, avx_len, &table,
+                                          avx_dec, &avx_consumed);
+        if (rc != PIVCO_OK) FAIL("avx512 decode returned %d", rc);
+
+        for (int i = 0; i < PIVCO_BLOCK_SIZE; i++) {
+            if (symbols[i] != avx_dec[i]) {
+                FAIL("avx512 mismatch at position %d: expected %d, got %d",
+                     i, symbols[i], avx_dec[i]);
+            }
+        }
+
+        /* Cross: scalar encode -> avx512 decode */
+        uint8_t avx_cross[PIVCO_BLOCK_SIZE];
+        size_t avx_cross_consumed;
+        rc = pivco_huffman_decode_avx512(encoded, enc_len, &table,
+                                          avx_cross, &avx_cross_consumed);
+        if (rc != PIVCO_OK) FAIL("avx512 cross decode returned %d", rc);
+        for (int i = 0; i < PIVCO_BLOCK_SIZE; i++) {
+            if (symbols[i] != avx_cross[i]) {
+                FAIL("avx512 cross mismatch at %d: expected %d, got %d",
+                     i, symbols[i], avx_cross[i]);
+            }
+        }
+    }
+#endif
+
     printf("PASS (pivco=%zu B, trad=%zu B, ratio=%.2fx)\n",
            enc_len, trad_len, (double)enc_len / (double)trad_len);
     return 0;
