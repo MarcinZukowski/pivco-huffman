@@ -1,0 +1,332 @@
+From: Hybrid PIVCO/traditional-Huffman decoder — STASHED, work-in-progress
+Date: 2026-04-27
+Apply with: git apply --3way extras/hybrid_decoder.diff
+            (from repo root: extras/hybrid_decoder.diff)
+
+This patch was extracted from a working tree on 2026-04-27 to unblock
+unrelated AVX2/Zen3 perf experiments that were being confounded by the
+hybrid path's `avg_steps > 2.8` threshold sending most real-text
+distributions through the traditional decoder.
+
+What it does:
+  - Adds `pivco_huffman_table_t::use_traditional` flag, set in
+    `pivco_huffman_build_table` when the expected tree-walk cost
+    `avg_steps > 2.8`.
+  - When the flag is set, all encode/decode dispatchers
+    (pivco_huffman.c, _neon.c, _scalar.c) bypass PIVCO and call
+    `trad_huffman_{encode,decode}_4s` instead.
+  - Updates the trad_4s wire format to a length-prefixed header
+    (so the decoder can return `*consumed` from a stream-of-blocks
+    container).
+
+Status when stashed:
+  - Build + tests passed.
+  - The 2.8 threshold was empirically too aggressive: bell_s10/bell_s30,
+    prose_pride, html_wiki, source_c, json_api, log_apache, chinese_text
+    all fall through to traditional, which on Zen 3 measured at ~170
+    M/s — much slower than PIVCO's normal tree-walk (~700-900 M/s on
+    those distributions).  Threshold tuning + per-platform calibration
+    likely needed before this can ship.
+  - Includes a debug `printf` in `compute_pivco_cost` block of
+    huffman_table.c that should be removed before shipping.
+  - Stream format change in traditional_huffman.c (header now stores
+    `total_bytes` so the decoder can return `*consumed`).  Old
+    trad_4s-encoded streams won't decode with the new code; this is
+    not a problem within a single bench run but matters if streams
+    are persisted.
+
+What this patch does NOT touch (intentionally left in tree):
+  - Instrumentation hooks (`pivco_instrument_node_size`,
+    `pivco_dump_node_size_hist` declarations + implementation in
+    src/pivco_instrumentation.c) — these are independent of the
+    hybrid decoder and stay as work-in-progress.
+  - AVX-512 vector-tail partition optimization in
+    src/pivco_huffman_avx512.c — unrelated to hybrid; uses the
+    `partition_32` masked variant for the < 32 element remainder.
+
+---
+
+diff --git a/pivco-huffman/include/pivco_huffman.h b/pivco-huffman/include/pivco_huffman.h
+--- a/pivco-huffman/include/pivco_huffman.h
++++ b/pivco-huffman/include/pivco_huffman.h
+@@ -89,6 +89,8 @@
+     uint8_t  flat_depth[PIVCO_MAX_TREE_NODES];
+     uint16_t flat_offset[PIVCO_MAX_TREE_NODES];
+     uint8_t  flat_code_to_sym[PIVCO_MAX_SYMBOLS];
++
++    uint8_t  use_traditional;   /* Heuristic: 1 if block should use traditional decoder */
+ } pivco_huffman_table_t;
+ 
+ /* ---------- Implementation selection ---------- */
+diff --git a/pivco-huffman/src/huffman_table.c b/pivco-huffman/src/huffman_table.c
+index 6763016..f181dd0 100644
+--- a/pivco-huffman/src/huffman_table.c
++++ b/pivco-huffman/src/huffman_table.c
+@@ -283,6 +283,37 @@ static void limit_code_lengths(uint8_t *lengths, int n_symbols, int max_len)
+     }
+ }
+ 
++static void compute_pivco_cost(const pivco_huffman_table_t *t, int16_t node_id, int current_cost, double *total_cost, const uint64_t *freq)
++{
++    if (node_id == t->prefill_node) {
++        return; /* cost is 0 */
++    }
++    const pivco_tree_node_t *n = &t->tree[node_id];
++    if (n->symbol >= 0) {
++        *total_cost += (double)freq[n->symbol] * current_cost;
++        return;
++    }
++    if (t->flat_depth[node_id] >= 2) {
++        uint64_t sub_freq = 0;
++        uint16_t stack[256];
++        int top = 0;
++        stack[top++] = node_id;
++        while (top > 0) {
++            int16_t curr = stack[--top];
++            if (t->tree[curr].symbol >= 0) {
++                sub_freq += freq[t->tree[curr].symbol];
++            } else {
++                stack[top++] = t->tree[curr].left;
++                stack[top++] = t->tree[curr].right;
++            }
++        }
++        *total_cost += (double)sub_freq * (current_cost + 1);
++        return;
++    }
++    compute_pivco_cost(t, n->left, current_cost + 1, total_cost, freq);
++    compute_pivco_cost(t, n->right, current_cost + 1, total_cost, freq);
++}
++
+ /* ---------- Canonical Huffman code assignment ---------- */
+ 
+ int pivco_huffman_build_table(const uint64_t freq[PIVCO_MAX_SYMBOLS],
+@@ -612,16 +643,35 @@ int pivco_huffman_build_table(const uint64_t freq[PIVCO_MAX_SYMBOLS],
+         }
+     }
+ 
+-    /* Flat-subtree detection.  Mark every internal node that is the root
+-       of a maximal flat subtree with depth >= 2 and fill its
+-       code_to_sym lookup.  The root itself is eligible — when the whole
+-       tree is flat with depth >= 2, the root gets flat_depth = max_len
+-       and decode_node_neon handles the whole block directly without
+-       routing through pivco_huffman_decode_neon_prefix. */
++    /* Flat-subtree detection. */
+     {
+         uint16_t pool_cursor = 0;
+         flat_mark_subtrees(table, table->tree_root, &pool_cursor);
+     }
+ 
++    /* ---------- Hybrid Heuristic ----------
++     *
++     * Calculate expected tree-walk steps per symbol.
++     * If expected steps > 3.0, the traditional 4-stream decoder is
++     * generally faster than PIVCO tree-walk.
++     */
++    {
++        uint64_t total_freq = 0;
++        for (int i = 0; i < PIVCO_MAX_SYMBOLS; i++) total_freq += freq[i];
++
++        if (total_freq > 0) {
++            double total_cost = 0;
++            compute_pivco_cost(table, table->tree_root, 0, &total_cost, freq);
++            double avg_steps = total_cost / (double)total_freq;
++
++            if (avg_steps > 2.8) {
++                table->use_traditional = 1;
++            } else {
++                table->use_traditional = 0;
++            }
++            printf("  max_len=%d, avg_steps=%.2f, trad=%d\n", table->max_len, avg_steps, table->use_traditional);
++        }
++    }
++
+     return PIVCO_OK;
+ }
+diff --git a/pivco-huffman/src/pivco_huffman.c b/pivco-huffman/src/pivco_huffman.c
+index 4ab2e8e..ff937d2 100644
+--- a/pivco-huffman/src/pivco_huffman.c
++++ b/pivco-huffman/src/pivco_huffman.c
+@@ -32,6 +32,9 @@ int pivco_huffman_encode(const uint8_t *symbols,
+                          const pivco_huffman_table_t *table,
+                          uint8_t *out, size_t *out_len)
+ {
++    if (table->use_traditional) {
++        return trad_huffman_encode_4s(symbols, PIVCO_BLOCK_SIZE, table, out, out_len);
++    }
+     switch (resolve_impl()) {
+     case PIVCO_IMPL_NEON:
+ #ifdef PIVCO_HAS_AVX512
+@@ -52,6 +55,13 @@ int pivco_huffman_decode(const uint8_t *in, size_t in_len,
+                          const pivco_huffman_table_t *table,
+                          uint8_t *symbols, size_t *consumed)
+ {
++    if (table->use_traditional) {
++        int rc = trad_huffman_decode_4s(in, in_len, table, symbols, PIVCO_BLOCK_SIZE);
++        if (rc == PIVCO_OK) {
++            *consumed = (size_t)in[0] | ((size_t)in[1] << 8);
++        }
++        return rc;
++    }
+     switch (resolve_impl()) {
+     case PIVCO_IMPL_NEON:
+ #ifdef PIVCO_HAS_AVX512
+diff --git a/pivco-huffman/src/pivco_huffman_neon.c b/pivco-huffman/src/pivco_huffman_neon.c
+index d4d6236..bb6b821 100644
+--- a/pivco-huffman/src/pivco_huffman_neon.c
++++ b/pivco-huffman/src/pivco_huffman_neon.c
+@@ -607,6 +607,10 @@ int pivco_huffman_encode_neon(const uint8_t *symbols,
+ {
+     if (!symbols || !table || !out || !out_len) return PIVCO_ERR_NULL;
+ 
++    if (table->use_traditional) {
++        return trad_huffman_encode_4s(symbols, PIVCO_BLOCK_SIZE, table, out, out_len);
++    }
++
+     init_compress_table();
+ 
+     const int N = PIVCO_BLOCK_SIZE;
+@@ -906,6 +910,14 @@ int pivco_huffman_decode_neon(const uint8_t *in, size_t in_len,
+ {
+     if (!in || !table || !symbols || !consumed) return PIVCO_ERR_NULL;
+ 
++    if (table->use_traditional) {
++        int rc = trad_huffman_decode_4s(in, in_len, table, symbols, PIVCO_BLOCK_SIZE);
++        if (rc == PIVCO_OK) {
++            *consumed = (size_t)in[0] | ((size_t)in[1] << 8);
++        }
++        return rc;
++    }
++
+     init_compress_table();
+ 
+     const int N = PIVCO_BLOCK_SIZE;
+diff --git a/pivco-huffman/src/pivco_huffman_scalar.c b/pivco-huffman/src/pivco_huffman_scalar.c
+index 4286141..285ddbc 100644
+--- a/pivco-huffman/src/pivco_huffman_scalar.c
++++ b/pivco-huffman/src/pivco_huffman_scalar.c
+@@ -135,6 +135,10 @@ int pivco_huffman_encode_scalar(const uint8_t *symbols,
+ {
+     if (!symbols || !table || !out || !out_len) return PIVCO_ERR_NULL;
+ 
++    if (table->use_traditional) {
++        return trad_huffman_encode_4s(symbols, PIVCO_BLOCK_SIZE, table, out, out_len);
++    }
++
+     const int N = PIVCO_BLOCK_SIZE;
+ 
+     /* Precompute codes and lengths for this block */
+@@ -255,6 +259,14 @@ int pivco_huffman_decode_scalar(const uint8_t *in, size_t in_len,
+ {
+     if (!in || !table || !symbols || !consumed) return PIVCO_ERR_NULL;
+ 
++    if (table->use_traditional) {
++        int rc = trad_huffman_decode_4s(in, in_len, table, symbols, PIVCO_BLOCK_SIZE);
++        if (rc == PIVCO_OK) {
++            *consumed = (size_t)in[0] | ((size_t)in[1] << 8);
++        }
++        return rc;
++    }
++
+     const int N = PIVCO_BLOCK_SIZE;
+     (void)in_len;
+ 
+diff --git a/pivco-huffman/src/traditional_huffman.c b/pivco-huffman/src/traditional_huffman.c
+index 3f62156..0fdc41a 100644
+--- a/pivco-huffman/src/traditional_huffman.c
++++ b/pivco-huffman/src/traditional_huffman.c
+@@ -217,7 +217,7 @@ int trad_huffman_decode(const uint8_t *in, size_t in_bits,
+  * Stream 4 size is implicit (remainder).
+  * ================================================================ */
+ 
+-#define STREAM_HEADER_SIZE 6   /* 3 × uint16_t */
++#define STREAM_HEADER_SIZE 8   /* 4 × uint16_t: total_bytes, s1, s2, s3 */
+ 
+ int trad_huffman_encode_4s(const uint8_t *symbols, size_t n_symbols,
+                            const pivco_huffman_table_t *table,
+@@ -233,31 +233,35 @@ int trad_huffman_encode_4s(const uint8_t *symbols, size_t n_symbols,
+     size_t slen[4] = { quarter, quarter, quarter, n_symbols - 3*quarter };
+ 
+     /* Encode each stream into a temporary buffer */
+-    uint8_t tmp[4][PIVCO_BLOCK_SIZE]; /* generous per-stream buffer */
++    uint8_t tmp[4][PIVCO_BLOCK_SIZE * 2]; /* generous per-stream buffer */
+     size_t  stream_bytes[4];
+-    size_t  stream_bits[4];
+ 
+     for (int s = 0; s < 4; s++) {
+         bitwriter_t bw;
+         bw_init(&bw, tmp[s]);
+-        size_t bits = 0;
+         for (size_t i = 0; i < slen[s]; i++) {
+             uint8_t sym = src[s][i];
+             bw_put(&bw, table->code[sym], table->code_len[sym]);
+-            bits += table->code_len[sym];
+         }
+         bw_finish(&bw);
+         stream_bytes[s] = bw.byte_pos;
+-        stream_bits[s] = bits;
+     }
+ 
+-    /* Write header: 3 stream sizes */
++    /* Calculate total size: header + streams + padding */
++    size_t total = STREAM_HEADER_SIZE + stream_bytes[0] + stream_bytes[1] +
++                   stream_bytes[2] + stream_bytes[3] + 8;
++
++    /* Write header: total_bytes, then 3 stream sizes */
+     uint8_t *ptr = out;
+-    for (int s = 0; s < 3; s++) {
+-        ptr[0] = (uint8_t)(stream_bytes[s] & 0xFF);
+-        ptr[1] = (uint8_t)(stream_bytes[s] >> 8);
+-        ptr += 2;
+-    }
++    ptr[0] = (uint8_t)(total & 0xFF);
++    ptr[1] = (uint8_t)(total >> 8);
++    ptr[2] = (uint8_t)(stream_bytes[0] & 0xFF);
++    ptr[3] = (uint8_t)(stream_bytes[0] >> 8);
++    ptr[4] = (uint8_t)(stream_bytes[1] & 0xFF);
++    ptr[5] = (uint8_t)(stream_bytes[1] >> 8);
++    ptr[6] = (uint8_t)(stream_bytes[2] & 0xFF);
++    ptr[7] = (uint8_t)(stream_bytes[2] >> 8);
++    ptr += STREAM_HEADER_SIZE;
+ 
+     /* Write stream data */
+     for (int s = 0; s < 4; s++) {
+@@ -280,25 +284,28 @@ int trad_huffman_decode_4s(const uint8_t *in, size_t in_len,
+     if (!in || !table || !symbols) return PIVCO_ERR_NULL;
+     if (in_len < STREAM_HEADER_SIZE) return PIVCO_ERR_CORRUPT;
+ 
+-    /* Build adaptive packed table */
+-    fast_table_t ft;
+-    build_fast_table(table, &ft);
+-    int tlog = ft.table_log;
+-
+-    /* Read stream sizes from header */
++    /* Read header */
+     const uint8_t *hdr = in;
++    size_t total_bytes = (size_t)hdr[0] | ((size_t)hdr[1] << 8);
++    if (total_bytes > in_len) return PIVCO_ERR_CORRUPT;
++
+     size_t s_bytes[4];
+-    s_bytes[0] = (size_t)hdr[0] | ((size_t)hdr[1] << 8);
+-    s_bytes[1] = (size_t)hdr[2] | ((size_t)hdr[3] << 8);
+-    s_bytes[2] = (size_t)hdr[4] | ((size_t)hdr[5] << 8);
++    s_bytes[0] = (size_t)hdr[2] | ((size_t)hdr[3] << 8);
++    s_bytes[1] = (size_t)hdr[4] | ((size_t)hdr[5] << 8);
++    s_bytes[2] = (size_t)hdr[6] | ((size_t)hdr[7] << 8);
+ 
+     const uint8_t *s_data[4];
+     s_data[0] = in + STREAM_HEADER_SIZE;
+     s_data[1] = s_data[0] + s_bytes[0];
+     s_data[2] = s_data[1] + s_bytes[1];
+     s_data[3] = s_data[2] + s_bytes[2];
+-    /* Stream 4 size = remainder (minus 8 bytes padding) */
+-    s_bytes[3] = (size_t)((in + in_len - 8) - s_data[3]);
++    /* Stream 4 size = total - header - s1 - s2 - s3 - padding */
++    s_bytes[3] = total_bytes - STREAM_HEADER_SIZE - s_bytes[0] - s_bytes[1] - s_bytes[2] - 8;
++
++    /* Build adaptive packed table */
++    fast_table_t ft;
++    build_fast_table(table, &ft);
++    int tlog = ft.table_log;
+ 
+     size_t quarter = n_symbols / 4;
+     size_t slen[4] = { quarter, quarter, quarter, n_symbols - 3*quarter };

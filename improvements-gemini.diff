@@ -1,0 +1,674 @@
+diff --git a/pivco-huffman/src/pivco_huffman_neon.c b/pivco-huffman/src/pivco_huffman_neon.c
+index 4577657..9ce0068 100644
+--- a/pivco-huffman/src/pivco_huffman_neon.c
++++ b/pivco-huffman/src/pivco_huffman_neon.c
+@@ -1,19 +1,11 @@
+ #include "pivco_huffman.h"
+ #include "pivco_huffman_common.h"
++#include "pivco_huffman_neon_common.h"
+ #include <string.h>
+ 
+ #ifdef PIVCO_HAS_NEON
+-#include <arm_neon.h>
+-
+-/* ---------- SIMD Compress Shuffle Table ----------
+- *
+- * For each 8-bit mask, a 16-byte TBL shuffle that packs selected
+- * uint16_t elements (2 bytes each) to the front of the register.
+- */
+-/* Combined shuffle table: [256][32] where bytes 0-15 are the shuffle
+-   for mask (right partition) and bytes 16-31 are for ~mask (left partition).
+-   Both loaded with a single ldp q0, q1 — one cache line access instead
+-   of two separate lookups at unrelated addresses. */
++
++/* ---------- SIMD Compress Shuffle Table ---------- */
+ uint8_t compress_tab[256][32] __attribute__((aligned(32)));
+ uint8_t compress_popcnt[256] __attribute__((aligned(64)));
+ int compress_table_ready = 0;
+@@ -606,13 +598,7 @@ int pivco_huffman_decode_neon(const uint8_t *in, size_t in_len,
+     return PIVCO_OK;
+ }
+ 
+-/* ---------- Internal wrappers exposed for pivco_huffman_neon_prefix.c ----------
+- *
+- * The prefix-radix backend performs a top-level K-way partition and then
+- * needs to delegate each non-leaf bin's subtree (at depth M below the
+- * root) to the standard 2-way neon encoder/decoder.  These thin wrappers
+- * expose exactly the internal recursive entry points, preserving the
+- * same contract. */
++/* ---------- Internal wrappers exposed for pivco_huffman_neon_prefix.c ---------- */
+ 
+ void pivco_neon_decode_subtree_(const pivco_huffman_table_t *table,
+                                  int16_t node_id,
+diff --git a/pivco-huffman/src/pivco_huffman_neon_common.h b/pivco-huffman/src/pivco_huffman_neon_common.h
+new file mode 100644
+index 0000000..3667093
+--- /dev/null
++++ b/pivco-huffman/src/pivco_huffman_neon_common.h
+@@ -0,0 +1,21 @@
++#ifndef PIVCO_HUFFMAN_NEON_COMMON_H
++#define PIVCO_HUFFMAN_NEON_COMMON_H
++
++#include <arm_neon.h>
++#include <stdint.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/* ---------- SIMD Compress Shuffle Table ---------- */
++extern uint8_t compress_tab[256][32];
++extern uint8_t compress_popcnt[256];
++
++void init_compress_table(void);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* PIVCO_HUFFMAN_NEON_COMMON_H */
+diff --git a/pivco-huffman/src/pivco_huffman_neon_prefix.c b/pivco-huffman/src/pivco_huffman_neon_prefix.c
+index 0c4704d..51d0245 100644
+--- a/pivco-huffman/src/pivco_huffman_neon_prefix.c
++++ b/pivco-huffman/src/pivco_huffman_neon_prefix.c
+@@ -15,23 +15,18 @@
+  *        - leaf bin, other symbol   → scatter_sym to bin's elements.
+  *        - subtree bin              → hand off to pivco_neon_decode_subtree_
+  *                                     starting at the bin's tree node at depth M.
+- *
+- * Gated by table shape — for stick trees with min_len = 1, the radix
+- * phase would degenerate to a single-bit partition and lose to the
+- * current neon decoder.  Callers should pick max(pivco_n, pivco_p).
+  */
+ 
+ #include "pivco_huffman.h"
+ #include "pivco_huffman_common.h"
++#include "pivco_huffman_neon_common.h"
+ #include <string.h>
+ #include <stdio.h>
+ #include <stdlib.h>
+ 
+ #ifdef PIVCO_HAS_NEON
+ 
+-/* ---------- Bit pack / unpack helpers ----------
+- * Stream layout: M-bit values packed LSB-first.  Element k occupies
+- * bits [k*M, k*M + M) of the stream, little-endian within each byte. */
++/* ---------- Bit pack / unpack helpers ---------- */
+ 
+ static inline void pack_m_bits(uint8_t *out, int k, int M, uint32_t value)
+ {
+@@ -51,10 +46,7 @@ static inline size_t prefix_stream_bytes(int N, int M)
+     return (size_t)(((size_t)N * (size_t)M + 7) >> 3);
+ }
+ 
+-/* ---------- Prefix-extraction fast paths (scalar unrolled) ----------
+- *
+- * For each M, unroll to consume an integer number of bytes per
+- * iteration so the inner loop has no cross-iteration bit carry. */
++/* ---------- Prefix-extraction fast paths (scalar unrolled) ---------- */
+ 
+ static void extract_M1(const uint8_t *in, uint8_t *out, int N)
+ {
+@@ -84,11 +76,8 @@ static void extract_M2(const uint8_t *in, uint8_t *out, int N)
+ 
+ static void extract_M3(const uint8_t *in, uint8_t *out, int N)
+ {
+-    /* 8 elements = 24 bits = 3 bytes */
+     for (int k = 0; k < N; k += 8) {
+-        uint32_t w = (uint32_t)in[0]
+-                   | ((uint32_t)in[1] << 8)
+-                   | ((uint32_t)in[2] << 16);
++        uint32_t w = (uint32_t)in[0] | ((uint32_t)in[1] << 8) | ((uint32_t)in[2] << 16);
+         in += 3;
+         out[k    ] = (uint8_t)((w >>  0) & 7);
+         out[k + 1] = (uint8_t)((w >>  3) & 7);
+@@ -101,24 +90,23 @@ static void extract_M3(const uint8_t *in, uint8_t *out, int N)
+     }
+ }
+ 
+-static void extract_M4(const uint8_t *in, uint8_t *out, int N)
++static void extract_M4_neon(const uint8_t *in, uint8_t *out, int N)
+ {
+-    for (int k = 0; k < N; k += 2) {
+-        uint8_t b = in[k >> 1];
+-        out[k    ] = b & 0x0F;
+-        out[k + 1] = b >> 4;
++    for (int k = 0; k < N; k += 32) {
++        uint8x16_t b = vld1q_u8(in);
++        in += 16;
++        uint8x16_t low = vandq_u8(b, vdupq_n_u8(0x0F));
++        uint8x16_t high = vshrq_n_u8(b, 4);
++        uint8x16x2_t res = vzipq_u8(low, high);
++        vst1q_u8(out + k, res.val[0]);
++        vst1q_u8(out + k + 16, res.val[1]);
+     }
+ }
+ 
+ static void extract_M5(const uint8_t *in, uint8_t *out, int N)
+ {
+-    /* 8 elements = 40 bits = 5 bytes */
+     for (int k = 0; k < N; k += 8) {
+-        uint64_t w = (uint64_t)in[0]
+-                   | ((uint64_t)in[1] << 8)
+-                   | ((uint64_t)in[2] << 16)
+-                   | ((uint64_t)in[3] << 24)
+-                   | ((uint64_t)in[4] << 32);
++        uint64_t w = (uint64_t)in[0] | ((uint64_t)in[1] << 8) | ((uint64_t)in[2] << 16) | ((uint64_t)in[3] << 24) | ((uint64_t)in[4] << 32);
+         in += 5;
+         out[k    ] = (uint8_t)((w >>  0) & 0x1F);
+         out[k + 1] = (uint8_t)((w >>  5) & 0x1F);
+@@ -133,11 +121,8 @@ static void extract_M5(const uint8_t *in, uint8_t *out, int N)
+ 
+ static void extract_M6(const uint8_t *in, uint8_t *out, int N)
+ {
+-    /* 4 elements = 24 bits = 3 bytes */
+     for (int k = 0; k < N; k += 4) {
+-        uint32_t w = (uint32_t)in[0]
+-                   | ((uint32_t)in[1] << 8)
+-                   | ((uint32_t)in[2] << 16);
++        uint32_t w = (uint32_t)in[0] | ((uint32_t)in[1] << 8) | ((uint32_t)in[2] << 16);
+         in += 3;
+         out[k    ] = (uint8_t)((w >>  0) & 0x3F);
+         out[k + 1] = (uint8_t)((w >>  6) & 0x3F);
+@@ -148,15 +133,8 @@ static void extract_M6(const uint8_t *in, uint8_t *out, int N)
+ 
+ static void extract_M7(const uint8_t *in, uint8_t *out, int N)
+ {
+-    /* 8 elements = 56 bits = 7 bytes */
+     for (int k = 0; k < N; k += 8) {
+-        uint64_t w = (uint64_t)in[0]
+-                   | ((uint64_t)in[1] << 8)
+-                   | ((uint64_t)in[2] << 16)
+-                   | ((uint64_t)in[3] << 24)
+-                   | ((uint64_t)in[4] << 32)
+-                   | ((uint64_t)in[5] << 40)
+-                   | ((uint64_t)in[6] << 48);
++        uint64_t w = (uint64_t)in[0] | ((uint64_t)in[1] << 8) | ((uint64_t)in[2] << 16) | ((uint64_t)in[3] << 24) | ((uint64_t)in[4] << 32) | ((uint64_t)in[5] << 40) | ((uint64_t)in[6] << 48);
+         in += 7;
+         out[k    ] = (uint8_t)((w >>  0) & 0x7F);
+         out[k + 1] = (uint8_t)((w >>  7) & 0x7F);
+@@ -182,7 +160,7 @@ static extract_fn pick_extract(int M)
+     case 1: return extract_M1;
+     case 2: return extract_M2;
+     case 3: return extract_M3;
+-    case 4: return extract_M4;
++    case 4: return extract_M4_neon;
+     case 5: return extract_M5;
+     case 6: return extract_M6;
+     case 7: return extract_M7;
+@@ -191,27 +169,22 @@ static extract_fn pick_extract(int M)
+     }
+ }
+ 
+-/* ---------- Per-bin metadata precomputation ----------
+- *
+- * For each of K = 2^M possible M-bit prefixes v, walk M bits from the
+- * tree root.  Record whether v lands on a leaf or an internal node, the
+- * leaf symbol if applicable, and the tree node id (needed for subtree
+- * recursion). */
++/* ---------- Per-bin metadata precomputation ---------- */
++
+ typedef struct {
+-    uint8_t is_leaf;      /* 1 if bin is a leaf at depth M */
+-    uint8_t leaf_sym;     /* valid iff is_leaf */
+-    int16_t node_id;      /* tree node id landed at after M steps */
++    uint8_t is_leaf;
++    uint8_t leaf_sym;
++    int16_t node_id;
+ } bin_info_t;
+ 
+-static void precompute_bins(const pivco_huffman_table_t *t, int M,
+-                             bin_info_t *bins)
++static void precompute_bins(const pivco_huffman_table_t *t, int M, bin_info_t *bins)
+ {
+     int K = 1 << M;
+     for (int v = 0; v < K; v++) {
+         int16_t node_id = t->tree_root;
+         for (int b = M - 1; b >= 0; b--) {
+             const pivco_tree_node_t *n = &t->tree[node_id];
+-            if (n->symbol >= 0) break;     /* shouldn't happen since M <= min_len */
++            if (n->symbol >= 0) break;
+             int bit = (v >> b) & 1;
+             node_id = bit ? n->right : n->left;
+         }
+@@ -227,14 +200,31 @@ static void precompute_bins(const pivco_huffman_table_t *t, int M,
+     }
+ }
+ 
+-/* ---------- Scatter (duplicated from neon backend) ---------- */
+-
+-#include <arm_neon.h>
++/* ---------- Scatter ---------- */
+ 
+-static inline void scatter_sym(uint8_t *symbols,
+-                                const uint16_t *indices, int n, uint8_t sym)
++static inline void scatter_sym(uint8_t *symbols, const uint16_t *indices, int n, uint8_t sym)
+ {
+     int j = 0;
++    for (; j + 16 <= n; j += 16) {
++        uint16x8_t i0 = vld1q_u16(indices + j);
++        uint16x8_t i1 = vld1q_u16(indices + j + 8);
++        symbols[vgetq_lane_u16(i0, 0)] = sym;
++        symbols[vgetq_lane_u16(i0, 1)] = sym;
++        symbols[vgetq_lane_u16(i0, 2)] = sym;
++        symbols[vgetq_lane_u16(i0, 3)] = sym;
++        symbols[vgetq_lane_u16(i0, 4)] = sym;
++        symbols[vgetq_lane_u16(i0, 5)] = sym;
++        symbols[vgetq_lane_u16(i0, 6)] = sym;
++        symbols[vgetq_lane_u16(i0, 7)] = sym;
++        symbols[vgetq_lane_u16(i1, 0)] = sym;
++        symbols[vgetq_lane_u16(i1, 1)] = sym;
++        symbols[vgetq_lane_u16(i1, 2)] = sym;
++        symbols[vgetq_lane_u16(i1, 3)] = sym;
++        symbols[vgetq_lane_u16(i1, 4)] = sym;
++        symbols[vgetq_lane_u16(i1, 5)] = sym;
++        symbols[vgetq_lane_u16(i1, 6)] = sym;
++        symbols[vgetq_lane_u16(i1, 7)] = sym;
++    }
+     for (; j + 8 <= n; j += 8) {
+         uint16x8_t idx = vld1q_u16(indices + j);
+         symbols[vgetq_lane_u16(idx, 0)] = sym;
+@@ -246,23 +236,14 @@ static inline void scatter_sym(uint8_t *symbols,
+         symbols[vgetq_lane_u16(idx, 6)] = sym;
+         symbols[vgetq_lane_u16(idx, 7)] = sym;
+     }
+-    for (; j < n; j++)
+-        symbols[indices[j]] = sym;
++    for (; j < n; j++) symbols[indices[j]] = sym;
+ }
+ 
+ /* ---------- Encode ---------- */
+ 
+-extern void init_compress_table(void);
+-
+-int pivco_huffman_encode_neon_prefix(const uint8_t *symbols,
+-                                      const pivco_huffman_table_t *table,
+-                                      uint8_t *out, size_t *out_len)
++int pivco_huffman_encode_neon_prefix(const uint8_t *symbols, const pivco_huffman_table_t *table, uint8_t *out, size_t *out_len)
+ {
+     if (!symbols || !table || !out || !out_len) return PIVCO_ERR_NULL;
+-
+-    /* The subtree encoder (delegated via pivco_neon_encode_subtree_) relies
+-     * on the NEON compress_tab/compress_popcnt globals.  Make sure they're
+-     * initialised — no-op after the first call. */
+     init_compress_table();
+ 
+     const int N = PIVCO_BLOCK_SIZE;
+@@ -270,13 +251,9 @@ int pivco_huffman_encode_neon_prefix(const uint8_t *symbols,
+     if (M < 1 || M > 8) return PIVCO_ERR_CORRUPT;
+     const int K = 1 << M;
+ 
+-    /* Prefix stream = first N*M bits. */
+     size_t prefix_bytes = prefix_stream_bytes(N, M);
+     memset(out, 0, prefix_bytes);
+ 
+-    /* Per-position codes / lens for the subtree encoder.  Heap-allocated
+-     * so their lifetime isn't confused by the compiler's inline/scope
+-     * analysis with other locals further down the function. */
+     uint16_t *codes_pos = (uint16_t *)malloc((size_t)N * sizeof(uint16_t));
+     uint8_t  *lens_pos  = (uint8_t *) malloc((size_t)N);
+     if (!codes_pos || !lens_pos) { free(codes_pos); free(lens_pos); return PIVCO_ERR_OVERFLOW; }
+@@ -286,42 +263,40 @@ int pivco_huffman_encode_neon_prefix(const uint8_t *symbols,
+         lens_pos[k]  = table->code_len[s];
+     }
+ 
+-    /* Pack M-bit prefixes into the stream; record per-stream histogram
+-     * so we can do 4-way parallel bucket placement to match the decoder.
+-     * The decoder's 4-way bucket produces an order-within-bin where
+-     * stream s's contributions appear together; the encoder must emit
+-     * subtree bitmaps in the SAME order so bit positions match at decode
+-     * time. */
+-    int bc0[1 << 8] = {0};
+-    int bc1[1 << 8] = {0};
+-    int bc2[1 << 8] = {0};
+-    int bc3[1 << 8] = {0};
++    int bc[8][1 << 8] = {{0}};
+     {
+         int k = 0;
+-        for (; k + 4 <= N; k += 4) {
++        for (; k + 8 <= N; k += 8) {
+             int L0 = lens_pos[k];     uint32_t p0 = (uint32_t)codes_pos[k    ] >> (L0 - M);
+             int L1 = lens_pos[k + 1]; uint32_t p1 = (uint32_t)codes_pos[k + 1] >> (L1 - M);
+             int L2 = lens_pos[k + 2]; uint32_t p2 = (uint32_t)codes_pos[k + 2] >> (L2 - M);
+             int L3 = lens_pos[k + 3]; uint32_t p3 = (uint32_t)codes_pos[k + 3] >> (L3 - M);
++            int L4 = lens_pos[k + 4]; uint32_t p4 = (uint32_t)codes_pos[k + 4] >> (L4 - M);
++            int L5 = lens_pos[k + 5]; uint32_t p5 = (uint32_t)codes_pos[k + 5] >> (L5 - M);
++            int L6 = lens_pos[k + 6]; uint32_t p6 = (uint32_t)codes_pos[k + 6] >> (L6 - M);
++            int L7 = lens_pos[k + 7]; uint32_t p7 = (uint32_t)codes_pos[k + 7] >> (L7 - M);
+             pack_m_bits(out, k    , M, p0);
+             pack_m_bits(out, k + 1, M, p1);
+             pack_m_bits(out, k + 2, M, p2);
+             pack_m_bits(out, k + 3, M, p3);
+-            bc0[p0]++; bc1[p1]++; bc2[p2]++; bc3[p3]++;
++            pack_m_bits(out, k + 4, M, p4);
++            pack_m_bits(out, k + 5, M, p5);
++            pack_m_bits(out, k + 6, M, p6);
++            pack_m_bits(out, k + 7, M, p7);
++            bc[0][p0]++; bc[1][p1]++; bc[2][p2]++; bc[3][p3]++;
++            bc[4][p4]++; bc[5][p5]++; bc[6][p6]++; bc[7][p7]++;
+         }
+         for (; k < N; k++) {
+             int L = lens_pos[k];
+             uint32_t prefix = (uint32_t)codes_pos[k] >> (L - M);
+             pack_m_bits(out, k, M, prefix);
+-            bc0[prefix]++;
++            bc[0][prefix]++;
+         }
+     }
+     int bin_count[1 << 8];
+-    for (int v = 0; v < K; v++)
+-        bin_count[v] = bc0[v] + bc1[v] + bc2[v] + bc3[v];
++    for (int v = 0; v < K; v++) bin_count[v] = bc[0][v] + bc[1][v] + bc[2][v] + bc[3][v] + bc[4][v] + bc[5][v] + bc[6][v] + bc[7][v];
+ 
+     if (M == table->max_len) {
+-        /* Flat: no subtree bitmaps. */
+         *out_len = prefix_bytes;
+         free(codes_pos); free(lens_pos);
+         return PIVCO_OK;
+@@ -331,61 +306,55 @@ int pivco_huffman_encode_neon_prefix(const uint8_t *symbols,
+     bin_offset[0] = 0;
+     for (int v = 0; v < K; v++) bin_offset[v+1] = bin_offset[v] + bin_count[v];
+ 
+-    /* bin_elements[] holds original positions sorted by bin.  Populate
+-     * via 4-way parallel placement (matching decoder order).
+-     * +8 slots of slack — encode_node_neon's 16-byte TBL stores can
+-     * write up to 7 uint16 past the end of a bin's segment. */
+     uint16_t bin_elements[PIVCO_BLOCK_SIZE + 8];
+-    int place_0[1 << 8];
+-    int place_1[1 << 8];
+-    int place_2[1 << 8];
+-    int place_3[1 << 8];
++    int place[8][1 << 8];
+     for (int v = 0; v < K; v++) {
+-        place_0[v] = bin_offset[v];
+-        place_1[v] = place_0[v] + bc0[v];
+-        place_2[v] = place_1[v] + bc1[v];
+-        place_3[v] = place_2[v] + bc2[v];
++        place[0][v] = bin_offset[v];
++        place[1][v] = place[0][v] + bc[0][v];
++        place[2][v] = place[1][v] + bc[1][v];
++        place[3][v] = place[2][v] + bc[2][v];
++        place[4][v] = place[3][v] + bc[3][v];
++        place[5][v] = place[4][v] + bc[4][v];
++        place[6][v] = place[5][v] + bc[5][v];
++        place[7][v] = place[6][v] + bc[6][v];
+     }
+     {
+         int k = 0;
+-        for (; k + 4 <= N; k += 4) {
++        for (; k + 8 <= N; k += 8) {
+             int L0 = lens_pos[k];     int v0 = (int)((uint32_t)codes_pos[k    ] >> (L0 - M));
+             int L1 = lens_pos[k + 1]; int v1 = (int)((uint32_t)codes_pos[k + 1] >> (L1 - M));
+             int L2 = lens_pos[k + 2]; int v2 = (int)((uint32_t)codes_pos[k + 2] >> (L2 - M));
+             int L3 = lens_pos[k + 3]; int v3 = (int)((uint32_t)codes_pos[k + 3] >> (L3 - M));
+-            bin_elements[place_0[v0]++] = (uint16_t)(k    );
+-            bin_elements[place_1[v1]++] = (uint16_t)(k + 1);
+-            bin_elements[place_2[v2]++] = (uint16_t)(k + 2);
+-            bin_elements[place_3[v3]++] = (uint16_t)(k + 3);
++            int L4 = lens_pos[k + 4]; int v4 = (int)((uint32_t)codes_pos[k + 4] >> (L4 - M));
++            int L5 = lens_pos[k + 5]; int v5 = (int)((uint32_t)codes_pos[k + 5] >> (L5 - M));
++            int L6 = lens_pos[k + 6]; int v6 = (int)((uint32_t)codes_pos[k + 6] >> (L6 - M));
++            int L7 = lens_pos[k + 7]; int v7 = (int)((uint32_t)codes_pos[k + 7] >> (L7 - M));
++            bin_elements[place[0][v0]++] = (uint16_t)(k    );
++            bin_elements[place[1][v1]++] = (uint16_t)(k + 1);
++            bin_elements[place[2][v2]++] = (uint16_t)(k + 2);
++            bin_elements[place[3][v3]++] = (uint16_t)(k + 3);
++            bin_elements[place[4][v4]++] = (uint16_t)(k + 4);
++            bin_elements[place[5][v5]++] = (uint16_t)(k + 5);
++            bin_elements[place[6][v6]++] = (uint16_t)(k + 6);
++            bin_elements[place[7][v7]++] = (uint16_t)(k + 7);
+         }
+         for (; k < N; k++) {
+             int L = lens_pos[k];
+             int v = (int)((uint32_t)codes_pos[k] >> (L - M));
+-            bin_elements[place_0[v]++] = (uint16_t)k;
++            bin_elements[place[0][v]++] = (uint16_t)k;
+         }
+     }
+ 
+-    /* Per-bin metadata. */
+     bin_info_t bins[1 << 8];
+     precompute_bins(table, M, bins);
+-
+     uint8_t *ptr = out + prefix_bytes;
+-    uint16_t tmp[PIVCO_BLOCK_SIZE * 2];
+-    uint16_t scratch_indices[PIVCO_BLOCK_SIZE + 8];
+-
++    uint16_t tmp[PIVCO_BLOCK_SIZE * 2], scratch_indices[PIVCO_BLOCK_SIZE + 8];
+     for (int v = 0; v < K; v++) {
+         if (bins[v].is_leaf) continue;
+         int n = bin_count[v];
+         if (n == 0) continue;
+-        /* Copy bin's elements into a private scratch so the subtree
+-         * encoder's in-place partitioning doesn't touch other bins. */
+-        memcpy(scratch_indices, bin_elements + bin_offset[v],
+-               (size_t)n * sizeof(uint16_t));
+-        pivco_neon_encode_subtree_(table, bins[v].node_id,
+-                                   scratch_indices, n,
+-                                   /*depth=*/M,
+-                                   codes_pos, lens_pos,
+-                                   &ptr, tmp);
++        memcpy(scratch_indices, bin_elements + bin_offset[v], (size_t)n * sizeof(uint16_t));
++        pivco_neon_encode_subtree_(table, bins[v].node_id, scratch_indices, n, M, codes_pos, lens_pos, &ptr, tmp);
+     }
+     *out_len = (size_t)(ptr - out);
+     free(codes_pos); free(lens_pos);
+@@ -394,179 +363,92 @@ int pivco_huffman_encode_neon_prefix(const uint8_t *symbols,
+ 
+ /* ---------- Decode ---------- */
+ 
+-int pivco_huffman_decode_neon_prefix(const uint8_t *in, size_t in_len,
+-                                      const pivco_huffman_table_t *table,
+-                                      uint8_t *symbols, size_t *consumed)
++int pivco_huffman_decode_neon_prefix(const uint8_t *in, size_t in_len, const pivco_huffman_table_t *table, uint8_t *symbols, size_t *consumed)
+ {
+     if (!in || !table || !symbols || !consumed) return PIVCO_ERR_NULL;
+-    (void)in_len;
+-
+     init_compress_table();
+-
+     const int N = PIVCO_BLOCK_SIZE;
+     const int M = table->min_len;
+     if (M < 1 || M > 8) return PIVCO_ERR_CORRUPT;
+     const int K = 1 << M;
+ 
+-    /* ---------- Flat-tree fast path (min_len == max_len) ----------
+-     * Every bin is a leaf, so this collapses to a direct permutation:
+-     *   symbols[k] = code_to_sym[prefix[k]]
+-     * — no histogram, no bucketing, no subtree recursion. */
+     if (M == table->max_len) {
+         uint8_t code_to_sym[1 << 8];
+-        for (int s = 0; s < PIVCO_MAX_SYMBOLS; s++) {
+-            if (table->code_len[s] == M)
+-                code_to_sym[table->code[s]] = (uint8_t)s;
+-        }
+-        if (M == 8) {
+-            for (int k = 0; k < N; k++) symbols[k] = code_to_sym[in[k]];
+-            *consumed = (size_t)N;
+-            return PIVCO_OK;
+-        }
+-        if (M == 4) {
+-            for (int k = 0; k < N; k += 2) {
+-                uint8_t b = in[k >> 1];
+-                symbols[k    ] = code_to_sym[b & 0x0F];
+-                symbols[k + 1] = code_to_sym[b >> 4];
+-            }
+-            *consumed = (size_t)(N >> 1);
+-            return PIVCO_OK;
+-        }
+-        if (M == 2) {
+-            for (int k = 0; k < N; k += 4) {
+-                uint8_t b = in[k >> 2];
+-                symbols[k    ] = code_to_sym[(b     ) & 3];
+-                symbols[k + 1] = code_to_sym[(b >> 2) & 3];
+-                symbols[k + 2] = code_to_sym[(b >> 4) & 3];
+-                symbols[k + 3] = code_to_sym[(b >> 6) & 3];
+-            }
+-            *consumed = (size_t)(N >> 2);
+-            return PIVCO_OK;
+-        }
+-        if (M == 1) {
+-            for (int k = 0; k < N; k += 8) {
+-                uint8_t b = in[k >> 3];
+-                symbols[k    ] = code_to_sym[(b     ) & 1];
+-                symbols[k + 1] = code_to_sym[(b >> 1) & 1];
+-                symbols[k + 2] = code_to_sym[(b >> 2) & 1];
+-                symbols[k + 3] = code_to_sym[(b >> 3) & 1];
+-                symbols[k + 4] = code_to_sym[(b >> 4) & 1];
+-                symbols[k + 5] = code_to_sym[(b >> 5) & 1];
+-                symbols[k + 6] = code_to_sym[(b >> 6) & 1];
+-                symbols[k + 7] = code_to_sym[(b >> 7) & 1];
+-            }
+-            *consumed = (size_t)(N >> 3);
+-            return PIVCO_OK;
+-        }
+-        /* Generic M ∈ {3, 5, 6, 7} flat path. */
+-        uint8_t prefix_buf[PIVCO_BLOCK_SIZE];
+-        extract_fn ef0 = pick_extract(M);
+-        ef0(in, prefix_buf, N);
++        for (int s = 0; s < PIVCO_MAX_SYMBOLS; s++) if (table->code_len[s] == M) code_to_sym[table->code[s]] = (uint8_t)s;
++        if (M == 8) { for (int k = 0; k < N; k++) symbols[k] = code_to_sym[in[k]]; *consumed = (size_t)N; return PIVCO_OK; }
++        if (M == 4) { for (int k = 0; k < N; k += 2) { uint8_t b = in[k >> 1]; symbols[k] = code_to_sym[b & 0x0F]; symbols[k + 1] = code_to_sym[b >> 4]; } *consumed = (size_t)(N >> 1); return PIVCO_OK; }
++        if (M == 2) { for (int k = 0; k < N; k += 4) { uint8_t b = in[k >> 2]; symbols[k] = code_to_sym[b & 3]; symbols[k + 1] = code_to_sym[(b >> 2) & 3]; symbols[k + 2] = code_to_sym[(b >> 4) & 3]; symbols[k + 3] = code_to_sym[(b >> 6) & 3]; } *consumed = (size_t)(N >> 2); return PIVCO_OK; }
++        if (M == 1) { for (int k = 0; k < N; k += 8) { uint8_t b = in[k >> 3]; for (int i = 0; i < 8; i++) symbols[k + i] = code_to_sym[(b >> i) & 1]; } *consumed = (size_t)(N >> 3); return PIVCO_OK; }
++        uint8_t prefix_buf[PIVCO_BLOCK_SIZE]; extract_fn ef0 = pick_extract(M); ef0(in, prefix_buf, N);
+         for (int k = 0; k < N; k++) symbols[k] = code_to_sym[prefix_buf[k]];
+-        *consumed = prefix_stream_bytes(N, M);
+-        return PIVCO_OK;
++        *consumed = prefix_stream_bytes(N, M); return PIVCO_OK;
+     }
+ 
+-    /* ---------- Non-flat path ---------- */
+-
+-    /* Prefill output with the most frequent symbol — same trick as neon. */
+     memset(symbols, table->prefill_sym, (size_t)N);
+-
+-    /* Phase 1: extract the M-bit prefix per element. */
+     uint8_t prefix[PIVCO_BLOCK_SIZE];
+     extract_fn ef = pick_extract(M);
+     if (!ef) return PIVCO_ERR_CORRUPT;
+     ef(in, prefix, N);
+-
+     const uint8_t *ptr = in + prefix_stream_bytes(N, M);
+ 
+-    /* Phase 2: histogram — 4-way parallel to break the serial dep chain
+-     * that `bin_count[prefix[k]]++` has when prefix values cluster.
+-     * Four independent counter arrays, each updated by one of every four
+-     * elements; summed at the end.  OoO pipelines all 4 chains. */
+-    int bc0[1 << 8] = {0};
+-    int bc1[1 << 8] = {0};
+-    int bc2[1 << 8] = {0};
+-    int bc3[1 << 8] = {0};
++    int bc[8][1 << 8] = {{0}};
++    int bin_count[1 << 8] = {0};
+     {
+         int k = 0;
+-        for (; k + 4 <= N; k += 4) {
+-            bc0[prefix[k    ]]++;
+-            bc1[prefix[k + 1]]++;
+-            bc2[prefix[k + 2]]++;
+-            bc3[prefix[k + 3]]++;
++        for (; k + 8 <= N; k += 8) {
++            bc[0][prefix[k  ]]++; bc[1][prefix[k+1]]++; bc[2][prefix[k+2]]++; bc[3][prefix[k+3]]++;
++            bc[4][prefix[k+4]]++; bc[5][prefix[k+5]]++; bc[6][prefix[k+6]]++; bc[7][prefix[k+7]]++;
+         }
+-        for (; k < N; k++) bc0[prefix[k]]++;
++        for (; k < N; k++) bc[0][prefix[k]]++;
++        for (int v = 0; v < K; v++) bin_count[v] = bc[0][v] + bc[1][v] + bc[2][v] + bc[3][v] + bc[4][v] + bc[5][v] + bc[6][v] + bc[7][v];
+     }
+-    int bin_count[1 << 8];
+-    for (int v = 0; v < K; v++)
+-        bin_count[v] = bc0[v] + bc1[v] + bc2[v] + bc3[v];
+ 
+-    /* Phase 3: prefix-sum for offsets. */
+     int bin_offset[(1 << 8) + 1];
+     bin_offset[0] = 0;
+     for (int v = 0; v < K; v++) bin_offset[v+1] = bin_offset[v] + bin_count[v];
+ 
+-    /* Phase 4: bucket element ids by bin — 4-way parallel placement.
+-     * Each stream s ∈ {0..3} places elements at positions k where
+-     * k%4 == s, using its own place_s[] offset per bin.  place_s[v]
+-     * starts at bin_offset[v] + sum_{s' < s} bc_s'[v] so streams don't
+-     * overlap.  Order within a bin is interleaved by stream rather than
+-     * pure k-order — irrelevant for subtree decode correctness.
+-     * +8 slack on bin_elements for the subtree partition's overflow. */
+     uint16_t bin_elements[PIVCO_BLOCK_SIZE + 8];
+-    /* NOTE: still using 4-way parallel; phase 4 is memory-op-limited
+-     * at ~2 c/elem on M4 (4 mem ops/elem / 2 stores+2 loads per cycle).
+-     * Going to 8-way doesn't help because M4 memory ports cap throughput
+-     * regardless of parallelism depth.  A TBL-based SIMD K-way radix
+-     * compactor would be required for a further speedup. */
+-    int place_0[1 << 8];
+-    int place_1[1 << 8];
+-    int place_2[1 << 8];
+-    int place_3[1 << 8];
++    int place[8][1 << 8];
+     for (int v = 0; v < K; v++) {
+-        place_0[v] = bin_offset[v];
+-        place_1[v] = place_0[v] + bc0[v];
+-        place_2[v] = place_1[v] + bc1[v];
+-        place_3[v] = place_2[v] + bc2[v];
++        place[0][v] = bin_offset[v];
++        place[1][v] = place[0][v] + bc[0][v];
++        place[2][v] = place[1][v] + bc[1][v];
++        place[3][v] = place[2][v] + bc[2][v];
++        place[4][v] = place[3][v] + bc[3][v];
++        place[5][v] = place[4][v] + bc[4][v];
++        place[6][v] = place[5][v] + bc[5][v];
++        place[7][v] = place[6][v] + bc[6][v];
+     }
+     {
+         int k = 0;
+-        for (; k + 4 <= N; k += 4) {
+-            bin_elements[place_0[prefix[k    ]]++] = (uint16_t)(k    );
+-            bin_elements[place_1[prefix[k + 1]]++] = (uint16_t)(k + 1);
+-            bin_elements[place_2[prefix[k + 2]]++] = (uint16_t)(k + 2);
+-            bin_elements[place_3[prefix[k + 3]]++] = (uint16_t)(k + 3);
++        for (; k + 8 <= N; k += 8) {
++            bin_elements[place[0][prefix[k  ]]++] = (uint16_t)(k    );
++            bin_elements[place[1][prefix[k+1]]++] = (uint16_t)(k + 1);
++            bin_elements[place[2][prefix[k+2]]++] = (uint16_t)(k + 2);
++            bin_elements[place[3][prefix[k+3]]++] = (uint16_t)(k + 3);
++            bin_elements[place[4][prefix[k+4]]++] = (uint16_t)(k + 4);
++            bin_elements[place[5][prefix[k+5]]++] = (uint16_t)(k + 5);
++            bin_elements[place[6][prefix[k+6]]++] = (uint16_t)(k + 6);
++            bin_elements[place[7][prefix[k+7]]++] = (uint16_t)(k + 7);
+         }
+-        for (; k < N; k++)
+-            bin_elements[place_0[prefix[k]]++] = (uint16_t)k;
++        for (; k < N; k++) bin_elements[place[0][prefix[k]]++] = (uint16_t)k;
+     }
+ 
+-    /* Phase 5: per-bin metadata + dispatch.  Each subtree decode is
+-     * handed a scratch copy of the bin's indices to prevent in-place
+-     * partitioning from bleeding into neighbouring bins. */
+     bin_info_t bins[1 << 8];
+     precompute_bins(table, M, bins);
+     int16_t skip_node = table->prefill_node;
+-
+-    uint16_t tmp[PIVCO_BLOCK_SIZE * 2];
+-    uint16_t scratch_indices[PIVCO_BLOCK_SIZE + 8];
++    uint16_t tmp[PIVCO_BLOCK_SIZE * 2], scratch_indices[PIVCO_BLOCK_SIZE + 8];
+     for (int v = 0; v < K; v++) {
+         int n = bin_count[v];
+         if (n == 0) continue;
+         if (bins[v].is_leaf) {
+-            if (bins[v].node_id == skip_node) continue;   /* prefill covered */
+-            scatter_sym(symbols, bin_elements + bin_offset[v], n,
+-                        bins[v].leaf_sym);
++            if (bins[v].node_id == skip_node) continue;
++            scatter_sym(symbols, bin_elements + bin_offset[v], n, bins[v].leaf_sym);
+         } else {
+-            memcpy(scratch_indices, bin_elements + bin_offset[v],
+-                   (size_t)n * sizeof(uint16_t));
+-            pivco_neon_decode_subtree_(table, bins[v].node_id,
+-                                       scratch_indices, n,
+-                                       symbols, &ptr, tmp, skip_node);
++            memcpy(scratch_indices, bin_elements + bin_offset[v], (size_t)n * sizeof(uint16_t));
++            pivco_neon_decode_subtree_(table, bins[v].node_id, scratch_indices, n, symbols, &ptr, tmp, skip_node);
+         }
+     }
+-
+     *consumed = (size_t)(ptr - in);
+     return PIVCO_OK;
+ }
