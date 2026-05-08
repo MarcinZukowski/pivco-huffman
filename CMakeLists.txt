@@ -46,13 +46,41 @@ project(pivco_huffman C CXX)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+# lemire/counters — hardware counter access (cycles, IPC, branch/cache miss).
+# Used by the *_cnt benchmarks under extras/.  Pulled via CPM so a fresh
+# checkout does not need a manual git clone.
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/CPM.cmake)
+set(COUNTERS_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(COUNTERS_INSTALL OFF CACHE BOOL "" FORCE)
+CPMAddPackage(
+    NAME counters
+    GITHUB_REPOSITORY lemire/counters
+    VERSION 4.1.0
+)
 
 # Compiler flags
 add_compile_options(-Wall -Wextra -O3)
 
-# Architecture detection
+# Architecture detection.  Tricky on macOS when cmake itself runs under
+# Rosetta — child processes inherit the x86_64 arch and uname/arch lie.
+# sysctl is a syscall that bypasses Rosetta translation, so on Apple
+# Silicon hw.optional.arm64=1 even when cmake is x86_64.
 if(CMAKE_OSX_ARCHITECTURES)
     set(TARGET_ARCH "${CMAKE_OSX_ARCHITECTURES}")
+elseif(APPLE)
+    execute_process(COMMAND sysctl -n hw.optional.arm64
+                    OUTPUT_VARIABLE _SYSCTL_ARM64
+                    OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+    if(_SYSCTL_ARM64 STREQUAL "1")
+        set(TARGET_ARCH "arm64")
+    else()
+        set(TARGET_ARCH "x86_64")
+    endif()
+elseif(CMAKE_HOST_SYSTEM_PROCESSOR)
+    set(TARGET_ARCH "${CMAKE_HOST_SYSTEM_PROCESSOR}")
 else()
     execute_process(COMMAND uname -m OUTPUT_VARIABLE TARGET_ARCH OUTPUT_STRIP_TRAILING_WHITESPACE)
 endif()
@@ -196,6 +224,18 @@ if(BUILD_BENCH)
     )
     target_link_libraries(pivco_partition_micro pivco_huffman m)
     target_include_directories(pivco_partition_micro PRIVATE src)
+
+    # Counter-instrumented partition microbench (NEON only — kernels are
+    # NEON intrinsics).  Reports cycles/instructions/IPC/cache-miss/branch-
+    # miss per call.  Needs sudo on macOS or perf_event_paranoid=0 on Linux.
+    if(TARGET_ARCH STREQUAL "arm64" OR TARGET_ARCH STREQUAL "aarch64")
+        add_executable(pivco_partition_micro_cnt
+            extras/bench_partition_micro_cnt.cpp
+        )
+        target_link_libraries(pivco_partition_micro_cnt
+            pivco_huffman counters::counters m)
+        target_include_directories(pivco_partition_micro_cnt PRIVATE src)
+    endif()
 
     if(TARGET_ARCH STREQUAL "arm64" OR TARGET_ARCH STREQUAL "aarch64")
         add_executable(pivco_bench_coalesce extras/bench_coalesce.c)
