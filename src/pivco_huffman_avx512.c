@@ -783,10 +783,17 @@ static inline int node_half_right_avx512(uint16_t *indices, int n,
         n_right += partition_32_right(indices + j, mask,
                                        tmp_right_out + n_right);
     }
-    /* Scalar tail (see node_full_avx512 comment). */
-    for (; j < n; j++) {
-        if (bitmap_get(bm, j))
-            tmp_right_out[n_right++] = indices[j];
+    /* Masked vector tail (1..31 elements): tmp_right_out is a separate
+     * buffer (no in-place aliasing), so masking out invalid bm bits is
+     * safe.  See node_half_right in pivco_huffman_neon.c for the full
+     * argument; same logic applies. */
+    if (j < n) {
+        int rem = n - j;
+        uint32_t mask = 0;
+        memcpy(&mask, bm + (j >> 3), (size_t)bitmap_bytes(rem));
+        mask &= (1u << rem) - 1;
+        n_right += partition_32_right(indices + j, mask,
+                                       tmp_right_out + n_right);
     }
     PROF_TOC(PROF_NODE_HALF_RIGHT, n);
     return n_right;
@@ -804,10 +811,17 @@ static inline int node_half_left_avx512(uint16_t *indices, int n,
         n_left += partition_32_left(indices + j, mask,
                                      indices + n_left);
     }
-    /* Scalar tail (see node_full_avx512 comment). */
-    for (; j < n; j++) {
-        if (!bitmap_get(bm, j))
-            indices[n_left++] = indices[j];
+    /* Masked vector tail.  In-place to indices+n_left, but n_left <= j
+     * and partition_32_left loads source before the store, so no RAW
+     * hazard.  See node_half_left in pivco_huffman_neon.c for full
+     * argument. */
+    if (j < n) {
+        int rem = n - j;
+        uint32_t mask = 0;
+        memcpy(&mask, bm + (j >> 3), (size_t)bitmap_bytes(rem));
+        mask |= ~((1u << rem) - 1);
+        n_left += partition_32_left(indices + j, mask,
+                                     indices + n_left);
     }
     PROF_TOC(PROF_NODE_HALF_LEFT, n);
     return n_left;

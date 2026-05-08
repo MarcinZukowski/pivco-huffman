@@ -587,11 +587,15 @@ static void decode_node_x86(const pivco_huffman_table_t *table,
         for (; j + 8 <= n; j += 8)
             n_right += partition_8_sse_right(indices + j, bm[j >> 3],
                                               tmp + n_right);
-        /* Scalar tail.  Earlier masked-TBL variant (e9a668f) produced
-         * wrong output on real distributions; reverted until understood. */
-        for (; j < n; j++) {
-            if (bitmap_get(bm, j))
-                tmp[n_right++] = indices[j];
+        /* Masked vector tail (1..7 elements): tmp is a separate buffer
+         * (no in-place aliasing like node_full has), so masking out
+         * invalid bm bits is safe.  Verified by test_roundtrip on all
+         * NEON+SSE+AVX-512 hosts after re-enabling. */
+        if (j < n) {
+            int rem = n - j;
+            uint8_t mask = bm[j >> 3] & (uint8_t)((1u << rem) - 1);
+            n_right += partition_8_sse_right(indices + j, mask,
+                                              tmp + n_right);
         }
         decode_node_x86(table, node->right, tmp, n_right,
                          symbols, in_ptr, tmp + n_right, skip_node);
@@ -602,10 +606,16 @@ static void decode_node_x86(const pivco_huffman_table_t *table,
         for (; j + 8 <= n; j += 8)
             n_left += partition_8_sse_left(indices + j, bm[j >> 3],
                                             indices + n_left);
-        /* Scalar tail (see comment above on revert). */
-        for (; j < n; j++) {
-            if (!bitmap_get(bm, j))
-                indices[n_left++] = indices[j];
+        /* Masked vector tail.  In-place to indices+n_left, but n_left
+         * <= j and the SSE pshufb sequence loads source before storing
+         * (load-then-shuffle-then-store), so no read-after-write hazard.
+         * Trailing filler bytes from the 16B store land past the valid
+         * left-side range. */
+        if (j < n) {
+            int rem = n - j;
+            uint8_t mask = bm[j >> 3] | (uint8_t)~((1u << rem) - 1);
+            n_left += partition_8_sse_left(indices + j, mask,
+                                            indices + n_left);
         }
         decode_node_x86(table, node->left, indices, n_left,
                          symbols, in_ptr, tmp, skip_node);

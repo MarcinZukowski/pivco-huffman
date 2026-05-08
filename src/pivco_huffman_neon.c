@@ -836,10 +836,19 @@ static inline int node_half_right(uint16_t *indices, int n,
         n_right += partition_8_right(indices + j, bm[j >> 3],
                                       tmp_right_out + n_right);
     }
-    /* Scalar tail (see node_full comment). */
-    for (; j < n; j++) {
-        if (bitmap_get(bm, j))
-            tmp_right_out[n_right++] = indices[j];
+    /* Vector tail (1..7 elements): mask out invalid bits so partition_8
+     * sees them as "left" and ignores them.  Safe because tmp_right_out
+     * is a separate buffer — partition_8_right only writes there, never
+     * to indices, so there's no in-place aliasing risk like node_full
+     * has.  The 16-byte vector load past indices[n-1] is bounded by
+     * the BLK-sized scratch, and the trailing filler bytes of the
+     * vector store land in tmp_right_out beyond n_right and are not
+     * referenced by the recursive caller. */
+    if (j < n) {
+        int rem = n - j;
+        uint8_t mask = bm[j >> 3] & (uint8_t)((1u << rem) - 1);
+        n_right += partition_8_right(indices + j, mask,
+                                      tmp_right_out + n_right);
     }
     PROF_TOC(PROF_NODE_HALF_RIGHT, n);
     return n_right;
@@ -865,10 +874,19 @@ static inline int node_half_left(uint16_t *indices, int n,
         n_left += partition_8_left(indices + j, bm[j >> 3],
                                     indices + n_left);
     }
-    /* Scalar tail (see node_full comment). */
-    for (; j < n; j++) {
-        if (!bitmap_get(bm, j))
-            indices[n_left++] = indices[j];
+    /* Vector tail (1..7 elements): set invalid bits to 1 so partition_8
+     * sees them as "right" and ignores them on the left side.  In-place
+     * write to indices+n_left, but n_left <= j (loop invariant), and
+     * partition_8_left loaded indices[j..j+7] into a register before
+     * issuing its store, so no read-after-write hazard.  Trailing
+     * filler bytes from the 16B store land in indices[n_left+nl..
+     * n_left+8) which is past the valid left-side range and never
+     * referenced by the caller (which sees n_left elements only). */
+    if (j < n) {
+        int rem = n - j;
+        uint8_t mask = bm[j >> 3] | (uint8_t)~((1u << rem) - 1);
+        n_left += partition_8_left(indices + j, mask,
+                                    indices + n_left);
     }
     PROF_TOC(PROF_NODE_HALF_LEFT, n);
     return n_left;
