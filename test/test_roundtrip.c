@@ -175,6 +175,29 @@ static int test_roundtrip_dist(const char *name, const uint64_t freq[PIVCO_MAX_S
         FAIL("pivco consumed %zu bytes, expected %zu", consumed, enc_len);
     }
 
+    /* PIVCO X2 scalar roundtrip */
+    uint8_t encoded_x2[PIVCO_MAX_ENCODED_SIZE];
+    size_t enc_len_x2;
+    rc = pivco_huffman_encode_scalar_x2(symbols, &table, encoded_x2, &enc_len_x2);
+    if (rc != PIVCO_OK) FAIL("pivco_x2 encode returned %d", rc);
+
+    uint8_t decoded_x2[PIVCO_BLOCK_SIZE];
+    size_t consumed_x2;
+    rc = pivco_huffman_decode_scalar_x2(encoded_x2, enc_len_x2, &table,
+                                          decoded_x2, &consumed_x2);
+    if (rc != PIVCO_OK) FAIL("pivco_x2 decode returned %d", rc);
+
+    for (int i = 0; i < PIVCO_BLOCK_SIZE; i++) {
+        if (symbols[i] != decoded_x2[i]) {
+            FAIL("pivco_x2 mismatch at position %d: expected %d, got %d",
+                 i, symbols[i], decoded_x2[i]);
+        }
+    }
+    if (consumed_x2 != enc_len_x2) {
+        FAIL("pivco_x2 consumed %zu bytes, expected %zu",
+             consumed_x2, enc_len_x2);
+    }
+
     /* Traditional roundtrip */
     uint8_t trad_enc[PIVCO_BLOCK_SIZE * 4];
     size_t trad_len, trad_bits;
