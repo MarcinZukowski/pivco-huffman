@@ -764,17 +764,25 @@ static void decode_node_neon(const pivco_huffman_table_t *table,
                               int16_t skip_node)
 {
     if (n == 0) return;
-    if (node_id == skip_node) return;  /* prefilled by memset */
 
     const pivco_tree_node_t *node = &table->tree[node_id];
-    if (node->symbol >= 0) {
+
+    /* Single dispatch on pre-classified node type — replaces the chain
+     * of skip_node/leaf/flat/both-leaves/half-prefilled checks that
+     * were re-evaluated per call.  The compiler emits a jump table.
+     * skip_node parameter is kept for API compatibility with recursive
+     * children but no longer compared against here (PIVCO_NODE_SKIP
+     * already encodes that). */
+    (void)skip_node;
+    switch ((pivco_node_type_t)table->node_type[node_id]) {
+    case PIVCO_NODE_SKIP:
+        return;
+
+    case PIVCO_NODE_LEAF:
         scatter_sym(symbols, indices, n, (uint8_t)node->symbol);
         return;
-    }
 
-    /* Flat-subtree fast path: read N*D packed bits, look up each
-       element's symbol directly in a per-subtree code_to_sym table. */
-    if (table->flat_depth[node_id] >= 2) {
+    case PIVCO_NODE_INTERNAL_FLAT: {
         int D = table->flat_depth[node_id];
         int total_bytes = (n * D + 7) >> 3;
         const uint8_t *bm = *in_ptr;
@@ -784,31 +792,24 @@ static void decode_node_neon(const pivco_huffman_table_t *table,
         return;
     }
 
-    /* Read n code bits */
-    int nbytes = bitmap_bytes(n);
-    const uint8_t *bm = *in_ptr;
-    *in_ptr += nbytes;
-
-    /* Check children for stage fusion */
-    const pivco_tree_node_t *left_child  = &table->tree[node->left];
-    const pivco_tree_node_t *right_child = &table->tree[node->right];
-    int left_leaf  = (left_child->symbol >= 0);
-    int right_leaf = (right_child->symbol >= 0);
-
-    if (left_leaf && right_leaf
-        && node->left != skip_node && node->right != skip_node) {
-        /* Both children are leaves (neither prefilled) — scatter directly
-           from bitmap.  If one IS prefilled, fall through to the
-           half-partition path below which is faster (1 TBL vs 8 stores). */
+    case PIVCO_NODE_BOTH_LEAVES: {
+        int nbytes = bitmap_bytes(n);
+        const uint8_t *bm = *in_ptr;
+        *in_ptr += nbytes;
+        const pivco_tree_node_t *left_child  = &table->tree[node->left];
+        const pivco_tree_node_t *right_child = &table->tree[node->right];
         scatter_both_leaves(symbols, indices, n, bm,
                             (uint8_t)left_child->symbol,
                             (uint8_t)right_child->symbol);
         return;
     }
 
-    if (left_leaf && node->left == skip_node) {
+    case PIVCO_NODE_HALF_RIGHT: {
         /* Left child is the prefilled leaf — half-partition right only.
            Left side already covered by memset, no scatter needed. */
+        int nbytes = bitmap_bytes(n);
+        const uint8_t *bm = *in_ptr;
+        *in_ptr += nbytes;
         int n_right = 0;
         int j = 0;
         for (; j + 8 <= n; j += 8) {
@@ -821,8 +822,13 @@ static void decode_node_neon(const pivco_huffman_table_t *table,
         }
         decode_node_neon(table, node->right, tmp, n_right,
                          symbols, in_ptr, tmp + n_right, skip_node);
-    } else if (right_leaf && node->right == skip_node) {
-        /* Right child is the prefilled leaf — half-partition left only. */
+        return;
+    }
+
+    case PIVCO_NODE_HALF_LEFT: {
+        int nbytes = bitmap_bytes(n);
+        const uint8_t *bm = *in_ptr;
+        *in_ptr += nbytes;
         int n_left = 0;
         int j = 0;
         for (; j + 8 <= n; j += 8) {
@@ -835,8 +841,14 @@ static void decode_node_neon(const pivco_huffman_table_t *table,
         }
         decode_node_neon(table, node->left, indices, n_left,
                          symbols, in_ptr, tmp, skip_node);
-    } else {
-        /* Standard full partition */
+        return;
+    }
+
+    case PIVCO_NODE_INTERNAL_FULL:
+    default: {
+        int nbytes = bitmap_bytes(n);
+        const uint8_t *bm = *in_ptr;
+        *in_ptr += nbytes;
         int n_left = 0, n_right = 0;
         int j = 0;
 
@@ -845,20 +857,20 @@ static void decode_node_neon(const pivco_huffman_table_t *table,
             int nr0 = partition_8(indices + j, m0,
                                   indices + n_left, tmp + n_right);
             n_right += nr0;
-            n_left += (8 - nr0);
+            n_left  += (8 - nr0);
 
             uint8_t m1 = bm[(j >> 3) + 1];
             int nr1 = partition_8(indices + j + 8, m1,
                                   indices + n_left, tmp + n_right);
             n_right += nr1;
-            n_left += (8 - nr1);
+            n_left  += (8 - nr1);
         }
         for (; j + 8 <= n; j += 8) {
             uint8_t mask = bm[j >> 3];
             int nr = partition_8(indices + j, mask,
                                  indices + n_left, tmp + n_right);
             n_right += nr;
-            n_left += (8 - nr);
+            n_left  += (8 - nr);
         }
         for (; j < n; j++) {
             if (bitmap_get(bm, j))
@@ -867,15 +879,12 @@ static void decode_node_neon(const pivco_huffman_table_t *table,
                 indices[n_left++] = indices[j];
         }
 
-        /* Recurse into both children unconditionally.  The child's entry
-           handles the leaf case (scatter_sym + return) and the prefill
-           case (skip_node + return) — one extra bl is negligible on OoO.
-           The both-leaves and prefill-half-partition fast paths above
-           still cover the hot shallow-node cases directly. */
         decode_node_neon(table, node->left, indices, n_left,
                          symbols, in_ptr, tmp + n_right, skip_node);
         decode_node_neon(table, node->right, tmp, n_right,
                          symbols, in_ptr, tmp + n_right, skip_node);
+        return;
+    }
     }
 }
 

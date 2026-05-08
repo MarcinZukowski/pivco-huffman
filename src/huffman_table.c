@@ -333,6 +333,14 @@ int pivco_huffman_build_table(const uint64_t freq[PIVCO_MAX_SYMBOLS],
         table->tree_node_count = 3;
         table->prefill_sym = (uint8_t)sym;
         table->prefill_node = 1;
+        /* Classify the 3 nodes for the single-symbol tree:
+         *   node 0 (root, internal): both children leaves, left=skip → HALF_RIGHT
+         *   node 1 (left leaf, prefilled): SKIP
+         *   node 2 (right leaf, same sym): LEAF (functionally equivalent to SKIP
+         *           since output is already filled, but classify per the rule). */
+        table->node_type[0] = PIVCO_NODE_HALF_RIGHT;
+        table->node_type[1] = PIVCO_NODE_SKIP;
+        table->node_type[2] = PIVCO_NODE_LEAF;
         return PIVCO_OK;
     }
 
@@ -621,6 +629,45 @@ int pivco_huffman_build_table(const uint64_t freq[PIVCO_MAX_SYMBOLS],
     {
         uint16_t pool_cursor = 0;
         flat_mark_subtrees(table, table->tree_root, &pool_cursor);
+    }
+
+    /* Classify each node for decode-dispatch.  Mirrors the existing
+     * conditional priority in decode_node_neon:
+     *   FLAT (subtree, D>=2)  >  HALF_RIGHT/LEFT  >  BOTH_LEAVES  >  FULL.
+     * Leaves are SKIP if prefilled, LEAF otherwise. */
+    for (int16_t i = 0; i < table->tree_node_count; i++) {
+        const pivco_tree_node_t *node = &table->tree[i];
+
+        if (node->symbol >= 0) {
+            /* Leaf */
+            table->node_type[i] = (i == table->prefill_node)
+                                ? (uint8_t)PIVCO_NODE_SKIP
+                                : (uint8_t)PIVCO_NODE_LEAF;
+            continue;
+        }
+
+        /* Internal node */
+        if (table->flat_depth[i] >= 2) {
+            table->node_type[i] = (uint8_t)PIVCO_NODE_INTERNAL_FLAT;
+            continue;
+        }
+
+        int16_t left_id  = node->left;
+        int16_t right_id = node->right;
+        int left_leaf  = (table->tree[left_id].symbol  >= 0);
+        int right_leaf = (table->tree[right_id].symbol >= 0);
+        int left_skip  = (left_id  == table->prefill_node);
+        int right_skip = (right_id == table->prefill_node);
+
+        if (left_leaf && left_skip) {
+            table->node_type[i] = (uint8_t)PIVCO_NODE_HALF_RIGHT;
+        } else if (right_leaf && right_skip) {
+            table->node_type[i] = (uint8_t)PIVCO_NODE_HALF_LEFT;
+        } else if (left_leaf && right_leaf) {
+            table->node_type[i] = (uint8_t)PIVCO_NODE_BOTH_LEAVES;
+        } else {
+            table->node_type[i] = (uint8_t)PIVCO_NODE_INTERNAL_FULL;
+        }
     }
 
     return PIVCO_OK;

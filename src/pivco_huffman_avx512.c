@@ -741,16 +741,22 @@ static void decode_node_avx512(const pivco_huffman_table_t *table,
                                 int16_t skip_node)
 {
     if (n == 0) return;
-    if (node_id == skip_node) return;  /* prefilled by memset */
 
     const pivco_tree_node_t *node = &table->tree[node_id];
-    if (node->symbol >= 0) {
+
+    /* Single dispatch on pre-classified node type — see pivco_node_type_t.
+     * Replaces the chain of skip_node/leaf/flat/both-leaves/half-prefilled
+     * checks that used to be re-evaluated per call. */
+    (void)skip_node;
+    switch ((pivco_node_type_t)table->node_type[node_id]) {
+    case PIVCO_NODE_SKIP:
+        return;
+
+    case PIVCO_NODE_LEAF:
         scatter_write_avx512(symbols, indices, n, (uint8_t)node->symbol);
         return;
-    }
 
-    /* Flat-subtree fast path. */
-    if (table->flat_depth[node_id] >= 2) {
+    case PIVCO_NODE_INTERNAL_FLAT: {
         int D = table->flat_depth[node_id];
         int total_bytes = (n * D + 7) >> 3;
         const uint8_t *bm = *in_ptr;
@@ -760,29 +766,22 @@ static void decode_node_avx512(const pivco_huffman_table_t *table,
         return;
     }
 
-    /* Read n code bits */
-    int nbytes = bitmap_bytes(n);
-    const uint8_t *bm = *in_ptr;
-    *in_ptr += nbytes;
-
-    /* Check children for stage fusion (mirrors NEON / SSE logic). */
-    const pivco_tree_node_t *left_child  = &table->tree[node->left];
-    const pivco_tree_node_t *right_child = &table->tree[node->right];
-    int left_leaf  = (left_child->symbol >= 0);
-    int right_leaf = (right_child->symbol >= 0);
-
-    if (left_leaf && right_leaf
-        && node->left != skip_node && node->right != skip_node) {
-        /* Both children are leaves (neither prefilled) — scatter directly
-           from bitmap. */
+    case PIVCO_NODE_BOTH_LEAVES: {
+        int nbytes = bitmap_bytes(n);
+        const uint8_t *bm = *in_ptr;
+        *in_ptr += nbytes;
+        const pivco_tree_node_t *left_child  = &table->tree[node->left];
+        const pivco_tree_node_t *right_child = &table->tree[node->right];
         scatter_both_leaves_avx512(symbols, indices, n, bm,
                                     (uint8_t)left_child->symbol,
                                     (uint8_t)right_child->symbol);
         return;
     }
 
-    if (left_leaf && node->left == skip_node) {
-        /* Left child is the prefilled leaf — half-partition right only. */
+    case PIVCO_NODE_HALF_RIGHT: {
+        int nbytes = bitmap_bytes(n);
+        const uint8_t *bm = *in_ptr;
+        *in_ptr += nbytes;
         int n_right = 0;
         int j = 0;
         for (; j + 32 <= n; j += 32) {
@@ -801,8 +800,10 @@ static void decode_node_avx512(const pivco_huffman_table_t *table,
         return;
     }
 
-    if (right_leaf && node->right == skip_node) {
-        /* Right child is the prefilled leaf — half-partition left only. */
+    case PIVCO_NODE_HALF_LEFT: {
+        int nbytes = bitmap_bytes(n);
+        const uint8_t *bm = *in_ptr;
+        *in_ptr += nbytes;
         int n_left = 0;
         int j = 0;
         for (; j + 32 <= n; j += 32) {
@@ -821,36 +822,42 @@ static void decode_node_avx512(const pivco_huffman_table_t *table,
         return;
     }
 
-    /* Standard full partition: 32 indices at a time */
-    int n_left = 0, n_right = 0;
-    int j = 0;
+    case PIVCO_NODE_INTERNAL_FULL:
+    default: {
+        int nbytes = bitmap_bytes(n);
+        const uint8_t *bm = *in_ptr;
+        *in_ptr += nbytes;
+        int n_left = 0, n_right = 0;
+        int j = 0;
 
-    for (; j + 32 <= n; j += 32) {
-        uint32_t mask;
-        memcpy(&mask, bm + (j >> 3), 4);
-        int nr = partition_32_full(indices + j, mask,
-                                    indices + n_left, tmp + n_right);
-        n_right += nr;
-        n_left += (32 - nr);
-    }
-    /* Vector tail: handle remaining 1..31 elements in one masked partition */
-    if (j < n) {
-        int rem = n - j;
-        uint32_t mask = 0;
-        memcpy(&mask, bm + (j >> 3), (size_t)bitmap_bytes(rem));
-        /* Mask out bits beyond rem */
-        mask &= (1u << rem) - 1;
-        
-        int nr = partition_32(indices + j, rem, (__mmask32)mask,
-                              indices + n_left, tmp + n_right);
-        n_right += nr;
-        n_left += (rem - nr);
-    }
+        for (; j + 32 <= n; j += 32) {
+            uint32_t mask;
+            memcpy(&mask, bm + (j >> 3), 4);
+            int nr = partition_32_full(indices + j, mask,
+                                        indices + n_left, tmp + n_right);
+            n_right += nr;
+            n_left  += (32 - nr);
+        }
+        /* Vector tail: handle remaining 1..31 elements in one masked partition */
+        if (j < n) {
+            int rem = n - j;
+            uint32_t mask = 0;
+            memcpy(&mask, bm + (j >> 3), (size_t)bitmap_bytes(rem));
+            mask &= (1u << rem) - 1;
 
-    decode_node_avx512(table, node->left, indices, n_left,
-                        symbols, in_ptr, tmp + n_right, skip_node);
-    decode_node_avx512(table, node->right, tmp, n_right,
-                        symbols, in_ptr, tmp + n_right, skip_node);
+            int nr = partition_32(indices + j, rem, (__mmask32)mask,
+                                  indices + n_left, tmp + n_right);
+            n_right += nr;
+            n_left  += (rem - nr);
+        }
+
+        decode_node_avx512(table, node->left, indices, n_left,
+                            symbols, in_ptr, tmp + n_right, skip_node);
+        decode_node_avx512(table, node->right, tmp, n_right,
+                            symbols, in_ptr, tmp + n_right, skip_node);
+        return;
+    }
+    }
 }
 
 int pivco_huffman_decode_avx512(const uint8_t *in, size_t in_len,

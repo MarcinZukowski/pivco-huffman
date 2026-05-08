@@ -49,6 +49,27 @@ typedef struct {
     int16_t right;    /* child node index (bit=1) */
 } pivco_tree_node_t;
 
+/* ---------- Per-node decode dispatch ----------
+ *
+ * Classifies each tree node at build_table time so the decoder can
+ * dispatch via a single switch on table->node_type[node_id] instead of
+ * the chain of conditional checks (skip_node? leaf? flat? both-leaves?
+ * half-prefilled?) that decode_node_neon used to do per call.
+ *
+ * Same classification applies to all backends (scalar, NEON, AVX-512,
+ * SSE).  Priority order matches decode_node_neon's existing logic:
+ * HALF_RIGHT/LEFT > BOTH_LEAVES > FULL_PARTITION.
+ */
+typedef enum {
+    PIVCO_NODE_INTERNAL_FULL = 0,  /* general partition path (default) */
+    PIVCO_NODE_INTERNAL_FLAT,      /* flat_depth[i] >= 2 — flat-subtree fast path */
+    PIVCO_NODE_BOTH_LEAVES,        /* both children are leaves, NEITHER prefilled */
+    PIVCO_NODE_HALF_RIGHT,         /* left child IS the prefilled leaf — half-partition right + recurse right */
+    PIVCO_NODE_HALF_LEFT,          /* right child IS the prefilled leaf — half-partition left + recurse left */
+    PIVCO_NODE_LEAF,               /* leaf, not the prefilled symbol — scatter_sym */
+    PIVCO_NODE_SKIP,               /* prefilled leaf — early return (memset already wrote it) */
+} pivco_node_type_t;
+
 /* ---------- Huffman table ---------- */
 
 typedef struct {
@@ -89,6 +110,12 @@ typedef struct {
     uint8_t  flat_depth[PIVCO_MAX_TREE_NODES];
     uint16_t flat_offset[PIVCO_MAX_TREE_NODES];
     uint8_t  flat_code_to_sym[PIVCO_MAX_SYMBOLS];
+
+    /* Decode dispatch type per node — see pivco_node_type_t.  Set by
+     * build_table after tree, prefill_node, and flat_depth are all
+     * finalized.  Decoders switch on this instead of running a chain
+     * of conditional checks. */
+    uint8_t  node_type[PIVCO_MAX_TREE_NODES];
 } pivco_huffman_table_t;
 
 /* ---------- Implementation selection ---------- */
