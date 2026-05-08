@@ -232,6 +232,80 @@ mitigation options:
   `scatter_both_leaves` already runs at all sizes without a threshold;
   `D >= 2` inherits that.
 
+## ~~PIVCO-Huffman X2 (two-cursor)~~ — tried, dropped (2026-05-07)
+
+Hypothesis: split the BLK batch into two halves with independent
+bitstreams, walk the tree in lockstep, issue paired primitive calls
+(`partition_8_x2(cursor_A, cursor_B)`) so the OoO core overlaps two
+independent dependency chains.  Same ILP idea as huf0's 4-stream, but
+applied at the SIMD primitive level.
+
+Implemented across all four backends (scalar, NEON, AVX-512, SSE4.1)
+with a canonical wire format: `[len_A:u16] || stream_A || stream_B`,
+ceil/floor index rebalancing at every internal node.  Decoder dispatches
+via the new `node_type` switch the same as X1; all roundtrip tests pass
+across 17 distributions.
+
+**Measured negative result on every uarch tested.**  Decode-throughput
+ratio (X2 / X1) on the real-text cluster (`prose_pride`, `english`,
+`html_wiki`, `source_c`, etc.) at default BLK:
+
+| host          | uarch                    | x2/x1 avg | range       |
+|---------------|--------------------------|----------:|-------------|
+| M4            | Apple Avalanche NEON     | 0.85      | 0.81–0.89   |
+| Graviton 4    | Neoverse V2 NEON         | 0.76      | 0.73–0.84   |
+| Zen 3         | x86 SSE4.1               | 0.78      | 0.67–1.00   |
+| Xeon SR       | Sapphire Rapids AVX-512  | 0.79      | 0.73–0.87   |
+| Zen 5 (EPYC)  | AVX-512                  | 0.59      | 0.50–0.71   |
+
+### Why it didn't pay off
+
+A focused microbench (`extras/bench_partition_micro.c`, removed with
+this commit but recoverable from git) tested `partition_8` /
+`partition_32` in three loop shapes — stride-8, stride-16 (2-way
+unroll, serial counter chain), paired (independent counter chains) —
+sweeping inner loop length from 8 to 1024.
+
+Result: at **decoder-realistic INNER ≈ 91 iters** per node-call:
+- M4 NEON paired = 0.24 ns/call vs **stride-16 = 0.16 ns/call** — paired is
+  **1.48× SLOWER** than serial-counter 2-way unroll
+- Graviton 4 NEON: paired = 0.43 vs stride-16 = 0.32 — 1.33× slower
+- Xeon AVX-512: paired = 1.29 vs single = 1.55 — paired *wins* 0.83×, but
+  only at L1-fitting sizes; cliff at INNER=256 once 4 streams exceed L1d.
+
+The bottleneck **isn't the counter dependency chain** as the original
+hypothesis assumed.  It's the **store-stream count**: stride-16 keeps
+writes confined to 2 cache lines (`indices`, `tmp`); paired-X2 spreads
+them across 4 (`indices_A`, `tmp_A`, `indices_B`, `tmp_B`).  The 2× store-
+buffer / cache-line allocation pressure costs more than the ILP gain.
+On AVX-512, `vpcompressw` saturates a single throughput pipe so paired
+calls can't even overlap effectively.
+
+### Things to consider if revisiting
+
+- The **architectural pattern** (paired primitives + index rebalance)
+  is fundamentally write-stream-bound.  Any future implementation
+  needs to reduce write streams, not increase them.
+- Possible angle: alternating-slot output where cursor A and B SHARE
+  one output buffer at predictable interleaved positions.  Cuts back
+  to 2 streams.  Encoder has to know the slotting; downstream consumers
+  have to merge or process interleaved.
+- AVX-512 had a real bug in the masked-tail `partition_32` call inside
+  X2 context — same code worked in X1 single-cursor.  Worked around
+  with a scalar tail; root cause not identified.  Worth understanding
+  before any X2 retry.
+
+### Reference data
+
+Per-primitive ns/call breakdown was captured for prose_pride at BLK=16384
+on M4, Graviton 4, and Xeon AVX-512 via `__builtin_readcyclecounter` /
+rdtsc instrumentation.  rebalance memcpy was the single biggest contributor
+to the X2-X1 gap on M4 (32% of 4 s of overhead on prose_pride).  The
+recursion-edge function-call overhead (which an earlier xctrace profile
+had blamed) was actually only ~8% of the gap — xctrace was misleading.
+
+---
+
 ## Scatter fusion into partition — tried, reverted (recorded here for future reference)
 
 See README.md §"Stage fusion" and §"Tested and discarded": the

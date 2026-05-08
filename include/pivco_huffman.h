@@ -152,24 +152,6 @@ int pivco_huffman_decode_scalar(const uint8_t *in, size_t in_len,
                                 const pivco_huffman_table_t *table,
                                 uint8_t *symbols, size_t *consumed);
 
-/* ---------- PIVCO Huffman X2 (two-cursor) encode/decode ----------
- *
- * Splits the PIVCO_BLOCK_SIZE batch into halves [0..N/2) (cursor A) and
- * [N/2..N) (cursor B).  Each cursor maintains its own bitstream.  Both
- * cursors walk the tree in lockstep at every internal node.  After each
- * partition, indices are rebalanced (canonical ceil/floor) across
- * cursors so |n_A - n_B| <= 1 — maximizing paired-loop coverage on
- * SIMD ports.  See src/pivco_huffman_scalar.c for the wire format and
- * rebalance rule (must match across encode and decode).
- */
-int pivco_huffman_encode_scalar_x2(const uint8_t *symbols,
-                                    const pivco_huffman_table_t *table,
-                                    uint8_t *out, size_t *out_len);
-
-int pivco_huffman_decode_scalar_x2(const uint8_t *in, size_t in_len,
-                                    const pivco_huffman_table_t *table,
-                                    uint8_t *symbols, size_t *consumed);
-
 #ifdef PIVCO_HAS_NEON
 int pivco_huffman_encode_neon(const uint8_t *symbols,
                               const pivco_huffman_table_t *table,
