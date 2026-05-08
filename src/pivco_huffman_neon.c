@@ -819,6 +819,19 @@ static inline int node_half_right(uint16_t *indices, int n,
     PROF_TIC();
     int n_right = 0;
     int j = 0;
+    /* 2x unroll (stride-16): two partition_8_right calls per iteration.
+     * Mirrors node_full's stride-16 path — adjacent 8-elem groups have
+     * independent loads and TBLs so OOO overlaps the second's load with
+     * the first's store; only the destination address (n_right + nr0)
+     * has a real dep, which is short-latency integer arithmetic. */
+    for (; j + 16 <= n; j += 16) {
+        int nr0 = partition_8_right(indices + j,     bm[j >> 3],
+                                     tmp_right_out + n_right);
+        n_right += nr0;
+        int nr1 = partition_8_right(indices + j + 8, bm[(j >> 3) + 1],
+                                     tmp_right_out + n_right);
+        n_right += nr1;
+    }
     for (; j + 8 <= n; j += 8) {
         n_right += partition_8_right(indices + j, bm[j >> 3],
                                       tmp_right_out + n_right);
@@ -839,6 +852,15 @@ static inline int node_half_left(uint16_t *indices, int n,
     PROF_TIC();
     int n_left = 0;
     int j = 0;
+    /* 2x unroll (stride-16) — same rationale as node_half_right. */
+    for (; j + 16 <= n; j += 16) {
+        int nl0 = partition_8_left(indices + j,     bm[j >> 3],
+                                    indices + n_left);
+        n_left += nl0;
+        int nl1 = partition_8_left(indices + j + 8, bm[(j >> 3) + 1],
+                                    indices + n_left);
+        n_left += nl1;
+    }
     for (; j + 8 <= n; j += 8) {
         n_left += partition_8_left(indices + j, bm[j >> 3],
                                     indices + n_left);
