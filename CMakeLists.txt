@@ -63,6 +63,7 @@ set(PIVCO_SOURCES
     src/pivco_huffman.c
     src/pivco_huffman_scalar.c
     src/pivco_instrumentation.c
+    src/pivco_prof.c
     src/traditional_huffman.c
 )
 
@@ -189,6 +190,12 @@ if(BUILD_BENCH)
         bench/bench_distributions.c
     )
     target_link_libraries(pivco_mask_pair_degeneracy pivco_huffman m)
+
+    add_executable(pivco_partition_micro
+        extras/bench_partition_micro.c
+    )
+    target_link_libraries(pivco_partition_micro pivco_huffman m)
+    target_include_directories(pivco_partition_micro PRIVATE src)
 
     if(TARGET_ARCH STREQUAL "arm64" OR TARGET_ARCH STREQUAL "aarch64")
         add_executable(pivco_bench_coalesce extras/bench_coalesce.c)

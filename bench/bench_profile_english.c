@@ -1,11 +1,19 @@
-/* Profile harness: decode a chosen distribution with PIVCO NEON only.
-   Runs ~10M block decodes — enough wall time for sample/perf profiling.
-   Usage: ./build/pivco_huffman_profile_english [dist_name]
-     dist_name defaults to "english" for back-compat; pass "prose_pride"
-     etc. to profile a different distribution.
-   Profile: sample <pid> 10 -f profile.txt */
+/* Profile harness: decode a chosen distribution and either run it under
+ * an external sampler (sample/perf/xctrace) OR use the built-in
+ * pivco_prof per-call-site instrumentation (PIVCO_PROF=1 build).
+ *
+ * Usage:   ./build/pivco_huffman_profile_english [dist_name]
+ *   dist_name defaults to "english" for back-compat; pass "prose_pride"
+ *   etc. to profile a different distribution.
+ *
+ * External sampling:  sample <pid> 10 -f profile.txt
+ *
+ * Built-in profiling: build with -DPIVCO_PROF=1 and the program will
+ * print the per-call-site breakdown (calls, elements, ticks, ns/call,
+ * ns/elem) at the end of the run — see include/pivco_prof.h. */
 
 #include "pivco_huffman.h"
+#include "pivco_prof.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -98,6 +106,18 @@ int main(int argc, char **argv)
            NBLOCKS, REPS, (long long)NBLOCKS * N * REPS, dist_name);
     fflush(stdout);
 
+    /* Pin to a P-core / first CPU to reduce noise from migration. */
+    int pin_rc = pivco_prof_pin_cpu(0);
+    printf("CPU pin: %s\n", pin_rc == 0 ? "ok" : "best-effort");
+
+    /* Probe cycle-counter frequency (ns/tick conversion).  Negligible
+     * overhead — runs once before the timed loop. */
+    double tick_freq = pivco_prof_probe_tick_freq();
+    if (tick_freq > 0)
+        printf("Cycle counter freq: %.2f MHz\n", tick_freq / 1e6);
+
+    pivco_prof_reset();
+
     printf("Starting decode loop...\n"); fflush(stdout);
     double t0 = now_sec();
     for (int r = 0; r < REPS; r++) {
@@ -120,6 +140,11 @@ int main(int argc, char **argv)
     double total = (double)NBLOCKS * N * REPS;
     printf("%.1f M symbols in %.2f s = %.0f M/s\n",
            total / 1e6, t1 - t0, total / (t1 - t0) / 1e6);
+
+    char label[128];
+    snprintf(label, sizeof(label), "%s / BLK=%d", dist_name, N);
+    pivco_prof_dump(label, t1 - t0, tick_freq,
+                    (uint64_t)NBLOCKS * (uint64_t)REPS);
 
     free(symbols);
     free(enc_buf);

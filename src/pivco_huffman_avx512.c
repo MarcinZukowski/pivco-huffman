@@ -1,5 +1,6 @@
 #include "pivco_huffman.h"
 #include "pivco_huffman_common.h"
+#include "pivco_prof.h"
 #include <string.h>
 
 #ifdef PIVCO_HAS_AVX512
@@ -732,6 +733,88 @@ static inline void scatter_both_leaves_avx512(uint8_t *symbols,
     }
 }
 
+/* ---------- Per-call-site partition loops (AVX-512 interior) ----------
+ * Each loop is its own static function with a PROF_TIC/TOC pair so the
+ * profiler can attribute time precisely.  Mirrors the NEON layout. */
+
+static inline void node_full_avx512(uint16_t *indices, int n,
+                                     const uint8_t *bm,
+                                     uint16_t *tmp,
+                                     int *n_left_out, int *n_right_out)
+{
+    PROF_TIC();
+    int n_left = 0, n_right = 0;
+    int j = 0;
+    for (; j + 32 <= n; j += 32) {
+        uint32_t mask;
+        memcpy(&mask, bm + (j >> 3), 4);
+        int nr = partition_32_full(indices + j, mask,
+                                    indices + n_left, tmp + n_right);
+        n_right += nr;
+        n_left  += (32 - nr);
+    }
+    if (j < n) {
+        int rem = n - j;
+        uint32_t mask = 0;
+        memcpy(&mask, bm + (j >> 3), (size_t)bitmap_bytes(rem));
+        mask &= (1u << rem) - 1;
+        int nr = partition_32(indices + j, rem, (__mmask32)mask,
+                              indices + n_left, tmp + n_right);
+        n_right += nr;
+        n_left  += (rem - nr);
+    }
+    *n_left_out  = n_left;
+    *n_right_out = n_right;
+    PROF_TOC(PROF_NODE_FULL, n);
+}
+
+static inline int node_half_right_avx512(uint16_t *indices, int n,
+                                          const uint8_t *bm,
+                                          uint16_t *tmp_right_out)
+{
+    PROF_TIC();
+    int n_right = 0;
+    int j = 0;
+    for (; j + 32 <= n; j += 32) {
+        uint32_t mask;
+        memcpy(&mask, bm + (j >> 3), 4);
+        n_right += partition_32_right(indices + j, mask,
+                                       tmp_right_out + n_right);
+    }
+    if (j < n) {
+        uint32_t mask = 0;
+        memcpy(&mask, bm + (j >> 3), (size_t)bitmap_bytes(n - j));
+        mask &= (1u << (n - j)) - 1;
+        n_right += partition_32_right(indices + j, mask,
+                                       tmp_right_out + n_right);
+    }
+    PROF_TOC(PROF_NODE_HALF_RIGHT, n);
+    return n_right;
+}
+
+static inline int node_half_left_avx512(uint16_t *indices, int n,
+                                         const uint8_t *bm)
+{
+    PROF_TIC();
+    int n_left = 0;
+    int j = 0;
+    for (; j + 32 <= n; j += 32) {
+        uint32_t mask;
+        memcpy(&mask, bm + (j >> 3), 4);
+        n_left += partition_32_left(indices + j, mask,
+                                     indices + n_left);
+    }
+    if (j < n) {
+        uint32_t mask = 0;
+        memcpy(&mask, bm + (j >> 3), (size_t)bitmap_bytes(n - j));
+        mask &= (1u << (n - j)) - 1;
+        n_left += partition_32_left(indices + j, mask,
+                                     indices + n_left);
+    }
+    PROF_TOC(PROF_NODE_HALF_LEFT, n);
+    return n_left;
+}
+
 static void decode_node_avx512(const pivco_huffman_table_t *table,
                                 int16_t node_id,
                                 uint16_t *indices, int n,
@@ -741,6 +824,7 @@ static void decode_node_avx512(const pivco_huffman_table_t *table,
                                 int16_t skip_node)
 {
     if (n == 0) return;
+    PROF_COUNT_ONLY(PROF_DECODE_NODE, n);
 
     const pivco_tree_node_t *node = &table->tree[node_id];
 
@@ -752,9 +836,12 @@ static void decode_node_avx512(const pivco_huffman_table_t *table,
     case PIVCO_NODE_SKIP:
         return;
 
-    case PIVCO_NODE_LEAF:
+    case PIVCO_NODE_LEAF: {
+        PROF_TIC();
         scatter_write_avx512(symbols, indices, n, (uint8_t)node->symbol);
+        PROF_TOC(PROF_SCATTER_SYM, n);
         return;
+    }
 
     case PIVCO_NODE_INTERNAL_FLAT: {
         int D = table->flat_depth[node_id];
@@ -762,7 +849,9 @@ static void decode_node_avx512(const pivco_huffman_table_t *table,
         const uint8_t *bm = *in_ptr;
         *in_ptr += total_bytes;
         const uint8_t *c2s = &table->flat_code_to_sym[table->flat_offset[node_id]];
+        PROF_TIC();
         flat_decode_scatter_avx512(symbols, indices, n, bm, D, c2s);
+        PROF_TOC(PROF_FLAT_DECODE_SCATTER, n);
         return;
     }
 
@@ -772,9 +861,11 @@ static void decode_node_avx512(const pivco_huffman_table_t *table,
         *in_ptr += nbytes;
         const pivco_tree_node_t *left_child  = &table->tree[node->left];
         const pivco_tree_node_t *right_child = &table->tree[node->right];
+        PROF_TIC();
         scatter_both_leaves_avx512(symbols, indices, n, bm,
                                     (uint8_t)left_child->symbol,
                                     (uint8_t)right_child->symbol);
+        PROF_TOC(PROF_SCATTER_BOTH_LEAVES, n);
         return;
     }
 
@@ -782,19 +873,7 @@ static void decode_node_avx512(const pivco_huffman_table_t *table,
         int nbytes = bitmap_bytes(n);
         const uint8_t *bm = *in_ptr;
         *in_ptr += nbytes;
-        int n_right = 0;
-        int j = 0;
-        for (; j + 32 <= n; j += 32) {
-            uint32_t mask;
-            memcpy(&mask, bm + (j >> 3), 4);
-            n_right += partition_32_right(indices + j, mask, tmp + n_right);
-        }
-        if (j < n) {
-            uint32_t mask = 0;
-            memcpy(&mask, bm + (j >> 3), (size_t)bitmap_bytes(n - j));
-            mask &= (1u << (n - j)) - 1;
-            n_right += partition_32_right(indices + j, mask, tmp + n_right);
-        }
+        int n_right = node_half_right_avx512(indices, n, bm, tmp);
         decode_node_avx512(table, node->right, tmp, n_right,
                             symbols, in_ptr, tmp + n_right, skip_node);
         return;
@@ -804,19 +883,7 @@ static void decode_node_avx512(const pivco_huffman_table_t *table,
         int nbytes = bitmap_bytes(n);
         const uint8_t *bm = *in_ptr;
         *in_ptr += nbytes;
-        int n_left = 0;
-        int j = 0;
-        for (; j + 32 <= n; j += 32) {
-            uint32_t mask;
-            memcpy(&mask, bm + (j >> 3), 4);
-            n_left += partition_32_left(indices + j, mask, indices + n_left);
-        }
-        if (j < n) {
-            uint32_t mask = 0;
-            memcpy(&mask, bm + (j >> 3), (size_t)bitmap_bytes(n - j));
-            mask &= (1u << (n - j)) - 1;
-            n_left += partition_32_left(indices + j, mask, indices + n_left);
-        }
+        int n_left = node_half_left_avx512(indices, n, bm);
         decode_node_avx512(table, node->left, indices, n_left,
                             symbols, in_ptr, tmp, skip_node);
         return;
@@ -827,30 +894,8 @@ static void decode_node_avx512(const pivco_huffman_table_t *table,
         int nbytes = bitmap_bytes(n);
         const uint8_t *bm = *in_ptr;
         *in_ptr += nbytes;
-        int n_left = 0, n_right = 0;
-        int j = 0;
-
-        for (; j + 32 <= n; j += 32) {
-            uint32_t mask;
-            memcpy(&mask, bm + (j >> 3), 4);
-            int nr = partition_32_full(indices + j, mask,
-                                        indices + n_left, tmp + n_right);
-            n_right += nr;
-            n_left  += (32 - nr);
-        }
-        /* Vector tail: handle remaining 1..31 elements in one masked partition */
-        if (j < n) {
-            int rem = n - j;
-            uint32_t mask = 0;
-            memcpy(&mask, bm + (j >> 3), (size_t)bitmap_bytes(rem));
-            mask &= (1u << rem) - 1;
-
-            int nr = partition_32(indices + j, rem, (__mmask32)mask,
-                                  indices + n_left, tmp + n_right);
-            n_right += nr;
-            n_left  += (rem - nr);
-        }
-
+        int n_left, n_right;
+        node_full_avx512(indices, n, bm, tmp, &n_left, &n_right);
         decode_node_avx512(table, node->left, indices, n_left,
                             symbols, in_ptr, tmp + n_right, skip_node);
         decode_node_avx512(table, node->right, tmp, n_right,
@@ -865,6 +910,7 @@ int pivco_huffman_decode_avx512(const uint8_t *in, size_t in_len,
                                  uint8_t *symbols, size_t *consumed)
 {
     if (!in || !table || !symbols || !consumed) return PIVCO_ERR_NULL;
+    PROF_COUNT_ONLY(PROF_DECODE_ENTRY, PIVCO_BLOCK_SIZE);
 
     const int N = PIVCO_BLOCK_SIZE;
     (void)in_len;
@@ -885,7 +931,9 @@ int pivco_huffman_decode_avx512(const uint8_t *in, size_t in_len,
         const uint8_t *bm = ptr;
         ptr += total_bytes;
         const uint8_t *c2s = &table->flat_code_to_sym[table->flat_offset[table->tree_root]];
+        PROF_TIC();
         flat_decode_direct_avx512(symbols, N, bm, D, c2s);
+        PROF_TOC(PROF_FLAT_DECODE_DIRECT, N);
         *consumed = (size_t)(ptr - in);
         return PIVCO_OK;
     }
@@ -903,16 +951,20 @@ int pivco_huffman_decode_avx512(const uint8_t *in, size_t in_len,
     uint16_t tmp[PIVCO_BLOCK_SIZE * 2];
     int n_left = 0, n_right = 0;
 
-    for (int j = 0; j + 32 <= N; j += 32) {
-        uint32_t mask;
-        memcpy(&mask, bm + (j >> 3), 4);
-        /* Generate identity [j..j+31] */
-        uint16_t id[32];
-        for (int k = 0; k < 32; k++) id[k] = (uint16_t)(j + k);
-        int nr = partition_32_full(id, mask,
-                                    indices + n_left, tmp + n_right);
-        n_right += nr;
-        n_left += (32 - nr);
+    {
+        PROF_TIC();
+        for (int j = 0; j + 32 <= N; j += 32) {
+            uint32_t mask;
+            memcpy(&mask, bm + (j >> 3), 4);
+            /* Generate identity [j..j+31] */
+            uint16_t id[32];
+            for (int k = 0; k < 32; k++) id[k] = (uint16_t)(j + k);
+            int nr = partition_32_full(id, mask,
+                                        indices + n_left, tmp + n_right);
+            n_right += nr;
+            n_left += (32 - nr);
+        }
+        PROF_TOC(PROF_ROOT_FULL, N);
     }
 
     decode_node_avx512(table, root->left, indices, n_left,
