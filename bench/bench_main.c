@@ -98,6 +98,7 @@ int main(int argc, char **argv)
     int n_dist = bench_num_distributions();
     double freq_before = cpu_freq_check();
     double wall_start = now_sec();
+    int g_cksum_errors = 0;
 
     printf("=== PIVCO-Huffman Benchmarks%s ===\n", quick ? " (QUICK)" : "");
     printf("Sequence: %dM, Repeats: %d (%dM/run), Block: %d, Runs: %d (drop %d)\n\n",
@@ -284,7 +285,10 @@ int main(int argc, char **argv)
 
 /* Macro: time repeats passes over the 4M decode.
    Each run = repeats × 4M = 400M symbols, giving ~100ms per run.
-   Checksums first and last run to verify consistency. */
+   Checksums first and last run to verify consistency, and compares
+   against `expected_cksum` (set BEFORE this macro by an untimed scalar
+   decode — see the block immediately preceding the first BENCH call).
+   Mismatches bump g_cksum_errors so main can exit non-zero. */
 #define BENCH(var, block, lbl) do { \
     snprintf(label, sizeof(label), "%s/%s", name, lbl); \
     uint64_t cksum_first = 0, cksum_last = 0; \
@@ -296,11 +300,14 @@ int main(int argc, char **argv)
         if (r == 0) cksum_first = fnv1a(dec_buf, TOTAL_SYMBOLS); \
         if (r == runs - 1) cksum_last = fnv1a(dec_buf, TOTAL_SYMBOLS); \
     } \
-    if (cksum_first != cksum_last) \
+    if (cksum_first != cksum_last) { \
         fprintf(stderr, "  ERROR: %s checksum mismatch between runs!\n", label); \
-    if (cksum_first != expected_cksum && expected_cksum != 0) \
-        fprintf(stderr, "  ERROR: %s checksum differs from reference!\n", label); \
-    if (expected_cksum == 0) expected_cksum = cksum_first; \
+        g_cksum_errors++; \
+    } \
+    if (cksum_first != expected_cksum) { \
+        fprintf(stderr, "  ERROR: %s checksum differs from reference (scalar)!\n", label); \
+        g_cksum_errors++; \
+    } \
     var = stable_median(runs_arr, runs, drop_worst, label); \
 } while(0)
 
@@ -308,7 +315,23 @@ int main(int argc, char **argv)
         double t_dec_1s = 0, t_dec_4s = 0;
         double h_dec_1s = 0, h_dec_4s = 0, h_dec_x2 = 0;
         double r_dec_2 = 0;
-        uint64_t expected_cksum = 0; /* set by first BENCH, checked by rest */
+
+        /* Establish reference checksum from the scalar decoder (untimed).
+         * Computing it here — outside any BENCH call — keeps scalar
+         * timing out of the perf table while still cross-validating
+         * every backend against scalar instead of against the first
+         * BENCH'd decoder.  Pre-fix, pivco_n was the reference, so a
+         * bug in pivco_n only flagged its peers as "wrong" — and we
+         * had been ignoring those errors as harness flakiness.  See
+         * commit 1399cee for the regression that motivated this. */
+        for (int b = 0; b < NBLOCKS; b++) {
+            size_t consumed;
+            pivco_huffman_decode_scalar(
+                pivco_enc_buf + pivco_enc_off[b],
+                pivco_enc_off[b+1] - pivco_enc_off[b],
+                table, dec_buf + (size_t)b * BLK, &consumed);
+        }
+        uint64_t expected_cksum = fnv1a(dec_buf, TOTAL_SYMBOLS);
 
 #if defined(PIVCO_HAS_NEON) || defined(PIVCO_HAS_SSE4) || defined(PIVCO_HAS_AVX512) || defined(PIVCO_HAS_SVE)
         BENCH(p_dec_n, {
@@ -468,5 +491,12 @@ cleanup:
         printf("  CPU freq drift: %+.1f%% (OK)\n", drift * 100);
     printf("  Total wall time: %.1f seconds\n", wall_elapsed);
 
+    if (g_cksum_errors > 0) {
+        fprintf(stderr,
+                "\nFAIL: %d decoder output(s) disagreed with the scalar "
+                "reference.  Bench numbers above are unreliable.\n",
+                g_cksum_errors);
+        return 1;
+    }
     return 0;
 }
