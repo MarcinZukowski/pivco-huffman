@@ -278,6 +278,27 @@ if(BUILD_BENCH)
         target_include_directories(pivco_p8_dual_cnt PRIVATE src)
     endif()
 
+    # x86 microbenches (SSE4.1 + AVX-512 variants).  Built whenever the
+    # corresponding kernels are compiled.
+    if(TARGET_ARCH STREQUAL "x86_64" OR TARGET_ARCH STREQUAL "amd64")
+        add_executable(pivco_micro_sse_cnt
+            extras/bench_micro_sse_cnt.cpp
+        )
+        target_link_libraries(pivco_micro_sse_cnt
+            pivco_huffman counters::counters m)
+        target_include_directories(pivco_micro_sse_cnt PRIVATE src)
+
+        if(COMPILER_HAS_AVX512_VBMI2 AND CPU_HAS_AVX512
+                                    AND NOT CPU_HAS_AVX512 STREQUAL "0")
+            add_executable(pivco_micro_avx512_cnt
+                extras/bench_micro_avx512_cnt.cpp
+            )
+            target_link_libraries(pivco_micro_avx512_cnt
+                pivco_huffman counters::counters m)
+            target_include_directories(pivco_micro_avx512_cnt PRIVATE src)
+        endif()
+    endif()
+
     if(TARGET_ARCH STREQUAL "arm64" OR TARGET_ARCH STREQUAL "aarch64")
         add_executable(pivco_bench_coalesce extras/bench_coalesce.c)
     endif()

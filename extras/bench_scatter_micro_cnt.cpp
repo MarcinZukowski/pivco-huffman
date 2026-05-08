@@ -18,6 +18,7 @@
 
 #include "counters/bench.h"
 #include <arm_neon.h>
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>

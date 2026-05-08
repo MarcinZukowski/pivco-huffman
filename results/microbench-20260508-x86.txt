@@ -1,0 +1,116 @@
+=== c6a Zen 3 SSE4.1 ===
+[hw counters unavailable: rerun under sudo or set perf_event_paranoid=0]
+
+=== partition_8_sse  (n_groups=1024) ===
+kernel                       ns/call
+partition_8_sse                1.359
+partition_8_sse_right          0.981
+partition_8_sse_left           0.975
+scatter16_sse                  8.023
+
+=== p8_sse single vs dual  (n_iters=1024) ===
+variant                      ns/iter
+single                         1.359
+dual_indep                     2.799
+
+=== fusion_sse  (n_iters=1024) ===
+variant                      ns/iter
+P_only (2 st/iter)             1.357
+S_only (16 st/iter)            8.034
+serial P;S (18 st/iter)        9.169
+
+=== scatter_sse split  (n=16384 stores/call) ===
+variant                      ns/call
+A full (16ext + 16st)          8.010
+B stores only (1ext+16st)      6.394
+C extracts only (16ext+0st)     1.103
+
+=== c8i Xeon SR SSE4.1 ===
+
+=== partition_8_sse  (n_groups=1024) ===
+kernel                       ns/call  cyc/call  ins/call    IPC    GHz   stores/cyc
+partition_8_sse                0.926     3.617    20.007   5.53   3.89        0.553
+partition_8_sse_right          0.674     2.633    16.008   6.08   3.89        0.380
+partition_8_sse_left           0.702     2.743    18.008   6.56   3.89        0.365
+scatter16_sse                  7.362    28.770    40.025   1.39   3.89        0.556
+
+=== p8_sse single vs dual  (n_iters=1024) ===
+variant                      ns/iter  cyc/iter  ins/iter    IPC    GHz   stores/cyc    p8/iter
+single                         0.929     3.629    20.007   5.51   3.89        0.551          1
+dual_indep                     2.020     7.886    35.007   4.44   3.89        0.507          2
+
+=== fusion_sse  (n_iters=1024) ===
+variant                      ns/iter  cyc/iter  ins/iter    IPC    GHz   stores/cyc
+P_only (2 st/iter)             0.929     3.629    20.007   5.51   3.89        0.551
+S_only (16 st/iter)            7.279    28.446    40.025   1.41   3.89        0.562
+serial P;S (18 st/iter)        9.746    38.075    58.028   1.52   3.89        0.473
+
+=== scatter_sse split  (n=16384 stores/call) ===
+variant                      ns/call  cyc/call  ins/call    IPC    GHz   stores/cyc   extracts/cyc
+A full (16ext + 16st)          7.304    28.547    40.025   1.40   3.89        0.560          0.560
+B stores only (1ext+16st)      3.674    14.340    38.007   2.65   3.88        1.116          0.070
+C extracts only (16ext+0st)     4.376    17.121    41.029   2.40   3.90        0.000          0.935
+=== c8i Xeon SR AVX-512 ===
+
+=== partition_32 (vpcompressw)  (n_iters=256) ===
+kernel                       ns/call  cyc/call  ins/call    IPC    GHz   stores/cyc
+partition_32 (full, 2 st)      1.559     6.101    22.028   3.61   3.90        0.328
+partition_32_right (1 st)      0.883     3.358    15.036   4.48   3.78        0.298
+partition_32_left  (1 st)      0.915     3.481    18.021   5.18   3.78        0.287
+scatter32_avx512 (32 st)      14.481    56.684    74.100   1.31   3.90        0.565
+
+=== p32 single vs dual  (n_iters=256) ===
+kernel                       ns/call  cyc/call  ins/call    IPC    GHz   stores/cyc
+single (2 st/iter)             1.558     6.098    22.028   3.61   3.90        0.328
+dual_indep (4 st/iter)         6.147    24.000    39.032   1.63   3.89        0.167
+
+=== fusion p32 + scatter32  (32 elem/iter each)  (n_iters=256) ===
+kernel                       ns/call  cyc/call  ins/call    IPC    GHz   stores/cyc
+P_only (2 st/iter)             1.557     6.095    22.028   3.61   3.90        0.328
+S_only (32 st/iter)           14.503    56.770    74.100   1.31   3.90        0.564
+serial P;S (34 st/iter)       19.119    74.787    93.115   1.25   3.88        0.455
+
+=== c8a Zen 5 SSE4.1 ===
+
+=== partition_8_sse  (n_groups=1024) ===
+kernel                       ns/call  cyc/call  ins/call    IPC    GHz   stores/cyc
+partition_8_sse                0.866     3.872    20.007   5.17   4.44        0.517
+partition_8_sse_right          0.747     3.342    16.008   4.79   4.44        0.299
+partition_8_sse_left           0.596     2.669    18.008   6.75   4.44        0.375
+scatter16_sse                  3.666    16.438    40.025   2.43   4.44        0.973
+
+=== p8_sse single vs dual  (n_iters=1024) ===
+variant                      ns/iter  cyc/iter  ins/iter    IPC    GHz   stores/cyc    p8/iter
+single                         0.867     3.881    20.007   5.16   4.44        0.515          1
+dual_indep                     1.729     7.740    35.007   4.52   4.44        0.517          2
+
+=== fusion_sse  (n_iters=1024) ===
+variant                      ns/iter  cyc/iter  ins/iter    IPC    GHz   stores/cyc
+P_only (2 st/iter)             0.866     3.880    20.007   5.16   4.44        0.516
+S_only (16 st/iter)            3.666    16.431    40.025   2.44   4.44        0.974
+serial P;S (18 st/iter)        4.096    18.306    58.028   3.17   4.44        0.983
+
+=== scatter_sse split  (n=16384 stores/call) ===
+variant                      ns/call  cyc/call  ins/call    IPC    GHz   stores/cyc   extracts/cyc
+A full (16ext + 16st)          3.670    16.433    40.025   2.44   4.45        0.974          0.974
+B stores only (1ext+16st)      2.419    10.827    38.007   3.51   4.44        1.478          0.092
+C extracts only (16ext+0st)     2.081     9.315    41.010   4.40   4.44        0.000          1.718
+=== c8a Zen 5 AVX-512 ===
+
+=== partition_32 (vpcompressw)  (n_iters=256) ===
+kernel                       ns/call  cyc/call  ins/call    IPC    GHz   stores/cyc
+partition_32 (full, 2 st)      2.235    10.011    22.028   2.20   4.45        0.200
+partition_32_right (1 st)      1.120     5.014    15.036   3.00   4.45        0.199
+partition_32_left  (1 st)      1.130     5.053    18.021   3.57   4.44        0.198
+scatter32_avx512 (32 st)       7.332    32.809    74.029   2.26   4.45        0.975
+
+=== p32 single vs dual  (n_iters=256) ===
+kernel                       ns/call  cyc/call  ins/call    IPC    GHz   stores/cyc
+single (2 st/iter)             2.234    10.012    22.028   2.20   4.45        0.200
+dual_indep (4 st/iter)         4.476    20.034    39.032   1.95   4.44        0.200
+
+=== fusion p32 + scatter32  (32 elem/iter each)  (n_iters=256) ===
+kernel                       ns/call  cyc/call  ins/call    IPC    GHz   stores/cyc
+P_only (2 st/iter)             2.234    10.012    22.028   2.20   4.45        0.200
+S_only (32 st/iter)            7.334    32.824    74.029   2.26   4.45        0.975
+serial P;S (34 st/iter)        8.214    36.799    93.040   2.53   4.44        0.924
