@@ -1,0 +1,43 @@
+=== pivco_partition_micro_cnt ===
+
+partition_8 microbench  (n_groups=1024, ~48 KiB working set)
+kernel                   ns/call  cyc/call  ins/call    IPC    GHz cmiss/call bmiss/call
+partition_8                2.124     5.950    22.009   3.70   2.79     0.0000     0.0000
+partition_8_right          1.694     4.745    19.009   4.01   2.79     0.0000     0.0000
+partition_8_left           1.709     4.788    20.009   4.18   2.79     0.0000     0.0000
+loads+TBL only (no st)     1.557     4.361    12.009   2.75   2.79     0.0000     0.0000
+1ld + 2st (no TBL)         1.281     3.590    14.008   3.90   2.78     0.0000     0.0000
+=== pivco_scatter_micro_cnt ===
+
+scatter microbench  (n=1024 stores per call, ~1 KiB symbols[])
+kernel                       ns/call  cyc/call  ins/call    IPC    GHz cmiss/call bmiss/call   stores/cyc
+memset (seq stores)           13.342    37.377    88.264   2.36   2.79     0.0000     0.0000       27.396
+scatter_bare                 655.010  1835.950  4105.530   2.24   2.78     0.0000     0.0000        0.558
+scatter_sym                  646.950  1813.470  2386.330   1.32   2.79     0.0000     0.0000        0.565
+scatter_both_leaves          640.320  1795.380  4045.430   2.25   2.77     0.0000     0.0000        0.570
+flat_d2_scatter              655.910  1839.080  3533.530   1.92   2.78     0.0000     0.0000        0.557
+=== pivco_fusion_micro_cnt ===
+
+fusion microbench  (n_iters=1024 fused-iters per call)
+variant                  ns/iter  cyc/iter  ins/iter    IPC    GHz   stores/cyc
+P_only (2 st/iter)         1.253     3.510    16.006   4.56   2.78        0.570
+S_only (16 st/iter)       10.102    28.303    39.024   1.38   2.78        0.565
+serial P;S (18 st/iter)    10.628    29.779    54.027   1.81   2.78        0.604
+interleaved (18 st/iter)    10.949    30.677    67.027   2.18   2.79        0.587
+=== pivco_p8_dual_cnt ===
+
+p8 single vs dual  (n_iters=1024)
+variant                      ns/iter  cyc/iter  ins/iter    IPC    GHz   stores/cyc    p8/iter
+single                         1.268     3.552    16.006   4.51   2.78        0.563          1
+dual_indep                     3.133     8.775    28.006   3.19   2.79        0.456          2
+dual_same_src                  2.827     7.918    29.006   3.66   2.79        0.505          2
+quad_indep                     5.852    16.404    52.023   3.17   2.77        0.488          4
+=== pivco_scatter_split_cnt ===
+
+scatter decomposition  (n=16384 stores per call, working over scattered indices)
+variant                      ns/call  cyc/call  ins/call    IPC    GHz   stores/cyc   extracts/cyc
+A full (16ext + 16st)      10337.500 28965.200 39961.000   1.38   2.78        0.566          0.566
+B stores only (1ext+16st)    698.490  1957.670  7175.310   3.67   2.78        8.369          0.523
+C extracts only (16ext+0st)   834.480  2338.700 12294.230   5.26   2.78        0.000          7.006
+D half-ext (8ext + 16st)   10622.100 29763.400 37913.000   1.27   2.78        0.550          0.275
+E vec-store (0ext + 1vst)    953.060  2670.630  7175.410   2.69   2.79        6.135          0.000
