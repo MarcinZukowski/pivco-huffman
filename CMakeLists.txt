@@ -269,6 +269,13 @@ if(BUILD_BENCH)
         target_link_libraries(pivco_scatter_split_cnt
             pivco_huffman counters::counters m)
         target_include_directories(pivco_scatter_split_cnt PRIVATE src)
+
+        add_executable(pivco_p8_dual_cnt
+            extras/bench_p8_dual_cnt.cpp
+        )
+        target_link_libraries(pivco_p8_dual_cnt
+            pivco_huffman counters::counters m)
+        target_include_directories(pivco_p8_dual_cnt PRIVATE src)
     endif()
 
     if(TARGET_ARCH STREQUAL "arm64" OR TARGET_ARCH STREQUAL "aarch64")
