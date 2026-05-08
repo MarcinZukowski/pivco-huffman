@@ -235,6 +235,13 @@ if(BUILD_BENCH)
         target_link_libraries(pivco_partition_micro_cnt
             pivco_huffman counters::counters m)
         target_include_directories(pivco_partition_micro_cnt PRIVATE src)
+
+        add_executable(pivco_lemire_compare
+            extras/bench_lemire_compare.cpp
+        )
+        target_link_libraries(pivco_lemire_compare
+            pivco_huffman counters::counters m)
+        target_include_directories(pivco_lemire_compare PRIVATE src)
     endif()
 
     if(TARGET_ARCH STREQUAL "arm64" OR TARGET_ARCH STREQUAL "aarch64")
