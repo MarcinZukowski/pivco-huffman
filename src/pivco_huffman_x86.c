@@ -587,8 +587,13 @@ static void decode_node_x86(const pivco_huffman_table_t *table,
         for (; j + 8 <= n; j += 8)
             n_right += partition_8_sse_right(indices + j, bm[j >> 3],
                                               tmp + n_right);
-        for (; j < n; j++)
-            if (bitmap_get(bm, j)) tmp[n_right++] = indices[j];
+        /* Vector tail: mask out invalid bits so they don't contribute. */
+        if (j < n) {
+            int rem = n - j;
+            uint8_t mask = bm[j >> 3] & (uint8_t)((1u << rem) - 1);
+            n_right += partition_8_sse_right(indices + j, mask,
+                                              tmp + n_right);
+        }
         decode_node_x86(table, node->right, tmp, n_right,
                          symbols, in_ptr, tmp + n_right, skip_node);
     } else if (right_leaf && node->right == skip_node) {
@@ -598,8 +603,13 @@ static void decode_node_x86(const pivco_huffman_table_t *table,
         for (; j + 8 <= n; j += 8)
             n_left += partition_8_sse_left(indices + j, bm[j >> 3],
                                             indices + n_left);
-        for (; j < n; j++)
-            if (!bitmap_get(bm, j)) indices[n_left++] = indices[j];
+        /* Vector tail: set invalid bits so they go to "right" filler. */
+        if (j < n) {
+            int rem = n - j;
+            uint8_t mask = bm[j >> 3] | (uint8_t)~((1u << rem) - 1);
+            n_left += partition_8_sse_left(indices + j, mask,
+                                            indices + n_left);
+        }
         decode_node_x86(table, node->left, indices, n_left,
                          symbols, in_ptr, tmp, skip_node);
     } else {
@@ -613,11 +623,17 @@ static void decode_node_x86(const pivco_huffman_table_t *table,
             n_right += nr;
             n_left += (8 - nr);
         }
-        for (; j < n; j++) {
-            if (bitmap_get(bm, j))
-                tmp[n_right++] = indices[j];
-            else
-                indices[n_left++] = indices[j];
+        /* Vector tail: two TBL calls (one per side), each with bm
+         * appropriately masked so invalid positions become harmless filler. */
+        if (j < n) {
+            int rem = n - j;
+            uint8_t valid = (uint8_t)((1u << rem) - 1);
+            uint8_t mask_r = bm[j >> 3] & valid;
+            uint8_t mask_l = bm[j >> 3] | (uint8_t)~valid;
+            int nr = partition_8_sse_right(indices + j, mask_r, tmp + n_right);
+            int nl = partition_8_sse_left (indices + j, mask_l, indices + n_left);
+            n_right += nr;
+            n_left  += nl;
         }
 
         /* Recurse into both; child's entry handles leaf/skip_node. */

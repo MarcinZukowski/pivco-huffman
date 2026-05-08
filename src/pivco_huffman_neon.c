@@ -795,9 +795,22 @@ static inline void node_full(uint16_t *indices, int n,
         n_right += nr;
         n_left  += (8 - nr);
     }
-    for (; j < n; j++) {
-        if (bitmap_get(bm, j)) tmp[n_right++] = indices[j];
-        else                   indices[n_left++] = indices[j];
+    /* Vector tail for 1..7 leftover elements: two TBL calls (one per
+     * side), each with the bm byte masked so only valid positions
+     * contribute and invalid positions become harmless filler.
+     *   - mask_r: bm & valid → invalid bits = 0 (go to "left" filler,
+     *             never written to right_out)
+     *   - mask_l: bm | ~valid → invalid bits = 1 (go to "right" filler,
+     *             never written to left_out) */
+    if (j < n) {
+        int rem = n - j;
+        uint8_t valid = (uint8_t)((1u << rem) - 1);
+        uint8_t mask_r = bm[j >> 3] & valid;
+        uint8_t mask_l = bm[j >> 3] | (uint8_t)~valid;
+        int nr = partition_8_right(indices + j, mask_r, tmp + n_right);
+        int nl = partition_8_left (indices + j, mask_l, indices + n_left);
+        n_right += nr;
+        n_left  += nl;
     }
     *n_left_out  = n_left;
     *n_right_out = n_right;
@@ -816,9 +829,13 @@ static inline int node_half_right(uint16_t *indices, int n,
         n_right += partition_8_right(indices + j, bm[j >> 3],
                                       tmp_right_out + n_right);
     }
-    for (; j < n; j++) {
-        if (bitmap_get(bm, j))
-            tmp_right_out[n_right++] = indices[j];
+    /* Vector tail (1..7 elements): mask out invalid bits so they don't
+     * contribute. */
+    if (j < n) {
+        int rem = n - j;
+        uint8_t mask = bm[j >> 3] & (uint8_t)((1u << rem) - 1);
+        n_right += partition_8_right(indices + j, mask,
+                                      tmp_right_out + n_right);
     }
     PROF_TOC(PROF_NODE_HALF_RIGHT, n);
     return n_right;
@@ -835,9 +852,13 @@ static inline int node_half_left(uint16_t *indices, int n,
         n_left += partition_8_left(indices + j, bm[j >> 3],
                                     indices + n_left);
     }
-    for (; j < n; j++) {
-        if (!bitmap_get(bm, j))
-            indices[n_left++] = indices[j];
+    /* Vector tail (1..7 elements): set invalid bits to 1 so they go to
+     * the "right" side (filler) and don't contribute to n_left. */
+    if (j < n) {
+        int rem = n - j;
+        uint8_t mask = bm[j >> 3] | (uint8_t)~((1u << rem) - 1);
+        n_left += partition_8_left(indices + j, mask,
+                                    indices + n_left);
     }
     PROF_TOC(PROF_NODE_HALF_LEFT, n);
     return n_left;
