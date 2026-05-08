@@ -753,15 +753,17 @@ static inline void node_full_avx512(uint16_t *indices, int n,
         n_right += nr;
         n_left  += (32 - nr);
     }
-    if (j < n) {
-        int rem = n - j;
-        uint32_t mask = 0;
-        memcpy(&mask, bm + (j >> 3), (size_t)bitmap_bytes(rem));
-        mask &= (1u << rem) - 1;
-        int nr = partition_32(indices + j, rem, (__mmask32)mask,
-                              indices + n_left, tmp + n_right);
-        n_right += nr;
-        n_left  += (rem - nr);
+    /* Scalar tail for 1..31 leftover elements.  An earlier attempt
+     * (b136b96) used a masked partition_32 here for a putative +20-40%
+     * gain on real text — but cross-validation against the scalar
+     * decoder revealed the masked tail produces wrong output on some
+     * distributions (e.g. prose_pride at position 0).  test_roundtrip
+     * never directly exercised decode_avx512, so the bug went unnoticed
+     * for a day.  Reverting to scalar tail until the masked variant is
+     * understood. */
+    for (; j < n; j++) {
+        if (bitmap_get(bm, j)) tmp[n_right++] = indices[j];
+        else                   indices[n_left++] = indices[j];
     }
     *n_left_out  = n_left;
     *n_right_out = n_right;
@@ -781,12 +783,10 @@ static inline int node_half_right_avx512(uint16_t *indices, int n,
         n_right += partition_32_right(indices + j, mask,
                                        tmp_right_out + n_right);
     }
-    if (j < n) {
-        uint32_t mask = 0;
-        memcpy(&mask, bm + (j >> 3), (size_t)bitmap_bytes(n - j));
-        mask &= (1u << (n - j)) - 1;
-        n_right += partition_32_right(indices + j, mask,
-                                       tmp_right_out + n_right);
+    /* Scalar tail (see node_full_avx512 comment). */
+    for (; j < n; j++) {
+        if (bitmap_get(bm, j))
+            tmp_right_out[n_right++] = indices[j];
     }
     PROF_TOC(PROF_NODE_HALF_RIGHT, n);
     return n_right;
@@ -804,12 +804,10 @@ static inline int node_half_left_avx512(uint16_t *indices, int n,
         n_left += partition_32_left(indices + j, mask,
                                      indices + n_left);
     }
-    if (j < n) {
-        uint32_t mask = 0;
-        memcpy(&mask, bm + (j >> 3), (size_t)bitmap_bytes(n - j));
-        mask &= (1u << (n - j)) - 1;
-        n_left += partition_32_left(indices + j, mask,
-                                     indices + n_left);
+    /* Scalar tail (see node_full_avx512 comment). */
+    for (; j < n; j++) {
+        if (!bitmap_get(bm, j))
+            indices[n_left++] = indices[j];
     }
     PROF_TOC(PROF_NODE_HALF_LEFT, n);
     return n_left;
