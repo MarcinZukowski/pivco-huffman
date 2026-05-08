@@ -321,6 +321,68 @@ misprediction (NEON) and store-buffer interference (scalar).  The
 current code keeps partition and scatter as separate phases
 deliberately.
 
+## Cross-platform partition+scatter fusion microbench — parked (2026-05-08)
+
+Built a 6-platform microbench sweep (`extras/bench_micro_{sse,avx512}_cnt.cpp`
+and the existing NEON ones) measuring whether running `partition_8`/`p32`
+in the same inner loop body as a 16-elem `scatter_sym` saves cycles vs.
+running them serially.  Hypothesis: partition's store-port slack (it's
+not store-saturated on any uarch) should overlap with scatter's
+store-bound work.
+
+Results — fusion saving (sum-of-parts minus serial), positive = win:
+
+| platform              | partition cyc/call | scatter stores/cyc | fusion saving |
+|-----------------------|:--:|:--:|:--:|
+| Apple M4 NEON         | 2.58 (8e)          | 1.86 (peak)        | **−10%** (hurts)  |
+| Graviton 4 NEON       | 5.95 (8e)          | 0.57               | **+6%**           |
+| Zen 3 SSE4.1 (c6a)    | ~3.8 ns/call       | 0.51 ns/store      | ≈ 0% (TBD with sudo) |
+| Xeon SR SSE4.1 (c8i)  | 3.79 (8e)          | 0.56               | **−18%** (hurts!) |
+| Xeon SR AVX-512 (c8i) | 6.09 (32e)         | 0.56               | **−18%** (hurts)  |
+| Zen 5 SSE4.1 (c8a)    | 3.88 (8e)          | 0.97               | **+10%**          |
+| Zen 5 AVX-512 (c8a)   | 10.01 (32e)        | 0.98               | **+14%**          |
+
+**Wins on Zen 5 + Graviton 4. Hurts on M4 + Xeon SR.**  Apple M4
+already runs scatter at the 2-stores/cyc port ceiling so there's no
+slack to absorb partition; Sapphire Rapids interferes destructively
+(probably store-buffer / µop-cache pressure on the larger combined
+kernel, evident also in `dual_indep` running 4.09× single rather than
+2× — Xeon SR has a specific scheduling hazard around `vpcompressw`
+stores).
+
+Decision: **not shipping.**  An optimization that helps two uarches by
++10/+14% but hurts two others by −10/−18% can't go behind a single code
+path, and the engineering cost of per-uarch dispatch (we'd need
+runtime detection plus separate `decode_node_fused` variants for at
+least the AVX-512/SSE4.1/NEON×{Apple,Neoverse-V2,Zen}-class branches)
+is too high relative to the absolute win.  The sibling fusion would
+also need careful tree-shape pre-classification (the win only applies
+when one child is a leaf-scatter and the other is a partition — see
+node_type already in `pivco_huffman_table_t`), further multiplying the
+case matrix.
+
+If the platform mix changes — e.g. Zen 5 becomes the dominant target,
+or we add a "tiered" backend with explicit per-arch fast paths — this
+is back on the table.  Reproducer is `extras/bench_micro_sse_cnt.cpp`
+and `extras/bench_micro_avx512_cnt.cpp`; raw sweep at
+`results/microbench-20260508-x86.txt` and
+`results/microbench-20260508-c8g.txt`.
+
+Drive-by findings from the same sweep, recorded here so we don't redo
+the experiments:
+- **Multi-cursor partition (2-cursor / 4-cursor / X2 family) is dead
+  on every uarch tested.**  `dual_indep` cost ≥ 2× single everywhere.
+  No spare back-end parallelism to extract; OOO already finds it all.
+  Independently confirms the prior X2 drop (commit 20f9b33) at the
+  microbench level.
+- **Scatter store-throughput tier list** (stores/cyc on byte-scattered
+  16-store loop): Apple M4 1.86 (port-saturated), Zen 5 0.97, everyone
+  else ~0.56.  Apple Silicon and Zen 5 have meaningfully better
+  scatter throughput than Sapphire Rapids / Neoverse V2 / Zen 3.
+- **Lane-extracts are free everywhere we measured** — halving them
+  (variant D of bench_scatter_split_cnt) changed nothing.  The
+  bottleneck is purely the byte stores.
+
 ## ~~Next best idea: finish `neon2` 4-way fused decode~~ — attempted, didn't pay off
 
 Implemented in `src/pivco_huffman_neon2b.c` with clean scratch management
