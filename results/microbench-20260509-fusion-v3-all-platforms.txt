@@ -1,0 +1,189 @@
+=== M4 NEON ===
+[hw counters unavailable: rerun under sudo]
+
+fusion_v3 (sorted scatter indices, varying P:S)
+N=64 outer iters; sindices step=4 (range [0..4096))
+
+--- baselines ---
+  P_only (1 P/iter)           36.9
+  S_only (1 S/iter)          114.8
+
+--- PpS=1 (1 P calls per 1 S chunk; elem ratio 8:16) ---
+  PP_SS PpS=1                155.5
+  PSPS PpS=1                 143.3
+
+--- PpS=2 (2 P calls per 1 S chunk; elem ratio 16:16) ---
+  PP_SS PpS=2                198.1
+  PSPS PpS=2                 172.7
+
+--- PpS=4 (4 P calls per 1 S chunk; elem ratio 32:16) ---
+  PP_SS PpS=4                278.9
+  PSPS PpS=4                 211.3
+
+--- PpS=8 (8 P calls per 1 S chunk; elem ratio 64:16) ---
+  PP_SS PpS=8                440.4
+  PSPS PpS=8                 365.4
+
+--- fine-grained interleaving (PpS=4, scatter split) ---
+  P,s4 x4 (4P + 4*scatter4)     213.1
+  PP,s8 x2 (4P + 2*scatter8)     224.3
+
+=== c8g (Graviton 4 NEON) ===
+
+fusion_v3 (sorted scatter indices, varying P:S)
+N=64 outer iters; sindices step=4 (range [0..4096))
+  variant                  ns/iter  cyc/iter  ins/iter    IPC    GHz   stores/cyc
+
+--- baselines ---
+  P_only (1 P/iter)           97.2     272.3    1028.5   3.78   2.78        0.470
+  S_only (1 S/iter)          365.9    1027.4    2503.3   2.44   2.78        0.997
+
+--- PpS=1 (1 P calls per 1 S chunk; elem ratio 8:16) ---
+  PP_SS PpS=1                456.5    1280.3    3922.3   3.06   2.78        0.900
+  PSPS PpS=1                 377.6    1059.4    3662.4   3.46   2.77        1.087
+
+--- PpS=2 (2 P calls per 1 S chunk; elem ratio 16:16) ---
+  PP_SS PpS=2                578.1    1621.2    5266.3   3.25   2.78        0.790
+  PSPS PpS=2                 411.2    1153.3    4493.4   3.90   2.77        1.110
+
+--- PpS=4 (4 P calls per 1 S chunk; elem ratio 32:16) ---
+  PP_SS PpS=4                720.5    2019.7    7954.3   3.94   2.77        0.761
+  PSPS PpS=4                 454.4    1274.8    5513.4   4.32   2.78        1.205
+
+--- PpS=8 (8 P calls per 1 S chunk; elem ratio 64:16) ---
+  PP_SS PpS=8               1071.6    3002.7   13330.3   4.44   2.78        0.682
+  PSPS PpS=8                 928.6    2602.5   10702.4   4.11   2.78        0.787
+
+--- fine-grained interleaving (PpS=4, scatter split) ---
+  P,s4 x4 (4P + 4*scatter4)     483.4    1356.1    5260.3   3.88   2.78        1.133
+  PP,s8 x2 (4P + 2*scatter8)     447.8    1256.3    5068.3   4.03   2.79        1.223
+
+=== c6a (Zen 3 SSE) ===
+[hw counters unavailable: rerun under sudo or set perf_event_paranoid=0]
+
+fusion_v3 SSE (sorted scatter indices, varying P:S)
+N=64 outer iters; sindices step=4
+
+--- baselines ---
+  P_only                      81.1
+  S_only                     302.7
+
+--- PpS=1 (1 P calls per S; elem 8:16) ---
+  PP_SS PpS=1                451.0
+  PSPS PpS=1                 388.8
+
+--- PpS=2 (2 P calls per S; elem 16:16) ---
+  PP_SS PpS=2                545.6
+  PSPS PpS=2                 579.1
+
+--- PpS=4 (4 P calls per S; elem 32:16) ---
+  PP_SS PpS=4                719.9
+  PSPS PpS=4                 500.3
+
+--- PpS=8 (8 P calls per S; elem 64:16) ---
+  PP_SS PpS=8               1159.1
+  PSPS PpS=8                1211.0
+
+=== c8i (Xeon SR SSE) ===
+
+fusion_v3 SSE (sorted scatter indices, varying P:S)
+N=64 outer iters; sindices step=4
+  variant                  ns/iter  cyc/iter  ins/iter    IPC    GHz   stores/cyc
+
+--- baselines ---
+  P_only                      95.2     371.9    1349.5   3.63   3.85        0.344
+  S_only                     289.1    1133.5    2566.4   2.26   3.90        0.903
+
+--- PpS=1 (1 P calls per S; elem 8:16) ---
+  PP_SS PpS=1                441.3    1727.7    4307.1   2.49   3.90        0.667
+  PSPS PpS=1                 393.1    1539.7    4045.2   2.63   3.91        0.748
+
+--- PpS=2 (2 P calls per S; elem 16:16) ---
+  PP_SS PpS=2                563.6    2204.4    6099.1   2.77   3.90        0.581
+  PSPS PpS=2                 460.8    1803.9    5327.3   2.95   3.90        0.710
+
+--- PpS=4 (4 P calls per S; elem 32:16) ---
+  PP_SS PpS=4                803.0    3139.2    9554.1   3.04   3.90        0.489
+  PSPS PpS=4                 708.0    2768.4    7952.2   2.87   3.90        0.555
+
+--- PpS=8 (8 P calls per S; elem 64:16) ---
+  PP_SS PpS=8               1261.6    4928.0   16466.1   3.34   3.89        0.416
+  PSPS PpS=8                 898.9    3513.1   13072.2   3.72   3.89        0.583
+
+=== c8i (Xeon SR AVX-512) ===
+
+fusion_v3 AVX-512 (sorted scatter indices, varying P:S)
+N=32 outer iters; sindices step=4
+  variant                  ns/iter  cyc/iter  ins/iter    IPC    GHz   stores/cyc
+
+--- baselines ---
+  P_only (32-elem)            58.3     222.3     709.5   3.19   3.80        0.288
+  S_only (32 stores)         288.7    1126.9    2373.5   2.11   3.89        0.909
+
+--- PpS=1 (elem 32:32) ---
+  PP_SS PpS=1                411.3    1609.8    3282.2   2.04   3.90        0.676
+  PSPS PpS=1                 400.3    1567.6    3085.2   1.97   3.90        0.694
+
+--- PpS=2 (elem 64:32) ---
+  PP_SS PpS=2                478.5    1872.1    4209.2   2.25   3.90        0.615
+  PSPS PpS=2                 467.1    1828.4    3823.3   2.09   3.90        0.630
+
+--- PpS=4 (elem 128:32) ---
+  PP_SS PpS=4                631.5    2469.2    6001.2   2.43   3.90        0.518
+  PSPS PpS=4                 601.4    2351.9    5167.3   2.20   3.90        0.544
+
+--- PpS=8 (elem 256:32) ---
+  PP_SS PpS=8               1147.3    4481.5    9585.2   2.14   3.90        0.343
+  PSPS PpS=8                 726.4    2839.4    7855.3   2.77   3.89        0.541
+
+=== c8a (Zen 5 SSE) ===
+
+fusion_v3 SSE (sorted scatter indices, varying P:S)
+N=64 outer iters; sindices step=4
+  variant                  ns/iter  cyc/iter  ins/iter    IPC    GHz   stores/cyc
+
+--- baselines ---
+  P_only                      49.5     220.6    1349.5   6.12   4.40        0.580
+  S_only                     188.8     841.3    2564.5   3.05   4.40        1.217
+
+--- PpS=1 (1 P calls per S; elem 8:16) ---
+  PP_SS PpS=1                249.4    1108.7    4305.3   3.88   4.40        1.039
+  PSPS PpS=1                 248.3    1104.3    4042.9   3.66   4.39        1.043
+
+--- PpS=2 (2 P calls per S; elem 16:16) ---
+  PP_SS PpS=2                306.3    1368.9    6099.1   4.46   4.40        0.935
+  PSPS PpS=2                 288.4    1288.2    5327.3   4.14   4.40        0.994
+
+--- PpS=4 (4 P calls per S; elem 32:16) ---
+  PP_SS PpS=4                422.8    1897.4    9554.1   5.04   4.44        0.810
+  PSPS PpS=4                 384.0    1720.9    7952.2   4.62   4.45        0.893
+
+--- PpS=8 (8 P calls per S; elem 64:16) ---
+  PP_SS PpS=8                654.2    2925.6   16466.1   5.63   4.44        0.700
+  PSPS PpS=8                 623.0    2779.6   13072.2   4.70   4.44        0.737
+
+=== c8a (Zen 5 AVX-512) ===
+
+fusion_v3 AVX-512 (sorted scatter indices, varying P:S)
+N=32 outer iters; sindices step=4
+  variant                  ns/iter  cyc/iter  ins/iter    IPC    GHz   stores/cyc
+
+--- baselines ---
+  P_only (32-elem)            71.7     320.3     709.5   2.22   4.41        0.200
+  S_only (32 stores)         172.5     769.6    2373.5   3.08   4.40        1.330
+
+--- PpS=1 (elem 32:32) ---
+  PP_SS PpS=1                238.3    1064.0    3280.4   3.08   4.41        1.023
+  PSPS PpS=1                 198.8     887.7    3083.3   3.47   4.38        1.226
+
+--- PpS=2 (elem 64:32) ---
+  PP_SS PpS=2                307.1    1373.5    4209.2   3.06   4.40        0.839
+  PSPS PpS=2                 231.6    1029.5    3821.4   3.71   4.39        1.119
+
+--- PpS=4 (elem 128:32) ---
+  PP_SS PpS=4                452.2    2016.0    6001.2   2.98   4.40        0.635
+  PSPS PpS=4                 305.8    1368.2    5167.3   3.78   4.43        0.936
+
+--- PpS=8 (elem 256:32) ---
+  PP_SS PpS=8                759.1    3393.1    9585.2   2.82   4.44        0.453
+  PSPS PpS=8                 522.3    2330.4    7855.3   3.37   4.44        0.659

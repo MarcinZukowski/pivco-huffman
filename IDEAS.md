@@ -429,7 +429,74 @@ by `pivco_huffman_tests` (4f2fd5c added the missing AVX-512/SSE
 coverage).  The bench's scalar-reference cksum (da3c9fd) catches the
 overlap bug immediately.
 
-## Cross-platform partition+scatter fusion microbench — parked (2026-05-08)
+## Cross-platform partition+scatter fusion — back on the table (2026-05-09)
+
+**UPDATE 2026-05-09:** the original "parked" verdict below was based on
+two methodology errors in the microbench:
+  1. Wrong P:S element ratio (1:2 instead of the real-decoder's 4:1)
+  2. Random scatter destinations instead of sorted-ascending
+     (real-decoder leaves get sorted indices because partition
+     preserves order)
+
+A corrected microbench (`extras/bench_fusion_v3_*_cnt.cpp`) sweeping
+PpS (partition calls per scatter chunk) ∈ {1,2,4,8} with sorted
+ascending scatter indices shows fusion is a substantial win on every
+platform — biggest at the realistic PpS=4 or PpS=8:
+
+| host                 | best PpS | PSPS-vs-PP_SS | end-to-end est. |
+|----------------------|:--------:|--------------:|----------------:|
+| M4 NEON              |    4     |        −24%   |    ~12-15%      |
+| Graviton 4 NEON      |    4     |    **−37%**   |    ~22-25%      |
+| Zen 3 SSE            |    4     |        −31%   |    ~18-22%      |
+| Xeon SR AVX-512      |    8     |    **−37%**   |    ~22-25%      |
+| Zen 5 AVX-512        |    4     |        −32%   |    ~20-23%      |
+
+The platforms that show the **biggest** fusion gains are exactly the
+ones where pivco currently loses on real text vs huf0_x2 (Graviton 4,
+Xeon SR AVX-512 prose, Zen 5).  Well-aligned opportunity.
+
+Mechanics: M4 scatter is store-port-saturated at 1.86/cyc; partition
+has 13% utilization with the rest free.  Adding partition's stores to
+scatter's store stream saturates the ports without contention up to
+~PpS=4-8 (above which front-end / IPC pressure starts dominating).
+Graviton/Zen 5 have even more headroom (S_only at 0.99/cyc) so wins
+are bigger.
+
+Reproducer:
+  - `extras/bench_fusion_v3_cnt.cpp`        (NEON)
+  - `extras/bench_fusion_v3_sse_cnt.cpp`    (SSE4.1)
+  - `extras/bench_fusion_v3_avx512_cnt.cpp` (AVX-512)
+  - sweep saved at
+    `results/microbench-20260509-fusion-v3-all-platforms.txt`
+
+### Implementation paths (open)
+
+The microbench gain isn't yet realised in the actual decoder.  The
+recursive structure means partition at depth N produces indices that
+scatter at depth N+1 reads — same data, different time, OOO can't
+pipeline across function calls.  Two paths:
+
+**A) Cross-batch (block-level) fusion** — decode 2 blocks in lockstep
+through a state machine, with block A's scatter stages overlapping
+block B's partition stages.  Independent buffers; no producer-consumer
+chain across the fusion boundary.  Predicted realisable win: ~half of
+the microbench gain (some of the headroom is already captured by OOO
+within a single block's recursion).  Engineering: medium — requires
+restructuring `decode_node_neon/x86/avx512` from recursion to an
+explicit work queue.
+
+**B) Within-block sibling fusion** — at each `node_full` parent whose
+children are both terminal (one partition + one leaf-scatter, or one
+flat-scatter + one half-partition), inline both into a single fused
+kernel.  Engineering: high — combinatorial number of sibling-pair
+shapes × per-uarch tuning.  Per-pair captures more theoretical win
+but only fires on specific tree topologies.
+
+Recommendation: **prototype A first on Graviton 4** (where the +20-25%
+estimate would close most of the prose-text gap vs huf0_x2).  Measure
+end-to-end before generalising.
+
+### Original parked microbench notes (kept for diagnostic trail)
 
 Built a 6-platform microbench sweep (`extras/bench_micro_{sse,avx512}_cnt.cpp`
 and the existing NEON ones) measuring whether running `partition_8`/`p32`
