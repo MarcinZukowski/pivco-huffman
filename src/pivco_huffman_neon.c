@@ -228,60 +228,67 @@ static inline uint32_t extract_D_bits(const uint8_t *in, int bit_pos, int D)
 /* flat_d{2,3,4,5,6}_unpack() and their tables live in
  * pivco_huffman_neon_flat.h (shared with bench/bench_micro.c). */
 
-/* ---------- Cross-block lookahead (experimental, for fusion test) ----------
+/* ---------- Cross-block fusion infrastructure (experimental) ----------
  *
- * Thread-local state pointing at the *next* block's root partition.
- * When `active`, every 16-elem scatter chunk also advances K calls of
- * partition_root_8 for the next block.  Idea: scatter is store-port-
- * saturated; partition_root_8 is back-end IPC limited; running them
- * in the same OOO window should overlap.  See
- * `pivco_huffman_decode_dual_neon` at the bottom of the file. */
+ * Two-slot ping-pong state for cross-block partition lookahead.
+ * Block N writes partial root_full results for block N+1 into one slot
+ * (via a fused scatter+partition kernel), while reading the partial
+ * results that block N-1 left for it from the other slot.  At the end
+ * of each decode the cur/nxt slots flip.
+ *
+ * Globals (no thread-local; single-thread experiment):
+ *   - g_pivco_fusion_enabled  : 0/1, toggle from caller
+ *   - g_la[2]                  : ping-pong state slots
+ *   - g_la_cur                 : index of the "current" slot
+ *   - g_la_writes              : pointer to the "next" slot during decode,
+ *                                 or NULL when fusion is off this block
+ *
+ * The caller signals "next block exists" by calling
+ * `pivco_huffman_set_next_neon(in_next)` BEFORE invoking
+ * `pivco_huffman_decode_neon` for the current block.
+ *
+ * Backing storage (g_la_indices_buf / g_la_tmp_buf) is shared between
+ * the cur slot's working buffers (where root_full writes its partition
+ * results) and the next slot's fusion-target buffers.  Both are
+ * BLK+8 / 2*BLK long, 64B-aligned.  See decode_neon entry. */
 typedef struct {
-    int active;
-    int j;
-    int N;
-    const uint8_t *bm;
-    uint16_t *indices;
-    uint16_t *tmp;
-    int n_left;
-    int n_right;
+    int j;                /* root-partition cursor: how many elements done */
+    int n_left;           /* count of left-partition elements written so far */
+    int n_right;          /* count of right-partition elements written so far */
+    const uint8_t *bm;    /* root bitmap of the block this slot represents */
+    uint16_t *indices;    /* points into g_la_indices_buf[i] */
+    uint16_t *tmp;        /* points into g_la_tmp_buf[i] */
 } pivco_la_neon_t;
 
-static __thread pivco_la_neon_t pivco_la_neon = {0};
+/* Storage for the two slots. */
+static uint16_t g_la_indices_buf[2][PIVCO_BLOCK_SIZE + 8] __attribute__((aligned(64)));
+static uint16_t g_la_tmp_buf[2][PIVCO_BLOCK_SIZE * 2]      __attribute__((aligned(64)));
 
-/* Forward decl — partition_root_8 is defined further down. */
-static inline int partition_root_8(int base, uint8_t mask,
-                                    uint16_t *left_out,
-                                    uint16_t *right_out);
+static pivco_la_neon_t g_la[2] = {0};
+static int g_la_cur = 0;
 
-/* Tunable: partition_root_8 calls injected per scatter 16-elem chunk.
- * K=4 matches the microbench's PpS=4 sweet spot on M4. */
+/* Caller-controlled fusion enable + dispatch helpers used by
+ * decode_node_neon's BOTH_LEAVES case. */
+int g_pivco_fusion_enabled = 0;
+static pivco_la_neon_t *g_la_writes = NULL;
+
+/* DEBUG counters — non-zero only confirms code paths run. */
+unsigned long g_pivco_fused_calls = 0;
+unsigned long g_pivco_fused_chunks = 0;
+unsigned long g_pivco_fused_partition_iters = 0;
+
+/* Tunable: partition_root_8 calls per fused scatter chunk.
+ * K=4 matches the microbench's PpS=4 sweet spot. */
 #ifndef PIVCO_LA_K
 #define PIVCO_LA_K 4
 #endif
 
-/* Run K root-partition iterations for the next block.  Stops early if
- * the lookahead has reached N. */
-static inline void pivco_la_advance(int K) {
-    if (!pivco_la_neon.active) return;
-    int j = pivco_la_neon.j;
-    int n_left = pivco_la_neon.n_left;
-    int n_right = pivco_la_neon.n_right;
-    const uint8_t *bm = pivco_la_neon.bm;
-    uint16_t *indices = pivco_la_neon.indices;
-    uint16_t *tmp = pivco_la_neon.tmp;
-    int N = pivco_la_neon.N;
-    for (int k = 0; k < K && j + 8 <= N; k++) {
-        uint8_t mask = bm[j >> 3];
-        int nr = partition_root_8(j, mask, indices + n_left, tmp + n_right);
-        n_right += nr;
-        n_left  += (8 - nr);
-        j += 8;
-    }
-    pivco_la_neon.j = j;
-    pivco_la_neon.n_left = n_left;
-    pivco_la_neon.n_right = n_right;
-    if (j >= N) pivco_la_neon.active = 0;
+/* Set the next block's input pointer.  The next block's root bm starts
+ * at this address.  Pass NULL to disable fusion for the upcoming
+ * decode_neon call (e.g. last block in a stream). */
+void pivco_huffman_set_next_neon(const uint8_t *in_next)
+{
+    g_la[g_la_cur ^ 1].bm = in_next;
 }
 
 /* Unpack n D-bit codes from bm, look up in c2s, scatter to
@@ -315,7 +322,6 @@ static inline void flat_decode_scatter_neon(uint8_t *symbols,
             symbols[indices[i + 13]] = vgetq_lane_u8(syms, 13);
             symbols[indices[i + 14]] = vgetq_lane_u8(syms, 14);
             symbols[indices[i + 15]] = vgetq_lane_u8(syms, 15);
-            pivco_la_advance(PIVCO_LA_K);
         }
         /* Tail: scalar 4-wide, then 1-wide (same as generic D=2 case) */
         for (; i + 4 <= n; i += 4) {
@@ -432,7 +438,6 @@ static inline void flat_decode_scatter_neon(uint8_t *symbols,
             symbols[indices[i + 13]] = vgetq_lane_u8(syms, 13);
             symbols[indices[i + 14]] = vgetq_lane_u8(syms, 14);
             symbols[indices[i + 15]] = vgetq_lane_u8(syms, 15);
-            pivco_la_advance(PIVCO_LA_K);
         }
         /* 2-wide and 1-wide tail (same as generic D=4 case). */
         for (; i + 2 <= n; i += 2) {
@@ -741,7 +746,6 @@ static inline void scatter_sym(uint8_t *symbols,
         symbols[vgetq_lane_u16(i1, 5)] = sym;
         symbols[vgetq_lane_u16(i1, 6)] = sym;
         symbols[vgetq_lane_u16(i1, 7)] = sym;
-        pivco_la_advance(PIVCO_LA_K);
     }
     for (; j + 8 <= n; j += 8) {
         uint16x8_t idx = vld1q_u16(indices + j);
@@ -795,7 +799,6 @@ static inline void scatter_both_leaves(uint8_t *symbols,
         symbols[vgetq_lane_u16(i1, 5)] = vget_lane_u8(vals1, 5);
         symbols[vgetq_lane_u16(i1, 6)] = vget_lane_u8(vals1, 6);
         symbols[vgetq_lane_u16(i1, 7)] = vget_lane_u8(vals1, 7);
-        pivco_la_advance(PIVCO_LA_K);
     }
     for (; j + 8 <= n; j += 8) {
         uint8x8_t bits = vtst_u8(vdup_n_u8(bm[j >> 3]), vbit_pos);
@@ -814,6 +817,119 @@ static inline void scatter_both_leaves(uint8_t *symbols,
         uint8_t bit = (bm[j >> 3] >> (j & 7)) & 1;
         symbols[indices[j]] = sym0 ^ ((sym0 ^ sym1) & (uint8_t)(-(int8_t)bit));
     }
+}
+
+/* ---------- Fused kernel: scatter_both_leaves + root_full ---------------
+ *
+ * Single tight inner loop body that issues both:
+ *   - 16 byte stores for the current block's BOTH_LEAVES scatter
+ *   - K * partition_root_8 for the next block's root partition
+ * inside ONE loop iteration so the OOO window sees the full instruction
+ * mix and can pipeline scatter's store-port-bound work with partition's
+ * IPC-bound work.  This is the key difference from the earlier
+ * "lookahead-from-helper" design — no function-call boundary between
+ * the two phases.
+ *
+ * `nxt` must be non-NULL with bm/indices/tmp set up.  When nxt's
+ * partition is fully done (nxt->j >= N), the loop just does the
+ * scatter side.  Returns nothing; updates nxt->j / n_left / n_right
+ * in place. */
+static inline void scatter_both_leaves_fused_root_full(
+    uint8_t *symbols, const uint16_t *indices, int n,
+    const uint8_t *bm,
+    uint8_t sym0, uint8_t sym1,
+    pivco_la_neon_t *nxt)
+{
+    g_pivco_fused_calls++;
+    uint8x8_t vsym0  = vdup_n_u8(sym0);
+    uint8x8_t vdelta = vdup_n_u8(sym0 ^ sym1);
+    static const uint8_t bit_pos_tab[8] = {1,2,4,8,16,32,64,128};
+    static const uint16_t off[8]        = {0,1,2,3,4,5,6,7};
+    uint8x8_t vbit_pos = vld1_u8(bit_pos_tab);
+    uint16x8_t voff    = vld1q_u16(off);
+
+    /* Snapshot nxt state into locals so the inner loop touches
+     * registers, not memory.  Write back once at the end. */
+    int nxt_j        = nxt->j;
+    int nxt_n_left   = nxt->n_left;
+    int nxt_n_right  = nxt->n_right;
+    const uint8_t *nxt_bm  = nxt->bm;
+    uint16_t *nxt_indices  = nxt->indices;
+    uint16_t *nxt_tmp      = nxt->tmp;
+    const int N_NXT = PIVCO_BLOCK_SIZE;
+
+    int j = 0;
+    for (; j + 16 <= n; j += 16) {
+        g_pivco_fused_chunks++;
+        /* === scatter side (16 stores into symbols) === */
+        uint8x8_t bits0 = vtst_u8(vdup_n_u8(bm[j >> 3]), vbit_pos);
+        uint8x8_t vals0 = veor_u8(vsym0, vand_u8(vdelta, bits0));
+        uint8x8_t bits1 = vtst_u8(vdup_n_u8(bm[(j >> 3) + 1]), vbit_pos);
+        uint8x8_t vals1 = veor_u8(vsym0, vand_u8(vdelta, bits1));
+        uint16x8_t i0 = vld1q_u16(indices + j);
+        uint16x8_t i1 = vld1q_u16(indices + j + 8);
+        symbols[vgetq_lane_u16(i0, 0)] = vget_lane_u8(vals0, 0);
+        symbols[vgetq_lane_u16(i0, 1)] = vget_lane_u8(vals0, 1);
+        symbols[vgetq_lane_u16(i0, 2)] = vget_lane_u8(vals0, 2);
+        symbols[vgetq_lane_u16(i0, 3)] = vget_lane_u8(vals0, 3);
+        symbols[vgetq_lane_u16(i0, 4)] = vget_lane_u8(vals0, 4);
+        symbols[vgetq_lane_u16(i0, 5)] = vget_lane_u8(vals0, 5);
+        symbols[vgetq_lane_u16(i0, 6)] = vget_lane_u8(vals0, 6);
+        symbols[vgetq_lane_u16(i0, 7)] = vget_lane_u8(vals0, 7);
+        symbols[vgetq_lane_u16(i1, 0)] = vget_lane_u8(vals1, 0);
+        symbols[vgetq_lane_u16(i1, 1)] = vget_lane_u8(vals1, 1);
+        symbols[vgetq_lane_u16(i1, 2)] = vget_lane_u8(vals1, 2);
+        symbols[vgetq_lane_u16(i1, 3)] = vget_lane_u8(vals1, 3);
+        symbols[vgetq_lane_u16(i1, 4)] = vget_lane_u8(vals1, 4);
+        symbols[vgetq_lane_u16(i1, 5)] = vget_lane_u8(vals1, 5);
+        symbols[vgetq_lane_u16(i1, 6)] = vget_lane_u8(vals1, 6);
+        symbols[vgetq_lane_u16(i1, 7)] = vget_lane_u8(vals1, 7);
+
+        /* === partition side (K calls of partition_root_8 inlined) === */
+        if (nxt_j + 8 * PIVCO_LA_K <= N_NXT) {
+            g_pivco_fused_partition_iters++;
+            #pragma GCC unroll 4
+            for (int k = 0; k < PIVCO_LA_K; k++) {
+                uint16x8_t base = vdupq_n_u16((uint16_t)nxt_j);
+                uint8x16_t data = vreinterpretq_u8_u16(vaddq_u16(base, voff));
+                uint8_t mask = nxt_bm[nxt_j >> 3];
+                const uint8_t *tab = compress_tab[mask];
+                uint8x16_t shuf_r = vld1q_u8(tab);
+                uint8x16_t shuf_l = vld1q_u8(tab + 16);
+                vst1q_u8((uint8_t *)(nxt_tmp     + nxt_n_right),
+                          vqtbl1q_u8(data, shuf_r));
+                vst1q_u8((uint8_t *)(nxt_indices + nxt_n_left),
+                          vqtbl1q_u8(data, shuf_l));
+                int nr = compress_popcnt[mask];
+                nxt_n_right += nr;
+                nxt_n_left  += (8 - nr);
+                nxt_j += 8;
+            }
+        }
+    }
+    /* Scatter tail (1..15 leftover) — partition can no longer fuse here. */
+    for (; j + 8 <= n; j += 8) {
+        uint8x8_t bits = vtst_u8(vdup_n_u8(bm[j >> 3]), vbit_pos);
+        uint8x8_t vals = veor_u8(vsym0, vand_u8(vdelta, bits));
+        uint16x8_t idx = vld1q_u16(indices + j);
+        symbols[vgetq_lane_u16(idx, 0)] = vget_lane_u8(vals, 0);
+        symbols[vgetq_lane_u16(idx, 1)] = vget_lane_u8(vals, 1);
+        symbols[vgetq_lane_u16(idx, 2)] = vget_lane_u8(vals, 2);
+        symbols[vgetq_lane_u16(idx, 3)] = vget_lane_u8(vals, 3);
+        symbols[vgetq_lane_u16(idx, 4)] = vget_lane_u8(vals, 4);
+        symbols[vgetq_lane_u16(idx, 5)] = vget_lane_u8(vals, 5);
+        symbols[vgetq_lane_u16(idx, 6)] = vget_lane_u8(vals, 6);
+        symbols[vgetq_lane_u16(idx, 7)] = vget_lane_u8(vals, 7);
+    }
+    for (; j < n; j++) {
+        uint8_t bit = (bm[j >> 3] >> (j & 7)) & 1;
+        symbols[indices[j]] = sym0 ^ ((sym0 ^ sym1) & (uint8_t)(-(int8_t)bit));
+    }
+
+    /* Flush local state back to nxt. */
+    nxt->j        = nxt_j;
+    nxt->n_left   = nxt_n_left;
+    nxt->n_right  = nxt_n_right;
 }
 
 /* ---------- Per-call-site partition loops (interior recursion) ----------
@@ -1019,9 +1135,17 @@ static void decode_node_neon(const pivco_huffman_table_t *table,
         const pivco_tree_node_t *left_child  = &table->tree[node->left];
         const pivco_tree_node_t *right_child = &table->tree[node->right];
         PROF_TIC();
-        scatter_both_leaves(symbols, indices, n, bm,
-                            (uint8_t)left_child->symbol,
-                            (uint8_t)right_child->symbol);
+        if (g_la_writes != NULL) {
+            scatter_both_leaves_fused_root_full(
+                symbols, indices, n, bm,
+                (uint8_t)left_child->symbol,
+                (uint8_t)right_child->symbol,
+                g_la_writes);
+        } else {
+            scatter_both_leaves(symbols, indices, n, bm,
+                                (uint8_t)left_child->symbol,
+                                (uint8_t)right_child->symbol);
+        }
         PROF_TOC(PROF_SCATTER_BOTH_LEAVES, n);
         return;
     }
@@ -1105,13 +1229,18 @@ static inline int partition_root_8(int base, uint8_t mask,
  * — N elements per BLK, no indices array read.  Extracted as named
  * static functions so the profiler can attribute time per call site. */
 
+/* Resumable root_full: starts partitioning at j_start with the given
+ * n_left_start, n_right_start.  Plain decoder calls with all-zero
+ * starts; cross-block fusion calls with values pre-populated by the
+ * previous block's fused scatter kernel. */
 static inline void root_full(int N, const uint8_t *bm,
                               uint16_t *indices, uint16_t *tmp,
+                              int j_start, int n_left_start, int n_right_start,
                               int *n_left_out, int *n_right_out)
 {
     PROF_TIC();
-    int n_left = 0, n_right = 0;
-    int j = 0;
+    int n_left = n_left_start, n_right = n_right_start;
+    int j = j_start;
     for (; j + 16 <= N; j += 16) {
         uint8_t m0 = bm[j >> 3];
         int nr0 = partition_root_8(j, m0,
@@ -1284,35 +1413,69 @@ int pivco_huffman_decode_neon(const uint8_t *in, size_t in_len,
     memset(symbols, prefill_sym, (size_t)N);
 
     int16_t skip_node = table->prefill_node;
-    /* +8 padding on indices: top-level partition_8_left's 16-byte
-     * filler may land at indices[n_left..n_left+8), and n_left can
-     * reach BLK-1 in pathological partitions.  Sizing to BLK+8
-     * keeps the filler in-bounds; its bytes are never read.
-     * 64B alignment keeps the layout deterministic across runs and
-     * avoids cache-set-conflict outliers on synthetic distributions
-     * (uniform / two_sym_*) where the +8 offset alone shifted into
-     * unfortunate associativity. */
-    uint16_t indices[PIVCO_BLOCK_SIZE + 8] __attribute__((aligned(64)));
-    uint16_t tmp[PIVCO_BLOCK_SIZE * 2]      __attribute__((aligned(64)));
+
+    /* Cross-block fusion setup.  The "cur" slot may carry a partial
+     * root-partition result for THIS block, populated by the previous
+     * block's fused scatter kernel.  The "nxt" slot is what THIS
+     * block will populate (if g_pivco_fusion_enabled and the caller
+     * set a non-NULL next-block pointer via pivco_huffman_set_next_neon).
+     *
+     * cur->indices / cur->tmp are stable global buffers (BLK+8 / 2*BLK
+     * 64B-aligned); we use them as the working scratch for THIS
+     * block's recursion.  This unifies the "fusion off / first block"
+     * path with the "fusion on / continuing" path: when no pre-work
+     * exists, cur->j == 0 and root_full just runs from scratch. */
+    pivco_la_neon_t *cur = &g_la[g_la_cur];
+    pivco_la_neon_t *nxt = &g_la[g_la_cur ^ 1];
+
+    /* Always make sure cur has its backing buffers wired.  (init lazily
+     * here so callers don't need an explicit init step.) */
+    if (cur->indices == NULL) cur->indices = g_la_indices_buf[g_la_cur];
+    if (cur->tmp     == NULL) cur->tmp     = g_la_tmp_buf[g_la_cur];
+
+    /* Reset nxt counters and wire its buffers.  bm was set (or cleared)
+     * by the caller via pivco_huffman_set_next_neon. */
+    nxt->j = 0;
+    nxt->n_left = 0;
+    nxt->n_right = 0;
+    nxt->indices = g_la_indices_buf[g_la_cur ^ 1];
+    nxt->tmp     = g_la_tmp_buf[g_la_cur ^ 1];
+
+    /* Enable fusion writes for the recursion only when both ends are
+     * ready: caller set a next bm AND fusion is globally enabled. */
+    g_la_writes = (g_pivco_fusion_enabled && nxt->bm != NULL) ? nxt : NULL;
 
     if (left_leaf && root->left == skip_node) {
-        int n_right = root_half_right(N, bm, tmp);
-        decode_node_neon(table, root->right, tmp, n_right,
-                         symbols, &ptr, tmp + n_right, skip_node);
+        int n_right = root_half_right(N, bm, cur->tmp);
+        decode_node_neon(table, root->right, cur->tmp, n_right,
+                         symbols, &ptr, cur->tmp + n_right, skip_node);
     } else if (right_leaf && root->right == skip_node) {
-        int n_left = root_half_left(N, bm, indices);
-        decode_node_neon(table, root->left, indices, n_left,
-                         symbols, &ptr, tmp, skip_node);
+        int n_left = root_half_left(N, bm, cur->indices);
+        decode_node_neon(table, root->left, cur->indices, n_left,
+                         symbols, &ptr, cur->tmp, skip_node);
     } else {
         int n_left, n_right;
-        root_full(N, bm, indices, tmp, &n_left, &n_right);
-        /* +8 padding gap before right child's tmp - see decode_node_neon
-         * FULL case for rationale. */
-        decode_node_neon(table, root->left, indices, n_left,
-                         symbols, &ptr, tmp + n_right + 8, skip_node);
-        decode_node_neon(table, root->right, tmp, n_right,
-                         symbols, &ptr, tmp + n_right + 8, skip_node);
+        /* Resume root_full from cur's pre-state (zeros for fresh start
+         * or first block; partial values when previous block's fusion
+         * pre-computed some of the partition for us). */
+        root_full(N, bm, cur->indices, cur->tmp,
+                  cur->j, cur->n_left, cur->n_right,
+                  &n_left, &n_right);
+        /* +8 padding gap before right child's tmp. */
+        decode_node_neon(table, root->left, cur->indices, n_left,
+                         symbols, &ptr, cur->tmp + n_right + 8, skip_node);
+        decode_node_neon(table, root->right, cur->tmp, n_right,
+                         symbols, &ptr, cur->tmp + n_right + 8, skip_node);
     }
+
+    /* Done with this block.  Clear our consumed-from cur, then flip:
+     * the slot we just wrote into (nxt) becomes the next call's cur. */
+    cur->bm      = NULL;
+    cur->j       = 0;
+    cur->n_left  = 0;
+    cur->n_right = 0;
+    g_la_writes  = NULL;
+    g_la_cur ^= 1;
 
     *consumed = (size_t)(ptr - in);
     return PIVCO_OK;
@@ -1336,100 +1499,6 @@ void pivco_neon_decode_subtree_(const pivco_huffman_table_t *table,
 {
     decode_node_neon(table, node_id, indices, n,
                      symbols, in_ptr, tmp, skip_node);
-}
-
-/* ---------- Experimental dual-block decode with cross-block lookahead --- */
-
-int pivco_huffman_decode_dual_neon(const uint8_t *in_A, size_t in_len_A,
-                                    const uint8_t *in_B, size_t in_len_B,
-                                    const pivco_huffman_table_t *table,
-                                    uint8_t *symbols_A,
-                                    uint8_t *symbols_B,
-                                    size_t *consumed_A,
-                                    size_t *consumed_B)
-{
-    if (!in_A || !in_B || !table || !symbols_A || !symbols_B
-        || !consumed_A || !consumed_B) return PIVCO_ERR_NULL;
-
-    init_compress_table();
-
-    const int N = PIVCO_BLOCK_SIZE;
-    const pivco_tree_node_t *root = &table->tree[table->tree_root];
-
-    /* Test whether the dual fast path is applicable: root must be an
-     * internal-full node (both children non-leaf, non-skip), tree
-     * not flat-rooted.  Otherwise fall back to two serial calls. */
-    int dual_applicable = 1;
-    if (root->symbol >= 0) dual_applicable = 0;
-    if (table->flat_depth[table->tree_root] >= 2) dual_applicable = 0;
-
-    if (dual_applicable) {
-        const pivco_tree_node_t *L = &table->tree[root->left];
-        const pivco_tree_node_t *R = &table->tree[root->right];
-        if (L->symbol >= 0 || R->symbol >= 0) dual_applicable = 0;
-    }
-
-    if (!dual_applicable) {
-        int rcA = pivco_huffman_decode_neon(in_A, in_len_A, table, symbols_A, consumed_A);
-        int rcB = pivco_huffman_decode_neon(in_B, in_len_B, table, symbols_B, consumed_B);
-        return (rcA != PIVCO_OK) ? rcA : rcB;
-    }
-
-    /* Set up lookahead pointing at block B's root partition. */
-    static __thread uint16_t la_indices[PIVCO_BLOCK_SIZE + 8] __attribute__((aligned(64)));
-    static __thread uint16_t la_tmp[PIVCO_BLOCK_SIZE * 2]      __attribute__((aligned(64)));
-
-    int nbytes = bitmap_bytes(N);
-    pivco_la_neon.active   = 1;
-    pivco_la_neon.j        = 0;
-    pivco_la_neon.N        = N;
-    pivco_la_neon.bm       = in_B;        /* B's root bm starts at in_B */
-    pivco_la_neon.indices  = la_indices;
-    pivco_la_neon.tmp      = la_tmp;
-    pivco_la_neon.n_left   = 0;
-    pivco_la_neon.n_right  = 0;
-
-    /* Decode block A normally; its scatters incidentally advance
-     * B's root partition via the la_advance hook. */
-    int rcA = pivco_huffman_decode_neon(in_A, in_len_A, table, symbols_A, consumed_A);
-    if (rcA != PIVCO_OK) {
-        pivco_la_neon.active = 0;
-        return rcA;
-    }
-
-    /* Finish whatever's left of B's root partition. */
-    pivco_la_neon.active = 0;
-    while (pivco_la_neon.j + 8 <= N) {
-        uint8_t mask = pivco_la_neon.bm[pivco_la_neon.j >> 3];
-        int nr = partition_root_8(pivco_la_neon.j, mask,
-                                   la_indices + pivco_la_neon.n_left,
-                                   la_tmp + pivco_la_neon.n_right);
-        pivco_la_neon.n_right += nr;
-        pivco_la_neon.n_left  += (8 - nr);
-        pivco_la_neon.j += 8;
-    }
-    /* N is multiple of 16 in our default config so no scalar tail
-     * needed.  Sanity assert via no-op for non-multiple-of-8 cases. */
-
-    /* Now decode B without re-running root partition.  Replicate
-     * decode_neon's post-root logic: prefill_sym memset, then recurse
-     * into root's children using the la state. */
-    uint8_t prefill_sym = table->prefill_sym;
-    memset(symbols_B, prefill_sym, (size_t)N);
-
-    const uint8_t *ptr_B = in_B + nbytes;     /* skip past root bm */
-    int16_t skip_node = table->prefill_node;
-    int n_left  = pivco_la_neon.n_left;
-    int n_right = pivco_la_neon.n_right;
-
-    decode_node_neon(table, root->left, la_indices, n_left,
-                     symbols_B, &ptr_B, la_tmp + n_right + 8, skip_node);
-    decode_node_neon(table, root->right, la_tmp, n_right,
-                     symbols_B, &ptr_B, la_tmp + n_right + 8, skip_node);
-
-    *consumed_B = (size_t)(ptr_B - in_B);
-    (void)in_len_B;
-    return PIVCO_OK;
 }
 
 void pivco_neon_encode_subtree_(const pivco_huffman_table_t *table,

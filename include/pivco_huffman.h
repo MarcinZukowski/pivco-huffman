@@ -161,17 +161,24 @@ int pivco_huffman_decode_neon(const uint8_t *in, size_t in_len,
                               const pivco_huffman_table_t *table,
                               uint8_t *symbols, size_t *consumed);
 
-/* Experimental 2-block decode with cross-block partition lookahead.
- * Decodes block A then block B; during A's scatter calls, runs root
- * partition for B in OOO-overlapping fashion.  Falls back to serial
- * decode for cases where B's root isn't an internal-full node. */
-int pivco_huffman_decode_dual_neon(const uint8_t *in_A, size_t in_len_A,
-                                    const uint8_t *in_B, size_t in_len_B,
-                                    const pivco_huffman_table_t *table,
-                                    uint8_t *symbols_A,
-                                    uint8_t *symbols_B,
-                                    size_t *consumed_A,
-                                    size_t *consumed_B);
+/* ---------- Cross-block fusion (experimental) ----------
+ *
+ * Inform the NEON decoder that the next block to decode (after the
+ * current call) starts at `in_next`.  When fusion is enabled and a
+ * next-block hint is set, decode_neon's scatter_both_leaves dispatch
+ * uses a fused kernel that incidentally pre-computes the next block's
+ * root_full partition in the OOO-overlap window of the current block's
+ * scatters.  Pass NULL to clear (e.g. last block in a stream).
+ *
+ * Caller pattern for a stream of blocks:
+ *   g_pivco_fusion_enabled = 1;
+ *   for (each block N) {
+ *       pivco_huffman_set_next_neon(N+1 < last ? in[N+1] : NULL);
+ *       pivco_huffman_decode_neon(in[N], ...);
+ *   }
+ */
+extern int g_pivco_fusion_enabled;
+void pivco_huffman_set_next_neon(const uint8_t *in_next);
 #endif
 
 #ifdef PIVCO_HAS_SSE4

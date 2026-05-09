@@ -1,5 +1,6 @@
-/* Verify correctness of pivco_huffman_decode_dual_neon vs serial
- * decode, then measure throughput on a chosen distribution. */
+/* Verify correctness of cross-block fusion (g_pivco_fusion_enabled +
+ * pivco_huffman_set_next_neon) vs plain serial decode, then measure
+ * throughput on a chosen distribution. */
 
 #include "pivco_huffman.h"
 #include <stdio.h>
@@ -20,6 +21,34 @@ static double now_ns(void) {
     return (double)ts.tv_sec * 1e9 + (double)ts.tv_nsec;
 }
 
+/* Decode a 2-block stream serially (plain decode, no fusion). */
+static void decode_serial(const uint8_t *in_A, size_t len_A,
+                           const uint8_t *in_B, size_t len_B,
+                           const pivco_huffman_table_t *t,
+                           uint8_t *sA, uint8_t *sB,
+                           size_t *cA, size_t *cB)
+{
+    g_pivco_fusion_enabled = 0;
+    pivco_huffman_set_next_neon(NULL);
+    pivco_huffman_decode_neon(in_A, len_A, t, sA, cA);
+    pivco_huffman_decode_neon(in_B, len_B, t, sB, cB);
+}
+
+/* Decode a 2-block stream with fusion enabled. */
+static void decode_fused(const uint8_t *in_A, size_t len_A,
+                          const uint8_t *in_B, size_t len_B,
+                          const pivco_huffman_table_t *t,
+                          uint8_t *sA, uint8_t *sB,
+                          size_t *cA, size_t *cB)
+{
+    g_pivco_fusion_enabled = 1;
+    pivco_huffman_set_next_neon(in_B);   /* A's scatters fuse into B's root partition */
+    pivco_huffman_decode_neon(in_A, len_A, t, sA, cA);
+    pivco_huffman_set_next_neon(NULL);   /* B is the last block, no fusion target */
+    pivco_huffman_decode_neon(in_B, len_B, t, sB, cB);
+    g_pivco_fusion_enabled = 0;
+}
+
 int main(int argc, char **argv) {
     bench_init();
     const char *dist = (argc > 1) ? argv[1] : "prose_pride";
@@ -34,13 +63,10 @@ int main(int argc, char **argv) {
     pivco_huffman_table_t table;
     pivco_huffman_build_table(bench_dist_freq(dist_idx), &table);
 
-    /* Generate two blocks of source symbols */
-    uint8_t sym_A[PIVCO_BLOCK_SIZE];
-    uint8_t sym_B[PIVCO_BLOCK_SIZE];
+    uint8_t sym_A[PIVCO_BLOCK_SIZE], sym_B[PIVCO_BLOCK_SIZE];
     bench_generate_symbols(dist_idx, sym_A, PIVCO_BLOCK_SIZE, 0xAAAA1234ULL);
     bench_generate_symbols(dist_idx, sym_B, PIVCO_BLOCK_SIZE, 0xBBBB5678ULL);
 
-    /* Encode each block */
     uint8_t enc_A[PIVCO_MAX_ENCODED_SIZE];
     uint8_t enc_B[PIVCO_MAX_ENCODED_SIZE];
     size_t  elen_A, elen_B;
@@ -48,75 +74,81 @@ int main(int argc, char **argv) {
     pivco_huffman_encode_neon(sym_B, &table, enc_B, &elen_B);
     printf("encoded A: %zu bytes; B: %zu bytes (dist=%s)\n", elen_A, elen_B, dist);
 
-    /* Decode serial */
-    uint8_t dec_A_serial[PIVCO_BLOCK_SIZE];
-    uint8_t dec_B_serial[PIVCO_BLOCK_SIZE];
+    /* Correctness check: serial first */
+    uint8_t dec_A_serial[PIVCO_BLOCK_SIZE], dec_B_serial[PIVCO_BLOCK_SIZE];
     size_t cA, cB;
-    pivco_huffman_decode_neon(enc_A, elen_A, &table, dec_A_serial, &cA);
-    pivco_huffman_decode_neon(enc_B, elen_B, &table, dec_B_serial, &cB);
+    decode_serial(enc_A, elen_A, enc_B, elen_B, &table,
+                  dec_A_serial, dec_B_serial, &cA, &cB);
     if (memcmp(sym_A, dec_A_serial, PIVCO_BLOCK_SIZE) != 0
         || memcmp(sym_B, dec_B_serial, PIVCO_BLOCK_SIZE) != 0) {
-        fprintf(stderr, "SERIAL DECODE: roundtrip mismatch (this is a baseline bug, not dual)\n");
+        fprintf(stderr, "SERIAL DECODE: roundtrip mismatch (baseline bug)\n");
         return 1;
     }
 
-    /* Decode dual */
-    uint8_t dec_A_dual[PIVCO_BLOCK_SIZE];
-    uint8_t dec_B_dual[PIVCO_BLOCK_SIZE];
-    size_t cAd, cBd;
-    pivco_huffman_decode_dual_neon(enc_A, elen_A, enc_B, elen_B, &table,
-                                    dec_A_dual, dec_B_dual, &cAd, &cBd);
-    if (memcmp(sym_A, dec_A_dual, PIVCO_BLOCK_SIZE) != 0) {
-        fprintf(stderr, "DUAL DECODE: A mismatch\n");
-        for (int i = 0; i < 32; i++)
-            fprintf(stderr, "  pos %d: got %d, expected %d\n",
-                    i, dec_A_dual[i], sym_A[i]);
+    /* Now fused */
+    uint8_t dec_A_fused[PIVCO_BLOCK_SIZE], dec_B_fused[PIVCO_BLOCK_SIZE];
+    size_t cAf, cBf;
+    decode_fused(enc_A, elen_A, enc_B, elen_B, &table,
+                 dec_A_fused, dec_B_fused, &cAf, &cBf);
+    if (memcmp(sym_A, dec_A_fused, PIVCO_BLOCK_SIZE) != 0) {
+        fprintf(stderr, "FUSED DECODE: A mismatch\n");
+        for (int i = 0; i < 32; i++) {
+            if (dec_A_fused[i] != sym_A[i])
+                fprintf(stderr, "  pos %d: got %d, expected %d\n",
+                        i, dec_A_fused[i], sym_A[i]);
+        }
         return 2;
     }
-    if (memcmp(sym_B, dec_B_dual, PIVCO_BLOCK_SIZE) != 0) {
-        fprintf(stderr, "DUAL DECODE: B mismatch\n");
+    if (memcmp(sym_B, dec_B_fused, PIVCO_BLOCK_SIZE) != 0) {
+        fprintf(stderr, "FUSED DECODE: B mismatch\n");
         for (int i = 0; i < 32; i++) {
-            if (dec_B_dual[i] != sym_B[i])
+            if (dec_B_fused[i] != sym_B[i])
                 fprintf(stderr, "  pos %d: got %d, expected %d\n",
-                        i, dec_B_dual[i], sym_B[i]);
+                        i, dec_B_fused[i], sym_B[i]);
         }
         return 3;
     }
-    printf("correctness PASS (both A and B match serial decode)\n");
+    extern unsigned long g_pivco_fused_calls;
+    extern unsigned long g_pivco_fused_chunks;
+    extern unsigned long g_pivco_fused_partition_iters;
+    g_pivco_fused_calls = g_pivco_fused_chunks = g_pivco_fused_partition_iters = 0;
+    decode_fused(enc_A, elen_A, enc_B, elen_B, &table,
+                 dec_A_fused, dec_B_fused, &cAf, &cBf);
+    printf("correctness PASS; fused diagnostic for one decode_fused call:\n");
+    printf("  fused_calls=%lu  fused_chunks=%lu  fused_partition_iters=%lu\n",
+           g_pivco_fused_calls, g_pivco_fused_chunks, g_pivco_fused_partition_iters);
 
     /* Warmup */
     for (int i = 0; i < 1000; i++) {
-        pivco_huffman_decode_neon(enc_A, elen_A, &table, dec_A_serial, &cA);
-        pivco_huffman_decode_neon(enc_B, elen_B, &table, dec_B_serial, &cB);
+        decode_serial(enc_A, elen_A, enc_B, elen_B, &table,
+                      dec_A_serial, dec_B_serial, &cA, &cB);
     }
 
     /* Time serial */
     double t0 = now_ns();
     for (int i = 0; i < reps; i++) {
-        pivco_huffman_decode_neon(enc_A, elen_A, &table, dec_A_serial, &cA);
-        pivco_huffman_decode_neon(enc_B, elen_B, &table, dec_B_serial, &cB);
+        decode_serial(enc_A, elen_A, enc_B, elen_B, &table,
+                      dec_A_serial, dec_B_serial, &cA, &cB);
     }
     double t_serial = now_ns() - t0;
 
-    /* Time dual */
+    /* Time fused */
     t0 = now_ns();
     for (int i = 0; i < reps; i++) {
-        pivco_huffman_decode_dual_neon(enc_A, elen_A, enc_B, elen_B, &table,
-                                        dec_A_dual, dec_B_dual, &cAd, &cBd);
+        decode_fused(enc_A, elen_A, enc_B, elen_B, &table,
+                     dec_A_fused, dec_B_fused, &cAf, &cBf);
     }
-    double t_dual = now_ns() - t0;
+    double t_fused = now_ns() - t0;
 
-    double ns_per_pair_serial = t_serial / reps;
-    double ns_per_pair_dual   = t_dual / reps;
-    double pct = 100.0 * (ns_per_pair_serial - ns_per_pair_dual) / ns_per_pair_serial;
+    double ns_serial = t_serial / reps;
+    double ns_fused  = t_fused  / reps;
+    double pct = 100.0 * (ns_serial - ns_fused) / ns_serial;
 
-    printf("dist=%s reps=%d  PIVCO_LA_K not visible from here\n", dist, reps);
-    printf("  serial:  %.1f ns / 2-block-pair\n", ns_per_pair_serial);
-    printf("  dual  :  %.1f ns / 2-block-pair\n", ns_per_pair_dual);
-    printf("  delta :  %+.2f%% (positive = dual faster)\n", pct);
-    printf("  M/s serial = %.1f, dual = %.1f\n",
-           2.0 * PIVCO_BLOCK_SIZE / ns_per_pair_serial * 1000.0,
-           2.0 * PIVCO_BLOCK_SIZE / ns_per_pair_dual * 1000.0);
-
+    printf("dist=%s reps=%d\n", dist, reps);
+    printf("  serial:  %.1f ns / 2-block-pair    (%.1f M/s)\n",
+           ns_serial, 2.0 * PIVCO_BLOCK_SIZE / ns_serial * 1000.0);
+    printf("  fused :  %.1f ns / 2-block-pair    (%.1f M/s)\n",
+           ns_fused, 2.0 * PIVCO_BLOCK_SIZE / ns_fused * 1000.0);
+    printf("  delta :  %+.2f%% (positive = fused faster)\n", pct);
     return 0;
 }
