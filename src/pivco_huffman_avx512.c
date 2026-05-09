@@ -753,17 +753,20 @@ static inline void node_full_avx512(uint16_t *indices, int n,
         n_right += nr;
         n_left  += (32 - nr);
     }
-    /* Scalar tail for 1..31 leftover elements.  An earlier attempt
-     * (b136b96) used a masked partition_32 here for a putative +20-40%
-     * gain on real text — but cross-validation against the scalar
-     * decoder revealed the masked tail produces wrong output on some
-     * distributions (e.g. prose_pride at position 0).  test_roundtrip
-     * never directly exercised decode_avx512, so the bug went unnoticed
-     * for a day.  Reverting to scalar tail until the masked variant is
-     * understood. */
-    for (; j < n; j++) {
-        if (bitmap_get(bm, j)) tmp[n_right++] = indices[j];
-        else                   indices[n_left++] = indices[j];
+    /* Masked vector tail (1..31 leftover elements).  Bug from b136b96
+     * was the same indices/tmp aliasing pattern as the NEON case (see
+     * pivco_huffman_neon.c for full diagnosis).  Fix: caller passes
+     * right child's tmp at tmp+n_right+32 (= 1 vector wide of padding)
+     * so partition_32's filler bytes harmlessly land in the gap. */
+    if (j < n) {
+        int rem = n - j;
+        uint32_t mask = 0;
+        memcpy(&mask, bm + (j >> 3), (size_t)bitmap_bytes(rem));
+        mask &= (1u << rem) - 1;
+        int nr = partition_32(indices + j, rem, (__mmask32)mask,
+                              indices + n_left, tmp + n_right);
+        n_right += nr;
+        n_left  += (rem - nr);
     }
     *n_left_out  = n_left;
     *n_right_out = n_right;
@@ -908,10 +911,13 @@ static void decode_node_avx512(const pivco_huffman_table_t *table,
         *in_ptr += nbytes;
         int n_left, n_right;
         node_full_avx512(indices, n, bm, tmp, &n_left, &n_right);
+        /* +32 padding before right child's tmp - one full vector
+         * stride so partition_32's filler harmlessly lands in the gap.
+         * See decode_node_neon for full rationale. */
         decode_node_avx512(table, node->left, indices, n_left,
-                            symbols, in_ptr, tmp + n_right, skip_node);
+                            symbols, in_ptr, tmp + n_right + 32, skip_node);
         decode_node_avx512(table, node->right, tmp, n_right,
-                            symbols, in_ptr, tmp + n_right, skip_node);
+                            symbols, in_ptr, tmp + n_right + 32, skip_node);
         return;
     }
     }
@@ -958,8 +964,10 @@ int pivco_huffman_decode_avx512(const uint8_t *in, size_t in_len,
     int16_t skip_node = table->prefill_node;
     memset(symbols, table->prefill_sym, (size_t)N);
 
-    /* Partition at root — skip identity array init */
-    uint16_t indices[PIVCO_BLOCK_SIZE];
+    /* Partition at root — skip identity array init.
+     * +32 padding on indices to absorb partition_32's 64-byte filler;
+     * see decode_node_neon comment. */
+    uint16_t indices[PIVCO_BLOCK_SIZE + 32];
     uint16_t tmp[PIVCO_BLOCK_SIZE * 2];
     int n_left = 0, n_right = 0;
 
@@ -979,10 +987,11 @@ int pivco_huffman_decode_avx512(const uint8_t *in, size_t in_len,
         PROF_TOC(PROF_ROOT_FULL, N);
     }
 
+    /* +32 padding before right child's tmp - see decode_node_neon. */
     decode_node_avx512(table, root->left, indices, n_left,
-                        symbols, &ptr, tmp + n_right, skip_node);
+                        symbols, &ptr, tmp + n_right + 32, skip_node);
     decode_node_avx512(table, root->right, tmp, n_right,
-                        symbols, &ptr, tmp + n_right, skip_node);
+                        symbols, &ptr, tmp + n_right + 32, skip_node);
 
     *consumed = (size_t)(ptr - in);
     return PIVCO_OK;

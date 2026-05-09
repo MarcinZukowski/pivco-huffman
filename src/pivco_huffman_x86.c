@@ -630,17 +630,24 @@ static void decode_node_x86(const pivco_huffman_table_t *table,
             n_right += nr;
             n_left += (8 - nr);
         }
-        /* Scalar tail (see comment above on revert). */
-        for (; j < n; j++) {
-            if (bitmap_get(bm, j)) tmp[n_right++] = indices[j];
-            else                   indices[n_left++] = indices[j];
+        /* Masked vector tail.  partition_8_sse_left's filler bytes
+         * land in 8-element padding gap; right-child tmp passed at
+         * tmp+n_right+8 below.  See pivco_huffman_neon.c for the
+         * full rationale. */
+        if (j < n) {
+            int rem = n - j;
+            uint8_t valid = (uint8_t)((1u << rem) - 1);
+            uint8_t mask_r = bm[j >> 3] & valid;
+            uint8_t mask_l = bm[j >> 3] | (uint8_t)~valid;
+            n_right += partition_8_sse_right(indices + j, mask_r, tmp + n_right);
+            n_left  += partition_8_sse_left (indices + j, mask_l, indices + n_left);
         }
 
-        /* Recurse into both; child's entry handles leaf/skip_node. */
+        /* +8 padding before right child's tmp - see decode_node_neon. */
         decode_node_x86(table, node->left, indices, n_left,
-                         symbols, in_ptr, tmp + n_right, skip_node);
+                         symbols, in_ptr, tmp + n_right + 8, skip_node);
         decode_node_x86(table, node->right, tmp, n_right,
-                         symbols, in_ptr, tmp + n_right, skip_node);
+                         symbols, in_ptr, tmp + n_right + 8, skip_node);
     }
 }
 
@@ -724,8 +731,10 @@ int pivco_huffman_decode_x86(const uint8_t *in, size_t in_len,
     int16_t skip_node = table->prefill_node;
     memset(symbols, prefill_sym, (size_t)N);
 
-    /* Partition at root — generate identity indices in-place */
-    uint16_t indices[PIVCO_BLOCK_SIZE];
+    /* Partition at root — generate identity indices in-place.
+     * +8 padding on indices to absorb partition_8_sse_left's 16-byte
+     * filler; see decode_node_neon comment. */
+    uint16_t indices[PIVCO_BLOCK_SIZE + 8];
     uint16_t tmp[PIVCO_BLOCK_SIZE * 2];
 
     if (left_leaf && root->left == skip_node) {
@@ -762,11 +771,12 @@ int pivco_huffman_decode_x86(const uint8_t *in, size_t in_len,
             n_left += (8 - nr);
         }
 
-        /* Recurse into both; child's entry handles leaf/skip_node. */
+        /* Recurse into both; child's entry handles leaf/skip_node.
+         * +8 padding before right child's tmp - see decode_node_neon. */
         decode_node_x86(table, root->left, indices, n_left,
-                         symbols, &ptr, tmp + n_right, skip_node);
+                         symbols, &ptr, tmp + n_right + 8, skip_node);
         decode_node_x86(table, root->right, tmp, n_right,
-                         symbols, &ptr, tmp + n_right, skip_node);
+                         symbols, &ptr, tmp + n_right + 8, skip_node);
     }
 
     *consumed = (size_t)(ptr - in);

@@ -803,30 +803,25 @@ static inline void node_full(uint16_t *indices, int n,
      * partition_8_right -> tmp (separate), partition_8_left -> indices
      * in-place at n_left <= j.  Verified by the new test_roundtrip
      * coverage (4f2fd5c) which exercises every backend directly. */
-    /* Scalar tail.  An e9a668f attempt at masked vector partition_8_right
-     * + partition_8_left with the bm | ~valid filler trick was reverted
-     * in 1399cee due to wrong output on real distributions.
+    /* Vector tail (1..7 elements).  partition_8_left's 16-byte store
+     * includes 8-nl filler zeros past indices+n_left+nl.  The previous
+     * bug (e9a668f / 1399cee): in RIGHT recursion where tmp = indices
+     * + parent_n with no padding, the filler corrupted the right child's
+     * just-written tmp data.
      *
-     * Root cause (diagnosed 2026-05-08): partition_8_left's 16-byte
-     * vector store includes 8-nl filler zeros past the valid left side.
-     * In RIGHT recursion (decode_node passes tmp = indices + parent_n,
-     * so indices and tmp are adjacent in buf2), if n_left+8 > parent_n
-     * the filler bytes overwrite the start of the right child's tmp
-     * area where partition_8_right just wrote valid right-side data.
-     *
-     * Two fixes evaluated, neither shipped:
-     *   - all-vector with LEFT-via-scratch+memcpy:
-     *     M4 -0.5%, Graviton +1.1% real-text avg.  Memcpy overhead
-     *     eats most of the win on M4.
-     *   - hybrid right-vector + left-scalar:
-     *     M4 -4.2%, Graviton +1.7%.  Mixing vector and scalar tail
-     *     blows up M4 register allocation.
-     *
-     * Net: not worth shipping for a few-percent Graviton win that
-     * costs M4.  See IDEAS.md "Full-tail masked partition" entry. */
-    for (; j < n; j++) {
-        if (bitmap_get(bm, j)) tmp[n_right++] = indices[j];
-        else                   indices[n_left++] = indices[j];
+     * Fix: caller (decode_node_neon at FULL case) passes the right
+     * child's tmp at indices + parent_n + 8 instead of + parent_n,
+     * leaving 8 elements of padding between right's indices range and
+     * its tmp.  Since n_left + 8 <= parent_n + 8, the filler now
+     * harmlessly lands in the padding zone.  See decode_node_neon
+     * comment at the FULL case + the IDEAS.md entry. */
+    if (j < n) {
+        int rem = n - j;
+        uint8_t valid = (uint8_t)((1u << rem) - 1);
+        uint8_t mask_r = bm[j >> 3] & valid;
+        uint8_t mask_l = bm[j >> 3] | (uint8_t)~valid;
+        n_right += partition_8_right(indices + j, mask_r, tmp + n_right);
+        n_left  += partition_8_left (indices + j, mask_l, indices + n_left);
     }
     *n_left_out  = n_left;
     *n_right_out = n_right;
@@ -998,10 +993,17 @@ static void decode_node_neon(const pivco_huffman_table_t *table,
         *in_ptr += nbytes;
         int n_left, n_right;
         node_full(indices, n, bm, tmp, &n_left, &n_right);
+        /* The right child's indices alias parent's tmp[0..n_right).
+         * Pass its scratch at tmp + n_right + 8 (not + n_right) so
+         * the right child's node_full tail can use a masked vector
+         * partition_8_left whose 8-byte filler harmlessly lands in
+         * the 8-element padding gap between its indices and tmp.
+         * Buf2 (tmp) is sized 2*BLK so the cumulative padding offset
+         * across deep right recursion has plenty of room. */
         decode_node_neon(table, node->left, indices, n_left,
-                         symbols, in_ptr, tmp + n_right, skip_node);
+                         symbols, in_ptr, tmp + n_right + 8, skip_node);
         decode_node_neon(table, node->right, tmp, n_right,
-                         symbols, in_ptr, tmp + n_right, skip_node);
+                         symbols, in_ptr, tmp + n_right + 8, skip_node);
         return;
     }
     }
@@ -1202,7 +1204,11 @@ int pivco_huffman_decode_neon(const uint8_t *in, size_t in_len,
     memset(symbols, prefill_sym, (size_t)N);
 
     int16_t skip_node = table->prefill_node;
-    uint16_t indices[PIVCO_BLOCK_SIZE];
+    /* +8 padding on indices: top-level partition_8_left's 16-byte
+     * filler may land at indices[n_left..n_left+8), and n_left can
+     * reach BLK-1 in pathological partitions.  Sizing to BLK+8
+     * keeps the filler in-bounds; its bytes are never read. */
+    uint16_t indices[PIVCO_BLOCK_SIZE + 8];
     uint16_t tmp[PIVCO_BLOCK_SIZE * 2];
 
     if (left_leaf && root->left == skip_node) {
@@ -1216,10 +1222,12 @@ int pivco_huffman_decode_neon(const uint8_t *in, size_t in_len,
     } else {
         int n_left, n_right;
         root_full(N, bm, indices, tmp, &n_left, &n_right);
+        /* +8 padding gap before right child's tmp - see decode_node_neon
+         * FULL case for rationale. */
         decode_node_neon(table, root->left, indices, n_left,
-                         symbols, &ptr, tmp + n_right, skip_node);
+                         symbols, &ptr, tmp + n_right + 8, skip_node);
         decode_node_neon(table, root->right, tmp, n_right,
-                         symbols, &ptr, tmp + n_right, skip_node);
+                         symbols, &ptr, tmp + n_right + 8, skip_node);
     }
 
     *consumed = (size_t)(ptr - in);

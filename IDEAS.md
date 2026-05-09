@@ -321,14 +321,62 @@ misprediction (NEON) and store-buffer interference (scalar).  The
 current code keeps partition and scatter as separate phases
 deliberately.
 
-## Full-tail masked partition — root cause found, not worth shipping (2026-05-08)
+## ~~Full-tail masked partition~~ — SHIPPED (2026-05-08, third attempt)
 
-The original masked vector tail attempts (b136b96 AVX-512, e9a668f
-NEON+SSE) shipped corrupt output and were blanket-reverted in 1399cee
-without a root-cause diagnosis.  Half-tail variants (`node_half_*`) were
-since proven safe and re-enabled in 771c3ce.  This entry records the
-analysis of why the FULL-tail variant was actually wrong, and why the
-correct fix doesn't earn its keep.
+After `771c3ce` re-enabled the half-tail masked variants, the full-tail
+remained scalar with two failed retry attempts (scratch+memcpy, hybrid).
+Then a one-line user observation — *"can't we just use slightly
+overallocated buffers?"* — pointed at the actual fix.
+
+**The bug** (rediscovered): in RIGHT recursion `decode_node` passes
+`tmp = indices + parent_n` so indices and tmp share `buf2` with no gap.
+`partition_8_left`'s 16-byte vector store includes `8 - nl` filler
+zeros past the valid left side; if `n_left + 8 > parent_n` the filler
+lands at `tmp[0..)` and overwrites the right-side data
+`partition_8_right` just wrote.
+
+**The fix:** caller passes the right child's tmp at `tmp + n_right + 8`
+(NEON/SSE) or `+ 32` (AVX-512) — one full vector wide of padding —
+between right child's indices and tmp.  Filler now harmlessly lands in
+the gap.  Indices buffer also bumped to `BLK + 8` (or `+ 32`) at the
+entry point to absorb the top-level partition_8_left's filler.
+
+Padding propagates additively per-RIGHT-recursion-level, so worst-case
+total padding is `max_depth × 8 = 16 × 8 = 128` elements (NEON/SSE) or
+`128` elements (AVX-512 with × 32 ≈ 512).  `tmp` is sized `2 × BLK`
+which has plenty of headroom.
+
+**End-to-end pivco_n change** (10-rep bench, vs `771c3ce`-state baseline):
+
+| host                | real-text avg | all-dist avg | best                    | worst                  |
+|---------------------|--------------:|-------------:|-------------------------|------------------------|
+| M4 NEON             |        +1.68% |       +2.01% | +4.7% (sparse_16)       | −1.7% (sparse_4)       |
+| Graviton 4 NEON     |        +3.32% |       +1.56% | +9.2% (sparse_16)       | −14.5% (uniform)       |
+| Zen 3 SSE           |        +7.31% |       +4.12% | +9.6% (bell_s30)        | −0.6% (two_sym_90/10)  |
+| Xeon SR AVX-512     |       **+23.17%** |   **+12.37%** | +38.3% (bell_s30)       | −7.7% (two_sym_90/10)  |
+| Zen 5 AVX-512       |       **+24.39%** |   **+15.66%** | +52.1% (sparse_16)      | −1.6% (proba80)        |
+
+The AVX-512 wins are huge because `partition_32` processes 32 elements
+at once, so masking 1..31 leftover-element tails saves much more wall
+than scalar conditional stores.  Validates the original b136b96
+"+20-40% AVX-512" claim that turned out to be on incorrect output —
+the gain was real, the kernel just needed the right calling convention.
+
+A few negative outliers (Graviton uniform −14.5%, Xeon SR
+two_sym_90/10 −7.7%) probably reflect cache-line layout shifts from
+the buffer offsets and are workload-specific.  Net is overwhelmingly
+positive.
+
+Verified by:
+- `pivco_huffman_tests` (4f2fd5c added per-backend coverage)
+- bench scalar-reference cksum (da3c9fd) — all 5 hosts report 0
+  errors after the fix.
+
+The earlier "parked" entry below is preserved as the diagnostic
+trail; would-be re-experimenters can read it to understand why the
+naive masked tail was wrong without padding.
+
+### Diagnostic trail (preserved for reference)
 
 **The bug.** In `decode_node_neon`'s RIGHT recursion, the caller passes
 `tmp = indices + parent_n` so that `indices` and `tmp` are *adjacent
