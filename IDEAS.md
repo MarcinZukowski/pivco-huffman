@@ -321,6 +321,49 @@ misprediction (NEON) and store-buffer interference (scalar).  The
 current code keeps partition and scatter as separate phases
 deliberately.
 
+## Relaxed / near-flat subtree detection — discarded (2026-05-09)
+
+Considered adding "relaxed" flat-subtree detection where a subtree is
+treated as flat-at-depth-D even when a few leaves are at depth D-1
+or D+1.  Two flavours, both bad:
+
+A) **Tree-shape modification.** Force more subtrees to be flat by
+   choosing non-Huffman code lengths.  Directly hurts compression
+   (Σ freq×len no longer optimal).  Existing
+   `pivco_huffman_build_table` already does the *only* compression-
+   neutral version: rearrange the tree shape while preserving the
+   code-length multiset.  Going further means worse compression.
+
+B) **Almost-flat detection on optimal tree.**  Codes preserved but
+   decoder needs to escape from the flat fast path on outlier codes
+   (codes that "should have ended" at a shallower depth).  Requires:
+   - Per-code outlier marker bit in the bitstream → compression loss
+     in format overhead
+   - Per-element conditional in the flat decode hot loop → kills
+     scatter throughput (we measured this is store-port-saturated;
+     adding a branch per elem regresses badly)
+   - Format change touching encoder + decoder
+
+The well-optimised recursive path already handles non-flat subtrees
+just fine; this would add complexity for unclear win at best, real
+loss otherwise.  Discarded.
+
+## AVX-512 byte-scatter (vpscatterdd / vpermb-based) — open question (2026-05-09)
+
+Currently scatter on AVX-512 falls back to per-lane SSE-style
+`_mm_extract_epi16` + byte stores (see `scatter_write_avx512`).
+AVX-512 has true scatter instructions (`vpscatterdd` etc.) but they
+operate on 32-bit lanes, not bytes.  Possible alternatives:
+
+- Pack 4 bytes per 32-bit lane, use vpscatterdd to scatter 16 dwords
+  at once.  But the destinations are scattered byte-positions in
+  symbols[], not aligned dword-positions.  Doesn't fit naturally.
+- vpermb-based gather-then-store: not really a scatter pattern.
+
+Verdict: probably no easy AVX-512 byte-scatter primitive that beats
+the current SSE-style extract.  But worth a focused microbench to
+confirm before committing more time.  Park as low-priority probe.
+
 ## ~~Full-tail masked partition~~ — SHIPPED (2026-05-08, third attempt)
 
 After `771c3ce` re-enabled the half-tail masked variants, the full-tail
