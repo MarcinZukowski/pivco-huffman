@@ -321,6 +321,66 @@ misprediction (NEON) and store-buffer interference (scalar).  The
 current code keeps partition and scatter as separate phases
 deliberately.
 
+## Full-tail masked partition — root cause found, not worth shipping (2026-05-08)
+
+The original masked vector tail attempts (b136b96 AVX-512, e9a668f
+NEON+SSE) shipped corrupt output and were blanket-reverted in 1399cee
+without a root-cause diagnosis.  Half-tail variants (`node_half_*`) were
+since proven safe and re-enabled in 771c3ce.  This entry records the
+analysis of why the FULL-tail variant was actually wrong, and why the
+correct fix doesn't earn its keep.
+
+**The bug.** In `decode_node_neon`'s RIGHT recursion, the caller passes
+`tmp = indices + parent_n` so that `indices` and `tmp` are *adjacent
+inside the same buf2 scratch*.  When the right recursion's own
+`node_full` reaches its tail, the masked `partition_8_left` stores 16
+bytes (= 8 uint16) to `indices + n_left`, including `8 - nl` zero filler
+bytes past the valid left-side range.  If `n_left + 8 > parent_n`, the
+filler ZEROS land at `indices + parent_n` onwards, which is `tmp[0..]` —
+exactly where `partition_8_right` just wrote the valid right-side data.
+So the right side gets clobbered.  Algebraically the overlap fires when
+`n_right_main < (8 - rem) / 2`, i.e. when the main-loop produced few
+right elements before the tail.  Symmetric analysis on the AVX-512 path
+explains why proba50 / bell_* / prose_pride / html_wiki failed on every
+backend.
+
+**Fixes evaluated, none shipped.**
+
+1. **All-vector with LEFT through scratch + sized memcpy** (writes only
+   the `nl` valid uint16_t to `indices+n_left`, never the filler):
+   correct on every host.  Bench delta on 10-rep:
+       M4         real-text avg  −0.48%   all-dist  −0.35%
+       Graviton 4 real-text avg  +1.13%   all-dist  +1.13%
+   Memcpy overhead absorbs most of the M4 win.
+
+2. **Hybrid: vector RIGHT + scalar LEFT** (`partition_8_right` is safe
+   because its filler lands in the right child's own tmp area which gets
+   overwritten or never read; LEFT stays scalar to dodge the indices-
+   vs-tmp overlap):
+       M4         real-text avg  −4.18%   all-dist  −1.78%
+       Graviton 4 real-text avg  +1.65%   all-dist  +0.41%
+   Mixing scalar and vector in the tail blows up M4 register allocation.
+
+A few-percent Graviton win costing M4 isn't worth shipping behind a
+single code path.  Per-uarch dispatch could fix it but at code-cost
+disproportionate to the absolute throughput gain (the half-tail is
+already only ~5% of decode wall on real text, and the full-tail is even
+smaller).
+
+If we ever:
+- Add a tiered backend with explicit per-arch fast paths (pivco_n_apple
+  vs pivco_n_neoverse), OR
+- Find a way to do the LEFT vector store WITHOUT writing filler bytes
+  past `indices+n_left+nl` (NEON has no native masked store; could use
+  load-blend-store or per-lane `vst1q_lane` but those benchmark slower
+  on the few-elem hot path) —
+
+then this is back on the table.  Reproducer logic is simply re-applying
+the e9a668f-style masked tail to `node_full`; correctness is verified
+by `pivco_huffman_tests` (4f2fd5c added the missing AVX-512/SSE
+coverage).  The bench's scalar-reference cksum (da3c9fd) catches the
+overlap bug immediately.
+
 ## Cross-platform partition+scatter fusion microbench — parked (2026-05-08)
 
 Built a 6-platform microbench sweep (`extras/bench_micro_{sse,avx512}_cnt.cpp`

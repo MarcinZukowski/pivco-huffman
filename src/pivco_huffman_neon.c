@@ -795,13 +795,35 @@ static inline void node_full(uint16_t *indices, int n,
         n_right += nr;
         n_left  += (8 - nr);
     }
-    /* Scalar tail for 1..7 leftover elements.  An earlier attempt
-     * (e9a668f) used two masked TBL calls (mask_r/mask_l filler trick)
-     * for a putative +2-7% gain on real text — but cross-validation
-     * against the scalar decoder revealed wrong output on many
-     * distributions (proba50, bell_*, zipfian, prose_pride, ...).
-     * test_roundtrip never exercised the code paths the bench hits.
-     * Reverting to scalar tail until the masked variant is understood. */
+    /* Vector tail (1..7 elements) using two separate half-partition
+     * calls.  Earlier attempt (e9a668f) used the same mask_r/mask_l
+     * trick but with the combined partition_8; revisited here as
+     * partition_8_right + partition_8_left after node_half_{right,left}
+     * proved the trick safe.  Each call only writes to ONE buffer:
+     * partition_8_right -> tmp (separate), partition_8_left -> indices
+     * in-place at n_left <= j.  Verified by the new test_roundtrip
+     * coverage (4f2fd5c) which exercises every backend directly. */
+    /* Scalar tail.  An e9a668f attempt at masked vector partition_8_right
+     * + partition_8_left with the bm | ~valid filler trick was reverted
+     * in 1399cee due to wrong output on real distributions.
+     *
+     * Root cause (diagnosed 2026-05-08): partition_8_left's 16-byte
+     * vector store includes 8-nl filler zeros past the valid left side.
+     * In RIGHT recursion (decode_node passes tmp = indices + parent_n,
+     * so indices and tmp are adjacent in buf2), if n_left+8 > parent_n
+     * the filler bytes overwrite the start of the right child's tmp
+     * area where partition_8_right just wrote valid right-side data.
+     *
+     * Two fixes evaluated, neither shipped:
+     *   - all-vector with LEFT-via-scratch+memcpy:
+     *     M4 -0.5%, Graviton +1.1% real-text avg.  Memcpy overhead
+     *     eats most of the win on M4.
+     *   - hybrid right-vector + left-scalar:
+     *     M4 -4.2%, Graviton +1.7%.  Mixing vector and scalar tail
+     *     blows up M4 register allocation.
+     *
+     * Net: not worth shipping for a few-percent Graviton win that
+     * costs M4.  See IDEAS.md "Full-tail masked partition" entry. */
     for (; j < n; j++) {
         if (bitmap_get(bm, j)) tmp[n_right++] = indices[j];
         else                   indices[n_left++] = indices[j];
