@@ -213,6 +213,14 @@ if(BUILD_BENCH)
     )
     target_link_libraries(pivco_partition_skew pivco_huffman m)
 
+    if(TARGET_ARCH STREQUAL "arm64" OR TARGET_ARCH STREQUAL "aarch64")
+        add_executable(pivco_dual_decode_test
+            extras/bench_dual_decode_test.c
+            bench/bench_distributions.c
+        )
+        target_link_libraries(pivco_dual_decode_test pivco_huffman m)
+    endif()
+
     add_executable(pivco_dense_runs
         extras/bench_dense_runs.c
         bench/bench_distributions.c

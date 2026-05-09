@@ -160,6 +160,18 @@ int pivco_huffman_encode_neon(const uint8_t *symbols,
 int pivco_huffman_decode_neon(const uint8_t *in, size_t in_len,
                               const pivco_huffman_table_t *table,
                               uint8_t *symbols, size_t *consumed);
+
+/* Experimental 2-block decode with cross-block partition lookahead.
+ * Decodes block A then block B; during A's scatter calls, runs root
+ * partition for B in OOO-overlapping fashion.  Falls back to serial
+ * decode for cases where B's root isn't an internal-full node. */
+int pivco_huffman_decode_dual_neon(const uint8_t *in_A, size_t in_len_A,
+                                    const uint8_t *in_B, size_t in_len_B,
+                                    const pivco_huffman_table_t *table,
+                                    uint8_t *symbols_A,
+                                    uint8_t *symbols_B,
+                                    size_t *consumed_A,
+                                    size_t *consumed_B);
 #endif
 
 #ifdef PIVCO_HAS_SSE4

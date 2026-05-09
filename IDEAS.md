@@ -512,10 +512,72 @@ Reproducer:
   - sweep saved at
     `results/microbench-20260509-fusion-v3-all-platforms.txt`
 
-### Implementation paths (open)
+### Implementation paths (open after MINIMAL TEST 2026-05-09)
 
-The microbench gain isn't yet realised in the actual decoder.  The
-recursive structure means partition at depth N produces indices that
+**Update: minimal cross-block lookahead test (2026-05-09)**
+
+Implemented the smallest-viable fusion test: thread-local lookahead
+state pointing at next block's root partition, hook in 3 NEON scatter
+inner loops (`scatter_sym`, `scatter_both_leaves`, `flat_decode_scatter`
+D=2 / D=4) calling `partition_root_8(K)` per 16-elem store chunk.
+Driver: `pivco_huffman_decode_dual_neon` decodes blocks A then B with
+lookahead during A's scatters covering B's root partition.
+
+Source: `src/pivco_huffman_neon.c`, public API in `pivco_huffman.h`.
+Test/bench: `extras/bench_dual_decode_test.c`.
+
+End-to-end results on M4 (200K iters per distribution, K swept 2/4/8/16):
+
+| dist          | serial M/s | dual M/s | delta  |
+|---------------|-----------:|---------:|-------:|
+| english       |     3471   |   3505   | +0.99% |
+| prose_pride   |     2849   |   2865   | +0.57% |
+| source_c      |     3128   |   3085   | −1.38% |
+| html_wiki     |     2668   |   2677   | +0.35% |
+| json_api      |     2822   |   2800   | −0.80% |
+| log_apache    |     2708   |   2733   | +0.92% |
+| csv_numeric   |     3920   |   3953   | +0.81% |
+| chinese_text  |     2843   |   2858   | +0.55% |
+| dna_fasta     |     4214   |   4244   | +0.71% |
+| bell_s30      |     2659   |   2645   | −0.55% |
+| zipfian       |     2816   |   2847   | +1.10% |
+
+Mean: ~+0.3%.  Range: −1.4% to +1.1%.  **Essentially noise.**
+
+The 12-15% microbench prediction does not translate.  Reasons:
+
+1. The microbench measures kernels in **one tight inner loop** —
+   `partition_8` and `scatter16` with all instructions visible to OOO
+   simultaneously.  Real decoder has these in **different inline
+   functions** at different recursion depths, separated by call-frame
+   boundaries that the OOO window can't span efficiently.
+2. The hook adds a branch + thread-local load per scatter chunk; even
+   when inactive, this costs ~1 cyc per chunk, eating into baseline.
+3. `partition_root_8` work for B is fundamentally still being done —
+   shifted from "after A" to "during A's scatter" — but the OOO
+   doesn't actually pipeline it; the calls execute serially within
+   each scatter chunk.
+
+**Conclusion:** the microbench-style fusion gain requires kernels to
+be **co-resident in a single inner loop body**, not just both called
+from the same function.  Realising this in the real decoder needs
+much deeper restructuring — a true *fused kernel* per (parent, leaf-
+type-of-child) shape that interleaves partition stores and scatter
+stores in one tight loop.  That is option B below (within-block
+sibling fusion), which is high engineering for combinatorial kernel
+zoo.
+
+Recommendation: keep the dual decode infrastructure as a parked
+experiment.  Don't ship it as a perf optimization.  Don't pursue
+the within-block fused-kernel option without first sketching the
+specific (parent, leaf-pair) shapes most worth fusing — and even
+then expect realised wins to be a fraction of the microbench
+prediction.
+
+Microbench prediction held for the kernel itself; the GAP between
+microbench and realised is the cost of the recursive control flow.
+
+The recursive structure means partition at depth N produces indices that
 scatter at depth N+1 reads — same data, different time, OOO can't
 pipeline across function calls.  Two paths:
 
