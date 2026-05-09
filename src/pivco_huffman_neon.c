@@ -1011,7 +1011,16 @@ static void decode_node_neon(const pivco_huffman_table_t *table,
 
 /* Partition 8 identity indices starting at base.
    Generates [base, base+1, ..., base+7] in-register (no memory read)
-   then partitions via TBL shuffle like partition_8. */
+   then partitions via TBL shuffle like partition_8.
+
+   Note (2026-05-08): considered a "running iota" variant that maintains
+   `data` across iterations and advances by +8 each call (saves the
+   per-call vdup+orr).  Measured ±0.5% on M4 medians (within 3-run
+   noise) — clang already hoists the iota constant out of the loop
+   and emits `dup w_j; orr v_data, v_dup, v_iota` per iter, which has
+   ZERO inter-iteration data dep and pipelines freely under OOO.  The
+   running-iota form trades that for a serial vaddq dep chain.  Net
+   wash; kept the cleaner per-call form. */
 static inline int partition_root_8(int base, uint8_t mask,
                                     uint16_t *left_out,
                                     uint16_t *right_out)
