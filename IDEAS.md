@@ -966,7 +966,24 @@ Masked vector partition collapses that to ~1 cycle/element regardless of `rem`.
   `if (n < 8) scalar` micro-fallback — but two_sym_eq is already 5.9 GS/s
   post-patch so probably not worth a branch.
 
-## Hybrid block decoder — back on the table after the real-data sweep
+## Hybrid block decoder — recognised escape hatch, intentionally not pursued
+
+> **Update (2026-05-09):** the hybrid is the *easy way out* — pick the
+> faster of pivco / trad_4s / huf0_x2 per block and you trivially never
+> lose on real text outside Apple silicon.  We deliberately don't want
+> to do this:
+>
+> - It doesn't move the science forward — the interesting question is
+>   whether tree-walk / pivot-style decode can be made competitive on
+>   real text on every uarch on its own merits.
+> - Once you start picking-the-winner you stop debugging the loss.
+>   The Graviton/Zen 3/Zen 5 prose gap remains the open problem we
+>   should keep banging on (fusion, structural changes, etc.).
+> - Worth mentioning in the paper as a deployment-engineering
+>   fallback ("if you ship this in production, do hybrid"), not as
+>   the research result.
+>
+> Keep the idea recorded for completeness; do not work on it.
 
 > **Status (as of [a1e742cded9f059d4e165177deca1ac8e26ba49e](../),
 > 2026-04-25):** the 2026-04-25 mega sweep added 10 real-world byte
@@ -985,9 +1002,8 @@ Masked vector partition collapses that to ~1 cycle/element regardless of `rem`.
 > The synthetic `english` distribution (1.33× M4 / 1.24× Xeon) was
 > overstating the win by ~25-33% vs real prose.
 >
-> **Hybrid is now the highest-EV outstanding optimisation** — it's
-> the cheapest path to flipping all four platforms back into the win
-> column on the loss cluster.
+> ~~Hybrid is now the highest-EV outstanding optimisation~~ - see
+> 2026-05-09 update at the top of this section.
 
 The results strongly suggest that PIVCO wins on skewed distributions and loses
 on moderate/uniform ones.
