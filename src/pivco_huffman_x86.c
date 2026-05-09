@@ -733,9 +733,10 @@ int pivco_huffman_decode_x86(const uint8_t *in, size_t in_len,
 
     /* Partition at root — generate identity indices in-place.
      * +8 padding on indices to absorb partition_8_sse_left's 16-byte
-     * filler; see decode_node_neon comment. */
-    uint16_t indices[PIVCO_BLOCK_SIZE + 8];
-    uint16_t tmp[PIVCO_BLOCK_SIZE * 2];
+     * filler; 64B-aligned to keep cache-set layout deterministic.
+     * See decode_node_neon comment. */
+    uint16_t indices[PIVCO_BLOCK_SIZE + 8] __attribute__((aligned(64)));
+    uint16_t tmp[PIVCO_BLOCK_SIZE * 2]      __attribute__((aligned(64)));
 
     if (left_leaf && root->left == skip_node) {
         /* Left is prefilled — half-partition right only at root */

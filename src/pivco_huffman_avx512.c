@@ -966,9 +966,10 @@ int pivco_huffman_decode_avx512(const uint8_t *in, size_t in_len,
 
     /* Partition at root — skip identity array init.
      * +32 padding on indices to absorb partition_32's 64-byte filler;
-     * see decode_node_neon comment. */
-    uint16_t indices[PIVCO_BLOCK_SIZE + 32];
-    uint16_t tmp[PIVCO_BLOCK_SIZE * 2];
+     * 64B-aligned to keep cache-set layout deterministic.
+     * See decode_node_neon comment. */
+    uint16_t indices[PIVCO_BLOCK_SIZE + 32] __attribute__((aligned(64)));
+    uint16_t tmp[PIVCO_BLOCK_SIZE * 2]       __attribute__((aligned(64)));
     int n_left = 0, n_right = 0;
 
     {

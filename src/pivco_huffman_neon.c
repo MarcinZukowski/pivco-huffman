@@ -1207,9 +1207,13 @@ int pivco_huffman_decode_neon(const uint8_t *in, size_t in_len,
     /* +8 padding on indices: top-level partition_8_left's 16-byte
      * filler may land at indices[n_left..n_left+8), and n_left can
      * reach BLK-1 in pathological partitions.  Sizing to BLK+8
-     * keeps the filler in-bounds; its bytes are never read. */
-    uint16_t indices[PIVCO_BLOCK_SIZE + 8];
-    uint16_t tmp[PIVCO_BLOCK_SIZE * 2];
+     * keeps the filler in-bounds; its bytes are never read.
+     * 64B alignment keeps the layout deterministic across runs and
+     * avoids cache-set-conflict outliers on synthetic distributions
+     * (uniform / two_sym_*) where the +8 offset alone shifted into
+     * unfortunate associativity. */
+    uint16_t indices[PIVCO_BLOCK_SIZE + 8] __attribute__((aligned(64)));
+    uint16_t tmp[PIVCO_BLOCK_SIZE * 2]      __attribute__((aligned(64)));
 
     if (left_leaf && root->left == skip_node) {
         int n_right = root_half_right(N, bm, tmp);
