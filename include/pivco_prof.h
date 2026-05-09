@@ -39,6 +39,7 @@ typedef enum {
     PROF_ROOT_FULL,
     PROF_ROOT_HALF_RIGHT,
     PROF_ROOT_HALF_LEFT,
+    PROF_ROOT_BOTH_LEAVES,
 
     /* Leaf primitives (timed). */
     PROF_SCATTER_SYM,

@@ -1162,6 +1162,42 @@ static inline int root_half_right(int N, const uint8_t *bm,
     return n_right;
 }
 
+/* Root, both children leaves: indices[i] == i so each output byte is
+ * sym0 (bm bit = 0) or sym1 (bm bit = 1).  No partition, no scatter —
+ * just sequential vst1 stores writing the entire symbols[] buffer.
+ * Overwrites the prefill_sym memset (callers may skip the memset for
+ * this case but the cost is identical to vst1q write throughput). */
+static inline void root_both_leaves(int N, const uint8_t *bm,
+                                     uint8_t *symbols,
+                                     uint8_t sym0, uint8_t sym1)
+{
+    PROF_TIC();
+    uint8x8_t vsym0  = vdup_n_u8(sym0);
+    uint8x8_t vdelta = vdup_n_u8(sym0 ^ sym1);
+    static const uint8_t bit_pos_tab[8] = {1,2,4,8,16,32,64,128};
+    uint8x8_t vbit_pos = vld1_u8(bit_pos_tab);
+
+    int j = 0;
+    for (; j + 16 <= N; j += 16) {
+        uint8x8_t bits0 = vtst_u8(vdup_n_u8(bm[j >> 3]), vbit_pos);
+        uint8x8_t vals0 = veor_u8(vsym0, vand_u8(vdelta, bits0));
+        uint8x8_t bits1 = vtst_u8(vdup_n_u8(bm[(j >> 3) + 1]), vbit_pos);
+        uint8x8_t vals1 = veor_u8(vsym0, vand_u8(vdelta, bits1));
+        vst1_u8(symbols + j, vals0);
+        vst1_u8(symbols + j + 8, vals1);
+    }
+    for (; j + 8 <= N; j += 8) {
+        uint8x8_t bits = vtst_u8(vdup_n_u8(bm[j >> 3]), vbit_pos);
+        uint8x8_t vals = veor_u8(vsym0, vand_u8(vdelta, bits));
+        vst1_u8(symbols + j, vals);
+    }
+    for (; j < N; j++) {
+        uint8_t bit = (bm[j >> 3] >> (j & 7)) & 1;
+        symbols[j] = sym0 ^ ((sym0 ^ sym1) & (uint8_t)(-(int8_t)bit));
+    }
+    PROF_TOC(PROF_ROOT_BOTH_LEAVES, N);
+}
+
 static inline int root_half_left(int N, const uint8_t *bm,
                                   uint16_t *indices_left_out)
 {
@@ -1235,34 +1271,9 @@ int pivco_huffman_decode_neon(const uint8_t *in, size_t in_len,
     int right_leaf = (right_child->symbol >= 0);
 
     if (left_leaf && right_leaf) {
-        /* Both-leaves at root — sequential vst1 stores, no scatter.
-           indices[j] == j so symbols[indices[j]] = symbols[j].
-           Overwrites the memset, but vst1 is equally fast. */
-        uint8_t sym0 = (uint8_t)left_child->symbol;
-        uint8_t sym1 = (uint8_t)right_child->symbol;
-        uint8x8_t vsym0  = vdup_n_u8(sym0);
-        uint8x8_t vdelta = vdup_n_u8(sym0 ^ sym1);
-        static const uint8_t bit_pos_tab[8] = {1,2,4,8,16,32,64,128};
-        uint8x8_t vbit_pos = vld1_u8(bit_pos_tab);
-
-        int j = 0;
-        for (; j + 16 <= N; j += 16) {
-            uint8x8_t bits0 = vtst_u8(vdup_n_u8(bm[j >> 3]), vbit_pos);
-            uint8x8_t vals0 = veor_u8(vsym0, vand_u8(vdelta, bits0));
-            uint8x8_t bits1 = vtst_u8(vdup_n_u8(bm[(j >> 3) + 1]), vbit_pos);
-            uint8x8_t vals1 = veor_u8(vsym0, vand_u8(vdelta, bits1));
-            vst1_u8(symbols + j, vals0);
-            vst1_u8(symbols + j + 8, vals1);
-        }
-        for (; j + 8 <= N; j += 8) {
-            uint8x8_t bits = vtst_u8(vdup_n_u8(bm[j >> 3]), vbit_pos);
-            uint8x8_t vals = veor_u8(vsym0, vand_u8(vdelta, bits));
-            vst1_u8(symbols + j, vals);
-        }
-        for (; j < N; j++) {
-            uint8_t bit = (bm[j >> 3] >> (j & 7)) & 1;
-            symbols[j] = sym0 ^ ((sym0 ^ sym1) & (uint8_t)(-(int8_t)bit));
-        }
+        root_both_leaves(N, bm, symbols,
+                         (uint8_t)left_child->symbol,
+                         (uint8_t)right_child->symbol);
         *consumed = (size_t)(ptr - in);
         return PIVCO_OK;
     }
