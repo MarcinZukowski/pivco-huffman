@@ -1,0 +1,1823 @@
+diff --git a/pivco-huffman/include/pivco_huffman.h b/pivco-huffman/include/pivco_huffman.h
+index 8bf5762..9a1b04b 100644
+--- a/pivco-huffman/include/pivco_huffman.h
++++ b/pivco-huffman/include/pivco_huffman.h
+@@ -161,17 +161,24 @@ int pivco_huffman_decode_neon(const uint8_t *in, size_t in_len,
+                               const pivco_huffman_table_t *table,
+                               uint8_t *symbols, size_t *consumed);
+ 
+-/* Experimental 2-block decode with cross-block partition lookahead.
+- * Decodes block A then block B; during A's scatter calls, runs root
+- * partition for B in OOO-overlapping fashion.  Falls back to serial
+- * decode for cases where B's root isn't an internal-full node. */
+-int pivco_huffman_decode_dual_neon(const uint8_t *in_A, size_t in_len_A,
+-                                    const uint8_t *in_B, size_t in_len_B,
+-                                    const pivco_huffman_table_t *table,
+-                                    uint8_t *symbols_A,
+-                                    uint8_t *symbols_B,
+-                                    size_t *consumed_A,
+-                                    size_t *consumed_B);
++/* ---------- Cross-block fusion (experimental) ----------
++ *
++ * Inform the NEON decoder that the next block to decode (after the
++ * current call) starts at `in_next`.  When fusion is enabled and a
++ * next-block hint is set, decode_neon's scatter_both_leaves dispatch
++ * uses a fused kernel that incidentally pre-computes the next block's
++ * root_full partition in the OOO-overlap window of the current block's
++ * scatters.  Pass NULL to clear (e.g. last block in a stream).
++ *
++ * Caller pattern for a stream of blocks:
++ *   g_pivco_fusion_enabled = 1;
++ *   for (each block N) {
++ *       pivco_huffman_set_next_neon(N+1 < last ? in[N+1] : NULL);
++ *       pivco_huffman_decode_neon(in[N], ...);
++ *   }
++ */
++extern int g_pivco_fusion_enabled;
++void pivco_huffman_set_next_neon(const uint8_t *in_next);
+ #endif
+ 
+ #ifdef PIVCO_HAS_SSE4
+diff --git a/pivco-huffman/src/pivco_huffman_neon.c b/pivco-huffman/src/pivco_huffman_neon.c
+index 1d032eb..42fbcef 100644
+--- a/pivco-huffman/src/pivco_huffman_neon.c
++++ b/pivco-huffman/src/pivco_huffman_neon.c
+@@ -228,60 +228,67 @@ static inline uint32_t extract_D_bits(const uint8_t *in, int bit_pos, int D)
+ /* flat_d{2,3,4,5,6}_unpack() and their tables live in
+  * pivco_huffman_neon_flat.h (shared with bench/bench_micro.c). */
+ 
+-/* ---------- Cross-block lookahead (experimental, for fusion test) ----------
++/* ---------- Cross-block fusion infrastructure (experimental) ----------
+  *
+- * Thread-local state pointing at the *next* block's root partition.
+- * When `active`, every 16-elem scatter chunk also advances K calls of
+- * partition_root_8 for the next block.  Idea: scatter is store-port-
+- * saturated; partition_root_8 is back-end IPC limited; running them
+- * in the same OOO window should overlap.  See
+- * `pivco_huffman_decode_dual_neon` at the bottom of the file. */
++ * Two-slot ping-pong state for cross-block partition lookahead.
++ * Block N writes partial root_full results for block N+1 into one slot
++ * (via a fused scatter+partition kernel), while reading the partial
++ * results that block N-1 left for it from the other slot.  At the end
++ * of each decode the cur/nxt slots flip.
++ *
++ * Globals (no thread-local; single-thread experiment):
++ *   - g_pivco_fusion_enabled  : 0/1, toggle from caller
++ *   - g_la[2]                  : ping-pong state slots
++ *   - g_la_cur                 : index of the "current" slot
++ *   - g_la_writes              : pointer to the "next" slot during decode,
++ *                                 or NULL when fusion is off this block
++ *
++ * The caller signals "next block exists" by calling
++ * `pivco_huffman_set_next_neon(in_next)` BEFORE invoking
++ * `pivco_huffman_decode_neon` for the current block.
++ *
++ * Backing storage (g_la_indices_buf / g_la_tmp_buf) is shared between
++ * the cur slot's working buffers (where root_full writes its partition
++ * results) and the next slot's fusion-target buffers.  Both are
++ * BLK+8 / 2*BLK long, 64B-aligned.  See decode_neon entry. */
+ typedef struct {
+-    int active;
+-    int j;
+-    int N;
+-    const uint8_t *bm;
+-    uint16_t *indices;
+-    uint16_t *tmp;
+-    int n_left;
+-    int n_right;
++    int j;                /* root-partition cursor: how many elements done */
++    int n_left;           /* count of left-partition elements written so far */
++    int n_right;          /* count of right-partition elements written so far */
++    const uint8_t *bm;    /* root bitmap of the block this slot represents */
++    uint16_t *indices;    /* points into g_la_indices_buf[i] */
++    uint16_t *tmp;        /* points into g_la_tmp_buf[i] */
+ } pivco_la_neon_t;
+ 
+-static __thread pivco_la_neon_t pivco_la_neon = {0};
++/* Storage for the two slots. */
++static uint16_t g_la_indices_buf[2][PIVCO_BLOCK_SIZE + 8] __attribute__((aligned(64)));
++static uint16_t g_la_tmp_buf[2][PIVCO_BLOCK_SIZE * 2]      __attribute__((aligned(64)));
+ 
+-/* Forward decl — partition_root_8 is defined further down. */
+-static inline int partition_root_8(int base, uint8_t mask,
+-                                    uint16_t *left_out,
+-                                    uint16_t *right_out);
++static pivco_la_neon_t g_la[2] = {0};
++static int g_la_cur = 0;
++
++/* Caller-controlled fusion enable + dispatch helpers used by
++ * decode_node_neon's BOTH_LEAVES case. */
++int g_pivco_fusion_enabled = 0;
++static pivco_la_neon_t *g_la_writes = NULL;
++
++/* DEBUG counters — non-zero only confirms code paths run. */
++unsigned long g_pivco_fused_calls = 0;
++unsigned long g_pivco_fused_chunks = 0;
++unsigned long g_pivco_fused_partition_iters = 0;
+ 
+-/* Tunable: partition_root_8 calls injected per scatter 16-elem chunk.
+- * K=4 matches the microbench's PpS=4 sweet spot on M4. */
++/* Tunable: partition_root_8 calls per fused scatter chunk.
++ * K=4 matches the microbench's PpS=4 sweet spot. */
+ #ifndef PIVCO_LA_K
+ #define PIVCO_LA_K 4
+ #endif
+ 
+-/* Run K root-partition iterations for the next block.  Stops early if
+- * the lookahead has reached N. */
+-static inline void pivco_la_advance(int K) {
+-    if (!pivco_la_neon.active) return;
+-    int j = pivco_la_neon.j;
+-    int n_left = pivco_la_neon.n_left;
+-    int n_right = pivco_la_neon.n_right;
+-    const uint8_t *bm = pivco_la_neon.bm;
+-    uint16_t *indices = pivco_la_neon.indices;
+-    uint16_t *tmp = pivco_la_neon.tmp;
+-    int N = pivco_la_neon.N;
+-    for (int k = 0; k < K && j + 8 <= N; k++) {
+-        uint8_t mask = bm[j >> 3];
+-        int nr = partition_root_8(j, mask, indices + n_left, tmp + n_right);
+-        n_right += nr;
+-        n_left  += (8 - nr);
+-        j += 8;
+-    }
+-    pivco_la_neon.j = j;
+-    pivco_la_neon.n_left = n_left;
+-    pivco_la_neon.n_right = n_right;
+-    if (j >= N) pivco_la_neon.active = 0;
++/* Set the next block's input pointer.  The next block's root bm starts
++ * at this address.  Pass NULL to disable fusion for the upcoming
++ * decode_neon call (e.g. last block in a stream). */
++void pivco_huffman_set_next_neon(const uint8_t *in_next)
++{
++    g_la[g_la_cur ^ 1].bm = in_next;
+ }
+ 
+ /* Unpack n D-bit codes from bm, look up in c2s, scatter to
+@@ -315,7 +322,6 @@ static inline void flat_decode_scatter_neon(uint8_t *symbols,
+             symbols[indices[i + 13]] = vgetq_lane_u8(syms, 13);
+             symbols[indices[i + 14]] = vgetq_lane_u8(syms, 14);
+             symbols[indices[i + 15]] = vgetq_lane_u8(syms, 15);
+-            pivco_la_advance(PIVCO_LA_K);
+         }
+         /* Tail: scalar 4-wide, then 1-wide (same as generic D=2 case) */
+         for (; i + 4 <= n; i += 4) {
+@@ -432,7 +438,6 @@ static inline void flat_decode_scatter_neon(uint8_t *symbols,
+             symbols[indices[i + 13]] = vgetq_lane_u8(syms, 13);
+             symbols[indices[i + 14]] = vgetq_lane_u8(syms, 14);
+             symbols[indices[i + 15]] = vgetq_lane_u8(syms, 15);
+-            pivco_la_advance(PIVCO_LA_K);
+         }
+         /* 2-wide and 1-wide tail (same as generic D=4 case). */
+         for (; i + 2 <= n; i += 2) {
+@@ -741,7 +746,6 @@ static inline void scatter_sym(uint8_t *symbols,
+         symbols[vgetq_lane_u16(i1, 5)] = sym;
+         symbols[vgetq_lane_u16(i1, 6)] = sym;
+         symbols[vgetq_lane_u16(i1, 7)] = sym;
+-        pivco_la_advance(PIVCO_LA_K);
+     }
+     for (; j + 8 <= n; j += 8) {
+         uint16x8_t idx = vld1q_u16(indices + j);
+@@ -795,7 +799,6 @@ static inline void scatter_both_leaves(uint8_t *symbols,
+         symbols[vgetq_lane_u16(i1, 5)] = vget_lane_u8(vals1, 5);
+         symbols[vgetq_lane_u16(i1, 6)] = vget_lane_u8(vals1, 6);
+         symbols[vgetq_lane_u16(i1, 7)] = vget_lane_u8(vals1, 7);
+-        pivco_la_advance(PIVCO_LA_K);
+     }
+     for (; j + 8 <= n; j += 8) {
+         uint8x8_t bits = vtst_u8(vdup_n_u8(bm[j >> 3]), vbit_pos);
+@@ -816,6 +819,119 @@ static inline void scatter_both_leaves(uint8_t *symbols,
+     }
+ }
+ 
++/* ---------- Fused kernel: scatter_both_leaves + root_full ---------------
++ *
++ * Single tight inner loop body that issues both:
++ *   - 16 byte stores for the current block's BOTH_LEAVES scatter
++ *   - K * partition_root_8 for the next block's root partition
++ * inside ONE loop iteration so the OOO window sees the full instruction
++ * mix and can pipeline scatter's store-port-bound work with partition's
++ * IPC-bound work.  This is the key difference from the earlier
++ * "lookahead-from-helper" design — no function-call boundary between
++ * the two phases.
++ *
++ * `nxt` must be non-NULL with bm/indices/tmp set up.  When nxt's
++ * partition is fully done (nxt->j >= N), the loop just does the
++ * scatter side.  Returns nothing; updates nxt->j / n_left / n_right
++ * in place. */
++static inline void scatter_both_leaves_fused_root_full(
++    uint8_t *symbols, const uint16_t *indices, int n,
++    const uint8_t *bm,
++    uint8_t sym0, uint8_t sym1,
++    pivco_la_neon_t *nxt)
++{
++    g_pivco_fused_calls++;
++    uint8x8_t vsym0  = vdup_n_u8(sym0);
++    uint8x8_t vdelta = vdup_n_u8(sym0 ^ sym1);
++    static const uint8_t bit_pos_tab[8] = {1,2,4,8,16,32,64,128};
++    static const uint16_t off[8]        = {0,1,2,3,4,5,6,7};
++    uint8x8_t vbit_pos = vld1_u8(bit_pos_tab);
++    uint16x8_t voff    = vld1q_u16(off);
++
++    /* Snapshot nxt state into locals so the inner loop touches
++     * registers, not memory.  Write back once at the end. */
++    int nxt_j        = nxt->j;
++    int nxt_n_left   = nxt->n_left;
++    int nxt_n_right  = nxt->n_right;
++    const uint8_t *nxt_bm  = nxt->bm;
++    uint16_t *nxt_indices  = nxt->indices;
++    uint16_t *nxt_tmp      = nxt->tmp;
++    const int N_NXT = PIVCO_BLOCK_SIZE;
++
++    int j = 0;
++    for (; j + 16 <= n; j += 16) {
++        g_pivco_fused_chunks++;
++        /* === scatter side (16 stores into symbols) === */
++        uint8x8_t bits0 = vtst_u8(vdup_n_u8(bm[j >> 3]), vbit_pos);
++        uint8x8_t vals0 = veor_u8(vsym0, vand_u8(vdelta, bits0));
++        uint8x8_t bits1 = vtst_u8(vdup_n_u8(bm[(j >> 3) + 1]), vbit_pos);
++        uint8x8_t vals1 = veor_u8(vsym0, vand_u8(vdelta, bits1));
++        uint16x8_t i0 = vld1q_u16(indices + j);
++        uint16x8_t i1 = vld1q_u16(indices + j + 8);
++        symbols[vgetq_lane_u16(i0, 0)] = vget_lane_u8(vals0, 0);
++        symbols[vgetq_lane_u16(i0, 1)] = vget_lane_u8(vals0, 1);
++        symbols[vgetq_lane_u16(i0, 2)] = vget_lane_u8(vals0, 2);
++        symbols[vgetq_lane_u16(i0, 3)] = vget_lane_u8(vals0, 3);
++        symbols[vgetq_lane_u16(i0, 4)] = vget_lane_u8(vals0, 4);
++        symbols[vgetq_lane_u16(i0, 5)] = vget_lane_u8(vals0, 5);
++        symbols[vgetq_lane_u16(i0, 6)] = vget_lane_u8(vals0, 6);
++        symbols[vgetq_lane_u16(i0, 7)] = vget_lane_u8(vals0, 7);
++        symbols[vgetq_lane_u16(i1, 0)] = vget_lane_u8(vals1, 0);
++        symbols[vgetq_lane_u16(i1, 1)] = vget_lane_u8(vals1, 1);
++        symbols[vgetq_lane_u16(i1, 2)] = vget_lane_u8(vals1, 2);
++        symbols[vgetq_lane_u16(i1, 3)] = vget_lane_u8(vals1, 3);
++        symbols[vgetq_lane_u16(i1, 4)] = vget_lane_u8(vals1, 4);
++        symbols[vgetq_lane_u16(i1, 5)] = vget_lane_u8(vals1, 5);
++        symbols[vgetq_lane_u16(i1, 6)] = vget_lane_u8(vals1, 6);
++        symbols[vgetq_lane_u16(i1, 7)] = vget_lane_u8(vals1, 7);
++
++        /* === partition side (K calls of partition_root_8 inlined) === */
++        if (nxt_j + 8 * PIVCO_LA_K <= N_NXT) {
++            g_pivco_fused_partition_iters++;
++            #pragma GCC unroll 4
++            for (int k = 0; k < PIVCO_LA_K; k++) {
++                uint16x8_t base = vdupq_n_u16((uint16_t)nxt_j);
++                uint8x16_t data = vreinterpretq_u8_u16(vaddq_u16(base, voff));
++                uint8_t mask = nxt_bm[nxt_j >> 3];
++                const uint8_t *tab = compress_tab[mask];
++                uint8x16_t shuf_r = vld1q_u8(tab);
++                uint8x16_t shuf_l = vld1q_u8(tab + 16);
++                vst1q_u8((uint8_t *)(nxt_tmp     + nxt_n_right),
++                          vqtbl1q_u8(data, shuf_r));
++                vst1q_u8((uint8_t *)(nxt_indices + nxt_n_left),
++                          vqtbl1q_u8(data, shuf_l));
++                int nr = compress_popcnt[mask];
++                nxt_n_right += nr;
++                nxt_n_left  += (8 - nr);
++                nxt_j += 8;
++            }
++        }
++    }
++    /* Scatter tail (1..15 leftover) — partition can no longer fuse here. */
++    for (; j + 8 <= n; j += 8) {
++        uint8x8_t bits = vtst_u8(vdup_n_u8(bm[j >> 3]), vbit_pos);
++        uint8x8_t vals = veor_u8(vsym0, vand_u8(vdelta, bits));
++        uint16x8_t idx = vld1q_u16(indices + j);
++        symbols[vgetq_lane_u16(idx, 0)] = vget_lane_u8(vals, 0);
++        symbols[vgetq_lane_u16(idx, 1)] = vget_lane_u8(vals, 1);
++        symbols[vgetq_lane_u16(idx, 2)] = vget_lane_u8(vals, 2);
++        symbols[vgetq_lane_u16(idx, 3)] = vget_lane_u8(vals, 3);
++        symbols[vgetq_lane_u16(idx, 4)] = vget_lane_u8(vals, 4);
++        symbols[vgetq_lane_u16(idx, 5)] = vget_lane_u8(vals, 5);
++        symbols[vgetq_lane_u16(idx, 6)] = vget_lane_u8(vals, 6);
++        symbols[vgetq_lane_u16(idx, 7)] = vget_lane_u8(vals, 7);
++    }
++    for (; j < n; j++) {
++        uint8_t bit = (bm[j >> 3] >> (j & 7)) & 1;
++        symbols[indices[j]] = sym0 ^ ((sym0 ^ sym1) & (uint8_t)(-(int8_t)bit));
++    }
++
++    /* Flush local state back to nxt. */
++    nxt->j        = nxt_j;
++    nxt->n_left   = nxt_n_left;
++    nxt->n_right  = nxt_n_right;
++}
++
+ /* ---------- Per-call-site partition loops (interior recursion) ----------
+  *
+  * Each kind of partition loop in decode_node_neon is extracted as its
+@@ -1019,9 +1135,17 @@ static void decode_node_neon(const pivco_huffman_table_t *table,
+         const pivco_tree_node_t *left_child  = &table->tree[node->left];
+         const pivco_tree_node_t *right_child = &table->tree[node->right];
+         PROF_TIC();
+-        scatter_both_leaves(symbols, indices, n, bm,
+-                            (uint8_t)left_child->symbol,
+-                            (uint8_t)right_child->symbol);
++        if (g_la_writes != NULL) {
++            scatter_both_leaves_fused_root_full(
++                symbols, indices, n, bm,
++                (uint8_t)left_child->symbol,
++                (uint8_t)right_child->symbol,
++                g_la_writes);
++        } else {
++            scatter_both_leaves(symbols, indices, n, bm,
++                                (uint8_t)left_child->symbol,
++                                (uint8_t)right_child->symbol);
++        }
+         PROF_TOC(PROF_SCATTER_BOTH_LEAVES, n);
+         return;
+     }
+@@ -1105,13 +1229,18 @@ static inline int partition_root_8(int base, uint8_t mask,
+  * — N elements per BLK, no indices array read.  Extracted as named
+  * static functions so the profiler can attribute time per call site. */
+ 
++/* Resumable root_full: starts partitioning at j_start with the given
++ * n_left_start, n_right_start.  Plain decoder calls with all-zero
++ * starts; cross-block fusion calls with values pre-populated by the
++ * previous block's fused scatter kernel. */
+ static inline void root_full(int N, const uint8_t *bm,
+                               uint16_t *indices, uint16_t *tmp,
++                              int j_start, int n_left_start, int n_right_start,
+                               int *n_left_out, int *n_right_out)
+ {
+     PROF_TIC();
+-    int n_left = 0, n_right = 0;
+-    int j = 0;
++    int n_left = n_left_start, n_right = n_right_start;
++    int j = j_start;
+     for (; j + 16 <= N; j += 16) {
+         uint8_t m0 = bm[j >> 3];
+         int nr0 = partition_root_8(j, m0,
+@@ -1284,36 +1413,70 @@ int pivco_huffman_decode_neon(const uint8_t *in, size_t in_len,
+     memset(symbols, prefill_sym, (size_t)N);
+ 
+     int16_t skip_node = table->prefill_node;
+-    /* +8 padding on indices: top-level partition_8_left's 16-byte
+-     * filler may land at indices[n_left..n_left+8), and n_left can
+-     * reach BLK-1 in pathological partitions.  Sizing to BLK+8
+-     * keeps the filler in-bounds; its bytes are never read.
+-     * 64B alignment keeps the layout deterministic across runs and
+-     * avoids cache-set-conflict outliers on synthetic distributions
+-     * (uniform / two_sym_*) where the +8 offset alone shifted into
+-     * unfortunate associativity. */
+-    uint16_t indices[PIVCO_BLOCK_SIZE + 8] __attribute__((aligned(64)));
+-    uint16_t tmp[PIVCO_BLOCK_SIZE * 2]      __attribute__((aligned(64)));
++
++    /* Cross-block fusion setup.  The "cur" slot may carry a partial
++     * root-partition result for THIS block, populated by the previous
++     * block's fused scatter kernel.  The "nxt" slot is what THIS
++     * block will populate (if g_pivco_fusion_enabled and the caller
++     * set a non-NULL next-block pointer via pivco_huffman_set_next_neon).
++     *
++     * cur->indices / cur->tmp are stable global buffers (BLK+8 / 2*BLK
++     * 64B-aligned); we use them as the working scratch for THIS
++     * block's recursion.  This unifies the "fusion off / first block"
++     * path with the "fusion on / continuing" path: when no pre-work
++     * exists, cur->j == 0 and root_full just runs from scratch. */
++    pivco_la_neon_t *cur = &g_la[g_la_cur];
++    pivco_la_neon_t *nxt = &g_la[g_la_cur ^ 1];
++
++    /* Always make sure cur has its backing buffers wired.  (init lazily
++     * here so callers don't need an explicit init step.) */
++    if (cur->indices == NULL) cur->indices = g_la_indices_buf[g_la_cur];
++    if (cur->tmp     == NULL) cur->tmp     = g_la_tmp_buf[g_la_cur];
++
++    /* Reset nxt counters and wire its buffers.  bm was set (or cleared)
++     * by the caller via pivco_huffman_set_next_neon. */
++    nxt->j = 0;
++    nxt->n_left = 0;
++    nxt->n_right = 0;
++    nxt->indices = g_la_indices_buf[g_la_cur ^ 1];
++    nxt->tmp     = g_la_tmp_buf[g_la_cur ^ 1];
++
++    /* Enable fusion writes for the recursion only when both ends are
++     * ready: caller set a next bm AND fusion is globally enabled. */
++    g_la_writes = (g_pivco_fusion_enabled && nxt->bm != NULL) ? nxt : NULL;
+ 
+     if (left_leaf && root->left == skip_node) {
+-        int n_right = root_half_right(N, bm, tmp);
+-        decode_node_neon(table, root->right, tmp, n_right,
+-                         symbols, &ptr, tmp + n_right, skip_node);
++        int n_right = root_half_right(N, bm, cur->tmp);
++        decode_node_neon(table, root->right, cur->tmp, n_right,
++                         symbols, &ptr, cur->tmp + n_right, skip_node);
+     } else if (right_leaf && root->right == skip_node) {
+-        int n_left = root_half_left(N, bm, indices);
+-        decode_node_neon(table, root->left, indices, n_left,
+-                         symbols, &ptr, tmp, skip_node);
++        int n_left = root_half_left(N, bm, cur->indices);
++        decode_node_neon(table, root->left, cur->indices, n_left,
++                         symbols, &ptr, cur->tmp, skip_node);
+     } else {
+         int n_left, n_right;
+-        root_full(N, bm, indices, tmp, &n_left, &n_right);
+-        /* +8 padding gap before right child's tmp - see decode_node_neon
+-         * FULL case for rationale. */
+-        decode_node_neon(table, root->left, indices, n_left,
+-                         symbols, &ptr, tmp + n_right + 8, skip_node);
+-        decode_node_neon(table, root->right, tmp, n_right,
+-                         symbols, &ptr, tmp + n_right + 8, skip_node);
++        /* Resume root_full from cur's pre-state (zeros for fresh start
++         * or first block; partial values when previous block's fusion
++         * pre-computed some of the partition for us). */
++        root_full(N, bm, cur->indices, cur->tmp,
++                  cur->j, cur->n_left, cur->n_right,
++                  &n_left, &n_right);
++        /* +8 padding gap before right child's tmp. */
++        decode_node_neon(table, root->left, cur->indices, n_left,
++                         symbols, &ptr, cur->tmp + n_right + 8, skip_node);
++        decode_node_neon(table, root->right, cur->tmp, n_right,
++                         symbols, &ptr, cur->tmp + n_right + 8, skip_node);
+     }
+ 
++    /* Done with this block.  Clear our consumed-from cur, then flip:
++     * the slot we just wrote into (nxt) becomes the next call's cur. */
++    cur->bm      = NULL;
++    cur->j       = 0;
++    cur->n_left  = 0;
++    cur->n_right = 0;
++    g_la_writes  = NULL;
++    g_la_cur ^= 1;
++
+     *consumed = (size_t)(ptr - in);
+     return PIVCO_OK;
+ }
+@@ -1338,100 +1501,6 @@ void pivco_neon_decode_subtree_(const pivco_huffman_table_t *table,
+                      symbols, in_ptr, tmp, skip_node);
+ }
+ 
+-/* ---------- Experimental dual-block decode with cross-block lookahead --- */
+-
+-int pivco_huffman_decode_dual_neon(const uint8_t *in_A, size_t in_len_A,
+-                                    const uint8_t *in_B, size_t in_len_B,
+-                                    const pivco_huffman_table_t *table,
+-                                    uint8_t *symbols_A,
+-                                    uint8_t *symbols_B,
+-                                    size_t *consumed_A,
+-                                    size_t *consumed_B)
+-{
+-    if (!in_A || !in_B || !table || !symbols_A || !symbols_B
+-        || !consumed_A || !consumed_B) return PIVCO_ERR_NULL;
+-
+-    init_compress_table();
+-
+-    const int N = PIVCO_BLOCK_SIZE;
+-    const pivco_tree_node_t *root = &table->tree[table->tree_root];
+-
+-    /* Test whether the dual fast path is applicable: root must be an
+-     * internal-full node (both children non-leaf, non-skip), tree
+-     * not flat-rooted.  Otherwise fall back to two serial calls. */
+-    int dual_applicable = 1;
+-    if (root->symbol >= 0) dual_applicable = 0;
+-    if (table->flat_depth[table->tree_root] >= 2) dual_applicable = 0;
+-
+-    if (dual_applicable) {
+-        const pivco_tree_node_t *L = &table->tree[root->left];
+-        const pivco_tree_node_t *R = &table->tree[root->right];
+-        if (L->symbol >= 0 || R->symbol >= 0) dual_applicable = 0;
+-    }
+-
+-    if (!dual_applicable) {
+-        int rcA = pivco_huffman_decode_neon(in_A, in_len_A, table, symbols_A, consumed_A);
+-        int rcB = pivco_huffman_decode_neon(in_B, in_len_B, table, symbols_B, consumed_B);
+-        return (rcA != PIVCO_OK) ? rcA : rcB;
+-    }
+-
+-    /* Set up lookahead pointing at block B's root partition. */
+-    static __thread uint16_t la_indices[PIVCO_BLOCK_SIZE + 8] __attribute__((aligned(64)));
+-    static __thread uint16_t la_tmp[PIVCO_BLOCK_SIZE * 2]      __attribute__((aligned(64)));
+-
+-    int nbytes = bitmap_bytes(N);
+-    pivco_la_neon.active   = 1;
+-    pivco_la_neon.j        = 0;
+-    pivco_la_neon.N        = N;
+-    pivco_la_neon.bm       = in_B;        /* B's root bm starts at in_B */
+-    pivco_la_neon.indices  = la_indices;
+-    pivco_la_neon.tmp      = la_tmp;
+-    pivco_la_neon.n_left   = 0;
+-    pivco_la_neon.n_right  = 0;
+-
+-    /* Decode block A normally; its scatters incidentally advance
+-     * B's root partition via the la_advance hook. */
+-    int rcA = pivco_huffman_decode_neon(in_A, in_len_A, table, symbols_A, consumed_A);
+-    if (rcA != PIVCO_OK) {
+-        pivco_la_neon.active = 0;
+-        return rcA;
+-    }
+-
+-    /* Finish whatever's left of B's root partition. */
+-    pivco_la_neon.active = 0;
+-    while (pivco_la_neon.j + 8 <= N) {
+-        uint8_t mask = pivco_la_neon.bm[pivco_la_neon.j >> 3];
+-        int nr = partition_root_8(pivco_la_neon.j, mask,
+-                                   la_indices + pivco_la_neon.n_left,
+-                                   la_tmp + pivco_la_neon.n_right);
+-        pivco_la_neon.n_right += nr;
+-        pivco_la_neon.n_left  += (8 - nr);
+-        pivco_la_neon.j += 8;
+-    }
+-    /* N is multiple of 16 in our default config so no scalar tail
+-     * needed.  Sanity assert via no-op for non-multiple-of-8 cases. */
+-
+-    /* Now decode B without re-running root partition.  Replicate
+-     * decode_neon's post-root logic: prefill_sym memset, then recurse
+-     * into root's children using the la state. */
+-    uint8_t prefill_sym = table->prefill_sym;
+-    memset(symbols_B, prefill_sym, (size_t)N);
+-
+-    const uint8_t *ptr_B = in_B + nbytes;     /* skip past root bm */
+-    int16_t skip_node = table->prefill_node;
+-    int n_left  = pivco_la_neon.n_left;
+-    int n_right = pivco_la_neon.n_right;
+-
+-    decode_node_neon(table, root->left, la_indices, n_left,
+-                     symbols_B, &ptr_B, la_tmp + n_right + 8, skip_node);
+-    decode_node_neon(table, root->right, la_tmp, n_right,
+-                     symbols_B, &ptr_B, la_tmp + n_right + 8, skip_node);
+-
+-    *consumed_B = (size_t)(ptr_B - in_B);
+-    (void)in_len_B;
+-    return PIVCO_OK;
+-}
+-
+ void pivco_neon_encode_subtree_(const pivco_huffman_table_t *table,
+                                  int16_t node_id,
+                                  uint16_t *indices, int n,
+diff --git a/pivco-huffman/CMakeLists.txt b/pivco-huffman/CMakeLists.txt
+index 218974a..9b78d83 100644
+--- a/pivco-huffman/CMakeLists.txt
++++ b/pivco-huffman/CMakeLists.txt
+@@ -221,6 +221,14 @@ if(BUILD_BENCH)
+         target_link_libraries(pivco_dual_decode_test pivco_huffman m)
+     endif()
+ 
++    if(TARGET_ARCH STREQUAL "x86_64" OR TARGET_ARCH STREQUAL "amd64")
++        add_executable(pivco_dual_decode_test_x86
++            extras/bench_dual_decode_test_x86.c
++            bench/bench_distributions.c
++        )
++        target_link_libraries(pivco_dual_decode_test_x86 pivco_huffman m)
++    endif()
++
+     add_executable(pivco_dense_runs
+         extras/bench_dense_runs.c
+         bench/bench_distributions.c
+@@ -298,6 +306,20 @@ if(BUILD_BENCH)
+         target_link_libraries(pivco_fusion_v3_cnt
+             pivco_huffman counters::counters m)
+         target_include_directories(pivco_fusion_v3_cnt PRIVATE src)
++
++        add_executable(pivco_fusion_v4_cnt
++            extras/bench_fusion_v4_cnt.cpp
++        )
++        target_link_libraries(pivco_fusion_v4_cnt
++            pivco_huffman counters::counters m)
++        target_include_directories(pivco_fusion_v4_cnt PRIVATE src)
++
++        add_executable(pivco_fusion_v5_real_kernel_cnt
++            extras/bench_fusion_v5_real_kernel_cnt.cpp
++        )
++        target_link_libraries(pivco_fusion_v5_real_kernel_cnt
++            pivco_huffman counters::counters m)
++        target_include_directories(pivco_fusion_v5_real_kernel_cnt PRIVATE src)
+     endif()
+ 
+     # x86 microbenches (SSE4.1 + AVX-512 variants).  Built whenever the
+@@ -325,6 +347,13 @@ if(BUILD_BENCH)
+             target_link_libraries(pivco_fusion_v3_avx512_cnt
+                 pivco_huffman counters::counters m)
+             target_include_directories(pivco_fusion_v3_avx512_cnt PRIVATE src)
++
++            add_executable(pivco_fusion_v4_avx512_cnt
++                extras/bench_fusion_v4_avx512_cnt.cpp
++            )
++            target_link_libraries(pivco_fusion_v4_avx512_cnt
++                pivco_huffman counters::counters m)
++            target_include_directories(pivco_fusion_v4_avx512_cnt PRIVATE src)
+         endif()
+ 
+         add_executable(pivco_fusion_v3_sse_cnt
+@@ -333,6 +362,13 @@ if(BUILD_BENCH)
+         target_link_libraries(pivco_fusion_v3_sse_cnt
+             pivco_huffman counters::counters m)
+         target_include_directories(pivco_fusion_v3_sse_cnt PRIVATE src)
++
++        add_executable(pivco_fusion_v4_sse_cnt
++            extras/bench_fusion_v4_sse_cnt.cpp
++        )
++        target_link_libraries(pivco_fusion_v4_sse_cnt
++            pivco_huffman counters::counters m)
++        target_include_directories(pivco_fusion_v4_sse_cnt PRIVATE src)
+     endif()
+ 
+     if(TARGET_ARCH STREQUAL "arm64" OR TARGET_ARCH STREQUAL "aarch64")
+diff --git a/pivco-huffman/bench/bench_profile_english.c b/pivco-huffman/bench/bench_profile_english.c
+index f533c07..484758c 100644
+--- a/pivco-huffman/bench/bench_profile_english.c
++++ b/pivco-huffman/bench/bench_profile_english.c
+@@ -116,35 +116,76 @@ int main(int argc, char **argv)
+     if (tick_freq > 0)
+         printf("Cycle counter freq: %.2f MHz\n", tick_freq / 1e6);
+ 
+-    pivco_prof_reset();
+-
+-    printf("Starting decode loop...\n"); fflush(stdout);
+-    double t0 = now_sec();
+-    for (int r = 0; r < REPS; r++) {
+-        for (int b = 0; b < NBLOCKS; b++) {
+-            size_t consumed;
+-            if (r == 0 && b < 5) printf("  block %d: off=%zu len=%zu\n", b, enc_off[b], enc_off[b+1]-enc_off[b]);
+-            int rc = pivco_huffman_decode(enc_buf + enc_off[b],
++    /* Run two passes: (1) no fusion (calls neon decoder with fusion
++     * disabled), (2) fusion enabled (set_next_neon for next block).
++     * Each pass dumps its own prof table so we can diff per-primitive
++     * costs.  Skip the fused pass on non-NEON builds. */
++#ifdef PIVCO_HAS_NEON
++    extern int g_pivco_fusion_enabled;
++    extern void pivco_huffman_set_next_neon(const uint8_t *in_next);
++    extern int  pivco_huffman_decode_neon(const uint8_t *in, size_t in_len,
++                                          const pivco_huffman_table_t *t,
++                                          uint8_t *symbols, size_t *consumed);
++    const int HAVE_FUSION = 1;
++#else
++    const int HAVE_FUSION = 0;
++#endif
++
++    for (int pass = 0; pass < (HAVE_FUSION ? 2 : 1); pass++) {
++        const int fusion = (pass == 1);
++        const char *pass_label = fusion ? "FUSED" : "NO FUSION";
++        pivco_prof_reset();
++
++        printf("\nStarting decode loop [%s]...\n", pass_label); fflush(stdout);
++        double t0 = now_sec();
++#ifdef PIVCO_HAS_NEON
++        g_pivco_fusion_enabled = fusion ? 1 : 0;
++#endif
++        for (int r = 0; r < REPS; r++) {
++            for (int b = 0; b < NBLOCKS; b++) {
++                size_t consumed;
++                int rc;
++#ifdef PIVCO_HAS_NEON
++                if (fusion) {
++                    /* Point at next block's bm (NULL if last block).
++                     * We're calling neon directly so fusion writes apply. */
++                    pivco_huffman_set_next_neon(
++                        b + 1 < NBLOCKS ? enc_buf + enc_off[b + 1] : NULL);
++                    rc = pivco_huffman_decode_neon(enc_buf + enc_off[b],
++                                                   enc_off[b + 1] - enc_off[b],
++                                                   &table, out + b * N, &consumed);
++                } else {
++                    rc = pivco_huffman_decode(enc_buf + enc_off[b],
++                                              enc_off[b + 1] - enc_off[b],
++                                              &table, out + b * N, &consumed);
++                }
++#else
++                rc = pivco_huffman_decode(enc_buf + enc_off[b],
+                                           enc_off[b + 1] - enc_off[b],
+                                           &table, out + b * N, &consumed);
+-            if (r == 0 && b < 5) printf("    rc=%d consumed=%zu\n", rc, consumed);
+-            if (consumed != enc_off[b + 1] - enc_off[b]) {
+-                printf("MISMATCH block %d: encoded=%zu consumed=%zu rc=%d\n",
+-                       b, enc_off[b + 1] - enc_off[b], consumed, rc);
+-                return 1;
++#endif
++                if (consumed != enc_off[b + 1] - enc_off[b]) {
++                    printf("MISMATCH block %d: encoded=%zu consumed=%zu rc=%d\n",
++                           b, enc_off[b + 1] - enc_off[b], consumed, rc);
++                    return 1;
++                }
+             }
+         }
++        double t1 = now_sec();
++#ifdef PIVCO_HAS_NEON
++        g_pivco_fusion_enabled = 0;
++#endif
++
++        double total = (double)NBLOCKS * N * REPS;
++        printf("[%s] %.1f M symbols in %.2f s = %.0f M/s\n",
++               pass_label, total / 1e6, t1 - t0, total / (t1 - t0) / 1e6);
++
++        char label[128];
++        snprintf(label, sizeof(label), "%s / BLK=%d / %s",
++                 dist_name, N, pass_label);
++        pivco_prof_dump(label, t1 - t0, tick_freq,
++                        (uint64_t)NBLOCKS * (uint64_t)REPS);
+     }
+-    double t1 = now_sec();
+-
+-    double total = (double)NBLOCKS * N * REPS;
+-    printf("%.1f M symbols in %.2f s = %.0f M/s\n",
+-           total / 1e6, t1 - t0, total / (t1 - t0) / 1e6);
+-
+-    char label[128];
+-    snprintf(label, sizeof(label), "%s / BLK=%d", dist_name, N);
+-    pivco_prof_dump(label, t1 - t0, tick_freq,
+-                    (uint64_t)NBLOCKS * (uint64_t)REPS);
+ 
+     free(symbols);
+     free(enc_buf);
+diff --git a/pivco-huffman/include/pivco_huffman.h b/pivco-huffman/include/pivco_huffman.h
+index 9a1b04b..3c5fecd 100644
+--- a/pivco-huffman/include/pivco_huffman.h
++++ b/pivco-huffman/include/pivco_huffman.h
+@@ -152,6 +152,10 @@ int pivco_huffman_decode_scalar(const uint8_t *in, size_t in_len,
+                                 const pivco_huffman_table_t *table,
+                                 uint8_t *symbols, size_t *consumed);
+ 
++/* Cross-block fusion master toggle, shared by NEON and SSE backends.
++ * Defined in src/pivco_huffman.c so it links on every build. */
++extern int g_pivco_fusion_enabled;
++
+ #ifdef PIVCO_HAS_NEON
+ int pivco_huffman_encode_neon(const uint8_t *symbols,
+                               const pivco_huffman_table_t *table,
+@@ -161,12 +165,10 @@ int pivco_huffman_decode_neon(const uint8_t *in, size_t in_len,
+                               const pivco_huffman_table_t *table,
+                               uint8_t *symbols, size_t *consumed);
+ 
+-/* ---------- Cross-block fusion (experimental) ----------
+- *
+- * Inform the NEON decoder that the next block to decode (after the
+- * current call) starts at `in_next`.  When fusion is enabled and a
+- * next-block hint is set, decode_neon's scatter_both_leaves dispatch
+- * uses a fused kernel that incidentally pre-computes the next block's
++/* Inform the NEON decoder that the next block to decode (after the
++ * current call) starts at `in_next`.  When g_pivco_fusion_enabled and
++ * a next-block hint is set, decode_neon's leaf scatter dispatches use
++ * a fused kernel that incidentally pre-computes the next block's
+  * root_full partition in the OOO-overlap window of the current block's
+  * scatters.  Pass NULL to clear (e.g. last block in a stream).
+  *
+@@ -177,7 +179,6 @@ int pivco_huffman_decode_neon(const uint8_t *in, size_t in_len,
+  *       pivco_huffman_decode_neon(in[N], ...);
+  *   }
+  */
+-extern int g_pivco_fusion_enabled;
+ void pivco_huffman_set_next_neon(const uint8_t *in_next);
+ #endif
+ 
+@@ -189,6 +190,11 @@ int pivco_huffman_encode_x86(const uint8_t *symbols,
+ int pivco_huffman_decode_x86(const uint8_t *in, size_t in_len,
+                               const pivco_huffman_table_t *table,
+                               uint8_t *symbols, size_t *consumed);
++
++/* Cross-block fusion (SSE).  Set next-block input pointer before
++ * calling decode_x86; pass NULL for last block in stream.  Gated on
++ * g_pivco_fusion_enabled (shared with NEON). */
++void pivco_huffman_set_next_x86(const uint8_t *in_next);
+ #endif
+ 
+ /* Prior experimental NEON variants (neon2, neon2b, neon_fused_1leaf)
+diff --git a/pivco-huffman/include/pivco_prof.h b/pivco-huffman/include/pivco_prof.h
+index 2edb47e..f085091 100644
+--- a/pivco-huffman/include/pivco_prof.h
++++ b/pivco-huffman/include/pivco_prof.h
+@@ -47,6 +47,13 @@ typedef enum {
+     PROF_FLAT_DECODE_SCATTER,
+     PROF_FLAT_DECODE_DIRECT,
+ 
++    /* Fused leaf primitives — separate so we can compare time/elem
++     * with vs without cross-block fusion (g_pivco_fusion_enabled).
++     * Fused calls are NOT also counted against the plain ID. */
++    PROF_SCATTER_SYM_FUSED,
++    PROF_SCATTER_BOTH_LEAVES_FUSED,
++    PROF_FLAT_DECODE_SCATTER_FUSED,
++
+     /* Recursion + entry call counts (count-only; recursive timing
+      * would double-count). */
+     PROF_DECODE_NODE,
+diff --git a/pivco-huffman/src/pivco_huffman.c b/pivco-huffman/src/pivco_huffman.c
+index 4ab2e8e..a97b38c 100644
+--- a/pivco-huffman/src/pivco_huffman.c
++++ b/pivco-huffman/src/pivco_huffman.c
+@@ -1,5 +1,10 @@
+ #include "pivco_huffman.h"
+ 
++/* Global cross-block fusion enable flag, shared by NEON and SSE backends.
++ * Defined here (not in a backend file) so it links on every build, even
++ * when no SIMD backend exposes its own fusion implementation. */
++int g_pivco_fusion_enabled = 0;
++
+ static pivco_impl_t g_impl = PIVCO_IMPL_AUTO;
+ 
+ void pivco_huffman_set_impl(pivco_impl_t impl)
+diff --git a/pivco-huffman/src/pivco_huffman_neon.c b/pivco-huffman/src/pivco_huffman_neon.c
+index 42fbcef..d9ca791 100644
+--- a/pivco-huffman/src/pivco_huffman_neon.c
++++ b/pivco-huffman/src/pivco_huffman_neon.c
+@@ -268,14 +268,15 @@ static pivco_la_neon_t g_la[2] = {0};
+ static int g_la_cur = 0;
+ 
+ /* Caller-controlled fusion enable + dispatch helpers used by
+- * decode_node_neon's BOTH_LEAVES case. */
+-int g_pivco_fusion_enabled = 0;
++ * decode_node_neon's BOTH_LEAVES case.  The flag itself lives in
++ * src/pivco_huffman.c (shared with SSE backend). */
++extern int g_pivco_fusion_enabled;
+ static pivco_la_neon_t *g_la_writes = NULL;
+ 
+-/* DEBUG counters — non-zero only confirms code paths run. */
++/* DEBUG counter — bumped once per fused-kernel invocation.  Inner-loop
++ * counters were removed because the global stores stalled the hot path
++ * (~1.5 % regression).  Use PROF_*_FUSED for per-primitive timing. */
+ unsigned long g_pivco_fused_calls = 0;
+-unsigned long g_pivco_fused_chunks = 0;
+-unsigned long g_pivco_fused_partition_iters = 0;
+ 
+ /* Tunable: partition_root_8 calls per fused scatter chunk.
+  * K=4 matches the microbench's PpS=4 sweet spot. */
+@@ -456,6 +457,133 @@ static inline void flat_decode_scatter_neon(uint8_t *symbols,
+ #undef DST_SCATTER
+ }
+ 
++/* Fused: flat_decode_scatter (D=2 or D=4) + K * partition_root_8 in one
++ * inline loop body.  Caller must guarantee D ∈ {2, 4} before calling. */
++static inline void flat_decode_scatter_neon_fused_root_full(
++    uint8_t *symbols, const uint16_t *indices, int n,
++    const uint8_t *bm, int D, const uint8_t *c2s,
++    pivco_la_neon_t *nxt)
++{
++    g_pivco_fused_calls++;
++
++    int max_p_iters    = (PIVCO_BLOCK_SIZE - nxt->j) / (8 * PIVCO_LA_K);
++    int max_n_fused    = max_p_iters * 16;
++    int n_fused        = (n / 16) * 16;
++    if (n_fused > max_n_fused) n_fused = max_n_fused;
++
++    if (n_fused > 0) {
++        PROF_TIC();
++        static const uint16_t off[8] = {0,1,2,3,4,5,6,7};
++        uint16x8_t voff = vld1q_u16(off);
++
++        int nxt_j        = nxt->j;
++        int nxt_n_left   = nxt->n_left;
++        int nxt_n_right  = nxt->n_right;
++        const uint8_t *nxt_bm  = nxt->bm;
++        uint16_t *nxt_indices  = nxt->indices;
++        uint16_t *nxt_tmp      = nxt->tmp;
++        uint8x16_t c2s_vec     = vld1q_u8(c2s);
++
++        if (D == 2) {
++            for (int i = 0; i < n_fused; i += 16) {
++                /* === scatter side === */
++                uint8x16_t codes = flat_d2_unpack(bm + (i >> 2));
++                uint8x16_t syms  = vqtbl1q_u8(c2s_vec, codes);
++                symbols[indices[i     ]] = vgetq_lane_u8(syms, 0);
++                symbols[indices[i +  1]] = vgetq_lane_u8(syms, 1);
++                symbols[indices[i +  2]] = vgetq_lane_u8(syms, 2);
++                symbols[indices[i +  3]] = vgetq_lane_u8(syms, 3);
++                symbols[indices[i +  4]] = vgetq_lane_u8(syms, 4);
++                symbols[indices[i +  5]] = vgetq_lane_u8(syms, 5);
++                symbols[indices[i +  6]] = vgetq_lane_u8(syms, 6);
++                symbols[indices[i +  7]] = vgetq_lane_u8(syms, 7);
++                symbols[indices[i +  8]] = vgetq_lane_u8(syms, 8);
++                symbols[indices[i +  9]] = vgetq_lane_u8(syms, 9);
++                symbols[indices[i + 10]] = vgetq_lane_u8(syms, 10);
++                symbols[indices[i + 11]] = vgetq_lane_u8(syms, 11);
++                symbols[indices[i + 12]] = vgetq_lane_u8(syms, 12);
++                symbols[indices[i + 13]] = vgetq_lane_u8(syms, 13);
++                symbols[indices[i + 14]] = vgetq_lane_u8(syms, 14);
++                symbols[indices[i + 15]] = vgetq_lane_u8(syms, 15);
++
++                /* === partition side: K inlined partition_root_8 === */
++                #pragma GCC unroll PIVCO_LA_K
++                for (int k = 0; k < PIVCO_LA_K; k++) {
++                    uint16x8_t base = vdupq_n_u16((uint16_t)nxt_j);
++                    uint8x16_t data = vreinterpretq_u8_u16(vaddq_u16(base, voff));
++                    uint8_t mask = nxt_bm[nxt_j >> 3];
++                    const uint8_t *tab = compress_tab[mask];
++                    uint8x16_t shuf_r = vld1q_u8(tab);
++                    uint8x16_t shuf_l = vld1q_u8(tab + 16);
++                    vst1q_u8((uint8_t *)(nxt_tmp     + nxt_n_right),
++                              vqtbl1q_u8(data, shuf_r));
++                    vst1q_u8((uint8_t *)(nxt_indices + nxt_n_left),
++                              vqtbl1q_u8(data, shuf_l));
++                    int nr = compress_popcnt[mask];
++                    nxt_n_right += nr;
++                    nxt_n_left  += (8 - nr);
++                    nxt_j += 8;
++                }
++            }
++        } else { /* D == 4 */
++            for (int i = 0; i < n_fused; i += 16) {
++                uint8x16_t codes = flat_d4_unpack(bm + (i >> 1));
++                uint8x16_t syms  = vqtbl1q_u8(c2s_vec, codes);
++                symbols[indices[i     ]] = vgetq_lane_u8(syms, 0);
++                symbols[indices[i +  1]] = vgetq_lane_u8(syms, 1);
++                symbols[indices[i +  2]] = vgetq_lane_u8(syms, 2);
++                symbols[indices[i +  3]] = vgetq_lane_u8(syms, 3);
++                symbols[indices[i +  4]] = vgetq_lane_u8(syms, 4);
++                symbols[indices[i +  5]] = vgetq_lane_u8(syms, 5);
++                symbols[indices[i +  6]] = vgetq_lane_u8(syms, 6);
++                symbols[indices[i +  7]] = vgetq_lane_u8(syms, 7);
++                symbols[indices[i +  8]] = vgetq_lane_u8(syms, 8);
++                symbols[indices[i +  9]] = vgetq_lane_u8(syms, 9);
++                symbols[indices[i + 10]] = vgetq_lane_u8(syms, 10);
++                symbols[indices[i + 11]] = vgetq_lane_u8(syms, 11);
++                symbols[indices[i + 12]] = vgetq_lane_u8(syms, 12);
++                symbols[indices[i + 13]] = vgetq_lane_u8(syms, 13);
++                symbols[indices[i + 14]] = vgetq_lane_u8(syms, 14);
++                symbols[indices[i + 15]] = vgetq_lane_u8(syms, 15);
++
++                #pragma GCC unroll PIVCO_LA_K
++                for (int k = 0; k < PIVCO_LA_K; k++) {
++                    uint16x8_t base = vdupq_n_u16((uint16_t)nxt_j);
++                    uint8x16_t data = vreinterpretq_u8_u16(vaddq_u16(base, voff));
++                    uint8_t mask = nxt_bm[nxt_j >> 3];
++                    const uint8_t *tab = compress_tab[mask];
++                    uint8x16_t shuf_r = vld1q_u8(tab);
++                    uint8x16_t shuf_l = vld1q_u8(tab + 16);
++                    vst1q_u8((uint8_t *)(nxt_tmp     + nxt_n_right),
++                              vqtbl1q_u8(data, shuf_r));
++                    vst1q_u8((uint8_t *)(nxt_indices + nxt_n_left),
++                              vqtbl1q_u8(data, shuf_l));
++                    int nr = compress_popcnt[mask];
++                    nxt_n_right += nr;
++                    nxt_n_left  += (8 - nr);
++                    nxt_j += 8;
++                }
++            }
++        }
++
++        nxt->j        = nxt_j;
++        nxt->n_left   = nxt_n_left;
++        nxt->n_right  = nxt_n_right;
++        PROF_TOC(PROF_FLAT_DECODE_SCATTER_FUSED, n_fused);
++    }
++
++    int n_rest = n - n_fused;
++    if (n_rest > 0) {
++        PROF_TIC();
++        /* bm offset: D=2 → bits/byte=4, n_fused%16==0 ⇒ aligned;
++         *            D=4 → bits/byte=2, n_fused%16==0 ⇒ aligned. */
++        const uint8_t *bm_rest = bm + (n_fused * D >> 3);
++        flat_decode_scatter_neon(symbols, indices + n_fused, n_rest,
++                                  bm_rest, D, c2s);
++        PROF_TOC(PROF_FLAT_DECODE_SCATTER, n_rest);
++    }
++}
++
+ /* Same, but write directly to symbols[i] (indices are identity — used
+  * for root-flat in pivco_huffman_decode_neon). */
+ static inline void flat_decode_direct_neon(uint8_t *symbols, int n,
+@@ -763,6 +891,86 @@ static inline void scatter_sym(uint8_t *symbols,
+     }
+ }
+ 
++/* Fused: scatter_sym + K * partition_root_8 in one inline loop body.
++ * See scatter_both_leaves_fused_root_full for the design rationale. */
++static inline void scatter_sym_fused_root_full(
++    uint8_t *symbols, const uint16_t *indices, int n,
++    uint8_t sym, pivco_la_neon_t *nxt)
++{
++    g_pivco_fused_calls++;
++
++    int max_p_iters    = (PIVCO_BLOCK_SIZE - nxt->j) / (8 * PIVCO_LA_K);
++    int max_n_fused    = max_p_iters * 16;
++    int n_fused        = (n / 16) * 16;
++    if (n_fused > max_n_fused) n_fused = max_n_fused;
++
++    if (n_fused > 0) {
++        PROF_TIC();
++        static const uint16_t off[8] = {0,1,2,3,4,5,6,7};
++        uint16x8_t voff = vld1q_u16(off);
++
++        int nxt_j        = nxt->j;
++        int nxt_n_left   = nxt->n_left;
++        int nxt_n_right  = nxt->n_right;
++        const uint8_t *nxt_bm  = nxt->bm;
++        uint16_t *nxt_indices  = nxt->indices;
++        uint16_t *nxt_tmp      = nxt->tmp;
++
++        for (int j = 0; j < n_fused; j += 16) {
++            /* === scatter side (16 byte stores) === */
++            uint16x8_t i0 = vld1q_u16(indices + j);
++            uint16x8_t i1 = vld1q_u16(indices + j + 8);
++            symbols[vgetq_lane_u16(i0, 0)] = sym;
++            symbols[vgetq_lane_u16(i0, 1)] = sym;
++            symbols[vgetq_lane_u16(i0, 2)] = sym;
++            symbols[vgetq_lane_u16(i0, 3)] = sym;
++            symbols[vgetq_lane_u16(i0, 4)] = sym;
++            symbols[vgetq_lane_u16(i0, 5)] = sym;
++            symbols[vgetq_lane_u16(i0, 6)] = sym;
++            symbols[vgetq_lane_u16(i0, 7)] = sym;
++            symbols[vgetq_lane_u16(i1, 0)] = sym;
++            symbols[vgetq_lane_u16(i1, 1)] = sym;
++            symbols[vgetq_lane_u16(i1, 2)] = sym;
++            symbols[vgetq_lane_u16(i1, 3)] = sym;
++            symbols[vgetq_lane_u16(i1, 4)] = sym;
++            symbols[vgetq_lane_u16(i1, 5)] = sym;
++            symbols[vgetq_lane_u16(i1, 6)] = sym;
++            symbols[vgetq_lane_u16(i1, 7)] = sym;
++
++            /* === partition side: K inlined partition_root_8 calls === */
++            #pragma GCC unroll PIVCO_LA_K
++            for (int k = 0; k < PIVCO_LA_K; k++) {
++                uint16x8_t base = vdupq_n_u16((uint16_t)nxt_j);
++                uint8x16_t data = vreinterpretq_u8_u16(vaddq_u16(base, voff));
++                uint8_t mask = nxt_bm[nxt_j >> 3];
++                const uint8_t *tab = compress_tab[mask];
++                uint8x16_t shuf_r = vld1q_u8(tab);
++                uint8x16_t shuf_l = vld1q_u8(tab + 16);
++                vst1q_u8((uint8_t *)(nxt_tmp     + nxt_n_right),
++                          vqtbl1q_u8(data, shuf_r));
++                vst1q_u8((uint8_t *)(nxt_indices + nxt_n_left),
++                          vqtbl1q_u8(data, shuf_l));
++                int nr = compress_popcnt[mask];
++                nxt_n_right += nr;
++                nxt_n_left  += (8 - nr);
++                nxt_j += 8;
++            }
++        }
++
++        nxt->j        = nxt_j;
++        nxt->n_left   = nxt_n_left;
++        nxt->n_right  = nxt_n_right;
++        PROF_TOC(PROF_SCATTER_SYM_FUSED, n_fused);
++    }
++
++    int n_rest = n - n_fused;
++    if (n_rest > 0) {
++        PROF_TIC();
++        scatter_sym(symbols, indices + n_fused, n_rest, sym);
++        PROF_TOC(PROF_SCATTER_SYM, n_rest);
++    }
++}
++
+ /* Both children are leaves: scatter sym0 (bit=0) or sym1 (bit=1) to each
+    index position, selecting via SIMD vtst/veor from the bitmap. */
+ static inline void scatter_both_leaves(uint8_t *symbols,
+@@ -841,54 +1049,62 @@ static inline void scatter_both_leaves_fused_root_full(
+     pivco_la_neon_t *nxt)
+ {
+     g_pivco_fused_calls++;
+-    uint8x8_t vsym0  = vdup_n_u8(sym0);
+-    uint8x8_t vdelta = vdup_n_u8(sym0 ^ sym1);
+-    static const uint8_t bit_pos_tab[8] = {1,2,4,8,16,32,64,128};
+-    static const uint16_t off[8]        = {0,1,2,3,4,5,6,7};
+-    uint8x8_t vbit_pos = vld1_u8(bit_pos_tab);
+-    uint16x8_t voff    = vld1q_u16(off);
+-
+-    /* Snapshot nxt state into locals so the inner loop touches
+-     * registers, not memory.  Write back once at the end. */
+-    int nxt_j        = nxt->j;
+-    int nxt_n_left   = nxt->n_left;
+-    int nxt_n_right  = nxt->n_right;
+-    const uint8_t *nxt_bm  = nxt->bm;
+-    uint16_t *nxt_indices  = nxt->indices;
+-    uint16_t *nxt_tmp      = nxt->tmp;
+-    const int N_NXT = PIVCO_BLOCK_SIZE;
+ 
+-    int j = 0;
+-    for (; j + 16 <= n; j += 16) {
+-        g_pivco_fused_chunks++;
+-        /* === scatter side (16 stores into symbols) === */
+-        uint8x8_t bits0 = vtst_u8(vdup_n_u8(bm[j >> 3]), vbit_pos);
+-        uint8x8_t vals0 = veor_u8(vsym0, vand_u8(vdelta, bits0));
+-        uint8x8_t bits1 = vtst_u8(vdup_n_u8(bm[(j >> 3) + 1]), vbit_pos);
+-        uint8x8_t vals1 = veor_u8(vsym0, vand_u8(vdelta, bits1));
+-        uint16x8_t i0 = vld1q_u16(indices + j);
+-        uint16x8_t i1 = vld1q_u16(indices + j + 8);
+-        symbols[vgetq_lane_u16(i0, 0)] = vget_lane_u8(vals0, 0);
+-        symbols[vgetq_lane_u16(i0, 1)] = vget_lane_u8(vals0, 1);
+-        symbols[vgetq_lane_u16(i0, 2)] = vget_lane_u8(vals0, 2);
+-        symbols[vgetq_lane_u16(i0, 3)] = vget_lane_u8(vals0, 3);
+-        symbols[vgetq_lane_u16(i0, 4)] = vget_lane_u8(vals0, 4);
+-        symbols[vgetq_lane_u16(i0, 5)] = vget_lane_u8(vals0, 5);
+-        symbols[vgetq_lane_u16(i0, 6)] = vget_lane_u8(vals0, 6);
+-        symbols[vgetq_lane_u16(i0, 7)] = vget_lane_u8(vals0, 7);
+-        symbols[vgetq_lane_u16(i1, 0)] = vget_lane_u8(vals1, 0);
+-        symbols[vgetq_lane_u16(i1, 1)] = vget_lane_u8(vals1, 1);
+-        symbols[vgetq_lane_u16(i1, 2)] = vget_lane_u8(vals1, 2);
+-        symbols[vgetq_lane_u16(i1, 3)] = vget_lane_u8(vals1, 3);
+-        symbols[vgetq_lane_u16(i1, 4)] = vget_lane_u8(vals1, 4);
+-        symbols[vgetq_lane_u16(i1, 5)] = vget_lane_u8(vals1, 5);
+-        symbols[vgetq_lane_u16(i1, 6)] = vget_lane_u8(vals1, 6);
+-        symbols[vgetq_lane_u16(i1, 7)] = vget_lane_u8(vals1, 7);
+-
+-        /* === partition side (K calls of partition_root_8 inlined) === */
+-        if (nxt_j + 8 * PIVCO_LA_K <= N_NXT) {
+-            g_pivco_fused_partition_iters++;
+-            #pragma GCC unroll 4
++    /* Pre-compute how far the fused loop can run.  Each iteration
++     * consumes 16 input scatter elements AND 8*K partition elements
++     * from nxt.  The fused loop must not overrun either input, so we
++     * cap n_fused once up-front and let the inner loop run with NO
++     * inner branch on the partition budget. */
++    int max_p_iters    = (PIVCO_BLOCK_SIZE - nxt->j) / (8 * PIVCO_LA_K);
++    int max_n_fused    = max_p_iters * 16;
++    int n_fused        = (n / 16) * 16;
++    if (n_fused > max_n_fused) n_fused = max_n_fused;
++
++    if (n_fused > 0) {
++        PROF_TIC();
++        uint8x8_t vsym0  = vdup_n_u8(sym0);
++        uint8x8_t vdelta = vdup_n_u8(sym0 ^ sym1);
++        static const uint8_t bit_pos_tab[8] = {1,2,4,8,16,32,64,128};
++        static const uint16_t off[8]        = {0,1,2,3,4,5,6,7};
++        uint8x8_t vbit_pos = vld1_u8(bit_pos_tab);
++        uint16x8_t voff    = vld1q_u16(off);
++
++        /* Snapshot nxt state into locals so the inner loop touches
++         * registers, not memory.  Write back once at the end. */
++        int nxt_j        = nxt->j;
++        int nxt_n_left   = nxt->n_left;
++        int nxt_n_right  = nxt->n_right;
++        const uint8_t *nxt_bm  = nxt->bm;
++        uint16_t *nxt_indices  = nxt->indices;
++        uint16_t *nxt_tmp      = nxt->tmp;
++
++        for (int j = 0; j < n_fused; j += 16) {
++            /* === scatter side (16 stores into symbols) === */
++            uint8x8_t bits0 = vtst_u8(vdup_n_u8(bm[j >> 3]), vbit_pos);
++            uint8x8_t vals0 = veor_u8(vsym0, vand_u8(vdelta, bits0));
++            uint8x8_t bits1 = vtst_u8(vdup_n_u8(bm[(j >> 3) + 1]), vbit_pos);
++            uint8x8_t vals1 = veor_u8(vsym0, vand_u8(vdelta, bits1));
++            uint16x8_t i0 = vld1q_u16(indices + j);
++            uint16x8_t i1 = vld1q_u16(indices + j + 8);
++            symbols[vgetq_lane_u16(i0, 0)] = vget_lane_u8(vals0, 0);
++            symbols[vgetq_lane_u16(i0, 1)] = vget_lane_u8(vals0, 1);
++            symbols[vgetq_lane_u16(i0, 2)] = vget_lane_u8(vals0, 2);
++            symbols[vgetq_lane_u16(i0, 3)] = vget_lane_u8(vals0, 3);
++            symbols[vgetq_lane_u16(i0, 4)] = vget_lane_u8(vals0, 4);
++            symbols[vgetq_lane_u16(i0, 5)] = vget_lane_u8(vals0, 5);
++            symbols[vgetq_lane_u16(i0, 6)] = vget_lane_u8(vals0, 6);
++            symbols[vgetq_lane_u16(i0, 7)] = vget_lane_u8(vals0, 7);
++            symbols[vgetq_lane_u16(i1, 0)] = vget_lane_u8(vals1, 0);
++            symbols[vgetq_lane_u16(i1, 1)] = vget_lane_u8(vals1, 1);
++            symbols[vgetq_lane_u16(i1, 2)] = vget_lane_u8(vals1, 2);
++            symbols[vgetq_lane_u16(i1, 3)] = vget_lane_u8(vals1, 3);
++            symbols[vgetq_lane_u16(i1, 4)] = vget_lane_u8(vals1, 4);
++            symbols[vgetq_lane_u16(i1, 5)] = vget_lane_u8(vals1, 5);
++            symbols[vgetq_lane_u16(i1, 6)] = vget_lane_u8(vals1, 6);
++            symbols[vgetq_lane_u16(i1, 7)] = vget_lane_u8(vals1, 7);
++
++            /* === partition side: K inlined partition_root_8 calls === */
++            #pragma GCC unroll PIVCO_LA_K
+             for (int k = 0; k < PIVCO_LA_K; k++) {
+                 uint16x8_t base = vdupq_n_u16((uint16_t)nxt_j);
+                 uint8x16_t data = vreinterpretq_u8_u16(vaddq_u16(base, voff));
+@@ -906,30 +1122,22 @@ static inline void scatter_both_leaves_fused_root_full(
+                 nxt_j += 8;
+             }
+         }
+-    }
+-    /* Scatter tail (1..15 leftover) — partition can no longer fuse here. */
+-    for (; j + 8 <= n; j += 8) {
+-        uint8x8_t bits = vtst_u8(vdup_n_u8(bm[j >> 3]), vbit_pos);
+-        uint8x8_t vals = veor_u8(vsym0, vand_u8(vdelta, bits));
+-        uint16x8_t idx = vld1q_u16(indices + j);
+-        symbols[vgetq_lane_u16(idx, 0)] = vget_lane_u8(vals, 0);
+-        symbols[vgetq_lane_u16(idx, 1)] = vget_lane_u8(vals, 1);
+-        symbols[vgetq_lane_u16(idx, 2)] = vget_lane_u8(vals, 2);
+-        symbols[vgetq_lane_u16(idx, 3)] = vget_lane_u8(vals, 3);
+-        symbols[vgetq_lane_u16(idx, 4)] = vget_lane_u8(vals, 4);
+-        symbols[vgetq_lane_u16(idx, 5)] = vget_lane_u8(vals, 5);
+-        symbols[vgetq_lane_u16(idx, 6)] = vget_lane_u8(vals, 6);
+-        symbols[vgetq_lane_u16(idx, 7)] = vget_lane_u8(vals, 7);
+-    }
+-    for (; j < n; j++) {
+-        uint8_t bit = (bm[j >> 3] >> (j & 7)) & 1;
+-        symbols[indices[j]] = sym0 ^ ((sym0 ^ sym1) & (uint8_t)(-(int8_t)bit));
++
++        nxt->j        = nxt_j;
++        nxt->n_left   = nxt_n_left;
++        nxt->n_right  = nxt_n_right;
++        PROF_TOC(PROF_SCATTER_BOTH_LEAVES_FUSED, n_fused);
+     }
+ 
+-    /* Flush local state back to nxt. */
+-    nxt->j        = nxt_j;
+-    nxt->n_left   = nxt_n_left;
+-    nxt->n_right  = nxt_n_right;
++    /* Fallback for the un-fused tail (n - n_fused).  bm + (n_fused>>3)
++     * is byte-aligned because n_fused is a multiple of 16. */
++    int n_rest = n - n_fused;
++    if (n_rest > 0) {
++        PROF_TIC();
++        scatter_both_leaves(symbols, indices + n_fused, n_rest,
++                             bm + (n_fused >> 3), sym0, sym1);
++        PROF_TOC(PROF_SCATTER_BOTH_LEAVES, n_rest);
++    }
+ }
+ 
+ /* ---------- Per-call-site partition loops (interior recursion) ----------
+@@ -1110,9 +1318,17 @@ static void decode_node_neon(const pivco_huffman_table_t *table,
+         return;
+ 
+     case PIVCO_NODE_LEAF: {
+-        PROF_TIC();
+-        scatter_sym(symbols, indices, n, (uint8_t)node->symbol);
+-        PROF_TOC(PROF_SCATTER_SYM, n);
++        if (g_la_writes != NULL) {
++            /* fused kernel does its own PROF tic/toc, plus a fallback
++             * to plain scatter_sym for the un-fused tail. */
++            scatter_sym_fused_root_full(symbols, indices, n,
++                                         (uint8_t)node->symbol,
++                                         g_la_writes);
++        } else {
++            PROF_TIC();
++            scatter_sym(symbols, indices, n, (uint8_t)node->symbol);
++            PROF_TOC(PROF_SCATTER_SYM, n);
++        }
+         return;
+     }
+ 
+@@ -1122,9 +1338,14 @@ static void decode_node_neon(const pivco_huffman_table_t *table,
+         const uint8_t *bm = *in_ptr;
+         *in_ptr += total_bytes;
+         const uint8_t *c2s = &table->flat_code_to_sym[table->flat_offset[node_id]];
+-        PROF_TIC();
+-        flat_decode_scatter_neon(symbols, indices, n, bm, D, c2s);
+-        PROF_TOC(PROF_FLAT_DECODE_SCATTER, n);
++        if (g_la_writes != NULL && (D == 2 || D == 4)) {
++            flat_decode_scatter_neon_fused_root_full(symbols, indices, n, bm, D, c2s,
++                                                      g_la_writes);
++        } else {
++            PROF_TIC();
++            flat_decode_scatter_neon(symbols, indices, n, bm, D, c2s);
++            PROF_TOC(PROF_FLAT_DECODE_SCATTER, n);
++        }
+         return;
+     }
+ 
+@@ -1134,7 +1355,6 @@ static void decode_node_neon(const pivco_huffman_table_t *table,
+         *in_ptr += nbytes;
+         const pivco_tree_node_t *left_child  = &table->tree[node->left];
+         const pivco_tree_node_t *right_child = &table->tree[node->right];
+-        PROF_TIC();
+         if (g_la_writes != NULL) {
+             scatter_both_leaves_fused_root_full(
+                 symbols, indices, n, bm,
+@@ -1142,11 +1362,12 @@ static void decode_node_neon(const pivco_huffman_table_t *table,
+                 (uint8_t)right_child->symbol,
+                 g_la_writes);
+         } else {
++            PROF_TIC();
+             scatter_both_leaves(symbols, indices, n, bm,
+                                 (uint8_t)left_child->symbol,
+                                 (uint8_t)right_child->symbol);
++            PROF_TOC(PROF_SCATTER_BOTH_LEAVES, n);
+         }
+-        PROF_TOC(PROF_SCATTER_BOTH_LEAVES, n);
+         return;
+     }
+ 
+@@ -1441,9 +1662,14 @@ int pivco_huffman_decode_neon(const uint8_t *in, size_t in_len,
+     nxt->indices = g_la_indices_buf[g_la_cur ^ 1];
+     nxt->tmp     = g_la_tmp_buf[g_la_cur ^ 1];
+ 
+-    /* Enable fusion writes for the recursion only when both ends are
+-     * ready: caller set a next bm AND fusion is globally enabled. */
+-    g_la_writes = (g_pivco_fusion_enabled && nxt->bm != NULL) ? nxt : NULL;
++    /* Enable fusion writes only when (a) caller set a next-block bm,
++     * (b) fusion is globally enabled, AND (c) this block takes the
++     * root_full path -- since the Huffman table is shared across
++     * blocks, "this block takes root_full" implies the next one does
++     * too, so the pre-computed partition will actually be consumed.
++     * For root_half / root_both_leaves blocks the pre-work would be
++     * thrown away (those paths don't read cur->indices/tmp/j). */
++    g_la_writes = NULL;
+ 
+     if (left_leaf && root->left == skip_node) {
+         int n_right = root_half_right(N, bm, cur->tmp);
+@@ -1454,6 +1680,7 @@ int pivco_huffman_decode_neon(const uint8_t *in, size_t in_len,
+         decode_node_neon(table, root->left, cur->indices, n_left,
+                          symbols, &ptr, cur->tmp, skip_node);
+     } else {
++        if (g_pivco_fusion_enabled && nxt->bm != NULL) g_la_writes = nxt;
+         int n_left, n_right;
+         /* Resume root_full from cur's pre-state (zeros for fresh start
+          * or first block; partial values when previous block's fusion
+diff --git a/pivco-huffman/src/pivco_huffman_x86.c b/pivco-huffman/src/pivco_huffman_x86.c
+index 05540e1..755d25b 100644
+--- a/pivco-huffman/src/pivco_huffman_x86.c
++++ b/pivco-huffman/src/pivco_huffman_x86.c
+@@ -102,6 +102,121 @@ static inline void scatter_write_sse(uint8_t *symbols,
+     }
+ }
+ 
++/* ---------- Cross-block fusion infrastructure (SSE) ----------
++ *
++ * Mirrors the NEON design (see pivco_huffman_neon.c).  The current
++ * block's scatter loop pre-computes the next block's root partition
++ * into ping-pong slots so the next block's root_full has nothing left
++ * to do.  Fusion is gated on (1) caller having set the next-block bm
++ * via pivco_huffman_set_next_x86, AND (2) g_pivco_fusion_enabled.
++ *
++ * SSE chunk shapes:
++ *   - scatter chunk: 16 elements (2x __m128i index loads)
++ *   - partition chunk: 8 elements (one __m128i partition_8_sse call)
++ *   - K = partition chunks per fused scatter chunk.  K=2 matches the
++ *     v4 microbench sweet spot on Zen 3 (15.7% kernel saving). */
++
++#ifndef PIVCO_LA_K_X86
++#define PIVCO_LA_K_X86 2
++#endif
++
++typedef struct {
++    int j;            /* partition cursor (0..PIVCO_BLOCK_SIZE) */
++    int n_left;
++    int n_right;
++    const uint8_t *bm;        /* next-block root bitmap */
++    uint16_t *indices;        /* next-block left buffer (n_left side) */
++    uint16_t *tmp;            /* next-block right buffer (n_right side) */
++} pivco_la_x86_t;
++
++extern int g_pivco_fusion_enabled;  /* defined in pivco_huffman_neon.c */
++
++static pivco_la_x86_t  g_la_x86[2];
++static int             g_la_x86_cur = 0;
++static pivco_la_x86_t *g_la_x86_writes = NULL;
++
++/* 64B-aligned ping-pong partition buffers. */
++static uint16_t g_la_x86_indices_buf[2][PIVCO_BLOCK_SIZE + 8]
++    __attribute__((aligned(64)));
++static uint16_t g_la_x86_tmp_buf[2][PIVCO_BLOCK_SIZE * 2]
++    __attribute__((aligned(64)));
++
++void pivco_huffman_set_next_x86(const uint8_t *in_next)
++{
++    g_la_x86[g_la_x86_cur ^ 1].bm = in_next;
++}
++
++/* Fused: scatter_write_sse (16 stores) + K * partition_8_sse pairs.
++ * Caller passes nxt with bm/indices/tmp wired.  Pre-computes how many
++ * input chunks can fuse with the available partition budget so the
++ * inner loop has no per-iter budget branch.  Tail (n_rest) falls back
++ * to plain scatter_write_sse. */
++static inline void scatter_write_sse_fused_root_full(
++    uint8_t *symbols, const uint16_t *indices, int n,
++    uint8_t sym, pivco_la_x86_t *nxt)
++{
++    /* Each fused iter consumes 16 scatter elements and 8*K partition
++     * elements.  Cap n_fused by both. */
++    int max_p_iters = (PIVCO_BLOCK_SIZE - nxt->j) / (8 * PIVCO_LA_K_X86);
++    int max_n_fused = max_p_iters * 16;
++    int n_fused     = (n / 16) * 16;
++    if (n_fused > max_n_fused) n_fused = max_n_fused;
++
++    if (n_fused > 0) {
++        int nxt_j        = nxt->j;
++        int nxt_n_left   = nxt->n_left;
++        int nxt_n_right  = nxt->n_right;
++        const uint8_t *nxt_bm  = nxt->bm;
++        uint16_t *nxt_indices  = nxt->indices;
++        uint16_t *nxt_tmp      = nxt->tmp;
++
++        for (int j = 0; j < n_fused; j += 16) {
++            /* === scatter side (16 byte stores) === */
++            __m128i i0 = _mm_loadu_si128((const __m128i *)(indices + j));
++            __m128i i1 = _mm_loadu_si128((const __m128i *)(indices + j + 8));
++            symbols[_mm_extract_epi16(i0, 0)] = sym;
++            symbols[_mm_extract_epi16(i0, 1)] = sym;
++            symbols[_mm_extract_epi16(i0, 2)] = sym;
++            symbols[_mm_extract_epi16(i0, 3)] = sym;
++            symbols[_mm_extract_epi16(i0, 4)] = sym;
++            symbols[_mm_extract_epi16(i0, 5)] = sym;
++            symbols[_mm_extract_epi16(i0, 6)] = sym;
++            symbols[_mm_extract_epi16(i0, 7)] = sym;
++            symbols[_mm_extract_epi16(i1, 0)] = sym;
++            symbols[_mm_extract_epi16(i1, 1)] = sym;
++            symbols[_mm_extract_epi16(i1, 2)] = sym;
++            symbols[_mm_extract_epi16(i1, 3)] = sym;
++            symbols[_mm_extract_epi16(i1, 4)] = sym;
++            symbols[_mm_extract_epi16(i1, 5)] = sym;
++            symbols[_mm_extract_epi16(i1, 6)] = sym;
++            symbols[_mm_extract_epi16(i1, 7)] = sym;
++
++            /* === partition side: K inlined partition_8_sse calls.
++             * Generate identity [nxt_j..nxt_j+7] once per K iter. */
++            #pragma GCC unroll 4
++            for (int k = 0; k < PIVCO_LA_K_X86; k++) {
++                uint16_t id[8];
++                for (int kk = 0; kk < 8; kk++) id[kk] = (uint16_t)(nxt_j + kk);
++                int nr = partition_8_sse(id, nxt_bm[nxt_j >> 3],
++                                          nxt_indices + nxt_n_left,
++                                          nxt_tmp + nxt_n_right);
++                nxt_n_right += nr;
++                nxt_n_left  += (8 - nr);
++                nxt_j += 8;
++            }
++        }
++
++        nxt->j        = nxt_j;
++        nxt->n_left   = nxt_n_left;
++        nxt->n_right  = nxt_n_right;
++    }
++
++    int n_rest = n - n_fused;
++    if (n_rest > 0) {
++        scatter_write_sse(symbols, indices + n_fused, n_rest, sym);
++    }
++}
++
+ /* ---------- x86 Encode (Tree-Walk) ---------- */
+ 
+ /* Pack n values of D bits (D<=8 typical, up to 15) into out, LSB-first.
+@@ -530,7 +645,13 @@ static void decode_node_x86(const pivco_huffman_table_t *table,
+ 
+     const pivco_tree_node_t *node = &table->tree[node_id];
+     if (node->symbol >= 0) {
+-        scatter_write_sse(symbols, indices, n, (uint8_t)node->symbol);
++        if (g_la_x86_writes != NULL) {
++            scatter_write_sse_fused_root_full(symbols, indices, n,
++                                               (uint8_t)node->symbol,
++                                               g_la_x86_writes);
++        } else {
++            scatter_write_sse(symbols, indices, n, (uint8_t)node->symbol);
++        }
+         return;
+     }
+ 
+@@ -731,12 +852,26 @@ int pivco_huffman_decode_x86(const uint8_t *in, size_t in_len,
+     int16_t skip_node = table->prefill_node;
+     memset(symbols, prefill_sym, (size_t)N);
+ 
+-    /* Partition at root — generate identity indices in-place.
+-     * +8 padding on indices to absorb partition_8_sse_left's 16-byte
+-     * filler; 64B-aligned to keep cache-set layout deterministic.
+-     * See decode_node_neon comment. */
+-    uint16_t indices[PIVCO_BLOCK_SIZE + 8] __attribute__((aligned(64)));
+-    uint16_t tmp[PIVCO_BLOCK_SIZE * 2]      __attribute__((aligned(64)));
++    /* Cross-block fusion ping-pong slots.  cur may carry a partial
++     * root_full result from the previous block's scatter fusion; nxt
++     * is what THIS block's scatter loop writes into.  See
++     * pivco_huffman_neon.c for full design rationale. */
++    pivco_la_x86_t *cur = &g_la_x86[g_la_x86_cur];
++    pivco_la_x86_t *nxt = &g_la_x86[g_la_x86_cur ^ 1];
++    if (cur->indices == NULL) cur->indices = g_la_x86_indices_buf[g_la_x86_cur];
++    if (cur->tmp     == NULL) cur->tmp     = g_la_x86_tmp_buf[g_la_x86_cur];
++    nxt->j = 0;
++    nxt->n_left = 0;
++    nxt->n_right = 0;
++    nxt->indices = g_la_x86_indices_buf[g_la_x86_cur ^ 1];
++    nxt->tmp     = g_la_x86_tmp_buf[g_la_x86_cur ^ 1];
++
++    /* Use cur's stable buffers as this block's working scratch — same
++     * trick as NEON, unifies fusion-on / fusion-off paths. */
++    uint16_t *indices = cur->indices;
++    uint16_t *tmp     = cur->tmp;
++
++    g_la_x86_writes = NULL;
+ 
+     if (left_leaf && root->left == skip_node) {
+         /* Left is prefilled — half-partition right only at root */
+@@ -760,9 +895,11 @@ int pivco_huffman_decode_x86(const uint8_t *in, size_t in_len,
+         decode_node_x86(table, root->left, indices, n_left,
+                          symbols, &ptr, tmp, skip_node);
+     } else {
+-        /* Full partition at root */
+-        int n_left = 0, n_right = 0;
+-        for (int j = 0; j + 8 <= N; j += 8) {
++        /* Full partition at root — resumable from cur->{j,n_left,n_right}
++         * which the previous block's fused scatter may have pre-populated. */
++        int n_left  = cur->n_left;
++        int n_right = cur->n_right;
++        for (int j = cur->j; j + 8 <= N; j += 8) {
+             uint16_t id[8];
+             for (int k = 0; k < 8; k++) id[k] = (uint16_t)(j + k);
+             uint8_t mask = bm[j >> 3];
+@@ -772,6 +909,12 @@ int pivco_huffman_decode_x86(const uint8_t *in, size_t in_len,
+             n_left += (8 - nr);
+         }
+ 
++        /* Enable fusion writes only for this branch (root_full); the
++         * Huffman table is shared across blocks so next-block root will
++         * also be FULL and consume our pre-work.  For root_half /
++         * root_both_leaves the pre-work would be wasted. */
++        if (g_pivco_fusion_enabled && nxt->bm != NULL) g_la_x86_writes = nxt;
++
+         /* Recurse into both; child's entry handles leaf/skip_node.
+          * +8 padding before right child's tmp - see decode_node_neon. */
+         decode_node_x86(table, root->left, indices, n_left,
+@@ -780,6 +923,12 @@ int pivco_huffman_decode_x86(const uint8_t *in, size_t in_len,
+                          symbols, &ptr, tmp + n_right + 8, skip_node);
+     }
+ 
++    /* Flip ping-pong: nxt becomes next call's cur. */
++    cur->bm = NULL;
++    cur->j = 0; cur->n_left = 0; cur->n_right = 0;
++    g_la_x86_writes = NULL;
++    g_la_x86_cur ^= 1;
++
+     *consumed = (size_t)(ptr - in);
+     return PIVCO_OK;
+ }
+diff --git a/pivco-huffman/src/pivco_prof.c b/pivco-huffman/src/pivco_prof.c
+index bb34543..5c9cdc1 100644
+--- a/pivco-huffman/src/pivco_prof.c
++++ b/pivco-huffman/src/pivco_prof.c
+@@ -26,6 +26,9 @@ static const char *prof_names[PROF_COUNT] = {
+     [PROF_SCATTER_BOTH_LEAVES] = "scatter_both_leaves",
+     [PROF_FLAT_DECODE_SCATTER] = "flat_decode_scatter",
+     [PROF_FLAT_DECODE_DIRECT]  = "flat_decode_direct",
++    [PROF_SCATTER_SYM_FUSED]            = "scatter_sym         (fused)",
++    [PROF_SCATTER_BOTH_LEAVES_FUSED]    = "scatter_both_leaves (fused)",
++    [PROF_FLAT_DECODE_SCATTER_FUSED]    = "flat_decode_scatter (fused)",
+     [PROF_DECODE_NODE]         = "decode_node (call count)",
+     [PROF_DECODE_ENTRY]        = "pivco_huffman_decode (entry)",
+ };
+--- /dev/null	2026-05-09 23:28:51.543891000 -0700
++++ extras/bench_dual_decode_test.c	2026-05-09 16:05:34.183470118 -0700
+@@ -0,0 +1,151 @@
++/* Verify correctness of cross-block fusion (g_pivco_fusion_enabled +
++ * pivco_huffman_set_next_neon) vs plain serial decode, then measure
++ * throughput on a chosen distribution. */
++
++#include "pivco_huffman.h"
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <time.h>
++
++extern void bench_init(void);
++extern int  bench_num_distributions(void);
++extern const char *bench_dist_name(int idx);
++extern const uint64_t *bench_dist_freq(int idx);
++extern void bench_generate_symbols(int dist_idx, uint8_t *symbols,
++                                   int n_symbols, uint64_t seed);
++
++static double now_ns(void) {
++    struct timespec ts;
++    clock_gettime(CLOCK_MONOTONIC, &ts);
++    return (double)ts.tv_sec * 1e9 + (double)ts.tv_nsec;
++}
++
++/* Decode a 2-block stream serially (plain decode, no fusion). */
++static void decode_serial(const uint8_t *in_A, size_t len_A,
++                           const uint8_t *in_B, size_t len_B,
++                           const pivco_huffman_table_t *t,
++                           uint8_t *sA, uint8_t *sB,
++                           size_t *cA, size_t *cB)
++{
++    g_pivco_fusion_enabled = 0;
++    pivco_huffman_set_next_neon(NULL);
++    pivco_huffman_decode_neon(in_A, len_A, t, sA, cA);
++    pivco_huffman_decode_neon(in_B, len_B, t, sB, cB);
++}
++
++/* Decode a 2-block stream with fusion enabled. */
++static void decode_fused(const uint8_t *in_A, size_t len_A,
++                          const uint8_t *in_B, size_t len_B,
++                          const pivco_huffman_table_t *t,
++                          uint8_t *sA, uint8_t *sB,
++                          size_t *cA, size_t *cB)
++{
++    g_pivco_fusion_enabled = 1;
++    pivco_huffman_set_next_neon(in_B);   /* A's scatters fuse into B's root partition */
++    pivco_huffman_decode_neon(in_A, len_A, t, sA, cA);
++    pivco_huffman_set_next_neon(NULL);   /* B is the last block, no fusion target */
++    pivco_huffman_decode_neon(in_B, len_B, t, sB, cB);
++    g_pivco_fusion_enabled = 0;
++}
++
++int main(int argc, char **argv) {
++    bench_init();
++    const char *dist = (argc > 1) ? argv[1] : "prose_pride";
++    int reps = (argc > 2) ? atoi(argv[2]) : 100000;
++
++    int dist_idx = -1;
++    for (int i = 0; i < bench_num_distributions(); i++) {
++        if (strcmp(bench_dist_name(i), dist) == 0) { dist_idx = i; break; }
++    }
++    if (dist_idx < 0) { fprintf(stderr, "no dist %s\n", dist); return 1; }
++
++    pivco_huffman_table_t table;
++    pivco_huffman_build_table(bench_dist_freq(dist_idx), &table);
++
++    uint8_t sym_A[PIVCO_BLOCK_SIZE], sym_B[PIVCO_BLOCK_SIZE];
++    bench_generate_symbols(dist_idx, sym_A, PIVCO_BLOCK_SIZE, 0xAAAA1234ULL);
++    bench_generate_symbols(dist_idx, sym_B, PIVCO_BLOCK_SIZE, 0xBBBB5678ULL);
++
++    uint8_t enc_A[PIVCO_MAX_ENCODED_SIZE];
++    uint8_t enc_B[PIVCO_MAX_ENCODED_SIZE];
++    size_t  elen_A, elen_B;
++    pivco_huffman_encode_neon(sym_A, &table, enc_A, &elen_A);
++    pivco_huffman_encode_neon(sym_B, &table, enc_B, &elen_B);
++    printf("encoded A: %zu bytes; B: %zu bytes (dist=%s)\n", elen_A, elen_B, dist);
++
++    /* Correctness check: serial first */
++    uint8_t dec_A_serial[PIVCO_BLOCK_SIZE], dec_B_serial[PIVCO_BLOCK_SIZE];
++    size_t cA, cB;
++    decode_serial(enc_A, elen_A, enc_B, elen_B, &table,
++                  dec_A_serial, dec_B_serial, &cA, &cB);
++    if (memcmp(sym_A, dec_A_serial, PIVCO_BLOCK_SIZE) != 0
++        || memcmp(sym_B, dec_B_serial, PIVCO_BLOCK_SIZE) != 0) {
++        fprintf(stderr, "SERIAL DECODE: roundtrip mismatch (baseline bug)\n");
++        return 1;
++    }
++
++    /* Now fused */
++    uint8_t dec_A_fused[PIVCO_BLOCK_SIZE], dec_B_fused[PIVCO_BLOCK_SIZE];
++    size_t cAf, cBf;
++    decode_fused(enc_A, elen_A, enc_B, elen_B, &table,
++                 dec_A_fused, dec_B_fused, &cAf, &cBf);
++    if (memcmp(sym_A, dec_A_fused, PIVCO_BLOCK_SIZE) != 0) {
++        fprintf(stderr, "FUSED DECODE: A mismatch\n");
++        for (int i = 0; i < 32; i++) {
++            if (dec_A_fused[i] != sym_A[i])
++                fprintf(stderr, "  pos %d: got %d, expected %d\n",
++                        i, dec_A_fused[i], sym_A[i]);
++        }
++        return 2;
++    }
++    if (memcmp(sym_B, dec_B_fused, PIVCO_BLOCK_SIZE) != 0) {
++        fprintf(stderr, "FUSED DECODE: B mismatch\n");
++        for (int i = 0; i < 32; i++) {
++            if (dec_B_fused[i] != sym_B[i])
++                fprintf(stderr, "  pos %d: got %d, expected %d\n",
++                        i, dec_B_fused[i], sym_B[i]);
++        }
++        return 3;
++    }
++    extern unsigned long g_pivco_fused_calls;
++    g_pivco_fused_calls = 0;
++    decode_fused(enc_A, elen_A, enc_B, elen_B, &table,
++                 dec_A_fused, dec_B_fused, &cAf, &cBf);
++    printf("correctness PASS; fused diagnostic for one decode_fused call:\n");
++    printf("  fused_calls=%lu\n", g_pivco_fused_calls);
++
++    /* Warmup */
++    for (int i = 0; i < 1000; i++) {
++        decode_serial(enc_A, elen_A, enc_B, elen_B, &table,
++                      dec_A_serial, dec_B_serial, &cA, &cB);
++    }
++
++    /* Time serial */
++    double t0 = now_ns();
++    for (int i = 0; i < reps; i++) {
++        decode_serial(enc_A, elen_A, enc_B, elen_B, &table,
++                      dec_A_serial, dec_B_serial, &cA, &cB);
++    }
++    double t_serial = now_ns() - t0;
++
++    /* Time fused */
++    t0 = now_ns();
++    for (int i = 0; i < reps; i++) {
++        decode_fused(enc_A, elen_A, enc_B, elen_B, &table,
++                     dec_A_fused, dec_B_fused, &cAf, &cBf);
++    }
++    double t_fused = now_ns() - t0;
++
++    double ns_serial = t_serial / reps;
++    double ns_fused  = t_fused  / reps;
++    double pct = 100.0 * (ns_serial - ns_fused) / ns_serial;
++
++    printf("dist=%s reps=%d\n", dist, reps);
++    printf("  serial:  %.1f ns / 2-block-pair    (%.1f M/s)\n",
++           ns_serial, 2.0 * PIVCO_BLOCK_SIZE / ns_serial * 1000.0);
++    printf("  fused :  %.1f ns / 2-block-pair    (%.1f M/s)\n",
++           ns_fused, 2.0 * PIVCO_BLOCK_SIZE / ns_fused * 1000.0);
++    printf("  delta :  %+.2f%% (positive = fused faster)\n", pct);
++    return 0;
++}
+--- /dev/null	2026-05-09 23:28:51.543891000 -0700
++++ extras/bench_dual_decode_test_x86.c	2026-05-09 18:51:33.978415214 -0700
+@@ -0,0 +1,146 @@
++/* Verify correctness of cross-block fusion (g_pivco_fusion_enabled +
++ * pivco_huffman_set_next_x86) vs plain serial decode, then measure
++ * throughput on a chosen distribution. */
++
++#include "pivco_huffman.h"
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <time.h>
++
++extern void bench_init(void);
++extern int  bench_num_distributions(void);
++extern const char *bench_dist_name(int idx);
++extern const uint64_t *bench_dist_freq(int idx);
++extern void bench_generate_symbols(int dist_idx, uint8_t *symbols,
++                                   int n_symbols, uint64_t seed);
++
++static double now_ns(void) {
++    struct timespec ts;
++    clock_gettime(CLOCK_MONOTONIC, &ts);
++    return (double)ts.tv_sec * 1e9 + (double)ts.tv_nsec;
++}
++
++/* Decode a 2-block stream serially (plain decode, no fusion). */
++static void decode_serial(const uint8_t *in_A, size_t len_A,
++                           const uint8_t *in_B, size_t len_B,
++                           const pivco_huffman_table_t *t,
++                           uint8_t *sA, uint8_t *sB,
++                           size_t *cA, size_t *cB)
++{
++    g_pivco_fusion_enabled = 0;
++    pivco_huffman_set_next_x86(NULL);
++    pivco_huffman_decode_x86(in_A, len_A, t, sA, cA);
++    pivco_huffman_decode_x86(in_B, len_B, t, sB, cB);
++}
++
++/* Decode a 2-block stream with fusion enabled. */
++static void decode_fused(const uint8_t *in_A, size_t len_A,
++                          const uint8_t *in_B, size_t len_B,
++                          const pivco_huffman_table_t *t,
++                          uint8_t *sA, uint8_t *sB,
++                          size_t *cA, size_t *cB)
++{
++    g_pivco_fusion_enabled = 1;
++    pivco_huffman_set_next_x86(in_B);   /* A's scatters fuse into B's root partition */
++    pivco_huffman_decode_x86(in_A, len_A, t, sA, cA);
++    pivco_huffman_set_next_x86(NULL);   /* B is the last block, no fusion target */
++    pivco_huffman_decode_x86(in_B, len_B, t, sB, cB);
++    g_pivco_fusion_enabled = 0;
++}
++
++int main(int argc, char **argv) {
++    bench_init();
++    const char *dist = (argc > 1) ? argv[1] : "prose_pride";
++    int reps = (argc > 2) ? atoi(argv[2]) : 100000;
++
++    int dist_idx = -1;
++    for (int i = 0; i < bench_num_distributions(); i++) {
++        if (strcmp(bench_dist_name(i), dist) == 0) { dist_idx = i; break; }
++    }
++    if (dist_idx < 0) { fprintf(stderr, "no dist %s\n", dist); return 1; }
++
++    pivco_huffman_table_t table;
++    pivco_huffman_build_table(bench_dist_freq(dist_idx), &table);
++
++    uint8_t sym_A[PIVCO_BLOCK_SIZE], sym_B[PIVCO_BLOCK_SIZE];
++    bench_generate_symbols(dist_idx, sym_A, PIVCO_BLOCK_SIZE, 0xAAAA1234ULL);
++    bench_generate_symbols(dist_idx, sym_B, PIVCO_BLOCK_SIZE, 0xBBBB5678ULL);
++
++    uint8_t enc_A[PIVCO_MAX_ENCODED_SIZE];
++    uint8_t enc_B[PIVCO_MAX_ENCODED_SIZE];
++    size_t  elen_A, elen_B;
++    pivco_huffman_encode_x86(sym_A, &table, enc_A, &elen_A);
++    pivco_huffman_encode_x86(sym_B, &table, enc_B, &elen_B);
++    printf("encoded A: %zu bytes; B: %zu bytes (dist=%s)\n", elen_A, elen_B, dist);
++
++    /* Correctness check: serial first */
++    uint8_t dec_A_serial[PIVCO_BLOCK_SIZE], dec_B_serial[PIVCO_BLOCK_SIZE];
++    size_t cA, cB;
++    decode_serial(enc_A, elen_A, enc_B, elen_B, &table,
++                  dec_A_serial, dec_B_serial, &cA, &cB);
++    if (memcmp(sym_A, dec_A_serial, PIVCO_BLOCK_SIZE) != 0
++        || memcmp(sym_B, dec_B_serial, PIVCO_BLOCK_SIZE) != 0) {
++        fprintf(stderr, "SERIAL DECODE: roundtrip mismatch (baseline bug)\n");
++        return 1;
++    }
++
++    /* Now fused */
++    uint8_t dec_A_fused[PIVCO_BLOCK_SIZE], dec_B_fused[PIVCO_BLOCK_SIZE];
++    size_t cAf, cBf;
++    decode_fused(enc_A, elen_A, enc_B, elen_B, &table,
++                 dec_A_fused, dec_B_fused, &cAf, &cBf);
++    if (memcmp(sym_A, dec_A_fused, PIVCO_BLOCK_SIZE) != 0) {
++        fprintf(stderr, "FUSED DECODE: A mismatch\n");
++        for (int i = 0; i < 32; i++) {
++            if (dec_A_fused[i] != sym_A[i])
++                fprintf(stderr, "  pos %d: got %d, expected %d\n",
++                        i, dec_A_fused[i], sym_A[i]);
++        }
++        return 2;
++    }
++    if (memcmp(sym_B, dec_B_fused, PIVCO_BLOCK_SIZE) != 0) {
++        fprintf(stderr, "FUSED DECODE: B mismatch\n");
++        for (int i = 0; i < 32; i++) {
++            if (dec_B_fused[i] != sym_B[i])
++                fprintf(stderr, "  pos %d: got %d, expected %d\n",
++                        i, dec_B_fused[i], sym_B[i]);
++        }
++        return 3;
++    }
++    printf("correctness PASS\n");
++
++    /* Warmup */
++    for (int i = 0; i < 1000; i++) {
++        decode_serial(enc_A, elen_A, enc_B, elen_B, &table,
++                      dec_A_serial, dec_B_serial, &cA, &cB);
++    }
++
++    /* Time serial */
++    double t0 = now_ns();
++    for (int i = 0; i < reps; i++) {
++        decode_serial(enc_A, elen_A, enc_B, elen_B, &table,
++                      dec_A_serial, dec_B_serial, &cA, &cB);
++    }
++    double t_serial = now_ns() - t0;
++
++    /* Time fused */
++    t0 = now_ns();
++    for (int i = 0; i < reps; i++) {
++        decode_fused(enc_A, elen_A, enc_B, elen_B, &table,
++                     dec_A_fused, dec_B_fused, &cAf, &cBf);
++    }
++    double t_fused = now_ns() - t0;
++
++    double ns_serial = t_serial / reps;
++    double ns_fused  = t_fused  / reps;
++    double pct = 100.0 * (ns_serial - ns_fused) / ns_serial;
++
++    printf("dist=%s reps=%d\n", dist, reps);
++    printf("  serial:  %.1f ns / 2-block-pair    (%.1f M/s)\n",
++           ns_serial, 2.0 * PIVCO_BLOCK_SIZE / ns_serial * 1000.0);
++    printf("  fused :  %.1f ns / 2-block-pair    (%.1f M/s)\n",
++           ns_fused, 2.0 * PIVCO_BLOCK_SIZE / ns_fused * 1000.0);
++    printf("  delta :  %+.2f%% (positive = fused faster)\n", pct);
++    return 0;
++}

@@ -1,4 +1,5 @@
 build/
+build-*/
 ext/
 *.o
 *.a

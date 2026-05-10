@@ -21,7 +21,6 @@ static const char *prof_names[PROF_COUNT] = {
     [PROF_ROOT_FULL]           = "root full       (entry)",
     [PROF_ROOT_HALF_RIGHT]     = "root half-right (entry)",
     [PROF_ROOT_HALF_LEFT]      = "root half-left  (entry)",
-    [PROF_ROOT_BOTH_LEAVES]    = "root both-leaves(entry)",
     [PROF_SCATTER_SYM]         = "scatter_sym",
     [PROF_SCATTER_BOTH_LEAVES] = "scatter_both_leaves",
     [PROF_FLAT_DECODE_SCATTER] = "flat_decode_scatter",
