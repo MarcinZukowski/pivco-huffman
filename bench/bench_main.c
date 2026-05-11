@@ -94,7 +94,10 @@ int main(int argc, char **argv)
         } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
             printf("Usage: %s [repeats] [--all]\n"
                    "  repeats   passes over 4M symbols per timed run (default %d)\n"
-                   "  --all     run every distribution (default: MAIN set only)\n",
+                   "  --all     run every distribution AND every comparator\n"
+                   "            (default MAIN: 9 distributions; pivco_s/n/bu,\n"
+                   "             trad_4s, huf0_x1/x2 — no pivco_p, no trad_1s,\n"
+                   "             no huf0_1s, no rans_x2)\n",
                    argv[0], DEFAULT_REPEATS);
             return 0;
         } else {
@@ -156,7 +159,7 @@ int main(int argc, char **argv)
     if (quick) {
         printf("%-13s | %7s\n", "DECODE M/s", "pivco_n");
         printf("--------------|--------\n");
-    } else {
+    } else if (run_all) {
         printf("%-13s | %7s %7s %7s %7s | %7s %7s | %7s %7s %7s | %7s | %7s\n",
                "DECODE M/s", "pivco_s", "pivco_n", "pivco_bu", "pivco_p",
                "trad_1s", "trad_4s",
@@ -164,6 +167,14 @@ int main(int argc, char **argv)
                "rans_x2", "ratio");
         printf("--------------|---------------------------------|-----------------|------"
                "----------------------|---------|--------\n");
+    } else {
+        /* MAIN comparator set: drop pivco_p, trad_1s, huf0_1s, rans_x2. */
+        printf("%-13s | %7s %7s %7s | %7s | %7s %7s | %7s\n",
+               "DECODE M/s", "pivco_s", "pivco_n", "pivco_bu",
+               "trad_4s",
+               "huf0_x1", "huf0_x2", "ratio");
+        printf("--------------|-------------------------|---------|"
+               "------------------|--------\n");
     }
 
     for (int d = 0; d < n_dist; d++) {
@@ -425,7 +436,7 @@ int main(int argc, char **argv)
         }, "pivco_s");
 
 #ifdef PIVCO_HAS_NEON
-        if (pfx_applicable) {
+        if (pfx_applicable && run_all) {
             BENCH(p_dec_pfx, {
                 for (int b = 0; b < NBLOCKS; b++) {
                     size_t consumed;
@@ -439,14 +450,16 @@ int main(int argc, char **argv)
 #endif
 
 
-        /* Trad 1-stream: decode blocks */
-        BENCH(t_dec_1s, {
-            for (int b = 0; b < trad_nblocks; b++) {
-                trad_huffman_decode(trad_enc + trad_enc_off[b],
-                                    trad_enc_bits_arr[b], table,
-                                    dec_buf + (size_t)b * TRAD_BLK, TRAD_BLK);
-            }
-        }, "trad_1s");
+        /* Trad 1-stream: decode blocks (ALL-only) */
+        if (run_all) {
+            BENCH(t_dec_1s, {
+                for (int b = 0; b < trad_nblocks; b++) {
+                    trad_huffman_decode(trad_enc + trad_enc_off[b],
+                                        trad_enc_bits_arr[b], table,
+                                        dec_buf + (size_t)b * TRAD_BLK, TRAD_BLK);
+                }
+            }, "trad_1s");
+        }
 
         /* Trad 4-stream: decode blocks */
         BENCH(t_dec_4s, {
@@ -457,8 +470,8 @@ int main(int argc, char **argv)
             }
         }, "trad_4s");
 
-        /* huf0 1-stream: decode chunks */
-        if (huf0_1s_ok) {
+        /* huf0 1-stream: decode chunks (ALL-only) */
+        if (huf0_1s_ok && run_all) {
             BENCH(h_dec_1s, {
                 for (int c = 0; c < huf0_nchunks; c++) {
                     size_t chunk_sz = (c < huf0_nchunks - 1) ? HUF0_CHUNK
@@ -496,11 +509,13 @@ int main(int argc, char **argv)
             }, "huf0_x2");
         }
 
-        /* rANS 2-stream: full 4M at once */
-        BENCH(r_dec_2, {
-            rans_alias_decode_x2(rans_ctx, rans_x2_enc, rans_x2_enc_len,
-                                  dec_buf, TOTAL_SYMBOLS);
-        }, "rans_2");
+        /* rANS 2-stream: full 4M at once (ALL-only) */
+        if (run_all) {
+            BENCH(r_dec_2, {
+                rans_alias_decode_x2(rans_ctx, rans_x2_enc, rans_x2_enc_len,
+                                      dec_buf, TOTAL_SYMBOLS);
+            }, "rans_2");
+        }
       } /* !quick */
 #undef BENCH
 
@@ -518,10 +533,16 @@ int main(int argc, char **argv)
         if (quick) {
             (void)ratio;
             printf("%-13s | %7.0f\n", name, p_dec_n);
-        } else {
+        } else if (run_all) {
             printf("%-13s | %7.0f %7.0f %7.0f %7.0f | %7.0f %7.0f | %7.0f %7.0f %7.0f | %7.0f | %5.2fx\n",
                    name, p_dec_s, p_dec_n, p_dec_bu, p_dec_pfx, t_dec_1s, t_dec_4s,
                    h_dec_1s, h_dec_4s, h_dec_x2, r_dec_2, ratio);
+        } else {
+            /* MAIN: pivco_s, pivco_n, pivco_bu | trad_4s | huf0_x1, huf0_x2 | ratio */
+            printf("%-13s | %7.0f %7.0f %7.0f | %7.0f | %7.0f %7.0f | %5.2fx\n",
+                   name, p_dec_s, p_dec_n, p_dec_bu,
+                   t_dec_4s,
+                   h_dec_4s, h_dec_x2, ratio);
         }
 
         /* Record compression-size + tree-shape stats for the post-table. */
