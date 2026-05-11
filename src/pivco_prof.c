@@ -32,8 +32,13 @@ static const char *prof_names[PROF_COUNT] = {
     [PROF_BU_FLAT_DECODE]           = "bu_flat_decode",
     [PROF_BU_POPCOUNT_K]            = "bu_popcount_K",
     [PROF_BU_LEAF_MEMSET]           = "bu_leaf_memset",
+    [PROF_ENC_INIT]                 = "enc_init",
+    [PROF_ENC_NODE_FULL]            = "enc_node_full",
+    [PROF_ENC_FLAT]                 = "enc_flat",
     [PROF_DECODE_NODE]         = "decode_node_calls",
     [PROF_DECODE_ENTRY]        = "decode_entry",
+    [PROF_ENC_NODE_VISIT]      = "enc_node_calls",
+    [PROF_ENC_ENTRY]           = "enc_entry",
 };
 
 const char *pivco_prof_name(pivco_prof_id_t id) {

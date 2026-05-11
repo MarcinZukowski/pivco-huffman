@@ -90,6 +90,11 @@ typedef struct {
     /* Per-symbol encode info */
     uint16_t code[PIVCO_MAX_SYMBOLS];       /* canonical Huffman code */
     uint8_t  code_len[PIVCO_MAX_SYMBOLS];   /* code length (0 = unused) */
+    /* Left-aligned code: code << (16 - code_len).  Used by the dense
+     * tree-walk encoder so that the bit at tree-depth d is at fixed
+     * position 15-d across all symbols, eliminating the per-element
+     * shift-amount variance.  Populated by pivco_huffman_build_table. */
+    uint16_t code_la[PIVCO_MAX_SYMBOLS];
 
     /* Tree for PIVCO tree-walk encode/decode */
     pivco_tree_node_t tree[PIVCO_MAX_TREE_NODES];

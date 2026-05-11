@@ -64,6 +64,16 @@ CPMAddPackage(
 # Compiler flags
 add_compile_options(-Wall -Wextra -O3)
 
+# Built-in per-primitive profiling (PROF_TIC / PROF_TOC).  Disabled by
+# default — adds RDTSC/CNTVCT pairs around hot primitives, which is
+# observable on x86 (see IDEAS.md "Profiling overhead is HUGE on x86").
+# Pass `-DPIVCO_PROF=ON` to cmake to enable.
+option(PIVCO_PROF "Enable per-primitive PROF_TIC/PROF_TOC instrumentation" OFF)
+if(PIVCO_PROF)
+    add_compile_definitions(PIVCO_PROF=1)
+    message(STATUS "PIVCO_PROF=1 — per-primitive prof timing enabled")
+endif()
+
 # Architecture detection.  Tricky on macOS when cmake itself runs under
 # Rosetta — child processes inherit the x86_64 arch and uname/arch lie.
 # sysctl is a syscall that bypasses Rosetta translation, so on Apple
@@ -186,6 +196,21 @@ if(BUILD_BENCH)
     )
     target_link_libraries(pivco_huffman_bench pivco_huffman huf0 m)
     target_include_directories(pivco_huffman_bench PRIVATE ext/fse/lib ext/ryg_rans)
+
+    add_executable(pivco_huffman_bench_encode
+        bench/bench_encode.c
+        bench/bench_distributions.c
+    )
+    target_link_libraries(pivco_huffman_bench_encode pivco_huffman huf0 m)
+    target_include_directories(pivco_huffman_bench_encode PRIVATE ext/fse/lib)
+
+    if(TARGET_ARCH STREQUAL "arm64" OR TARGET_ARCH STREQUAL "aarch64")
+        add_executable(pivco_encode_split_micro
+            extras/bench_encode_split.c
+        )
+        target_link_libraries(pivco_encode_split_micro pivco_huffman m)
+        target_include_directories(pivco_encode_split_micro PRIVATE src)
+    endif()
 
     add_executable(pivco_huffman_profile_english
         bench/bench_profile_english.c

@@ -530,11 +530,61 @@ static inline void flat_decode_direct_neon(uint8_t *symbols, int n,
 #undef DST_DIRECT
 }
 
+/* Dense-codes mask build (NEON "movmask" recipe).
+ *
+ * code_vec holds 8 left-aligned 16-bit Huffman codes.  At tree depth d,
+ * bit d of the original code is at position (15 - d) of code_la; we
+ * right-shift each lane by (15 - d) so the desired bit lands in the
+ * LSB.  vshrq_n_u16 takes an immediate shift so we use vshlq_u16 with a
+ * negative runtime vector instead.  Final movmask: shift lane k left by
+ * k bits, then horizontal-add.
+ *
+ * Cost: 4 NEON ops (shl, and, shl, addv) per 8 codes. */
+static inline uint8_t enc_mask8_codes_la(uint16x8_t code_vec, int neg_shift_d)
+{
+    int16x8_t shr_vec = vdupq_n_s16((int16_t)neg_shift_d);
+    uint16x8_t bit_lsb = vandq_u16(vshlq_u16(code_vec, shr_vec),
+                                    vdupq_n_u16(1));
+    static const int16_t weights[8] = {0, 1, 2, 3, 4, 5, 6, 7};
+    uint16x8_t weighted = vshlq_u16(bit_lsb, vld1q_s16(weights));
+    return (uint8_t)vaddvq_u16(weighted);
+}
+
+/* Pack `n` codes into `out` as one D-bit code per element.  Used by the
+ * flat-subtree fast path.  Dense version: reads codes_la directly (no
+ * indices indirection).  At a flat subtree of depth D rooted at tree-
+ * depth `depth`, the local D-bit code is bits [depth, depth+D-1] of the
+ * original code = bits [16-depth-D, 15-depth] of code_la, packed
+ * MSB-first as before. */
+static inline void pack_D_bits_dense(uint8_t *out, int n, int D, int depth,
+                                      const uint16_t *codes_la)
+{
+    int total_bytes = (n * D + 7) >> 3;
+    if (total_bytes > 0) out[total_bytes - 1] = 0;
+    uint32_t mask = (1u << D) - 1;
+    int right_shift = 16 - depth - D;   /* drops left-pad + below-leaf bits */
+    uint64_t buf = 0;
+    int bits_in_buf = 0;
+    int byte_idx = 0;
+    for (int i = 0; i < n; i++) {
+        uint32_t local = ((uint32_t)codes_la[i] >> right_shift) & mask;
+        buf |= ((uint64_t)local) << bits_in_buf;
+        bits_in_buf += D;
+        while (bits_in_buf >= 8) {
+            out[byte_idx++] = (uint8_t)(buf & 0xff);
+            buf >>= 8;
+            bits_in_buf -= 8;
+        }
+    }
+    if (bits_in_buf > 0) {
+        out[byte_idx] = (uint8_t)(buf & ((1u << bits_in_buf) - 1));
+    }
+}
+
 static void encode_node_neon(const pivco_huffman_table_t *table,
                               int16_t node_id,
-                              uint16_t *indices, int n,
+                              uint16_t *codes_la, int n,
                               int depth,
-                              const uint16_t *codes, const uint8_t *lens,
                               uint8_t **out_ptr,
                               uint16_t *tmp)
 {
@@ -543,6 +593,8 @@ static void encode_node_neon(const pivco_huffman_table_t *table,
     const pivco_tree_node_t *node = &table->tree[node_id];
     if (node->symbol >= 0) return; /* leaf */
 
+    PROF_COUNT_ONLY(PROF_ENC_NODE_VISIT, n);
+
     /* Flat-subtree fast path: emit N*D packed bits instead of D levels of
        bitmaps.  Detected at build_table time. */
     if (table->flat_depth[node_id] >= 2) {
@@ -550,56 +602,77 @@ static void encode_node_neon(const pivco_huffman_table_t *table,
         int total_bytes = (n * D + 7) >> 3;
         uint8_t *out = *out_ptr;
         *out_ptr += total_bytes;
-        pack_D_bits(out, n, D, indices, codes);
+        PROF_TIC();
+        pack_D_bits_dense(out, n, D, depth, codes_la);
+        PROF_TOC(PROF_ENC_FLAT, n);
         return;
     }
 
-    /* Build bitmap and partition in one fused pass.
-       For each group of 8 indices, construct the mask byte directly
-       and feed it to partition_8 + write to the output bitmap. */
     int nbytes = bitmap_bytes(n);
     uint8_t *bm = *out_ptr;
     *out_ptr += nbytes;
 
     int n_left = 0, n_right = 0;
     int j = 0;
+    int neg_shift_d = -(15 - depth);
 
+    PROF_TIC();
+    /* Stride-8 SIMD: load 8 left-aligned codes, build mask byte via the
+     * dense movmask, partition the SAME register into left/right halves
+     * using compress_tab[mask].  In-place write of the LEFT half over
+     * codes_la (n_left ≤ j invariant keeps this safe even when the
+     * 16-byte store extends past the cursor); RIGHT half goes to tmp.
+     *
+     * Per 8 elements: 1 vld, 4 NEON mask ops, 2 vld (shuf), 2 vqtbl,
+     * 2 vst.  Down from the old ~16 scalar ops per group. */
     for (; j + 8 <= n; j += 8) {
-        /* Build mask byte from 8 code bits */
-        uint8_t mask = 0;
-        for (int k = 0; k < 8; k++) {
-            int idx = indices[j + k];
-            int bit = (codes[idx] >> (lens[idx] - 1 - depth)) & 1;
-            mask |= (uint8_t)(bit << k);
-        }
+        uint16x8_t code_vec = vld1q_u16(codes_la + j);
+        uint8_t mask = enc_mask8_codes_la(code_vec, neg_shift_d);
         bm[j >> 3] = mask;
 
-        int nr = partition_8(indices + j, mask,
-                             indices + n_left, tmp + n_right);
+        const uint8_t *tab = compress_tab[mask];
+        uint8x16_t shuf_r = vld1q_u8(tab);
+        uint8x16_t shuf_l = vld1q_u8(tab + 16);
+        uint8x16_t data   = vreinterpretq_u8_u16(code_vec);
+        uint8x16_t right  = vqtbl1q_u8(data, shuf_r);
+        uint8x16_t left   = vqtbl1q_u8(data, shuf_l);
+        int nr = compress_popcnt[mask];
+        vst1q_u8((uint8_t *)(tmp      + n_right), right);
+        vst1q_u8((uint8_t *)(codes_la + n_left ), left);
         n_right += nr;
-        n_left += (8 - nr);
+        n_left  += (8 - nr);
     }
-    /* Scalar remainder */
+    /* Scalar remainder.  Read all the tail codes into a temporary
+     * before writing back, since the in-place left write can overlap
+     * the read (n_left + 8 > j once we drop below a full group). */
     if (j < n) {
+        int tail = n - j;
+        uint16_t tail_buf[8];
+        for (int k = 0; k < tail; k++) tail_buf[k] = codes_la[j + k];
         uint8_t mask = 0;
-        for (int k = 0; j + k < n; k++) {
-            int idx = indices[j + k];
-            int bit = (codes[idx] >> (lens[idx] - 1 - depth)) & 1;
+        int shift_d = 15 - depth;
+        for (int k = 0; k < tail; k++) {
+            int bit = (tail_buf[k] >> shift_d) & 1;
             mask |= (uint8_t)(bit << k);
         }
         bm[j >> 3] = mask;
-        for (int k = 0; j < n; j++, k++) {
+        for (int k = 0; k < tail; k++) {
             if (mask & (1 << k))
-                tmp[n_right++] = indices[j];
+                tmp[n_right++] = tail_buf[k];
             else
-                indices[n_left++] = indices[j];
+                codes_la[n_left++] = tail_buf[k];
         }
     }
 
-    encode_node_neon(table, node->left, indices, n_left,
-                     depth + 1, codes, lens, out_ptr, tmp + n_right);
-    encode_node_neon(table, node->right, tmp, n_right,
-                     depth + 1, codes, lens, out_ptr, tmp + n_right);
+    PROF_TOC(PROF_ENC_NODE_FULL, n);
+
+    /* Recurse.  Left child reads codes_la[0..n_left); right child reads
+     * tmp[0..n_right).  Each grandchild gets a `tmp` cursor advanced
+     * past the right half (so siblings don't trample each other). */
+    encode_node_neon(table, node->left, codes_la, n_left,
+                     depth + 1, out_ptr, tmp + n_right);
+    encode_node_neon(table, node->right, tmp,      n_right,
+                     depth + 1, out_ptr, tmp + n_right);
 }
 
 int pivco_huffman_encode_neon(const uint8_t *symbols,
@@ -609,24 +682,26 @@ int pivco_huffman_encode_neon(const uint8_t *symbols,
     if (!symbols || !table || !out || !out_len) return PIVCO_ERR_NULL;
 
     init_compress_table();
+    PROF_COUNT_ONLY(PROF_ENC_ENTRY, PIVCO_BLOCK_SIZE);
 
     const int N = PIVCO_BLOCK_SIZE;
 
-    uint16_t codes[PIVCO_BLOCK_SIZE];
-    uint8_t  lens[PIVCO_BLOCK_SIZE];
-    for (int i = 0; i < N; i++) {
-        codes[i] = table->code[symbols[i]];
-        lens[i]  = table->code_len[symbols[i]];
-    }
+    /* Dense left-aligned codes — the input the new encode_node_neon
+     * walks down the tree.  Eliminates the indices indirection and the
+     * per-element shift-amount lookup that the old scalar mask build
+     * needed (lens[idx] - 1 - depth → 15 - depth, uniform across
+     * elements). */
+    uint16_t codes_la[PIVCO_BLOCK_SIZE];
 
-    uint16_t indices[PIVCO_BLOCK_SIZE];
-    for (int i = 0; i < N; i++) indices[i] = (uint16_t)i;
+    PROF_TIC();
+    for (int i = 0; i < N; i++) codes_la[i] = table->code_la[symbols[i]];
+    PROF_TOC(PROF_ENC_INIT, N);
 
     uint16_t tmp[PIVCO_BLOCK_SIZE * 2];
     uint8_t *ptr = out;
 
-    encode_node_neon(table, table->tree_root, indices, N,
-                     0, codes, lens, &ptr, tmp);
+    encode_node_neon(table, table->tree_root, codes_la, N,
+                     0, &ptr, tmp);
 
     *out_len = (size_t)(ptr - out);
     return PIVCO_OK;
@@ -1266,8 +1341,20 @@ void pivco_neon_encode_subtree_(const pivco_huffman_table_t *table,
                                  uint8_t **out_ptr,
                                  uint16_t *tmp)
 {
-    encode_node_neon(table, node_id, indices, n, depth,
-                     codes, lens, out_ptr, tmp);
+    /* The prefix research backend (pivco_p, parked for retirement)
+     * still uses the old indices+codes+lens layout.  Adapt by
+     * gathering a dense codes_la buffer here; this path is not on the
+     * production hot path. */
+    (void)lens;
+    static uint16_t codes_la_scratch[PIVCO_BLOCK_SIZE + 8];
+    for (int k = 0; k < n; k++) {
+        uint16_t idx = indices[k];
+        uint16_t c   = codes[idx];
+        uint8_t  L   = lens[idx];
+        codes_la_scratch[k] = (uint16_t)(c << (16 - L));
+    }
+    encode_node_neon(table, node_id, codes_la_scratch, n, depth,
+                     out_ptr, tmp);
 }
 
 /* Non-static wrapper exposed for the bottom-up decoder

@@ -118,44 +118,63 @@ int main(int argc, char **argv)
 
     pivco_prof_reset();
 
-    /* Decoder selection: env PIVCO_PROFILE_MODE = "bu" routes to the
-     * bottom-up decoder so we can profile its primitives.  Default
-     * keeps the existing top-down path. */
+    /* Mode selection.  PIVCO_PROFILE_MODE = "td" (default, top-down decode),
+     * "bu" (bottom-up decode), or "encode" (encode loop instead). */
     const char *mode_env = getenv("PIVCO_PROFILE_MODE");
-    int use_bu = (mode_env && strcmp(mode_env, "bu") == 0);
-    printf("Decoder mode: %s\n", use_bu ? "bottom-up" : "top-down");
+    int use_bu     = (mode_env && strcmp(mode_env, "bu") == 0);
+    int use_encode = (mode_env && strcmp(mode_env, "encode") == 0);
+    const char *mode_label =
+        use_encode ? "encode" : (use_bu ? "bottom-up" : "top-down");
+    printf("Profile mode: %s\n", mode_label);
 
-    printf("Starting decode loop...\n"); fflush(stdout);
+    /* Per-block encode output buffer: each block writes into its own
+     * pre-assigned slot of size enc_off[b+1]-enc_off[b] (from the
+     * untimed setup pass above).  We overwrite in place each rep. */
     double t0 = now_sec();
-    for (int r = 0; r < REPS; r++) {
-        for (int b = 0; b < NBLOCKS; b++) {
-            size_t consumed;
-            if (r == 0 && b < 5) printf("  block %d: off=%zu len=%zu\n", b, enc_off[b], enc_off[b+1]-enc_off[b]);
-            int rc;
-            if (use_bu) {
-#if defined(PIVCO_HAS_NEON)
-                rc = pivco_huffman_decode_bu_neon(enc_buf + enc_off[b],
-                                                   enc_off[b + 1] - enc_off[b],
-                                                   &table, out + b * N, &consumed);
-#elif defined(PIVCO_HAS_SSE4)
-                rc = pivco_huffman_decode_bu_x86(enc_buf + enc_off[b],
-                                                  enc_off[b + 1] - enc_off[b],
-                                                  &table, out + b * N, &consumed);
-#else
-                rc = pivco_huffman_decode(enc_buf + enc_off[b],
-                                          enc_off[b + 1] - enc_off[b],
-                                          &table, out + b * N, &consumed);
-#endif
-            } else {
-                rc = pivco_huffman_decode(enc_buf + enc_off[b],
-                                          enc_off[b + 1] - enc_off[b],
-                                          &table, out + b * N, &consumed);
+    if (use_encode) {
+        /* Use the same NEON encoder we want to profile.  The buffer was
+         * already sized large enough by the setup pass; we just
+         * overwrite the same slots, REPS times. */
+        printf("Starting encode loop...\n"); fflush(stdout);
+        for (int r = 0; r < REPS; r++) {
+            for (int b = 0; b < NBLOCKS; b++) {
+                size_t elen;
+                pivco_huffman_encode(symbols + b * N, &table,
+                                     enc_buf + enc_off[b], &elen);
             }
-            if (r == 0 && b < 5) printf("    rc=%d consumed=%zu\n", rc, consumed);
-            if (consumed != enc_off[b + 1] - enc_off[b]) {
-                printf("MISMATCH block %d: encoded=%zu consumed=%zu rc=%d\n",
-                       b, enc_off[b + 1] - enc_off[b], consumed, rc);
-                return 1;
+        }
+    } else {
+        printf("Starting decode loop...\n"); fflush(stdout);
+        for (int r = 0; r < REPS; r++) {
+            for (int b = 0; b < NBLOCKS; b++) {
+                size_t consumed;
+                if (r == 0 && b < 5) printf("  block %d: off=%zu len=%zu\n", b, enc_off[b], enc_off[b+1]-enc_off[b]);
+                int rc;
+                if (use_bu) {
+#if defined(PIVCO_HAS_NEON)
+                    rc = pivco_huffman_decode_bu_neon(enc_buf + enc_off[b],
+                                                       enc_off[b + 1] - enc_off[b],
+                                                       &table, out + b * N, &consumed);
+#elif defined(PIVCO_HAS_SSE4)
+                    rc = pivco_huffman_decode_bu_x86(enc_buf + enc_off[b],
+                                                      enc_off[b + 1] - enc_off[b],
+                                                      &table, out + b * N, &consumed);
+#else
+                    rc = pivco_huffman_decode(enc_buf + enc_off[b],
+                                              enc_off[b + 1] - enc_off[b],
+                                              &table, out + b * N, &consumed);
+#endif
+                } else {
+                    rc = pivco_huffman_decode(enc_buf + enc_off[b],
+                                              enc_off[b + 1] - enc_off[b],
+                                              &table, out + b * N, &consumed);
+                }
+                if (r == 0 && b < 5) printf("    rc=%d consumed=%zu\n", rc, consumed);
+                if (consumed != enc_off[b + 1] - enc_off[b]) {
+                    printf("MISMATCH block %d: encoded=%zu consumed=%zu rc=%d\n",
+                           b, enc_off[b + 1] - enc_off[b], consumed, rc);
+                    return 1;
+                }
             }
         }
     }
@@ -166,7 +185,8 @@ int main(int argc, char **argv)
            total / 1e6, t1 - t0, total / (t1 - t0) / 1e6);
 
     char label[128];
-    snprintf(label, sizeof(label), "%s / BLK=%d", dist_name, N);
+    snprintf(label, sizeof(label), "%s%s / BLK=%d",
+             use_encode ? "ENCODE " : "", dist_name, N);
     pivco_prof_dump(label, t1 - t0, tick_freq,
                     (uint64_t)NBLOCKS * (uint64_t)REPS);
 

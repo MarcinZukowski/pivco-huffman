@@ -56,10 +56,19 @@ typedef enum {
     PROF_BU_POPCOUNT_K,             /* compute K_right from bitmap */
     PROF_BU_LEAF_MEMSET,            /* LEAF / SKIP: write K copies of sym */
 
+    /* Encoder (pivco_huffman_encode_neon / encode_node_neon).  Mirrors
+     * the decode side: per-primitive timing of the work done inside a
+     * node body (not the recursion itself), plus the per-block setup. */
+    PROF_ENC_INIT,                  /* codes[]/lens[]/indices[] setup, per block */
+    PROF_ENC_NODE_FULL,             /* non-flat internal node: mask build + partition_8 */
+    PROF_ENC_FLAT,                  /* flat-subtree node: pack_D_bits */
+
     /* Recursion + entry call counts (count-only; recursive timing
      * would double-count). */
     PROF_DECODE_NODE,
     PROF_DECODE_ENTRY,
+    PROF_ENC_NODE_VISIT,            /* count-only: calls to encode_node_neon */
+    PROF_ENC_ENTRY,                 /* count-only: calls to pivco_huffman_encode_neon */
 
     PROF_COUNT
 } pivco_prof_id_t;

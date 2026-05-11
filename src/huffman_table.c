@@ -670,5 +670,15 @@ int pivco_huffman_build_table(const uint64_t freq[PIVCO_MAX_SYMBOLS],
         }
     }
 
+    /* Populate code_la (left-aligned code) for the dense tree-walk
+     * encoder.  Bit-d of the canonical code lives at position 15-d of
+     * code_la (for d < code_len[sym]). */
+    for (int s = 0; s < PIVCO_MAX_SYMBOLS; s++) {
+        uint8_t len = table->code_len[s];
+        table->code_la[s] = len > 0
+            ? (uint16_t)(table->code[s] << (16 - len))
+            : 0;
+    }
+
     return PIVCO_OK;
 }
