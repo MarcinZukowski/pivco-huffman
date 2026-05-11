@@ -1,0 +1,9 @@
+[hw counters unavailable: rerun under sudo]
+
+tree_merge x86 microbench (N=4096 output bytes per iter)
+
+  variant                       ns/iter      ns/elem
+  merge_scalar                   4925.1                                             1.2024
+  merge_sse (8B chunk)            562.0                                             0.1372
+  merge_sse_x2 (16B chunk)        421.0                                             0.1028
+  merge_sse_broadcast_left        361.6                                             0.0883

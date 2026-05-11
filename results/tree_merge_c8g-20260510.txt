@@ -1,0 +1,9 @@
+
+tree_merge microbench (N=4096 output bytes per iter)
+Random bitmap (~50% ones).  Left+right buffers are dense input arrays.
+
+  variant                       ns/iter  cyc/iter  ins/iter    IPC    GHz      ns/elem
+  merge_scalar                   4285.9   12018.6   61472.0   5.11   2.77       1.0464
+  merge_neon (8B chunk)           449.1    1259.3    7699.3   6.11   2.78       0.1096
+  merge_neon_x2 (16B chunk)       437.0    1225.5    6934.3   5.66   2.78       0.1067
+  merge_neon_broadcast_left       370.2    1038.4    6674.3   6.43   2.78       0.0904

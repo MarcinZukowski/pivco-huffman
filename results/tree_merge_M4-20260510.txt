@@ -1,0 +1,10 @@
+[hw counters unavailable: rerun under sudo]
+
+tree_merge microbench (N=4096 output bytes per iter)
+Random bitmap (~50% ones).  Left+right buffers are dense input arrays.
+
+  variant                       ns/iter      ns/elem
+  merge_scalar                   1582.9                                             0.3865
+  merge_neon (8B chunk)           237.6                                             0.0580
+  merge_neon_x2 (16B chunk)       219.6                                             0.0536
+  merge_neon_broadcast_left       184.6                                             0.0451

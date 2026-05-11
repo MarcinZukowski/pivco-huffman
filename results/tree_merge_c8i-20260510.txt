@@ -1,0 +1,9 @@
+
+tree_merge x86 microbench (N=4096 output bytes per iter)
+
+  variant                       ns/iter  cyc/iter  ins/iter    IPC    GHz      ns/elem
+  merge_scalar                  15871.4   61971.2   65567.5   1.06   3.90       3.8749
+  merge_sse (8B chunk)            434.6    1700.6   10778.8   6.34   3.91       0.1061
+  merge_sse_x2 (16B chunk)        386.2    1511.7    9245.9   6.12   3.91       0.0943
+  merge_avx512 (64B vpexpandb)       93.7     347.2    1317.9   3.80   3.67       0.0229
+  merge_sse_broadcast_left        339.8    1330.5    8216.0   6.18   3.91       0.0830
