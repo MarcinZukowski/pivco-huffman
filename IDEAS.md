@@ -1,5 +1,48 @@
 # PIVCO-Huffman Decode Ideas
 
+## Evaluate existing bitpacking libraries (simdcomp / FastPFor / etc.) — open (2026-05-11)
+
+**Status: open.**  We have hand-rolled SIMD bit-pack/unpack helpers for
+`flat_dN_unpack` (NEON, AVX-512, SSE4.1) and now for the encode-side
+`pack_dN` family (NEON D=2..8).  Established libraries solve the same
+problem at production quality and may be faster, simpler, or both.
+
+Candidates worth a microbench:
+
+- **simdcomp** (lemire/simdcomp) — SSE/AVX2/AVX-512 bit-pack/unpack for
+  uint32 streams.  Mature, used in production by many search/database
+  systems.  Has FastPFor-style "STREAMVBYTE" + delta-pack variants.
+- **FastPFor** (lemire/FastPFor) — superset of simdcomp; SIMDBP128
+  layout is the same FastLanes layout we already investigated in
+  `BITPACKING.md`.
+- **Daniel Lemire's "fastpack"** primitives — small standalone kernels.
+- **arm-neon-bitpack** type repos for NEON-specific options (uint16-
+  oriented kernels may be sparser; check `streamvbyte` arm port).
+
+What to measure:
+
+1. Throughput parity vs our hand-rolled `flat_dN_unpack` / `pack_dN`
+   on D ∈ {2..8} for both 16-bit (our codes_la) and 32-bit inputs.
+2. Whether their wire format matches ours.  We use LSB-first within a
+   byte; simdcomp's SIMDBP128 transposes streams (FastLanes) — different
+   format.  If we adopted their format the decoder needs to change too.
+3. License / dependency cost vs current zero-dep state.
+
+Hypotheses to validate or refute:
+
+- Our `pack_d3 / d5 / d6 / d7` use uint64 horizontal-OR via add — there
+  may be a faster trick (e.g., `vsri_n_u8` shift-right-insert) we
+  haven't tried.
+- For D=8 (byte-aligned) the existing libraries are probably no
+  better than our `vmovn_u16 + vst1q_u8` path, but worth confirming.
+- For low D (2-3) the FastLanes transposed layout was 2-4x faster in
+  pure-unpack microbench (`BITPACKING.md`); ditto for pack.
+
+If simdcomp wins by enough to justify a format change, this becomes a
+v2 wire-format proposal alongside FastLanes.
+
+
+
 ## ~~Flat-aware Huffman tree restructurer~~ — SHIPPED
 
 **Status (2026-04-25):** SHIPPED.  `pivco_huffman_build_table` now

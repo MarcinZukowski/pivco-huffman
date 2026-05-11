@@ -564,15 +564,21 @@ static inline uint8_t enc_mask8_codes_la(uint16x8_t code_vec, int neg_shift_d)
  * byte stream — matching the bit-numbering convention the decoder
  * expects. */
 
-/* D=2: 16 codes → 4 bytes.  Per byte: c[0] | c[1]<<2 | c[2]<<4 | c[3]<<6. */
+/* D=2: 16 codes → 4 bytes.  Per byte: c[0] | c[1]<<2 | c[2]<<4 | c[3]<<6.
+ *
+ * Overpacks: processes ceil(n/16)*16 elements so callers can avoid the
+ * scalar tail entirely.  The caller must zero codes_la[n..n+15] so the
+ * extra elements pack as zero bytes, which the encoder's out_ptr
+ * advance leaves to be overwritten by the next subtree's bytes. */
 static inline int pack_d2(uint8_t *out, const uint16_t *codes_la,
                           int n, int right_shift)
 {
     static const int8_t shifts_d2[16] = {
         0, 2, 4, 6,  0, 2, 4, 6,  0, 2, 4, 6,  0, 2, 4, 6
     };
+    int rounded = (n + 15) & ~15;
     int i = 0;
-    for (; i + 16 <= n; i += 16) {
+    for (; i < rounded; i += 16) {
         uint16x8_t v0 = vshlq_u16(vld1q_u16(codes_la + i    ),
                                    vdupq_n_s16((int16_t)-right_shift));
         uint16x8_t v1 = vshlq_u16(vld1q_u16(codes_la + i + 8),
@@ -592,14 +598,16 @@ static inline int pack_d2(uint8_t *out, const uint16_t *codes_la,
 }
 
 /* D=3: 8 codes → 24 bits.  Cross byte boundaries; accumulate in
- * uint32 lanes (max shift 7*3 = 21 fits a 32-bit lane). */
+ * uint32 lanes (max shift 7*3 = 21 fits a 32-bit lane).  Overpacks
+ * to ceil(n/8)*8 — same caller contract as pack_d2. */
 static inline int pack_d3(uint8_t *out, const uint16_t *codes_la,
                           int n, int right_shift)
 {
     static const int32_t shifts_lo[4] = {0,   3,  6,  9};
     static const int32_t shifts_hi[4] = {12, 15, 18, 21};
+    int rounded = (n + 7) & ~7;
     int i = 0;
-    for (; i + 8 <= n; i += 8) {
+    for (; i < rounded; i += 8) {
         uint16x8_t v = vshlq_u16(vld1q_u16(codes_la + i),
                                   vdupq_n_s16((int16_t)-right_shift));
         v = vandq_u16(v, vdupq_n_u16(0x7));
@@ -621,15 +629,16 @@ static inline int pack_d3(uint8_t *out, const uint16_t *codes_la,
 }
 
 /* D=4: 16 codes → 8 bytes.  No byte crossings; pair (c[2k], c[2k+1])
- * into one byte each. */
+ * into one byte each.  Overpacks. */
 static inline int pack_d4(uint8_t *out, const uint16_t *codes_la,
                           int n, int right_shift)
 {
     static const int8_t shifts_d4[16] = {
         0, 4, 0, 4, 0, 4, 0, 4, 0, 4, 0, 4, 0, 4, 0, 4
     };
+    int rounded = (n + 15) & ~15;
     int i = 0;
-    for (; i + 16 <= n; i += 16) {
+    for (; i < rounded; i += 16) {
         uint16x8_t v0 = vshlq_u16(vld1q_u16(codes_la + i    ),
                                    vdupq_n_s16((int16_t)-right_shift));
         uint16x8_t v1 = vshlq_u16(vld1q_u16(codes_la + i + 8),
@@ -645,7 +654,7 @@ static inline int pack_d4(uint8_t *out, const uint16_t *codes_la,
 }
 
 /* D=5: 8 codes → 40 bits = 5 bytes.  Cross byte boundaries; need
- * uint64 because 7*5 = 35 > 32. */
+ * uint64 because 7*5 = 35 > 32.  Overpacks. */
 static inline int pack_d5(uint8_t *out, const uint16_t *codes_la,
                           int n, int right_shift)
 {
@@ -653,8 +662,9 @@ static inline int pack_d5(uint8_t *out, const uint16_t *codes_la,
     static const int64_t shifts_mid[2] = {10, 15};
     static const int64_t shifts_hi[2] = {20, 25};
     static const int64_t shifts_top[2] = {30, 35};
+    int rounded = (n + 7) & ~7;
     int i = 0;
-    for (; i + 8 <= n; i += 8) {
+    for (; i < rounded; i += 8) {
         uint16x8_t v = vshlq_u16(vld1q_u16(codes_la + i),
                                   vdupq_n_s16((int16_t)-right_shift));
         v = vandq_u16(v, vdupq_n_u16(0x1F));
@@ -681,7 +691,8 @@ static inline int pack_d5(uint8_t *out, const uint16_t *codes_la,
     return i;
 }
 
-/* D=6: 8 codes → 48 bits = 6 bytes.  Need uint64 (7*6 = 42). */
+/* D=6: 8 codes → 48 bits = 6 bytes.  Need uint64 (7*6 = 42).
+ * Overpacks. */
 static inline int pack_d6(uint8_t *out, const uint16_t *codes_la,
                           int n, int right_shift)
 {
@@ -689,8 +700,9 @@ static inline int pack_d6(uint8_t *out, const uint16_t *codes_la,
     static const int64_t shifts_mid[2] = {12, 18};
     static const int64_t shifts_hi[2] = {24, 30};
     static const int64_t shifts_top[2] = {36, 42};
+    int rounded = (n + 7) & ~7;
     int i = 0;
-    for (; i + 8 <= n; i += 8) {
+    for (; i < rounded; i += 8) {
         uint16x8_t v = vshlq_u16(vld1q_u16(codes_la + i),
                                   vdupq_n_s16((int16_t)-right_shift));
         v = vandq_u16(v, vdupq_n_u16(0x3F));
@@ -717,6 +729,62 @@ static inline int pack_d6(uint8_t *out, const uint16_t *codes_la,
     return i;
 }
 
+/* D=7: 8 codes → 56 bits = 7 bytes.  uint64 (7*7 = 49).  Overpacks. */
+static inline int pack_d7(uint8_t *out, const uint16_t *codes_la,
+                          int n, int right_shift)
+{
+    static const int64_t shifts_lo[2] = {0,   7};
+    static const int64_t shifts_mid[2] = {14, 21};
+    static const int64_t shifts_hi[2] = {28, 35};
+    static const int64_t shifts_top[2] = {42, 49};
+    int rounded = (n + 7) & ~7;
+    int i = 0;
+    for (; i < rounded; i += 8) {
+        uint16x8_t v = vshlq_u16(vld1q_u16(codes_la + i),
+                                  vdupq_n_s16((int16_t)-right_shift));
+        v = vandq_u16(v, vdupq_n_u16(0x7F));
+        uint32x4_t v32_lo = vmovl_u16(vget_low_u16(v));
+        uint32x4_t v32_hi = vmovl_u16(vget_high_u16(v));
+        uint64x2_t a = vshlq_u64(vmovl_u32(vget_low_u32 (v32_lo)),
+                                  vld1q_s64(shifts_lo));
+        uint64x2_t b = vshlq_u64(vmovl_u32(vget_high_u32(v32_lo)),
+                                  vld1q_s64(shifts_mid));
+        uint64x2_t c = vshlq_u64(vmovl_u32(vget_low_u32 (v32_hi)),
+                                  vld1q_s64(shifts_hi));
+        uint64x2_t d = vshlq_u64(vmovl_u32(vget_high_u32(v32_hi)),
+                                  vld1q_s64(shifts_top));
+        uint64x2_t sum = vaddq_u64(vaddq_u64(a, b), vaddq_u64(c, d));
+        uint64_t packed = vgetq_lane_u64(sum, 0) + vgetq_lane_u64(sum, 1);
+        int bi = i * 7 / 8;
+        out[bi    ] = (uint8_t)(packed       );
+        out[bi + 1] = (uint8_t)(packed >>  8 );
+        out[bi + 2] = (uint8_t)(packed >> 16);
+        out[bi + 3] = (uint8_t)(packed >> 24);
+        out[bi + 4] = (uint8_t)(packed >> 32);
+        out[bi + 5] = (uint8_t)(packed >> 40);
+        out[bi + 6] = (uint8_t)(packed >> 48);
+    }
+    return i;
+}
+
+/* D=8: 16 codes → 16 bytes.  Byte-aligned, trivial; one shift+AND
+ * pass narrows uint16 lanes to uint8 stream.  Overpacks. */
+static inline int pack_d8(uint8_t *out, const uint16_t *codes_la,
+                          int n, int right_shift)
+{
+    int rounded = (n + 15) & ~15;
+    int i = 0;
+    for (; i < rounded; i += 16) {
+        uint16x8_t v0 = vshlq_u16(vld1q_u16(codes_la + i    ),
+                                   vdupq_n_s16((int16_t)-right_shift));
+        uint16x8_t v1 = vshlq_u16(vld1q_u16(codes_la + i + 8),
+                                   vdupq_n_s16((int16_t)-right_shift));
+        uint8x16_t bytes = vcombine_u8(vmovn_u16(v0), vmovn_u16(v1));
+        vst1q_u8(out + i, bytes);
+    }
+    return i;
+}
+
 static inline void pack_D_bits_dense(uint8_t *out, int n, int D, int depth,
                                       const uint16_t *codes_la)
 {
@@ -731,10 +799,19 @@ static inline void pack_D_bits_dense(uint8_t *out, int n, int D, int depth,
     case 4: i = pack_d4(out, codes_la, n, right_shift); break;
     case 5: i = pack_d5(out, codes_la, n, right_shift); break;
     case 6: i = pack_d6(out, codes_la, n, right_shift); break;
-    default: break;  /* D=7, scalar tail handles it */
+    case 7: i = pack_d7(out, codes_la, n, right_shift); break;
+    case 8: i = pack_d8(out, codes_la, n, right_shift); break;
+    default: break;  /* D >= 9: scalar tail handles it (shouldn't happen
+                      * with PIVCO_MAX_CODE_LEN = 11 and a leaf D = depth */
     }
 
-    if (i == n) return;
+    /* With overpacking, i = ceil(n / stride) * stride >= n.  Clamp the
+     * counter to avoid uint64 underflow in PROF_COUNT_ONLY. */
+    int simd_n = i > n ? n : i;
+    PROF_COUNT_ONLY(PROF_ENC_FLAT_SIMD_ELEMS, simd_n);
+    PROF_COUNT_ONLY(PROF_ENC_FLAT_TAIL_ELEMS, n - simd_n);
+
+    if (i >= n) return;
 
     /* Scalar tail: pick up where the SIMD path left off and finish.
      * Reconstruct `buf` / `bits_in_buf` from the byte position. */
@@ -781,6 +858,13 @@ static void encode_node_neon(const pivco_huffman_table_t *table,
         int total_bytes = (n * D + 7) >> 3;
         uint8_t *out = *out_ptr;
         *out_ptr += total_bytes;
+        /* Zero-pad codes_la past n so pack_D_bits's SIMD path can
+         * overpack to the next stride boundary without writing
+         * garbage past the legit byte end.  The encoder's *out_ptr
+         * advance leaves overpacked zero bytes to be overwritten by
+         * the next subtree's output; the codes_la slack ensures we
+         * don't write past the input buffer. */
+        for (int k = 0; k < 16; k++) codes_la[n + k] = 0;
         PROF_TIC();
         pack_D_bits_dense(out, n, D, depth, codes_la);
         PROF_TOC(PROF_ENC_FLAT, n);
@@ -869,8 +953,12 @@ int pivco_huffman_encode_neon(const uint8_t *symbols,
      * walks down the tree.  Eliminates the indices indirection and the
      * per-element shift-amount lookup that the old scalar mask build
      * needed (lens[idx] - 1 - depth → 15 - depth, uniform across
-     * elements). */
-    uint16_t codes_la[PIVCO_BLOCK_SIZE];
+     * elements).
+     *
+     * +16 slack so the flat-pack overpack can zero-pad past n without
+     * spilling out of bounds; +16 also covers the partition_8's 16-byte
+     * TBL store at n_left + 8 ≤ n + 8 worst case. */
+    uint16_t codes_la[PIVCO_BLOCK_SIZE + 16];
 
     PROF_TIC();
     for (int i = 0; i < N; i++) codes_la[i] = table->code_la[symbols[i]];

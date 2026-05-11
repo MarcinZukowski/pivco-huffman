@@ -62,6 +62,8 @@ typedef enum {
     PROF_ENC_INIT,                  /* codes[]/lens[]/indices[] setup, per block */
     PROF_ENC_NODE_FULL,             /* non-flat internal node: mask build + partition_8 */
     PROF_ENC_FLAT,                  /* flat-subtree node: pack_D_bits */
+    PROF_ENC_FLAT_SIMD_ELEMS,       /* count-only: elems handled by SIMD path */
+    PROF_ENC_FLAT_TAIL_ELEMS,       /* count-only: elems handled by scalar tail */
 
     /* Recursion + entry call counts (count-only; recursive timing
      * would double-count). */
