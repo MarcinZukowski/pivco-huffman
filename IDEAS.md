@@ -63,46 +63,75 @@ pipe* in each path, not just the total op count.  This is the second
 time this exact mistake came up on M4 (see also "iota-table for
 partition_root_8" — same shape, same outcome).
 
-## Evaluate existing bitpacking libraries (simdcomp / FastPFor / etc.) — open (2026-05-11)
+## ~~Evaluate existing bitpacking libraries (simdcomp / FastPFor / etc.)~~ — surveyed 2026-05-11, no direct adoption
 
-**Status: open.**  We have hand-rolled SIMD bit-pack/unpack helpers for
-`flat_dN_unpack` (NEON, AVX-512, SSE4.1) and now for the encode-side
-`pack_dN` family (NEON D=2..8).  Established libraries solve the same
-problem at production quality and may be faster, simpler, or both.
+**Status: surveyed, nothing directly applicable to our codebase as-is.
+Kept here as reference for future revisits.**
 
-Candidates worth a microbench:
+### simdcomp (lemire/simdcomp)
 
-- **simdcomp** (lemire/simdcomp) — SSE/AVX2/AVX-512 bit-pack/unpack for
-  uint32 streams.  Mature, used in production by many search/database
-  systems.  Has FastPFor-style "STREAMVBYTE" + delta-pack variants.
-- **FastPFor** (lemire/FastPFor) — superset of simdcomp; SIMDBP128
-  layout is the same FastLanes layout we already investigated in
-  `BITPACKING.md`.
-- **Daniel Lemire's "fastpack"** primitives — small standalone kernels.
-- **arm-neon-bitpack** type repos for NEON-specific options (uint16-
-  oriented kernels may be sparser; check `streamvbyte` arm port).
+- **No NEON.**  SSE4.1 / AVX2 / AVX-512 only.  Direct port to NEON
+  would mean re-rolling 80% of the work we already did.
+- **uint32-only.**  All inputs are `uint32_t`.  Our codes_la is
+  `uint16_t`.  Adapting would require either widening (2x memory) or
+  rewriting their kernels.
+- **Fixed block size.**  SSE: 128 inputs.  AVX-512: 512 inputs.  Our
+  flat-subtree calls have variable n, often much smaller (image_jpeg's
+  D=7 nodes have n in the 100-4500 range, never a clean 128/512
+  multiple).  Overpack helps for stride-16 but not for batch=128.
+- **FastLanes / SIMDBP128 transposed layout.**  Each output __m128i /
+  __m512i holds 4 / 16 parallel "streams" of packed bits, one per
+  lane.  Avoids horizontal reduction entirely — but the wire format is
+  totally incompatible with our LSB-first sequential layout.  Adopting
+  it means a format change we already evaluated in `BITPACKING.md`
+  (~5-6% net gain on M4, not worth it).
 
-What to measure:
+simdcomp's per-b kernel pattern (SSE, b=3):
 
-1. Throughput parity vs our hand-rolled `flat_dN_unpack` / `pack_dN`
-   on D ∈ {2..8} for both 16-bit (our codes_la) and 32-bit inputs.
-2. Whether their wire format matches ours.  We use LSB-first within a
-   byte; simdcomp's SIMDBP128 transposes streams (FastLanes) — different
-   format.  If we adopted their format the decoder needs to change too.
-3. License / dependency cost vs current zero-dep state.
+```c
+OutReg = InReg;                                  // 4-lane uint32 load
+InReg = _mm_loadu_si128(++in);                   // next 4 uint32
+OutReg = _mm_or_si128(OutReg, _mm_slli_epi32(InReg, 3));   // shift+OR
+... (11 unrolled iters per output __m128i)
+_mm_storeu_si128(out, OutReg);                   // store packed result
+```
 
-Hypotheses to validate or refute:
+The kernel works in 4 parallel streams (one per lane).  No horizontal
+reduction because each lane is its own bit stream.  Our pack_d3 / d5
+/ d6 / d7 horizontally reduce via `vaddvq_u32` / `vaddq_u64` to
+collapse 8 codes into one packed byte sequence — that's the cost of
+matching our wire format.
 
-- Our `pack_d3 / d5 / d6 / d7` use uint64 horizontal-OR via add — there
-  may be a faster trick (e.g., `vsri_n_u8` shift-right-insert) we
-  haven't tried.
-- For D=8 (byte-aligned) the existing libraries are probably no
-  better than our `vmovn_u16 + vst1q_u8` path, but worth confirming.
-- For low D (2-3) the FastLanes transposed layout was 2-4x faster in
-  pure-unpack microbench (`BITPACKING.md`); ditto for pack.
+For the LSB-first format, no equivalent "no horizontal reduction"
+trick exists short of the format change.
 
-If simdcomp wins by enough to justify a format change, this becomes a
-v2 wire-format proposal alongside FastLanes.
+### FastPFor (lemire/FastPFor)
+
+- **Same fundamental layout as simdcomp** (SIMDBP128).  Adds delta-
+  decoding (FOR / PFOR) variants we don't need.
+- `headers/horizontalbitpacking.h` + `src/horizontalbitpacking.cpp`
+  hold a *separate* horizontal layout (LSB-first sequential, like
+  ours) — explicitly marked "purely for technical comparisons" of an
+  older paper.  Not the main codec path.
+- The horizontal unpack uses a clever **multiply-as-shift trick**:
+  `_mm_mullo_epi32(ca, multi)` to achieve per-lane variable left-
+  shift on SSE4.1 (which lacks `_mm_sllv_epi32`).  Irrelevant on NEON
+  (`vshlq_u32` is a single instruction) and on AVX2+ (has `vpsllvd`).
+  Worth knowing if we ever do an SSE2-only port, but we don't have
+  one and don't plan to.
+
+### Bottom line
+
+- For NEON: zero direct help.  Our hand-rolled `pack_d2..d8` and
+  `flat_d2..d6_unpack` cover the field.
+- For x86: simdcomp's loop structure (fully-unrolled per-b
+  shift-or-store) is roughly what we'd do for an AVX-512 port of
+  `pack_dN`, but the wire format mismatch means we'd write new code
+  anyway.  AVX-512's `vpcompressd` is also more powerful than what
+  simdcomp uses.
+- For a future v2 wire format: simdcomp + FastPFor are the
+  drop-in implementations.  The format-change cost is the bottleneck;
+  the kernels exist.
 
 
 
