@@ -88,16 +88,22 @@ int main(int argc, char **argv)
      * first non-flag argument as the repeat count. */
     int repeats = DEFAULT_REPEATS;
     int run_all = 0;
+    int tdbu_only = 0;   /* --tdbu: pivco_n + pivco_bu only, skip comparators */
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--all") == 0) {
             run_all = 1;
+        } else if (strcmp(argv[i], "--tdbu") == 0) {
+            tdbu_only = 1;
         } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
-            printf("Usage: %s [repeats] [--all]\n"
+            printf("Usage: %s [repeats] [--all] [--tdbu]\n"
                    "  repeats   passes over 4M symbols per timed run (default %d)\n"
                    "  --all     run every distribution AND every comparator\n"
                    "            (default MAIN: 9 distributions; pivco_s/n/bu,\n"
                    "             trad_4s, huf0_x1/x2 — no pivco_p, no trad_1s,\n"
-                   "             no huf0_1s, no rans_x2)\n",
+                   "             no huf0_1s, no rans_x2)\n"
+                   "  --tdbu    skip every comparator (run only pivco_n + pivco_bu);\n"
+                   "            keeps the full 5-run methodology.  Use for prof-on/off\n"
+                   "            A/B without paying for trad / huf0 / rans timing.\n",
                    argv[0], DEFAULT_REPEATS);
             return 0;
         } else {
@@ -127,9 +133,10 @@ int main(int argc, char **argv)
            TOTAL_SYMBOLS / (1024*1024), repeats,
            (int)((size_t)TOTAL_SYMBOLS * repeats / (1024*1024)),
            BLK, runs, drop_worst);
-    printf("Distribution set: %s\n\n",
+    printf("Distribution set: %s%s\n\n",
            run_all ? "ALL (29 distributions)"
-                   : "MAIN (9 distributions; pass --all for full sweep)");
+                   : "MAIN (9 distributions; pass --all for full sweep)",
+           tdbu_only ? "  [--tdbu: pivco_n + pivco_bu only]" : "");
 
     /* Per-distribution compression-size + tree-shape stats.  Filled in
      * inside the per-distribution loop, printed at the end. */
@@ -159,6 +166,9 @@ int main(int argc, char **argv)
     if (quick) {
         printf("%-13s | %7s\n", "DECODE M/s", "pivco_n");
         printf("--------------|--------\n");
+    } else if (tdbu_only) {
+        printf("%-13s | %7s %7s\n", "DECODE M/s", "pivco_n", "pivco_bu");
+        printf("--------------|-----------------\n");
     } else if (run_all) {
         printf("%-13s | %7s %7s %7s %7s | %7s %7s | %7s %7s %7s | %7s | %7s\n",
                "DECODE M/s", "pivco_s", "pivco_n", "pivco_bu", "pivco_p",
@@ -423,7 +433,7 @@ int main(int argc, char **argv)
         }, "pivco_bu");
 #endif
 
-      if (!quick) {
+      if (!quick && !tdbu_only) {
         /* PIVCO scalar: decode NBLOCKS blocks */
         BENCH(p_dec_s, {
             for (int b = 0; b < NBLOCKS; b++) {
@@ -533,6 +543,9 @@ int main(int argc, char **argv)
         if (quick) {
             (void)ratio;
             printf("%-13s | %7.0f\n", name, p_dec_n);
+        } else if (tdbu_only) {
+            (void)ratio;
+            printf("%-13s | %7.0f %7.0f\n", name, p_dec_n, p_dec_bu);
         } else if (run_all) {
             printf("%-13s | %7.0f %7.0f %7.0f %7.0f | %7.0f %7.0f | %7.0f %7.0f %7.0f | %7.0f | %5.2fx\n",
                    name, p_dec_s, p_dec_n, p_dec_bu, p_dec_pfx, t_dec_1s, t_dec_4s,

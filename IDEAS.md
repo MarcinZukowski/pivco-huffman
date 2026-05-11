@@ -1394,6 +1394,104 @@ applies to the bcast_left/bcast_right merges (one side is a
 constant, so the L or R "shift" is degenerate) — probably yes for
 similar but smaller wins on a smaller wall slice.
 
+## Profiling overhead is HUGE on x86 and varies 60× across platforms — never quote prof numbers as headline (2026-05-11)
+
+**Status: measured & documented.**  Treat `pivco_huffman_profile_english`
+output as RELATIVE only.  All headline performance numbers must
+come from the bench harness built WITHOUT `-DPIVCO_PROF=1`.
+
+### Why this matters
+
+Our `PROF_TIC` / `PROF_TOC` macros wrap each primitive with a pair of
+cycle-counter reads (`mrs cntvct_el0` on ARM, `rdtsc` on x86) plus a
+3-store accounting block.  As the decoder got faster this year (BU
++50% on Graviton 4, +67% on M4, BU/TD ratio 2.94× over huf0 on
+Granite Rapids on prose_pride), the per-primitive work got close
+enough to the prof overhead that the overhead became visible — and
+on some platforms it became LARGER than the work.
+
+### Microbenched cycle-counter cost (empty loop, isolated)
+
+  M4   cntvct_el0       0.0 ns/read    (Apple userspace — free)
+  c3   rdtsc Ivy Bridge 7.1 ns         (oldest x86)
+  c4   rdtsc Haswell    6.5 ns
+  c5   rdtsc CascadeL   6.3 ns
+  c8a  rdtsc Zen 5      8.3 ns
+  c6a  rdtsc Zen 3     10.0 ns
+  c8g  cntvct_el0 G4   10.0 ns         (Linux ARM, NOT free like Apple)
+  c8i  rdtsc GraniteR  10.2 ns         (worst Intel — added serialisation)
+
+A PROF_TIC+TOC pair is 2 of these reads + 3 stores: roughly
+**14–22 ns on every non-Apple platform**.
+
+### Microbench vs reality — OOO hides RDTSC differently
+
+Real prof overhead in the decoder vs predicted from microbench × call count:
+
+  c8i Granite Rapids   actual ≈ predicted   (RDTSC mostly serial here)
+  c3/c4/c5 older Intel actual ≈ predicted
+  c6a Zen 3            actual ≈ 0.5× pred  (OOO hides half)
+  c8a Zen 5            actual ≈ 0.2× pred  (excellent OOO)
+  c8g Graviton 4       actual ≈ 0.25× pred (aggressive ARM OOO)
+  M4                   actual ≈ 0          (CNTVCT is free in renamer)
+
+Granite Rapids is the worst case — its RDTSC is more serialising
+than any other modern core.
+
+### Measured prof overhead on pivco_bu wall (prose_pride, MAIN sweep avg over text dists)
+
+  host           overhead    BLK   noprof bu (M sym/s)    prof bu (M sym/s)
+  M4             +0.3%       8192    4756 prose_pride        4754
+  c8g G4         +5.5%       8192    2236                    2126
+  c8a Zen 5      +8.1%       8192    6217                    5846
+  c6a Zen 3     +11.4%       4096    1456                    1299
+  c3  Ivy Bridge +14.1%      4096     952                     832
+  c4  Haswell   +15.7%       4096    1149                     984
+  c5  Cascade   +15.9%       4096    1191                    1024
+  c8i Granite R **+61.6%**   8192    5204                    3230
+
+  flat_M5 and gzip_random show <1% overhead on every platform —
+  those distributions skip tree_merge entirely (flat path takes
+  over), so very few PROF_TIC/TOC calls fire.
+
+### Why c8i blows up
+
+prose_pride at BLK=8192 fires ~36 PROF_TIC/TOC pairs per block.
+On Granite Rapids that's 36 × 22.3 ns = 800 ns/blk of overhead
+(measured ~1000 ns including indirect costs like i-cache pressure).
+Real bu wall on c8i prose_pride is 1574 ns/blk, so prof DOUBLES the
+wall.  Per-primitive ns/call output is similarly inflated by
+~25-30 ns per call site.
+
+### Rules going forward
+
+1. **Bench numbers (`pivco_huffman_bench` from `build/`, NO
+   `-DPIVCO_PROF=1`) are the only authoritative headline numbers.**
+   All cross-platform performance tables, IDEAS entries, commit
+   message numbers, and READMEs must cite these.
+2. `pivco_huffman_profile_english` output is RELATIVE.  Use it for
+   "primitive A is X% of wall on platform P" — but don't quote its
+   absolute ns/call as production performance.
+3. The new `--tdbu` flag on the bench runs pivco_n + pivco_bu only
+   (skips trad / huf0 / rans benches) — use for fast prof-on/off
+   A/B verification of any kernel work.
+4. **On small-K primitives (`bu_tree_merge_bcast_*`, etc.) the
+   per-call overhead skews the ns/elem comparison.** Subtract
+   ~25-30 ns/call on c8i, ~15 ns/call on older Intel, ~10 ns/call
+   on Zen 3, ~negligible elsewhere.
+
+### Open: reduce prof overhead
+
+If we ever want trustable Granite Rapids profiles:
+- Switch to `RDPMC` (perf-counter, ~5 ns vs RDTSC ~10) — needs CAP_SYS_RAWIO or perf_event_open setup
+- Aggregate prof updates batch-wise (one TIC at loop entry, one TOC at exit per outer iteration instead of per primitive)
+- Cycle-counter calibration constant subtracted from each ns/call
+
+For now: just don't trust the c8i absolute ns/call.  The relative
+breakdown ("bu_tree_merge is 35% of BU wall on c8i") is still valid
+as long as all primitives are equally inflated by the constant
+~25-30 ns/call overhead.
+
 ## Ideas probably not worth more time
 
 These already appear explored or unlikely to pay off:
