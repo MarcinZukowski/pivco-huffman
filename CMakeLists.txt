@@ -131,6 +131,7 @@ elseif(TARGET_ARCH STREQUAL "x86_64" OR TARGET_ARCH STREQUAL "amd64")
         list(APPEND PIVCO_SOURCES src/pivco_huffman_avx512.c src/pivco_huffman_x86.c src/pivco_huffman_bu_x86.c)
         add_compile_definitions(PIVCO_HAS_AVX512=1 PIVCO_HAS_AVX2=1 PIVCO_HAS_SSE4=1)
         add_compile_options(-mavx512f -mavx512bw -mavx512vl -mavx512vbmi -mavx512vbmi2
+                            -mavx512vpopcntdq
                             -mavx2 -mbmi2 -msse4.1 -mpopcnt)
     elseif(COMPILER_HAS_AVX2 AND CPU_HAS_AVX2 AND NOT CPU_HAS_AVX2 STREQUAL "0")
         message(STATUS "x86_64 detected — enabling AVX2 + BMI2 + SSE4.1")

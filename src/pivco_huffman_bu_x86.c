@@ -24,20 +24,45 @@
 #include <smmintrin.h>  /* SSE4.1 */
 #include <immintrin.h>  /* AVX/AVX-512 umbrella; harmless on SSE-only builds */
 
-/* Popcount K bits from bm using POPCNT (BMI1/SSE4.2 era; -mpopcnt
- * enabled for both AVX-512 and SSE-only builds in CMakeLists).
- * 4-way unrolled 64-bit loop: each independent POPCNT lands on its own
- * exec unit (Zen3 has 4 popcnt ports, Xeon ICX has 1 — both benefit
- * from 4 independent reductions accumulated into separate ints, which
- * the compiler then sums at the end).  Mirrors the structure of the
- * NEON 64-byte chunk path in pivco_huffman_bu_neon.c. */
+/* Popcount K bits from bm.
+ *
+ * Three tiers, picked at compile time:
+ *
+ *  - AVX-512 VPOPCNTQ (Ice Lake+ / Zen 4+): 64-byte main loop with
+ *    _mm512_popcnt_epi64 — one ZMM popcount = 8 × 64-bit popcounts in
+ *    a single 1c-throughput instruction.  Accumulates into a u64x8
+ *    register (no overflow risk until 2^58 chunks).  Biggest win on
+ *    Xeon Ice Lake / Granite Rapids where scalar POPCNT is bound by
+ *    a single port at 1/cycle.
+ *
+ *  - Scalar 64-bit POPCNT, 4-way unrolled (BMI1/SSE4.2 era; -mpopcnt
+ *    enabled for both AVX2 and SSE-only builds): each independent
+ *    POPCNT lands on its own exec unit.  Zen 3 has 4 POPCNT ports so
+ *    all 4 reductions retire in parallel; Xeon ICX has 1 port but the
+ *    independent accumulators still let OOO overlap with surrounding
+ *    work.
+ *
+ *  - Mop-up + tail (last 0..15 full bytes + optional partial byte
+ *    with K & 7 valid bits).
+ */
 static inline int popcount_K_right_x86(const uint8_t *bm, int nbytes, int K) {
     (void)nbytes;   /* derivable from K; kept for API stability */
     PROF_TIC();
     int full_bytes = K >> 3;
     int partial_bits = K & 7;
     int b = 0;
+    int K_right = 0;
 
+#ifdef __AVX512VPOPCNTDQ__
+    /* 64-byte main loop with VPOPCNTQ. */
+    __m512i acc = _mm512_setzero_si512();
+    for (; b + 64 <= full_bytes; b += 64) {
+        __m512i v = _mm512_loadu_si512((const __m512i *)(bm + b));
+        acc = _mm512_add_epi64(acc, _mm512_popcnt_epi64(v));
+    }
+    K_right = (int)_mm512_reduce_add_epi64(acc);
+#else
+    /* 32-byte scalar POPCNT loop, 4-way unrolled. */
     uint64_t a0 = 0, a1 = 0, a2 = 0, a3 = 0;
     for (; b + 32 <= full_bytes; b += 32) {
         uint64_t v0, v1, v2, v3;
@@ -50,9 +75,11 @@ static inline int popcount_K_right_x86(const uint8_t *bm, int nbytes, int K) {
         a2 += __builtin_popcountll(v2);
         a3 += __builtin_popcountll(v3);
     }
-    int K_right = (int)(a0 + a1 + a2 + a3);
+    K_right = (int)(a0 + a1 + a2 + a3);
+#endif
 
-    /* 8-byte mop-up (1..3 leftover 8-byte groups). */
+    /* 8-byte mop-up (1..7 leftover 8-byte groups under VPOPCNTQ; 1..3
+     * under the scalar path). */
     for (; b + 8 <= full_bytes; b += 8) {
         uint64_t v;
         memcpy(&v, bm + b, 8);
