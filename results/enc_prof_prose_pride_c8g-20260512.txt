@@ -1,0 +1,36 @@
+Consolidate compiler generated dependencies of target pivco_huffman_profile_english
+[100%] Built target pivco_huffman_profile_english
+Total encoded: 2419062 bytes (4724.7 per block, max_enc=33554432)
+Verify: rc=0 consumed=4732 match=1
+out=0xffffadad1010 enc_buf=0xffffaded2010
+Decoding 512 blocks x 20000 reps = 83886080000 symbols (prose_pride)
+CPU pin: ok
+Cycle counter freq: 1000.03 MHz
+Profile mode: encode
+Starting encode loop...
+83886.1 M symbols in 111.02 s = 756 M/s
+
+=== pivco_prof: ENCODE prose_pride / BLK=8192 ===
+  wall: 111.015 s   blocks: 10240000   counter freq: 1000.03 MHz
+
+  primitive                               calls       elements  elem/call    ns/call    ns/elem  % wall
+  --------------------------------------------------------------------------------------------------
+  enc_init                             10240000    83886080000     8192.0     3370.2       0.41  31.09%
+  enc_node_full                       184620000   287881480000     1559.3      366.3       0.23  60.91%
+  enc_flat                             40960000    37675180000      919.8      138.2       0.15   5.10%
+    enc_flat_simd                      40960000    37675180000      919.8    (count)    (count)     —
+    enc_flat_tail                      40960000              0        0.0    (count)    (count)     —
+  enc_node_calls                      225580000   325556660000     1443.2    (count)    (count)     —
+  enc_entry                            10240000    83886080000     8192.0    (count)    (count)     —
+  (unaccounted)                                                                314.8        —   2.90%
+  TOTAL (wall)                                                               10841.3        — 100.00%
+
+  Per-BLK averages:
+    enc_init                              1.0 calls/BLK       8192.0 elems/BLK
+    enc_node_full                        18.0 calls/BLK      28113.4 elems/BLK
+    enc_flat                              4.0 calls/BLK       3679.2 elems/BLK
+      enc_flat_simd                       4.0 calls/BLK       3679.2 elems/BLK
+      enc_flat_tail                       4.0 calls/BLK          0.0 elems/BLK
+    enc_node_calls                       22.0 calls/BLK      31792.6 elems/BLK
+    enc_entry                             1.0 calls/BLK       8192.0 elems/BLK
+

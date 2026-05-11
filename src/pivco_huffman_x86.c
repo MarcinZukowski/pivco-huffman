@@ -1,5 +1,6 @@
 #include "pivco_huffman.h"
 #include "pivco_huffman_common.h"
+#include "pivco_prof.h"
 #include <string.h>
 
 #ifdef PIVCO_HAS_SSE4
@@ -464,13 +465,17 @@ static void encode_node_x86(const pivco_huffman_table_t *table,
     const pivco_tree_node_t *node = &table->tree[node_id];
     if (node->symbol >= 0) return; /* leaf */
 
+    PROF_COUNT_ONLY(PROF_ENC_NODE_VISIT, n);
+
     /* Flat-subtree fast path: emit n*D packed bits instead of D levels
        of bitmaps.  Detected at build_table time. */
     if (table->flat_depth[node_id] >= 2) {
         int D = table->flat_depth[node_id];
         int total_bytes = (n * D + 7) >> 3;
         uint8_t *out = *out_ptr;
+        PROF_TIC();
         pack_D_bits_dense_x86(out, n, D, depth, codes_la);
+        PROF_TOC(PROF_ENC_FLAT, n);
         *out_ptr += total_bytes;
         return;
     }
@@ -487,6 +492,7 @@ static void encode_node_x86(const pivco_huffman_table_t *table,
     int j = 0;
     __m128i shift_count = _mm_cvtsi32_si128(depth);
 
+    PROF_TIC();
     for (; j + 8 <= n; j += 8) {
         __m128i code_vec = _mm_loadu_si128((const __m128i *)(codes_la + j));
         uint8_t mask = enc_mask8_codes_la_sse(code_vec, shift_count);
@@ -523,6 +529,7 @@ static void encode_node_x86(const pivco_huffman_table_t *table,
                 codes_la[n_left++] = tail_buf[k];
         }
     }
+    PROF_TOC(PROF_ENC_NODE_FULL, n);
 
     encode_node_x86(table, node->left, codes_la, n_left,
                      depth + 1, out_ptr, tmp + n_right);
@@ -537,13 +544,16 @@ int pivco_huffman_encode_x86(const uint8_t *symbols,
     if (!symbols || !table || !out || !out_len) return PIVCO_ERR_NULL;
 
     init_compress_table();
+    PROF_COUNT_ONLY(PROF_ENC_ENTRY, PIVCO_BLOCK_SIZE);
 
     const int N = PIVCO_BLOCK_SIZE;
 
     /* Dense left-aligned codes; +16 slack matches the NEON encoder:
      * partition_8_sse's 16-byte store can write at n_left + 8. */
     uint16_t codes_la[PIVCO_BLOCK_SIZE + 16];
+    PROF_TIC();
     for (int i = 0; i < N; i++) codes_la[i] = table->code_la[symbols[i]];
+    PROF_TOC(PROF_ENC_INIT, N);
 
     uint16_t tmp[PIVCO_BLOCK_SIZE * 2];
     uint8_t *ptr = out;

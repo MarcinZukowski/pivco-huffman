@@ -1,0 +1,32 @@
+[ 84%] Linking C executable pivco_huffman_profile_english
+[100%] Built target pivco_huffman_profile_english
+Total encoded: 2419062 bytes (4724.7 per block, max_enc=33554432)
+Verify: rc=0 consumed=4732 match=1
+out=0x7fcd52bfd010 enc_buf=0x7fcd52ffe010
+Decoding 512 blocks x 20000 reps = 83886080000 symbols (prose_pride)
+CPU pin: ok
+Cycle counter freq: 2699.98 MHz
+Profile mode: encode
+Starting encode loop...
+83886.1 M symbols in 81.07 s = 1035 M/s
+
+=== pivco_prof: ENCODE prose_pride / BLK=8192 ===
+  wall: 81.069 s   blocks: 10240000   counter freq: 2699.98 MHz
+
+  primitive                               calls       elements  elem/call    ns/call    ns/elem  % wall
+  --------------------------------------------------------------------------------------------------
+  enc_init                             10240000    83886080000     8192.0     2093.7       0.26  26.45%
+  enc_node_full                       184620000   287881480000     1559.3      125.7       0.08  28.62%
+  enc_flat                             40960000    37675180000      919.8      764.5       0.83  38.63%
+  enc_node_calls                      225580000   325556660000     1443.2    (count)    (count)     —
+  enc_entry                            10240000    83886080000     8192.0    (count)    (count)     —
+  (unaccounted)                                                                499.1        —   6.30%
+  TOTAL (wall)                                                                7916.9        — 100.00%
+
+  Per-BLK averages:
+    enc_init                              1.0 calls/BLK       8192.0 elems/BLK
+    enc_node_full                        18.0 calls/BLK      28113.4 elems/BLK
+    enc_flat                              4.0 calls/BLK       3679.2 elems/BLK
+    enc_node_calls                       22.0 calls/BLK      31792.6 elems/BLK
+    enc_entry                             1.0 calls/BLK       8192.0 elems/BLK
+

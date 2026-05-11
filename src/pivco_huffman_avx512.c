@@ -631,12 +631,16 @@ static void encode_node_avx512(const pivco_huffman_table_t *table,
     const pivco_tree_node_t *node = &table->tree[node_id];
     if (node->symbol >= 0) return; /* leaf */
 
+    PROF_COUNT_ONLY(PROF_ENC_NODE_VISIT, n);
+
     /* Flat-subtree fast path: emit n*D packed bits. */
     if (table->flat_depth[node_id] >= 2) {
         int D = table->flat_depth[node_id];
         int total_bytes = (n * D + 7) >> 3;
         uint8_t *out = *out_ptr;
+        PROF_TIC();
         pack_D_bits_dense_avx512(out, n, D, depth, codes_la);
+        PROF_TOC(PROF_ENC_FLAT, n);
         *out_ptr += total_bytes;
         return;
     }
@@ -653,6 +657,7 @@ static void encode_node_avx512(const pivco_huffman_table_t *table,
     int n_left = 0, n_right = 0;
     int j = 0;
 
+    PROF_TIC();
     for (; j + 32 <= n; j += 32) {
         __m512i code_vec = _mm512_loadu_si512((const __m512i *)(codes_la + j));
         uint32_t mask = enc_mask32_codes_la_avx512(code_vec, depth);
@@ -702,6 +707,7 @@ static void encode_node_avx512(const pivco_huffman_table_t *table,
                 codes_la[n_left++] = tail_buf[k];
         }
     }
+    PROF_TOC(PROF_ENC_NODE_FULL, n);
 
     encode_node_avx512(table, node->left,  codes_la, n_left,
                         depth + 1, out_ptr, tmp + n_right);
@@ -714,13 +720,16 @@ int pivco_huffman_encode_avx512(const uint8_t *symbols,
                                  uint8_t *out, size_t *out_len)
 {
     if (!symbols || !table || !out || !out_len) return PIVCO_ERR_NULL;
+    PROF_COUNT_ONLY(PROF_ENC_ENTRY, PIVCO_BLOCK_SIZE);
 
     const int N = PIVCO_BLOCK_SIZE;
 
     /* Dense left-aligned codes; +32 slack covers the AVX-512 stride-32
      * partition's 64-byte vpcompressw store at n_left + 32 worst case. */
     uint16_t codes_la[PIVCO_BLOCK_SIZE + 32];
+    PROF_TIC();
     for (int i = 0; i < N; i++) codes_la[i] = table->code_la[symbols[i]];
+    PROF_TOC(PROF_ENC_INIT, N);
 
     uint16_t tmp[PIVCO_BLOCK_SIZE * 2];
     uint8_t *ptr = out;
