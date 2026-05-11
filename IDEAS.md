@@ -1178,6 +1178,116 @@ Key asymmetry: **BMI2 PDEP is 12-15× faster than NEON's table-driven
 emulation**.  Any future algorithm that wants to phrase a hot loop as
 a deposit operation should expect huge x86-vs-ARM asymmetry.
 
+## ~~Bottom-up tree_merge decoder: 2× unroll + SIMD popcount_K_right~~ — SHIPPED (2026-05-10)
+
+**Status (2026-05-10): SHIPPED.**  Commits `8f03fac`, `462db14`, `a962789`.
+
+Two NEON optimisations to the brand-new bottom-up decoder (`b2e6c38`,
+`0e7a41e`), informed by the first round of `bu_*` prof instrumentation
+(`8032c0e`).  Both followed straight from a prof breakdown showing
+`bu_tree_merge` at 53% of wall and `bu_popcount_K` at 29% with a
+scalar `__builtin_popcount` byte loop.
+
+### 1) 2× unroll on `tree_merge` and `tree_merge_bcast_{left,right}`
+
+The TD `node_full` has had a stride-16 unrolled main loop for ages —
+adjacent 8-elem groups have independent loads / TBLs / stores so OOO
+overlaps iteration N's TBL with iteration N+1's load.  The BU merge
+primitives were stride-8 only.  Applied the same unroll pattern:
+stride-16 with two independent merges per iter, stride-8 mop-up,
+scalar 1..7 tail.  (`merge_both_const` already had it.)
+
+`bu_tree_merge`: 184.8 → 176.2 ns/call, 0.066 → 0.063 ns/elem.
+
+### 2) SIMD `popcount_K_right`, 4-wide ILP
+
+The helper counts "1" bits in the first K bits of a bitmap — called
+at every HALF / INTERNAL_FULL node to find K_right before recursing.
+At 14 calls/blk × ~218 bytes/call on prose_pride the scalar loop
+cost **28.76% of BU wall** (802 ns/blk).
+
+64-byte main loop with 4-wide ILP: four independent `vcntq_u8`,
+three-level lane-wise add tree via `vaddq_u8` (~4/cycle on M-series
+vs ~2/cycle for `vpaddq_u8` — same data-reduction shape, simpler op
+and equivalent or faster across ARM cores), one `vpaddlq_u8` widen
+to u16 (max 64 per lane), one `vaddq_u16` into the u16x8
+accumulator.  16-byte mop-up for the trailing 1..3 vectors, scalar
+tail for the final 0..15 full bytes plus the optional partial last
+byte (`K & 7` valid bits).
+
+`bu_popcount_K`: 57.1 → 7.5 ns/call (7.6×), 0.033 → 0.005 ns/elem,
+**28.76% → 5.26% of wall**.
+
+### Headline (M4, prose_pride, ns per block)
+
+| primitive                    | before | after  |     Δ |
+|------------------------------|-------:|-------:|------:|
+| bu_tree_merge                |   1478 |   1415 |   −63 |
+| bu_tree_merge_bcast_left     |    157 |    132 |   −25 |
+| bu_merge_both_const          |    154 |    151 |    −3 |
+| bu_flat_decode               |    136 |    132 |    −4 |
+| bu_popcount_K                |    802 |    105 |  −697 |
+| (unaccounted)                |     67 |     62 |    −5 |
+| **BU TOTAL**                 | **2802** | **1999** | **−803** |
+| TD TOTAL (reference)         |   3002 |   2993 |     — |
+
+BU is now **1.50× TD** on prose_pride.
+
+### bench MAIN-set on M4 (pivco_bu M sym/s vs pivco_n TD)
+
+| dataset       |    TD  | BU before | BU after | BU/TD |
+|---------------|-------:|----------:|---------:|------:|
+| proba80       |   9764 |      9159 |    13958 | 1.43× |
+| english       |   3356 |      4095 |     5487 | 1.63× |
+| flat_M5       |  25056 |     25497 |    25033 | 1.00× |
+| html_wiki     |   2629 |      2681 |     3754 | 1.43× |
+| prose_pride   |   2759 |      2894 |     4063 | 1.47× |
+| image_jpeg    |   2844 |      3057 |     3787 | 1.33× |
+| json_api      |   2666 |      2672 |     3718 | 1.39× |
+| gzip_random   |   5168 |      5181 |     5160 | 1.00× |
+| chinese_text  |   2713 |      2961 |     4247 | 1.57× |
+
+(`flat_M5` and `gzip_random` are flat-path and uniform respectively —
+neither exercises `tree_merge` or `popcount_K_right`.)
+
+## Bottom-up decoder: store K_right per internal node to skip popcount
+
+**Status:** open follow-up to the SHIPPED entry above.  Estimated **~5%
+additional BU win** on real-text distributions.
+
+`bu_popcount_K` is now 5.26% of BU wall on prose_pride (105 ns/blk).
+The popcount work is fundamental to the current format: at each
+internal node we have to count the "1" bits in the bitmap to learn
+K_right before we can recurse into the right child.
+
+The cheap shortcut: at encode time, prepend a 1-byte (or short
+varint) `K_right` header immediately before each internal node's
+bitmap.  Decoder reads one byte instead of running the popcount
+loop — a single cache-line touch already paid for the bitmap fetch.
+
+**Cost:**  ~1 byte per visible internal node.  prose_pride has ~95
+internal nodes per 8192-byte block → ~95 B/block = **~1.2% encoded-
+size bloat**.  Lower for skewed distributions (fewer internals),
+higher for flat ones (which mostly skip this path anyway via
+`bu_flat_decode`).
+
+**Estimated win:** the full 105 ns/blk of `bu_popcount_K` collapses
+to a single byte load (~1-2 ns/blk amortised), so ~100 ns/blk saved
+on prose_pride out of 1999 → **~5% on text decode**.  Marginal on
+flat / uniform / two_sym cases that don't hit the popcount path.
+
+**Open design questions:**
+- Width: 1 byte covers K up to 255 (block size 256).  For K > 255 fall
+  back to a 2-byte short varint.  Most internal nodes already operate
+  on K ≪ block_size.
+- Header placement: easiest is `[K_right_byte][bitmap_bytes]`.  Slight
+  alignment cost — bitmap no longer starts on a byte boundary that's
+  a multiple of the bitmap length.  Probably fine.
+- Encoder change: trivial, popcount once at encode time per internal
+  node.
+- Worth a prototype on prose_pride / english before propagating to
+  x86 backends.
+
 ## Ideas probably not worth more time
 
 These already appear explored or unlikely to pay off:
