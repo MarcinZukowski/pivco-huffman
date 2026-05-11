@@ -1028,6 +1028,156 @@ Possible heuristics:
 - entropy estimate,
 - expected shallow-leaf fraction.
 
+## PDEP/expand-based per-position code reconstruction — researched 2026-05-10, parked
+
+**Status:** documented, not implemented.  Conditionally promising on
+**Xeon (AVX-512 VBMI2)** but requires non-trivial encoder+decoder rewrite.
+NEON cannot benefit (no bit-PDEP, no `vpexpandw` analogue on Apple/G4).
+
+### The idea
+
+Instead of decoding via tree-walk partition + indexed scatter
+(`symbols[indices[i]] = sym`), reconstruct the **full Huffman code per
+output position** as a contiguous `uint16[N]` array, then do a
+sequential c2s lookup with **scalar-stride sequential stores**:
+
+```c
+for (i = 0; i < N; i++) symbols[i] = c2s[codes[i]];
+```
+
+Sequential output writes are dramatically cheaper than the scrambled
+scatter (the partition-reordered indices) on x86, where the L1 store
+queue can't coalesce scattered byte stores.
+
+### How reconstruction works (bottom-up)
+
+Walk the Huffman tree **bottom-up**.  Each subtree maintains a 16-bit
+per-element code-so-far representation.
+
+At an internal node combining left (n_l elements, D_l-bit codes) and
+right (n_r elements, D_r-bit codes), with bm selecting between them:
+
+```c
+out_left  = _mm512_maskz_expand_epi16(~bm_chunk, left_codes)    // place at bm=0 positions
+out_right = _mm512_maskz_expand_epi16( bm_chunk, right_codes)   // place at bm=1 positions
+prefix    = bm_chunk-broadcast-to-16-bit << D_max;              // add the new prefix bit
+out       = out_left | out_right | prefix
+```
+
+`vpexpandw` (AVX-512 VBMI2) is the key primitive: for each set bit in
+the mask, take the next 16-bit word from source and place it at that
+output position; for each unset bit, write 0.  Exactly what we need.
+
+At leaves the code is empty (0 bits).  After D combines we have N
+codes of D bits each, contiguous in memory.
+
+### Cost analysis (Xeon Ice Lake+ / Zen 4+)
+
+Work per `vpexpandw` combine = (subtree size in words).  Total work
+across all combines = sum over symbols of `count[s] * depth[s]` = N ×
+entropy.
+
+For `prose_pride` N=8192 with average code length ~4.5 bits:
+```
+   reconstruction ≈ 8192 × 4.5 = 37000 word-ops
+   vpexpandw throughput ≈ 32 words/cycle
+   → ~1150 cycles ≈ 380 ns/block
+```
+
+Then the contiguous c2s lookup cost depends on table size:
+
+| max code D | c2s size | Lookup | Cost on Xeon |
+|---|---:|---|---:|
+| ≤ 6 | 64 B | `vpermb` (single reg) | ~50 ns |
+| ≤ 8 | 256 B | 4× `vpermb` + blend | ~150 ns |
+| ≤ 11 (default after this commit) | 2 KB | `vpgatherdd` from L1 | ~1370 ns |
+| ≤ 15 | 32 KB | gather + L1 misses | ~3000+ ns |
+
+### Headline projection vs current
+
+| approach (Xeon prose_pride) | reconstruct | c2s | total | vs current ~2500 ns |
+|---|---:|---:|---:|---:|
+| current (partition + scatter) | ~1000 | ~1500 | 2500 | 1.0× |
+| **BU reconstruct + D≤11 gather** | 380 | 1370 | **~1750** | **1.4×** |
+| BU reconstruct + D≤8 vpermb | 380 | 150 | **~530** | **5×** |
+
+At D=11 (now our default): ~1.4× decode speedup, **ABI-compatible
+with huf0's 11-bit canonical tables** — could be marketed as
+"a faster huf0".  At D=8: 5× speedup at a small ratio cost.
+
+### Architectural fit
+
+- **Xeon Ice Lake+** (`vpexpandw` available): primary target.  ~1.4-5×
+  speedup depending on D cap.
+- **Zen 4+**: same — has VBMI2.
+- **Zen 3**: no `vpexpandw` — would need byte-wise emulation; unclear
+  whether positive net.
+- **Apple M4 / Graviton 4 (NEON)**: no equivalent instruction.  Would
+  need scalar `pdep` emulation per-byte from a 256-entry table, which
+  benchmarks at ~0.27 ns/A-bit (12× slower than BMI2).  Stay with the
+  existing partition+scatter decoder.
+- **Graviton 3+ / Neoverse V1/V2**: SVE2 has `bdep` (bit deposit), which
+  matches BMI2 PDEP.  Untested.
+
+Runtime backend selection per architecture (already in place).
+
+### Why the D=11 default (this commit) helps even without implementing
+
+Independent of whether we ever build the BU-reconstruct path, capping at
+D=11 means `decode_sym/decode_len` shrink from 32KB to 2KB and fit L1
+cleanly.  The existing scatter decoder gets a small win on text-like
+data (+2-10% on prose/html/source across hosts), and the c2s table for
+a *future* BU-reconstruct decoder fits in L1 as a 2KB gather target.
+
+### Variable-length codes wrinkle
+
+PIVCO trees have variable depth.  At each combine, normalize to the
+deeper child's bit-width by padding the shorter child's codes with
+zeros at the top bit positions.  In transposed (per-bit-bitmap)
+representation this is free; in packed (per-element-code) representation
+we already work in fixed 16-bit cells so it's also free as long as
+unused high bits stay zero.
+
+The leftover question is: for elements whose code length L_i < D_max,
+the bits beyond L_i are "don't care" — they must be masked or
+handled in the c2s table by replicating the symbol across all 2^(D_max-L_i)
+table entries that share the relevant prefix.  Standard canonical-Huffman
+trick.
+
+### Why parked
+
+- Cost-benefit unclear without a full implementation: the +1.4× at
+  D=11 is real but not dramatic.  Real wins kick in only at D≤8,
+  which costs ~1-3% compression on text — a different trade-off.
+- AVX-512-VBMI2-only.  Half the deployed Xeon fleet is older.
+- Format change: need to design the bitmap layout for bottom-up
+  traversal, build a new encoder pathway.
+- Existing decoder already beats huf0 by 1.0-5× depending on
+  distribution; no urgent bottleneck.
+
+If revisiting: prototype on test-c8i first (Sapphire Rapids), 1-2 hrs
+to validate the 1.4× claim.  If real, the design pivots from
+partition+scatter to BU-reconstruct + sequential c2s with runtime
+backend selection per architecture.
+
+### Related microbench primitives (`extras/bench_primitives_*_cnt.cpp`)
+
+Standalone benches for the four bit-manipulation primitives that came
+up during this exploration:
+
+| primitive | Input | Output | M4 NEON | G4 NEON | Zen3 | Xeon |
+|---|---|---|---:|---:|---:|---:|
+| **P1** select_vec | V[N] uint8 + char C | uint16 indices where V[i]==C | 0.058 | 0.130 | 0.154 (SSE) | **0.033** (AVX-512 vpcompressw) |
+| **P2** pdep_bm | bitmap A (N b), B (popcount(A) b) | C[i] = A[i] ? B[rank(A,i)] : 0 | 0.265 | 0.392 | **0.022** (BMI2) | **0.017** (BMI2) |
+| **P3** pdep_idx | A, B as P2 | uint16 indices where C[i]==1 | 0.309 | 0.455 | **0.189** (BMI2+tzcnt) | **0.099** (BMI2+tzcnt) |
+| **P4** interleave | A, B as P2 | C[2i]=A[i], C[2i+1]=A[i]?B[rank]:0 | 0.288 | 0.431 | **0.053** (2× PDEP) | **0.034** (2× PDEP) |
+
+(all in ns per input unit — P1 per V-byte, P2-P4 per A-bit)
+
+Key asymmetry: **BMI2 PDEP is 12-15× faster than NEON's table-driven
+emulation**.  Any future algorithm that wants to phrase a hot loop as
+a deposit operation should expect huge x86-vs-ARM asymmetry.
+
 ## Ideas probably not worth more time
 
 These already appear explored or unlikely to pay off:
