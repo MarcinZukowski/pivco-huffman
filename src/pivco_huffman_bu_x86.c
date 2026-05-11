@@ -24,16 +24,48 @@
 #include <smmintrin.h>  /* SSE4.1 */
 #include <immintrin.h>  /* AVX/AVX-512 umbrella; harmless on SSE-only builds */
 
+/* Popcount K bits from bm using POPCNT (BMI1/SSE4.2 era; -mpopcnt
+ * enabled for both AVX-512 and SSE-only builds in CMakeLists).
+ * 4-way unrolled 64-bit loop: each independent POPCNT lands on its own
+ * exec unit (Zen3 has 4 popcnt ports, Xeon ICX has 1 — both benefit
+ * from 4 independent reductions accumulated into separate ints, which
+ * the compiler then sums at the end).  Mirrors the structure of the
+ * NEON 64-byte chunk path in pivco_huffman_bu_neon.c. */
 static inline int popcount_K_right_x86(const uint8_t *bm, int nbytes, int K) {
+    (void)nbytes;   /* derivable from K; kept for API stability */
     PROF_TIC();
-    int K_right = 0;
-    int last = nbytes - 1;
-    for (int b = 0; b < nbytes; b++) {
-        uint8_t byte = bm[b];
-        int valid = (b == last) ? (K - (b << 3)) : 8;
-        if (valid > 8) valid = 8;
-        uint8_t valid_mask = (valid == 8) ? 0xFFu : (uint8_t)((1u << valid) - 1);
-        K_right += __builtin_popcount(byte & valid_mask);
+    int full_bytes = K >> 3;
+    int partial_bits = K & 7;
+    int b = 0;
+
+    uint64_t a0 = 0, a1 = 0, a2 = 0, a3 = 0;
+    for (; b + 32 <= full_bytes; b += 32) {
+        uint64_t v0, v1, v2, v3;
+        memcpy(&v0, bm + b,      8);
+        memcpy(&v1, bm + b + 8,  8);
+        memcpy(&v2, bm + b + 16, 8);
+        memcpy(&v3, bm + b + 24, 8);
+        a0 += __builtin_popcountll(v0);
+        a1 += __builtin_popcountll(v1);
+        a2 += __builtin_popcountll(v2);
+        a3 += __builtin_popcountll(v3);
+    }
+    int K_right = (int)(a0 + a1 + a2 + a3);
+
+    /* 8-byte mop-up (1..3 leftover 8-byte groups). */
+    for (; b + 8 <= full_bytes; b += 8) {
+        uint64_t v;
+        memcpy(&v, bm + b, 8);
+        K_right += __builtin_popcountll(v);
+    }
+    /* Byte tail (0..7 leftover full bytes). */
+    for (; b < full_bytes; b++) {
+        K_right += __builtin_popcount(bm[b]);
+    }
+    /* Optional partial byte (K & 7 valid bits). */
+    if (partial_bits) {
+        uint8_t valid_mask = (uint8_t)((1u << partial_bits) - 1);
+        K_right += __builtin_popcount(bm[full_bytes] & valid_mask);
     }
     PROF_TOC(PROF_BU_POPCOUNT_K, K);
     return K_right;
@@ -214,15 +246,27 @@ static inline void merge_both_const(const uint8_t *bm, int K,
 }
 
 /* ---------- D-bit flat decode ----------
- * Reuses the existing vectorised D=4 path; scalar for other D's. */
+ * On AVX-512 VBMI2 hosts route through the AVX-512 unpack (D=5/6 have
+ * dedicated fast paths there).  Without AVX-512 fall back to the SSE
+ * D=4 vectorised path.  The bu_x86 backend is the only x86 caller of
+ * these wrappers; the TD decoders inline them directly. */
 extern void pivco_huffman_flat_decode_direct_x86_(uint8_t *symbols, int n,
                                                    const uint8_t *bm, int D,
                                                    const uint8_t *c2s);
+#ifdef PIVCO_HAS_AVX512
+extern void pivco_huffman_flat_decode_direct_avx512_(uint8_t *symbols, int n,
+                                                      const uint8_t *bm, int D,
+                                                      const uint8_t *c2s);
+#endif
 static inline void flat_decode_to_buffer(uint8_t *out, int n,
                                           const uint8_t *bm, int D,
                                           const uint8_t *c2s) {
     PROF_TIC();
+#ifdef PIVCO_HAS_AVX512
+    pivco_huffman_flat_decode_direct_avx512_(out, n, bm, D, c2s);
+#else
     pivco_huffman_flat_decode_direct_x86_(out, n, bm, D, c2s);
+#endif
     PROF_TOC(PROF_BU_FLAT_DECODE, n);
 }
 

@@ -998,4 +998,13 @@ int pivco_huffman_decode_avx512(const uint8_t *in, size_t in_len,
     return PIVCO_OK;
 }
 
+/* Non-static wrapper exposed for the bottom-up decoder
+ * (src/pivco_huffman_bu_x86.c) so it can route through the AVX-512
+ * flat unpack instead of the slower SSE flat_decode_direct_x86. */
+void pivco_huffman_flat_decode_direct_avx512_(uint8_t *symbols, int n,
+                                               const uint8_t *bm, int D,
+                                               const uint8_t *c2s) {
+    flat_decode_direct_avx512(symbols, n, bm, D, c2s);
+}
+
 #endif /* PIVCO_HAS_AVX512 */
