@@ -576,11 +576,53 @@ static inline void flat_decode_direct_avx512(uint8_t *symbols, int n,
 #undef DST_DIRECT
 }
 
+/* Dense-codes pack: extract D bits per element from codes_la, pack
+ * LSB-first.  Stays scalar for x86 -- per-byte / per-lane variable
+ * shifts available on AVX2+ but the dominant slice here is the node
+ * partition, not enc_flat.  Symmetric to the NEON helper. */
+static inline void pack_D_bits_dense_avx512(uint8_t *out, int n, int D,
+                                             int depth,
+                                             const uint16_t *codes_la)
+{
+    int total_bytes = (n * D + 7) >> 3;
+    if (total_bytes > 0) out[total_bytes - 1] = 0;
+    uint32_t mask = (1u << D) - 1;
+    int right_shift = 16 - depth - D;
+    uint64_t buf = 0;
+    int bits_in_buf = 0;
+    int byte_idx = 0;
+    for (int i = 0; i < n; i++) {
+        uint32_t local = ((uint32_t)codes_la[i] >> right_shift) & mask;
+        buf |= ((uint64_t)local) << bits_in_buf;
+        bits_in_buf += D;
+        while (bits_in_buf >= 8) {
+            out[byte_idx++] = (uint8_t)(buf & 0xff);
+            buf >>= 8;
+            bits_in_buf -= 8;
+        }
+    }
+    if (bits_in_buf > 0) {
+        out[byte_idx] = (uint8_t)(buf & ((1u << bits_in_buf) - 1));
+    }
+}
+
+/* AVX-512 dense-codes mask build for 32 codes per call.
+ *
+ * Load 32 uint16 codes into a __m512i (= 64 bytes).  Shift left by
+ * depth so bit-d lands at int16 position 15 (= sign bit).
+ * `_mm512_movepi16_mask` reads the sign bit of each int16 lane into a
+ * 32-bit mask register — exact analog of the SSE `_mm_packs_epi16 +
+ * _mm_movemask_epi8` trick, but native and a single instruction. */
+static inline uint32_t enc_mask32_codes_la_avx512(__m512i code_vec, int depth)
+{
+    __m512i shifted = _mm512_slli_epi16(code_vec, depth);
+    return (uint32_t)_mm512_movepi16_mask(shifted);
+}
+
 static void encode_node_avx512(const pivco_huffman_table_t *table,
                                 int16_t node_id,
-                                uint16_t *indices, int n,
+                                uint16_t *codes_la, int n,
                                 int depth,
-                                const uint16_t *codes, const uint8_t *lens,
                                 uint8_t **out_ptr,
                                 uint16_t *tmp)
 {
@@ -594,63 +636,77 @@ static void encode_node_avx512(const pivco_huffman_table_t *table,
         int D = table->flat_depth[node_id];
         int total_bytes = (n * D + 7) >> 3;
         uint8_t *out = *out_ptr;
-        if (total_bytes > 0) out[total_bytes - 1] = 0;
-        pack_D_bits_avx512(out, n, D, indices, codes);
+        pack_D_bits_dense_avx512(out, n, D, depth, codes_la);
         *out_ptr += total_bytes;
         return;
     }
 
-    /* Write n code bits */
+    /* Bitmap + partition.  Stride 32 codes / iter:
+     * - vpsllw(code_vec, depth) + vpmovw2m   -- 32-bit mask in one shot
+     * - write the 32-bit mask to bm[j >> 3..j>>3 + 4)
+     * - vpcompressw on the SAME register: left half (mask=0) in place over
+     *   codes_la, right half (mask=1) into tmp. */
     int nbytes = bitmap_bytes(n);
     uint8_t *bm = *out_ptr;
-    memset(bm, 0, (size_t)nbytes);
-
-    for (int j = 0; j < n; j++) {
-        int idx = indices[j];
-        int bit = (codes[idx] >> (lens[idx] - 1 - depth)) & 1;
-        if (bit) bitmap_set(bm, j);
-    }
     *out_ptr += nbytes;
 
-    /* AVX-512 partition: 32 indices at a time */
     int n_left = 0, n_right = 0;
     int j = 0;
 
     for (; j + 32 <= n; j += 32) {
-        /* Load 32 bits of mask from 4 consecutive bitmap bytes */
-        uint32_t mask;
-        memcpy(&mask, bm + (j >> 3), 4);
-        int nr = partition_32_full(indices + j, mask,
-                                    indices + n_left, tmp + n_right);
+        __m512i code_vec = _mm512_loadu_si512((const __m512i *)(codes_la + j));
+        uint32_t mask = enc_mask32_codes_la_avx512(code_vec, depth);
+        memcpy(bm + (j >> 3), &mask, 4);
+
+        __m512i right_v = _mm512_maskz_compress_epi16((__mmask32)mask,  code_vec);
+        __m512i left_v  = _mm512_maskz_compress_epi16((__mmask32)~mask, code_vec);
+        _mm512_storeu_si512((__m512i *)(tmp      + n_right), right_v);
+        _mm512_storeu_si512((__m512i *)(codes_la + n_left ), left_v);
+        int nr = __builtin_popcount(mask);
         n_right += nr;
-        n_left += (32 - nr);
+        n_left  += (32 - nr);
     }
-    /* SSE remainder: 8 at a time */
+    /* SSE-stride remainder: 8 codes / iter via the same movemask trick. */
+    __m128i shift_count = _mm_cvtsi32_si128(depth);
     for (; j + 8 <= n; j += 8) {
-        uint8_t mask8 = bm[j >> 3];
-        __m128i data = _mm_loadu_si128((const __m128i *)(indices + j));
-        /* Use pshufb-based partition for the 8-wide remainder */
-        /* Inline simple scalar for now — the 32-wide loop handles most */
-        for (int k = 0; k < 8; k++) {
-            if (mask8 & (1 << k))
-                tmp[n_right++] = indices[j + k];
-            else
-                indices[n_left++] = indices[j + k];
-        }
+        __m128i code_vec = _mm_loadu_si128((const __m128i *)(codes_la + j));
+        __m128i shifted  = _mm_sll_epi16(code_vec, shift_count);
+        __m128i bytes    = _mm_packs_epi16(shifted, _mm_setzero_si128());
+        uint8_t mask     = (uint8_t)_mm_movemask_epi8(bytes);
+        bm[j >> 3] = mask;
+
+        __m128i right_v = _mm_maskz_compress_epi16((__mmask8)mask,  code_vec);
+        __m128i left_v  = _mm_maskz_compress_epi16((__mmask8)~mask, code_vec);
+        _mm_storeu_si128((__m128i *)(tmp      + n_right), right_v);
+        _mm_storeu_si128((__m128i *)(codes_la + n_left ), left_v);
+        int nr = __builtin_popcount(mask);
+        n_right += nr;
+        n_left  += (8 - nr);
     }
-    /* Scalar remainder */
-    for (; j < n; j++) {
-        if (bitmap_get(bm, j)) {
-            tmp[n_right++] = indices[j];
-        } else {
-            indices[n_left++] = indices[j];
+    /* Scalar tail. */
+    if (j < n) {
+        int tail = n - j;
+        uint16_t tail_buf[8];
+        for (int k = 0; k < tail; k++) tail_buf[k] = codes_la[j + k];
+        uint8_t mask = 0;
+        int shift_d = 15 - depth;
+        for (int k = 0; k < tail; k++) {
+            int bit = (tail_buf[k] >> shift_d) & 1;
+            mask |= (uint8_t)(bit << k);
+        }
+        bm[j >> 3] = mask;
+        for (int k = 0; k < tail; k++) {
+            if (mask & (1 << k))
+                tmp[n_right++] = tail_buf[k];
+            else
+                codes_la[n_left++] = tail_buf[k];
         }
     }
 
-    encode_node_avx512(table, node->left, indices, n_left,
-                        depth + 1, codes, lens, out_ptr, tmp + n_right);
-    encode_node_avx512(table, node->right, tmp, n_right,
-                        depth + 1, codes, lens, out_ptr, tmp + n_right);
+    encode_node_avx512(table, node->left,  codes_la, n_left,
+                        depth + 1, out_ptr, tmp + n_right);
+    encode_node_avx512(table, node->right, tmp,      n_right,
+                        depth + 1, out_ptr, tmp + n_right);
 }
 
 int pivco_huffman_encode_avx512(const uint8_t *symbols,
@@ -661,21 +717,16 @@ int pivco_huffman_encode_avx512(const uint8_t *symbols,
 
     const int N = PIVCO_BLOCK_SIZE;
 
-    uint16_t codes[PIVCO_BLOCK_SIZE];
-    uint8_t  lens[PIVCO_BLOCK_SIZE];
-    for (int i = 0; i < N; i++) {
-        codes[i] = table->code[symbols[i]];
-        lens[i]  = table->code_len[symbols[i]];
-    }
-
-    uint16_t indices[PIVCO_BLOCK_SIZE];
-    for (int i = 0; i < N; i++) indices[i] = (uint16_t)i;
+    /* Dense left-aligned codes; +32 slack covers the AVX-512 stride-32
+     * partition's 64-byte vpcompressw store at n_left + 32 worst case. */
+    uint16_t codes_la[PIVCO_BLOCK_SIZE + 32];
+    for (int i = 0; i < N; i++) codes_la[i] = table->code_la[symbols[i]];
 
     uint16_t tmp[PIVCO_BLOCK_SIZE * 2];
     uint8_t *ptr = out;
 
-    encode_node_avx512(table, table->tree_root, indices, N,
-                        0, codes, lens, &ptr, tmp);
+    encode_node_avx512(table, table->tree_root, codes_la, N,
+                        0, &ptr, tmp);
 
     *out_len = (size_t)(ptr - out);
     return PIVCO_OK;

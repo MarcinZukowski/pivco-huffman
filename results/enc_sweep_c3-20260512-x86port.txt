@@ -1,0 +1,23 @@
+-- Build files have been written to: /home/ec2-user/pivco-huffman/build
+[100%] Built target pivco_huffman_bench_encode
+=== PIVCO-Huffman Encode Benchmarks (PIVCO_MAX_CODE_LEN=11) ===
+Sequence: 4M, Repeats: 25 (100M/run), Block: 4096, Runs: 5 (drop 2)
+Distribution set: MAIN (9 distributions; pass --all for full sweep)
+
+ENCODE M/s    |  pivco_s    pivco |  trad_4s |  huf0_x1  huf0_x2 |   ratio
+--------------|-------------------|----------|-------------------|--------
+proba80       |      113      977 |      612 |      642      643 |  1.52x
+english       |       33      393 |      425 |      641      641 |  0.61x
+flat_M5       |      363      379 |      591 |      644      644 |  0.59x
+html_wiki     |       26      308 |      365 |      622      622 |  0.49x
+prose_pride   |       24      385 |      388 |      631      631 |  0.61x
+image_jpeg    |       40      293 |      443 |      604      604 |  0.48x
+json_api      |       24      336 |      373 |      634      633 |  0.53x
+gzip_random   |      299      323 |      512 |     2208     2207 |  0.15x
+chinese_text  |       26      326 |      365 |      628      628 |  0.52x
+
+  5 runs of 100M symbols each (25x 4M), drop 2 slowest, warn if spread > 5%
+  PIVCO/trad encode in 4096-symbol blocks; huf0 in 128KB chunks
+  ratio = pivco / max(huf0_x1, huf0_x2)
+  CPU freq drift: +0.1% (OK)
+  Total wall time: 161.4 seconds

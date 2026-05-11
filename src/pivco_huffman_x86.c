@@ -402,11 +402,60 @@ static inline void flat_decode_direct_x86(uint8_t *symbols, int n,
     }
 }
 
+/* Dense-codes pack: extract D bits per element from codes_la, pack
+ * LSB-first into the byte stream.  Stays scalar for now -- D=2..8
+ * SIMD pack on x86 needs per-byte / per-lane variable shifts that
+ * aren't available before AVX2 (and the dominant slice on x86 is
+ * enc_node_full, not enc_flat).  Symmetric to the NEON helper. */
+static inline void pack_D_bits_dense_x86(uint8_t *out, int n, int D,
+                                          int depth,
+                                          const uint16_t *codes_la)
+{
+    int total_bytes = (n * D + 7) >> 3;
+    if (total_bytes > 0) out[total_bytes - 1] = 0;
+    uint32_t mask = (1u << D) - 1;
+    int right_shift = 16 - depth - D;
+    uint64_t buf = 0;
+    int bits_in_buf = 0;
+    int byte_idx = 0;
+    for (int i = 0; i < n; i++) {
+        uint32_t local = ((uint32_t)codes_la[i] >> right_shift) & mask;
+        buf |= ((uint64_t)local) << bits_in_buf;
+        bits_in_buf += D;
+        while (bits_in_buf >= 8) {
+            out[byte_idx++] = (uint8_t)(buf & 0xff);
+            buf >>= 8;
+            bits_in_buf -= 8;
+        }
+    }
+    if (bits_in_buf > 0) {
+        out[byte_idx] = (uint8_t)(buf & ((1u << bits_in_buf) - 1));
+    }
+}
+
+/* Dense-codes mask build via the classic SSE movemask trick.
+ *
+ * code_vec holds 8 left-aligned 16-bit Huffman codes.  At tree depth d,
+ * bit d of the original code is at position (15 - d) of code_la; we
+ * shift LEFT by d to move that bit to position 15 (= sign bit of each
+ * int16 lane).  _mm_packs_epi16 with signed saturation then collapses
+ * each int16 lane to an int8 byte where bit 7 is the sign bit, and
+ * _mm_movemask_epi8 reads bit 7 of each byte into an 8-bit (well,
+ * 16-bit but we mask to low 8) bitmask -- the per-element bit slice
+ * we want.
+ *
+ * Cost: vsll (1) + vpacksw (1) + vpmovmskb (1) = 3 SSE ops + 1 mask. */
+static inline uint8_t enc_mask8_codes_la_sse(__m128i code_vec, __m128i shift_count)
+{
+    __m128i shifted = _mm_sll_epi16(code_vec, shift_count);
+    __m128i bytes   = _mm_packs_epi16(shifted, _mm_setzero_si128());
+    return (uint8_t)_mm_movemask_epi8(bytes);
+}
+
 static void encode_node_x86(const pivco_huffman_table_t *table,
                               int16_t node_id,
-                              uint16_t *indices, int n,
+                              uint16_t *codes_la, int n,
                               int depth,
-                              const uint16_t *codes, const uint8_t *lens,
                               uint8_t **out_ptr,
                               uint16_t *tmp)
 {
@@ -421,47 +470,64 @@ static void encode_node_x86(const pivco_huffman_table_t *table,
         int D = table->flat_depth[node_id];
         int total_bytes = (n * D + 7) >> 3;
         uint8_t *out = *out_ptr;
-        if (total_bytes > 0) out[total_bytes - 1] = 0;
-        pack_D_bits_x86(out, n, D, indices, codes);
+        pack_D_bits_dense_x86(out, n, D, depth, codes_la);
         *out_ptr += total_bytes;
         return;
     }
 
-    /* Write n code bits */
+    /* Bitmap + partition.  Each iter loads 8 left-aligned codes, builds
+     * the mask byte via the movemask trick, partitions the SAME register
+     * through compress_tab[mask] into left/right halves, writes left
+     * in-place over codes_la and right into tmp. */
     int nbytes = bitmap_bytes(n);
     uint8_t *bm = *out_ptr;
-    memset(bm, 0, (size_t)nbytes);
-
-    for (int j = 0; j < n; j++) {
-        int idx = indices[j];
-        int bit = (codes[idx] >> (lens[idx] - 1 - depth)) & 1;
-        if (bit) bitmap_set(bm, j);
-    }
     *out_ptr += nbytes;
 
-    /* SSE partition in-place */
     int n_left = 0, n_right = 0;
     int j = 0;
+    __m128i shift_count = _mm_cvtsi32_si128(depth);
 
     for (; j + 8 <= n; j += 8) {
-        uint8_t mask = bm[j >> 3];
-        int nr = partition_8_sse(indices + j, mask,
-                                  indices + n_left, tmp + n_right);
+        __m128i code_vec = _mm_loadu_si128((const __m128i *)(codes_la + j));
+        uint8_t mask = enc_mask8_codes_la_sse(code_vec, shift_count);
+        bm[j >> 3] = mask;
+
+        const uint8_t *tab = compress_tab[mask];
+        __m128i shuf_r = _mm_load_si128((const __m128i *)tab);
+        __m128i shuf_l = _mm_load_si128((const __m128i *)(tab + 16));
+        __m128i right  = _mm_shuffle_epi8(code_vec, shuf_r);
+        __m128i left   = _mm_shuffle_epi8(code_vec, shuf_l);
+        int nr = compress_popcnt[mask];
+        _mm_storeu_si128((__m128i *)(tmp      + n_right), right);
+        _mm_storeu_si128((__m128i *)(codes_la + n_left ), left);
         n_right += nr;
-        n_left += (8 - nr);
+        n_left  += (8 - nr);
     }
-    for (; j < n; j++) {
-        if (bitmap_get(bm, j)) {
-            tmp[n_right++] = indices[j];
-        } else {
-            indices[n_left++] = indices[j];
+    /* Scalar tail.  Read codes into a temp first since the in-place
+     * left write can overlap the read once we're below a full group. */
+    if (j < n) {
+        int tail = n - j;
+        uint16_t tail_buf[8];
+        for (int k = 0; k < tail; k++) tail_buf[k] = codes_la[j + k];
+        uint8_t mask = 0;
+        int shift_d = 15 - depth;
+        for (int k = 0; k < tail; k++) {
+            int bit = (tail_buf[k] >> shift_d) & 1;
+            mask |= (uint8_t)(bit << k);
+        }
+        bm[j >> 3] = mask;
+        for (int k = 0; k < tail; k++) {
+            if (mask & (1 << k))
+                tmp[n_right++] = tail_buf[k];
+            else
+                codes_la[n_left++] = tail_buf[k];
         }
     }
 
-    encode_node_x86(table, node->left, indices, n_left,
-                     depth + 1, codes, lens, out_ptr, tmp + n_right);
-    encode_node_x86(table, node->right, tmp, n_right,
-                     depth + 1, codes, lens, out_ptr, tmp + n_right);
+    encode_node_x86(table, node->left, codes_la, n_left,
+                     depth + 1, out_ptr, tmp + n_right);
+    encode_node_x86(table, node->right, tmp,      n_right,
+                     depth + 1, out_ptr, tmp + n_right);
 }
 
 int pivco_huffman_encode_x86(const uint8_t *symbols,
@@ -474,21 +540,16 @@ int pivco_huffman_encode_x86(const uint8_t *symbols,
 
     const int N = PIVCO_BLOCK_SIZE;
 
-    uint16_t codes[PIVCO_BLOCK_SIZE];
-    uint8_t  lens[PIVCO_BLOCK_SIZE];
-    for (int i = 0; i < N; i++) {
-        codes[i] = table->code[symbols[i]];
-        lens[i]  = table->code_len[symbols[i]];
-    }
-
-    uint16_t indices[PIVCO_BLOCK_SIZE];
-    for (int i = 0; i < N; i++) indices[i] = (uint16_t)i;
+    /* Dense left-aligned codes; +16 slack matches the NEON encoder:
+     * partition_8_sse's 16-byte store can write at n_left + 8. */
+    uint16_t codes_la[PIVCO_BLOCK_SIZE + 16];
+    for (int i = 0; i < N; i++) codes_la[i] = table->code_la[symbols[i]];
 
     uint16_t tmp[PIVCO_BLOCK_SIZE * 2];
     uint8_t *ptr = out;
 
-    encode_node_x86(table, table->tree_root, indices, N,
-                     0, codes, lens, &ptr, tmp);
+    encode_node_x86(table, table->tree_root, codes_la, N,
+                     0, &ptr, tmp);
 
     *out_len = (size_t)(ptr - out);
     return PIVCO_OK;
