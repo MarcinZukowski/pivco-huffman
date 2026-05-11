@@ -1,5 +1,68 @@
 # PIVCO-Huffman Decode Ideas
 
+## Root fusion (init + root encode) — tried, lost (2026-05-11)
+
+**Hypothesis.**  The NEON encoder does a separate `enc_init` pass
+(scalar gather `codes_la[i] = table->code_la[symbols[i]]`) before the
+recursive `encode_node_neon` walks down the tree.  At the root level,
+`encode_node_neon` immediately reads the just-stored `codes_la` back
+into vector registers for the mask build + partition.  This is an L1
+round-trip per root element.
+
+The fix:  inline the gather inside the root encode loop, so each
+symbol's `code_la` is loaded into a vector lane directly and never
+hits memory.  Saves 16 LSU ops per 8 elements (8 init stores + 8 root
+encode loads).  Projected end-to-end savings on M4 prose_pride:
+~800-1000 ns/blk, lifting 1802 → ~2150 M/s.
+
+**Reality (commit reverted).**  −5% on every text dist (prose_pride
+1812 → 1725, html_wiki 1755 → 1710, english 2132 → 2036).
+
+**Why it loses.**  Counted the wrong cycle.  The saved scalar stores
+(`STRH`) and loads (`LDRH`) are on M4's LSU, which has spare
+bandwidth (3 loads / 2 stores per cycle, separate from the vector
+pipes).  The replacement work — building the code vector inline from
+the 8 symbol gathers — uses **either** stack-buf store-then-vector-
+load (forward stall) **or** `vsetq_lane_u16` / `vld1q_lane_u16` × 8
+which executes on the vector pipe at 2/cycle.  Either way, 8 lane-
+inserts per 8 elements consume vector-pipe bandwidth that the
+partition's `vqtbl1q_u8` + 2 stores need.
+
+In short: the separate path uses LSU (cheap) for the init and the
+vector pipe (also cheap) for the partition.  The fused path tries to
+do both on the vector pipe at once, and the vector pipe becomes the
+bottleneck.
+
+**What was tried** (all on M4):
+
+  variant                                     prose_pride M/s   Δ
+  baseline (separate enc_init + encode_node)         1812        --
+  fused, stack-buf gather + vld1q_u16                1729     -4.6%
+  fused, vsetq_lane_u16 × 8                          1725     -4.8%
+  fused, vld1q_lane_u16 × 8                          1724     -4.9%
+  fused, 16-stride unrolled + vld1q_lane             1759     -2.9%
+
+The 16-stride unroll recovers some of the ILP loss but still loses
+to the baseline.
+
+**When this might revisit.**  Either of:
+
+- Wider vector pipe (more than 2 vector-issue/cycle for INS/LD1-lane).
+  AVX-512 has lane operations on more ports — the x86 port of this
+  optimisation might actually win.
+- True vector gather (SVE's `LD1H` with vector index).  M4's SVE2 is
+  128-bit so only 8 lanes per gather, but a single instruction.  The
+  gather throughput on Apple SVE is unmeasured — worth a microbench
+  before committing.
+- A reduction in the partition's vector-pipe pressure (e.g., AVX-512
+  `vpcompressw` does the partition in 1 instruction instead of 2 TBL).
+
+**Lesson.**  When the separate path uses spare LSU bandwidth, fusing
+it into a vector-bound loop is anti-optimization.  Count the *busiest
+pipe* in each path, not just the total op count.  This is the second
+time this exact mistake came up on M4 (see also "iota-table for
+partition_root_8" — same shape, same outcome).
+
 ## Evaluate existing bitpacking libraries (simdcomp / FastPFor / etc.) — open (2026-05-11)
 
 **Status: open.**  We have hand-rolled SIMD bit-pack/unpack helpers for

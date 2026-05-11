@@ -949,15 +949,9 @@ int pivco_huffman_encode_neon(const uint8_t *symbols,
 
     const int N = PIVCO_BLOCK_SIZE;
 
-    /* Dense left-aligned codes — the input the new encode_node_neon
-     * walks down the tree.  Eliminates the indices indirection and the
-     * per-element shift-amount lookup that the old scalar mask build
-     * needed (lens[idx] - 1 - depth → 15 - depth, uniform across
-     * elements).
-     *
-     * +16 slack so the flat-pack overpack can zero-pad past n without
-     * spilling out of bounds; +16 also covers the partition_8's 16-byte
-     * TBL store at n_left + 8 ≤ n + 8 worst case. */
+    /* Dense left-aligned codes — the input encode_node_neon walks
+     * down the tree.  +16 slack: flat-pack overpack zero-pads past n;
+     * partition_8's 16-byte TBL store can write at n_left + 8. */
     uint16_t codes_la[PIVCO_BLOCK_SIZE + 16];
 
     PROF_TIC();
