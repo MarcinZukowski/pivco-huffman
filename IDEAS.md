@@ -1252,29 +1252,46 @@ neither exercises `tree_merge` or `popcount_K_right`.)
 
 ## Bottom-up decoder: store K_right per internal node to skip popcount
 
-**Status:** open follow-up to the SHIPPED entry above.  Estimated **~5%
-additional BU win** on real-text distributions.
+**Status:** open follow-up to the SHIPPED entries above.  Estimated
+**5–15% additional BU win on real-text distributions, depending on
+platform** — biggest on the AVX-512 hosts.
 
-`bu_popcount_K` is now 5.26% of BU wall on prose_pride (105 ns/blk).
-The popcount work is fundamental to the current format: at each
-internal node we have to count the "1" bits in the bitmap to learn
-K_right before we can recurse into the right child.
+`bu_popcount_K` is fundamental to the current format: at each internal
+node we have to count the "1" bits in the bitmap to learn K_right
+before we can recurse into the right child.  Both NEON SIMD popcount
+(`vcntq_u8` + `vaddvq`, 2026-05-10) and AVX-512 VPOPCNTQ
+(`_mm512_popcnt_epi64`, 2026-05-11) have already shrunk this primitive
+substantially, but it's still a measurable wall slice — and on AVX-512
+hosts where everything else is fast, it's actually a *bigger* relative
+share than on slower NEON cores.
 
-The cheap shortcut: at encode time, prepend a 1-byte (or short
-varint) `K_right` header immediately before each internal node's
-bitmap.  Decoder reads one byte instead of running the popcount
-loop — a single cache-line touch already paid for the bitmap fetch.
+The cheap shortcut: at encode time, prepend a 1-byte (or short varint)
+`K_right` header immediately before each internal node's bitmap.
+Decoder reads one byte instead of running the popcount loop — a single
+cache-line touch already paid for the bitmap fetch.
 
-**Cost:**  ~1 byte per visible internal node.  prose_pride has ~95
+**Cost:** ~1 byte per visible internal node.  prose_pride has ~95
 internal nodes per 8192-byte block → ~95 B/block = **~1.2% encoded-
 size bloat**.  Lower for skewed distributions (fewer internals),
 higher for flat ones (which mostly skip this path anyway via
 `bu_flat_decode`).
 
-**Estimated win:** the full 105 ns/blk of `bu_popcount_K` collapses
-to a single byte load (~1-2 ns/blk amortised), so ~100 ns/blk saved
-on prose_pride out of 1999 → **~5% on text decode**.  Marginal on
-flat / uniform / two_sym cases that don't hit the popcount path.
+**Estimated win, per platform** (prose_pride; bu_popcount_K share of
+post-optimisation BU wall):
+
+| platform                          | bu_popcount_K | BU TOTAL  | popcnt % wall |  est. BU gain |
+|-----------------------------------|--------------:|----------:|--------------:|--------------:|
+| M4 (NEON)                         |    105 ns/blk |  1999 ns/blk |   **5.3%**    |  ~5%          |
+| Zen 3 (AVX2, scalar 4× POPCNT)    |    235 ns/blk |  3303 ns/blk |   **7.1%**    |  ~7%          |
+| Zen 5 Turin (AVX-512 VPOPCNTQ)    |    143 ns/blk |  1387 ns/blk |  **10.3%**    | ~10%          |
+| **Xeon Granite Rapids (AVX-512)** |    371 ns/blk |  2557 ns/blk |  **14.5%**    | **~15%**      |
+
+The Xeon win is largest because: (a) everything else on Xeon BU is
+already AVX-512–accelerated, so popcount is a bigger relative share;
+(b) Xeon ICX/Granite Rapids has a single POPCNT execution port even
+after VPOPCNTQ widening, while Zen 3+ have 4 scalar POPCNT ports.
+Removing the primitive entirely is the path to making the AVX-512
+backend really shine.
 
 **Open design questions:**
 - Width: 1 byte covers K up to 255 (block size 256).  For K > 255 fall
