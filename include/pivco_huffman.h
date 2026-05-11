@@ -174,6 +174,11 @@ int pivco_huffman_encode_neon(const uint8_t *symbols,
 int pivco_huffman_decode_neon(const uint8_t *in, size_t in_len,
                               const pivco_huffman_table_t *table,
                               uint8_t *symbols, size_t *consumed);
+
+/* Experimental: bottom-up tree_merge decode (NEON). */
+int pivco_huffman_decode_bu_neon(const uint8_t *in, size_t in_len,
+                                  const pivco_huffman_table_t *table,
+                                  uint8_t *symbols, size_t *consumed);
 #endif
 
 #ifdef PIVCO_HAS_SSE4

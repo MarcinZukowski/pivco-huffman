@@ -237,6 +237,26 @@ static int test_roundtrip_dist(const char *name, const uint64_t freq[PIVCO_MAX_S
         }
     }
 
+    /* Bottom-up decoder (experimental).  Decodes the same neon-encoded
+     * stream as the top-down decoder; output must match exactly. */
+    {
+        uint8_t bu_dec[PIVCO_BLOCK_SIZE];
+        size_t bu_consumed;
+        rc = pivco_huffman_decode_bu_neon(neon_enc, neon_len, &table,
+                                           bu_dec, &bu_consumed);
+        if (rc != PIVCO_OK) FAIL("bu_neon decode returned %d", rc);
+        for (int i = 0; i < PIVCO_BLOCK_SIZE; i++) {
+            if (symbols[i] != bu_dec[i]) {
+                FAIL("bu_neon mismatch at position %d: expected %d, got %d",
+                     i, symbols[i], bu_dec[i]);
+            }
+        }
+        if (bu_consumed != neon_len) {
+            FAIL("bu_neon consumed %zu bytes, expected %zu",
+                 bu_consumed, neon_len);
+        }
+    }
+
     /* Cross-implementation: scalar encode -> neon decode */
     uint8_t cross_dec[PIVCO_BLOCK_SIZE];
     size_t cross_consumed;

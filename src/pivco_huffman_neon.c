@@ -1270,4 +1270,13 @@ void pivco_neon_encode_subtree_(const pivco_huffman_table_t *table,
                      codes, lens, out_ptr, tmp);
 }
 
+/* Non-static wrapper exposed for the bottom-up decoder
+ * (src/pivco_huffman_bu_neon.c) so it can reuse the vectorised
+ * D=2..8 flat-decode without duplicating the per-D unpackers. */
+void pivco_huffman_flat_decode_direct_neon_(uint8_t *symbols, int n,
+                                             const uint8_t *bm, int D,
+                                             const uint8_t *c2s) {
+    flat_decode_direct_neon(symbols, n, bm, D, c2s);
+}
+
 #endif /* PIVCO_HAS_NEON */
