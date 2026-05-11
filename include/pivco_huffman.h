@@ -189,6 +189,11 @@ int pivco_huffman_encode_x86(const uint8_t *symbols,
 int pivco_huffman_decode_x86(const uint8_t *in, size_t in_len,
                               const pivco_huffman_table_t *table,
                               uint8_t *symbols, size_t *consumed);
+
+/* Experimental: bottom-up tree_merge decode (x86 SSE4.1 / AVX-512 VBMI2). */
+int pivco_huffman_decode_bu_x86(const uint8_t *in, size_t in_len,
+                                 const pivco_huffman_table_t *table,
+                                 uint8_t *symbols, size_t *consumed);
 #endif
 
 /* Prior experimental NEON variants (neon2, neon2b, neon_fused_1leaf)

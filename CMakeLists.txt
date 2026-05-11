@@ -116,12 +116,12 @@ elseif(TARGET_ARCH STREQUAL "x86_64" OR TARGET_ARCH STREQUAL "amd64")
     endif()
     if(COMPILER_HAS_AVX512_VBMI2 AND CPU_HAS_AVX512 AND NOT CPU_HAS_AVX512 STREQUAL "0")
         message(STATUS "x86_64 detected — enabling AVX-512 VBMI2 + SSE4.1")
-        list(APPEND PIVCO_SOURCES src/pivco_huffman_avx512.c src/pivco_huffman_x86.c)
+        list(APPEND PIVCO_SOURCES src/pivco_huffman_avx512.c src/pivco_huffman_x86.c src/pivco_huffman_bu_x86.c)
         add_compile_definitions(PIVCO_HAS_AVX512=1 PIVCO_HAS_SSE4=1)
         add_compile_options(-mavx512f -mavx512bw -mavx512vl -mavx512vbmi -mavx512vbmi2 -msse4.1 -mpopcnt)
     else()
         message(STATUS "x86_64 detected — enabling SSE4.1")
-        list(APPEND PIVCO_SOURCES src/pivco_huffman_x86.c)
+        list(APPEND PIVCO_SOURCES src/pivco_huffman_x86.c src/pivco_huffman_bu_x86.c)
         add_compile_definitions(PIVCO_HAS_SSE4=1)
         add_compile_options(-msse4.1)
     endif()
@@ -399,6 +399,14 @@ if(BUILD_BENCH)
             bench/bench_distributions.c
         )
         target_link_libraries(pivco_bench_bu_decoder pivco_huffman m)
+    endif()
+
+    if(TARGET_ARCH STREQUAL "x86_64" OR TARGET_ARCH STREQUAL "amd64")
+        add_executable(pivco_bench_bu_decoder_x86
+            extras/bench_bu_decoder_x86.c
+            bench/bench_distributions.c
+        )
+        target_link_libraries(pivco_bench_bu_decoder_x86 pivco_huffman m)
     endif()
 
     add_executable(pivco_bench_multicore

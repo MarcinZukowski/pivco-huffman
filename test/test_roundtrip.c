@@ -308,6 +308,25 @@ static int test_roundtrip_dist(const char *name, const uint64_t freq[PIVCO_MAX_S
                      i, symbols[i], sse_cross[i]);
             }
         }
+
+        /* Bottom-up SSE decoder against the top-down SSE decoder. */
+        {
+            uint8_t bu_dec[PIVCO_BLOCK_SIZE];
+            size_t bu_consumed;
+            rc = pivco_huffman_decode_bu_x86(sse_enc, sse_len, &table,
+                                              bu_dec, &bu_consumed);
+            if (rc != PIVCO_OK) FAIL("bu_x86 decode returned %d", rc);
+            for (int i = 0; i < PIVCO_BLOCK_SIZE; i++) {
+                if (symbols[i] != bu_dec[i]) {
+                    FAIL("bu_x86 mismatch at position %d: expected %d, got %d",
+                         i, symbols[i], bu_dec[i]);
+                }
+            }
+            if (bu_consumed != sse_len) {
+                FAIL("bu_x86 consumed %zu bytes, expected %zu",
+                     bu_consumed, sse_len);
+            }
+        }
     }
 #endif
 
