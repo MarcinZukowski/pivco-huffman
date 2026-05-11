@@ -1305,6 +1305,95 @@ backend really shine.
 - Worth a prototype on prose_pride / english before propagating to
   x86 backends.
 
+## ~~NEON `bu_tree_merge`: 16-byte loads + precomputed (nr0, m1) shuf~~ — SHIPPED (2026-05-11)
+
+**Status (2026-05-11): SHIPPED.**  Stride-16 main loop in
+`tree_merge` (`src/pivco_huffman_bu_neon.c`) now loads 16-byte
+L_full / R_full once per iter, does iter 0 with baseline
+`vqtbl1`, and uses `vqtbl2_u8` over the full 32-byte source for
+iter 1 with a **precomputed adjusted shuf** indexed by `(nr0, m1)`.
+
+Motivating intuition: `bu_tree_merge` was the dominant BU primitive
+on every platform (70% of M4 wall, 64% G4, 44% Zen 3, 34% Xeon).
+The previous 2× unrolled path did 4× 8-byte L/R loads per iter to
+serve two separate 8-byte merges.  Replacing them with 2× 16-byte
+loads + a clever iter-1 shuf cuts load count in half AND eliminates
+the per-iter runtime adjustment work.
+
+### The precomputed (nr0, m1) table
+
+`expand_tab_pre[9][256][8]` (18 KB, fits L1d) — for each possible
+iter-0 popcount `nr0 ∈ [0..8]` and each iter-1 mask byte `m1`,
+the 8-byte adjusted shuf vector for `vqtbl2` over the 32-byte
+(L_full, R_full) source.
+
+  - L-lane idx = `expand_tab[m1][k] + (8 - nr0)`  ∈ [(8-nr0)..15]
+  - R-lane idx = `expand_tab[m1][k] + 8 + nr0`    ∈ [(16+nr0)..(23+nr0)]
+
+One indexed `vld_8` per iter 1 replaces what would otherwise be ~4
+vector ALU ops on the dep chain from `nr0`.
+
+### Numbers (prose_pride, M sym/s; pivco_bu column):
+
+| host | before | after | gain    |
+|------|-------:|------:|--------:|
+| M4   |  4165  | **4727** | **+13.5%** |
+| G4   |  2065  | **2274** | **+10.1%** |
+
+Across the MAIN dist set on M4: english +13%, html_wiki +14%,
+prose_pride +14%, json_api +13%, chinese_text +15%, image_jpeg +9%.
+proba80 / flat_M5 / gzip_random unchanged (those paths don't hit
+`tree_merge`).  G4 wins are similar but slightly smaller.
+
+### Per-primitive profile delta on M4 prose_pride:
+
+  bu_tree_merge ns/call:  176.2 → 145.2  (−18%)
+  bu_tree_merge ns/elem:  0.063 → 0.052
+  bu_tree_merge % wall:   70.8% → 66.4%
+  BU TOTAL ns/blk:        1991 → 1748     (−12.1%)
+
+The win comes from collapsing the iter-1 critical path from
+~10 cycles (4 ALU + vqtbl2) to ~5 cycles (load + vqtbl2).
+
+### Alternatives tried and dropped
+
+Two earlier attempts at the same problem (V2: runtime ALU
+adjustment of the shuf; V3: `vextq_u8` rotate via 9-case switch on
+`nr0`) — both kept here as historical reference for *why* the
+precomputed-table approach is the right answer:
+
+- **V2 (vqtbl2 + 4 ALU ops on dep chain)**:
+  +0.4–1.8% on M4 (marginal), +4–6% on G4 (Neoverse-V2 has lower
+  load throughput so load consolidation helps more there).  Strictly
+  worse than V4 (V4 keeps V2's load consolidation and eliminates
+  the ALU chain on top).
+- **V3 (`vextq` rotate + switch on `nr0`)**:
+  DEAD on real text — `−77%` on prose_pride / english / html_wiki /
+  chinese_text.  `vextq_u8` requires a compile-time immediate,
+  forcing a 9-way switch which the compiler emits as an indirect
+  branch.  For near-uniform bitmaps `nr0` is binomial(8, 0.5) →
+  basically random → ~85% misprediction.  At ~175 iters/call ×
+  8 calls/blk that's 20–30 µs of pure misprediction overhead per
+  block.  Only `proba80` survived (its mask bytes cluster around
+  `nr0=6..7`, so the branch IS predictable).
+
+Branchless V3 variants we considered and rejected before settling
+on the precomputed table:
+
+- `vqtbl1q_u8(L_full, iota + (8-nr0))` for the shift → adds 1 TBL
+  per side, 3 TBLs total per iter (worse than V2's 1 vqtbl2).
+- `vqtbl2q_u8` over `(L_full, R_full)` with a runtime-built index +
+  baseline `vqtbl1` for the merge → 2 TBLs per iter on the dep
+  chain, same critical path as V2.
+- `vbslq` blending all 9 precomputed `vextq` outputs → 8 blends,
+  far too expensive.
+
+The shipped version (precomputed-table) is strictly better than
+all of these.  The remaining open angle is whether the same trick
+applies to the bcast_left/bcast_right merges (one side is a
+constant, so the L or R "shift" is degenerate) — probably yes for
+similar but smaller wins on a smaller wall slice.
+
 ## Ideas probably not worth more time
 
 These already appear explored or unlikely to pay off:

@@ -98,11 +98,29 @@ static inline int popcount_K_right(const uint8_t *bm, int nbytes, int K) {
  *   - 8..15  means "take from right[count_ones_in_m[0..k-1]] + 8"
  *
  * Used as vqtbl1_u8 indices over a 16-byte vector built by
- *   vcombine(left[0..8), right[0..8)).
+ *   vcombine(left[0..8), right[0..8)).  This is the iter-0 path of the
+ *   stride-16 unrolled tree_merge below, and also the path for the
+ *   stride-8 mop-up and bcast_left/right variants.
+ *
+ * expand_tab_pre[nr0][m1][k] is the pre-adjusted shuf for the SECOND
+ * iter of the stride-16 unroll.  After iter 0 consumed nr0 right
+ * bytes and (8-nr0) left bytes, iter 1 must read L from offset
+ * (8-nr0) in L_full and R from offset nr0 in R_full — so the shuf
+ * indices for a 32-byte vqtbl2 over (L_full, R_full) become:
+ *
+ *   L-lane idx = expand_tab[m1][k] + (8 - nr0)         ∈ [(8-nr0)..15]
+ *   R-lane idx = expand_tab[m1][k] + 8 + nr0           ∈ [(16+nr0)..(23+nr0)]
+ *
+ * Pre-baking by (nr0, m1) collapses the dep chain from iter-0's nr0
+ * to iter-1's shuf into a single indexed load.  Replaces what would
+ * otherwise be ~4 vector ALU ops on the critical path.
+ *
+ * Table size: 9 × 256 × 8 = 18 432 bytes — fits L1d on every target.
  *
  * expand_popcnt[m] = popcount(m) (= number of right bytes consumed). */
-static uint8_t expand_tab[256][8] __attribute__((aligned(32)));
-static uint8_t expand_popcnt[256]  __attribute__((aligned(64)));
+static uint8_t expand_tab[256][8]            __attribute__((aligned(32)));
+static uint8_t expand_tab_pre[9][256][8]     __attribute__((aligned(64)));
+static uint8_t expand_popcnt[256]            __attribute__((aligned(64)));
 static int expand_table_ready = 0;
 
 static void init_expand_table(void) {
@@ -119,6 +137,17 @@ static void init_expand_table(void) {
             }
         }
         expand_popcnt[m] = (uint8_t)n_ones;
+    }
+    /* Pre-adjusted (nr0, m1) shuf table — see comment above. */
+    for (int nr0 = 0; nr0 <= 8; nr0++) {
+        for (int m = 0; m < 256; m++) {
+            for (int k = 0; k < 8; k++) {
+                uint8_t raw = expand_tab[m][k];
+                expand_tab_pre[nr0][m][k] =
+                    (raw < 8) ? (uint8_t)(raw + (8 - nr0))   /* L-lane */
+                              : (uint8_t)(raw + 8 + nr0);    /* R-lane */
+            }
+        }
     }
     expand_table_ready = 1;
 }
@@ -138,33 +167,51 @@ static inline void tree_merge(const uint8_t *bm, int K,
     PROF_TIC();
     int lc = 0, rc = 0;
     int j = 0;
-    /* 2x unroll (stride-16): two independent merges per iteration.
-     * Adjacent 8-byte groups have independent loads / TBLs / stores so
-     * OOO overlaps the second's load with the first's TBL.  Only
-     * lc/rc carry a real dep, and that's short-latency integer add.
-     * Mirrors node_full's stride-16 unroll in pivco_huffman_neon.c. */
+    /* Stride-16 main path: load 16-byte L_full / R_full once per
+     * iter, then produce two 8-byte halves of output.
+     *
+     *   Iter 0 uses vqtbl1 over vcombine(low(L_full), low(R_full))
+     *   with the baseline expand_tab[m0] — no shift needed at the
+     *   start of the iter.
+     *
+     *   Iter 1 uses vqtbl2 over the full 32-byte (L_full, R_full)
+     *   with a PRECOMPUTED shuf from expand_tab_pre[nr0][m1].  This
+     *   collapses what would be ~4 runtime ALU ops (adjust the shuf
+     *   for the lc/rc shift caused by iter 0) into one indexed load.
+     *
+     * 16-byte loads of left/right can overread past total_left /
+     * total_right but vqtbl1/vqtbl2 only INDEX positions the shuf
+     * vector points to — by construction those are bounded by
+     * remaining_lefts / remaining_rights, so the loaded-but-unused
+     * tail bytes never reach the output.  The scratch arena packs
+     * buffers adjacent with 64 bytes of trailing pad, so the load
+     * address always lands in valid memory.
+     *
+     * +13–15% bench gain on M4, +7–10% on Graviton 4 vs the older
+     * stride-16 path with 4 × vld_8 per iter — see IDEAS.md. */
     for (; j + 16 <= K; j += 16) {
+        uint8x16_t L_full = vld1q_u8(left  + lc);
+        uint8x16_t R_full = vld1q_u8(right + rc);
+
+        /* Iter 0: vqtbl1 on the low halves with baseline shuf. */
         uint8_t m0 = bm[j >> 3];
-        uint8x8_t  L0    = vld1_u8(left + lc);
-        uint8x8_t  R0    = vld1_u8(right + rc);
-        uint8x16_t both0 = vcombine_u8(L0, R0);
+        uint8x16_t both0 = vcombine_u8(vget_low_u8(L_full),
+                                        vget_low_u8(R_full));
         uint8x8_t  shuf0 = vld1_u8(expand_tab[m0]);
         uint8x8_t  o0    = vqtbl1_u8(both0, shuf0);
         vst1_u8(out + j, o0);
         int nr0 = expand_popcnt[m0];
-        rc += nr0;
-        lc += (8 - nr0);
 
+        /* Iter 1: vqtbl2 over (L_full, R_full) with pre-shifted shuf. */
         uint8_t m1 = bm[(j >> 3) + 1];
-        uint8x8_t  L1    = vld1_u8(left + lc);
-        uint8x8_t  R1    = vld1_u8(right + rc);
-        uint8x16_t both1 = vcombine_u8(L1, R1);
-        uint8x8_t  shuf1 = vld1_u8(expand_tab[m1]);
-        uint8x8_t  o1    = vqtbl1_u8(both1, shuf1);
+        uint8x16x2_t src = {{ L_full, R_full }};
+        uint8x8_t shuf1  = vld1_u8(expand_tab_pre[nr0][m1]);
+        uint8x8_t o1     = vqtbl2_u8(src, shuf1);
         vst1_u8(out + j + 8, o1);
         int nr1 = expand_popcnt[m1];
-        rc += nr1;
-        lc += (8 - nr1);
+
+        rc += nr0 + nr1;
+        lc += (16 - nr0 - nr1);
     }
     for (; j + 8 <= K; j += 8) {
         uint8_t m  = bm[j >> 3];
