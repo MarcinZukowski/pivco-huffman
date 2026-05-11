@@ -1,0 +1,20 @@
+=== pivco_prof: prose_pride / BLK=8192 ===
+  wall: 14.203 s   blocks: 10240000   counter freq: 2599.98 MHz
+
+  primitive                               calls       elements  elem/call    ns/call    ns/elem  % wall
+  --------------------------------------------------------------------------------------------------
+  bu_tree_merge                        81920000   229209520000     2798.0       73.8       0.03  42.58%
+  bu_tree_merge_bcast_left             61440000    21011000000      342.0       15.3       0.04   6.63%
+  bu_merge_both_const                  41260000    37660960000      912.8       27.1       0.03   7.87%
+  bu_flat_decode                       40960000    37675180000      919.8       30.5       0.03   8.80%
+  bu_popcount_K                       143360000   250220520000     1745.4       10.2       0.01  10.31%
+  (unaccounted)                                                                330.3        —  23.81%
+  TOTAL (wall)                                                                1387.0        — 100.00%
+
+  Per-BLK averages:
+    bu_tree_merge                         8.0 calls/BLK      22383.7 elems/BLK
+    bu_tree_merge_bcast_left              6.0 calls/BLK       2051.9 elems/BLK
+    bu_merge_both_const                   4.0 calls/BLK       3677.8 elems/BLK
+    bu_flat_decode                        4.0 calls/BLK       3679.2 elems/BLK
+    bu_popcount_K                        14.0 calls/BLK      24435.6 elems/BLK
+

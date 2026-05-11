@@ -1,0 +1,47 @@
+=== TD ===
+=== pivco_prof: prose_pride / BLK=4096 ===
+  wall: 96.609 s   blocks: 20480000   counter freq: 2649.94 MHz
+
+  primitive                               calls       elements  elem/call    ns/call    ns/elem  % wall
+  --------------------------------------------------------------------------------------------------
+  (unaccounted)                                                               4717.3        — 100.00%
+  TOTAL (wall)                                                                4717.3        — 100.00%
+
+  Per-BLK averages:
+
+
+=== BU ===
+=== pivco_prof: prose_pride / BLK=4096 ===
+  wall: 90.394 s   blocks: 20480000   counter freq: 2649.94 MHz
+
+  primitive                               calls       elements  elem/call    ns/call    ns/elem  % wall
+  --------------------------------------------------------------------------------------------------
+  bu_tree_merge                       163840000   229209520000     1399.0      181.6       0.13  32.92%
+  bu_tree_merge_bcast_left            122880000    21011000000      171.0       37.7       0.22   5.13%
+  bu_merge_both_const                  82240000    37660960000      457.9       62.1       0.14   5.65%
+  bu_flat_decode                       81920000    37675180000      459.9      184.9       0.40  16.75%
+  bu_popcount_K                       286720000   250220520000      872.7       96.7       0.11  30.68%
+  (unaccounted)                                                                391.7        —   8.87%
+  TOTAL (wall)                                                                4413.8        — 100.00%
+
+  Per-BLK averages:
+    bu_tree_merge                         8.0 calls/BLK      11191.9 elems/BLK
+    bu_tree_merge_bcast_left              6.0 calls/BLK       1025.9 elems/BLK
+    bu_merge_both_const                   4.0 calls/BLK       1838.9 elems/BLK
+    bu_flat_decode                        4.0 calls/BLK       1839.6 elems/BLK
+    bu_popcount_K                        14.0 calls/BLK      12217.8 elems/BLK
+
+
+=== bench MAIN ===
+DECODE M/s    | pivco_s pivco_n pivco_bu pivco_p | trad_1s trad_4s | huf0_1s huf0_x1 huf0_x2 | rans_x2 |   ratio
+--------------|---------------------------------|-----------------|----------------------------|---------|--------
+proba80       |     390    2827    3466       0 |     444     815 |     372    1089    1597 |     268 |  2.17x
+english       |     100    1019    1159       0 |     357     736 |     372    1068    1527 |     236 |  0.76x
+flat_M5       |    1007    2312    2290       0 |     419     813 |     373    1092    1538 |     311 |  1.50x
+html_wiki     |      76     818     793       0 |     329     670 |     371    1074    1311 |     205 |  0.62x
+prose_pride   |      73     876     927       0 |     341     671 |     371    1075    1438 |     215 |  0.64x
+image_jpeg    |     115     935    1025       0 |     354     735 |     370    1069     809 |     268 |  0.96x
+json_api      |      72     822     791       0 |     336     670 |     371    1077    1370 |     202 |  0.60x
+gzip_random   |    1110    2973    2953       0 |     390     792 |       0       0       0 |     295 |  3.75x
+chinese_text  |      75     848     919       0 |     330     669 |     371    1074    1215 |     208 |  0.76x
+

@@ -1,0 +1,33 @@
+=== TD ===
+=== pivco_prof: prose_pride / BLK=4096 ===
+  wall: 95.811 s   blocks: 20480000   counter freq: 2649.94 MHz
+
+  primitive                               calls       elements  elem/call    ns/call    ns/elem  % wall
+  --------------------------------------------------------------------------------------------------
+  (unaccounted)                                                               4678.3        — 100.00%
+  TOTAL (wall)                                                                4678.3        — 100.00%
+
+  Per-BLK averages:
+
+
+=== BU ===
+=== pivco_prof: prose_pride / BLK=4096 ===
+  wall: 67.643 s   blocks: 20480000   counter freq: 2649.94 MHz
+
+  primitive                               calls       elements  elem/call    ns/call    ns/elem  % wall
+  --------------------------------------------------------------------------------------------------
+  bu_tree_merge                       163840000   229209520000     1399.0      182.6       0.13  44.24%
+  bu_tree_merge_bcast_left            122880000    21011000000      171.0       38.4       0.22   6.98%
+  bu_merge_both_const                  82240000    37660960000      457.9       61.9       0.14   7.52%
+  bu_flat_decode                       81920000    37675180000      459.9      185.3       0.40  22.44%
+  bu_popcount_K                       286720000   250220520000      872.7       16.8       0.02   7.10%
+  (unaccounted)                                                                387.1        —  11.72%
+  TOTAL (wall)                                                                3302.9        — 100.00%
+
+  Per-BLK averages:
+    bu_tree_merge                         8.0 calls/BLK      11191.9 elems/BLK
+    bu_tree_merge_bcast_left              6.0 calls/BLK       1025.9 elems/BLK
+    bu_merge_both_const                   4.0 calls/BLK       1838.9 elems/BLK
+    bu_flat_decode                        4.0 calls/BLK       1839.6 elems/BLK
+    bu_popcount_K                        14.0 calls/BLK      12217.8 elems/BLK
+
