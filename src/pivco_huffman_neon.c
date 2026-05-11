@@ -576,9 +576,8 @@ static inline int pack_d2(uint8_t *out, const uint16_t *codes_la,
     static const int8_t shifts_d2[16] = {
         0, 2, 4, 6,  0, 2, 4, 6,  0, 2, 4, 6,  0, 2, 4, 6
     };
-    int rounded = (n + 15) & ~15;
     int i = 0;
-    for (; i < rounded; i += 16) {
+    for (; i + 16 <= n; i += 16) {
         uint16x8_t v0 = vshlq_u16(vld1q_u16(codes_la + i    ),
                                    vdupq_n_s16((int16_t)-right_shift));
         uint16x8_t v1 = vshlq_u16(vld1q_u16(codes_la + i + 8),
@@ -605,9 +604,8 @@ static inline int pack_d3(uint8_t *out, const uint16_t *codes_la,
 {
     static const int32_t shifts_lo[4] = {0,   3,  6,  9};
     static const int32_t shifts_hi[4] = {12, 15, 18, 21};
-    int rounded = (n + 7) & ~7;
     int i = 0;
-    for (; i < rounded; i += 8) {
+    for (; i + 8 <= n; i += 8) {
         uint16x8_t v = vshlq_u16(vld1q_u16(codes_la + i),
                                   vdupq_n_s16((int16_t)-right_shift));
         v = vandq_u16(v, vdupq_n_u16(0x7));
@@ -636,9 +634,8 @@ static inline int pack_d4(uint8_t *out, const uint16_t *codes_la,
     static const int8_t shifts_d4[16] = {
         0, 4, 0, 4, 0, 4, 0, 4, 0, 4, 0, 4, 0, 4, 0, 4
     };
-    int rounded = (n + 15) & ~15;
     int i = 0;
-    for (; i < rounded; i += 16) {
+    for (; i + 16 <= n; i += 16) {
         uint16x8_t v0 = vshlq_u16(vld1q_u16(codes_la + i    ),
                                    vdupq_n_s16((int16_t)-right_shift));
         uint16x8_t v1 = vshlq_u16(vld1q_u16(codes_la + i + 8),
@@ -662,9 +659,8 @@ static inline int pack_d5(uint8_t *out, const uint16_t *codes_la,
     static const int64_t shifts_mid[2] = {10, 15};
     static const int64_t shifts_hi[2] = {20, 25};
     static const int64_t shifts_top[2] = {30, 35};
-    int rounded = (n + 7) & ~7;
     int i = 0;
-    for (; i < rounded; i += 8) {
+    for (; i + 8 <= n; i += 8) {
         uint16x8_t v = vshlq_u16(vld1q_u16(codes_la + i),
                                   vdupq_n_s16((int16_t)-right_shift));
         v = vandq_u16(v, vdupq_n_u16(0x1F));
@@ -700,9 +696,8 @@ static inline int pack_d6(uint8_t *out, const uint16_t *codes_la,
     static const int64_t shifts_mid[2] = {12, 18};
     static const int64_t shifts_hi[2] = {24, 30};
     static const int64_t shifts_top[2] = {36, 42};
-    int rounded = (n + 7) & ~7;
     int i = 0;
-    for (; i < rounded; i += 8) {
+    for (; i + 8 <= n; i += 8) {
         uint16x8_t v = vshlq_u16(vld1q_u16(codes_la + i),
                                   vdupq_n_s16((int16_t)-right_shift));
         v = vandq_u16(v, vdupq_n_u16(0x3F));
@@ -737,9 +732,8 @@ static inline int pack_d7(uint8_t *out, const uint16_t *codes_la,
     static const int64_t shifts_mid[2] = {14, 21};
     static const int64_t shifts_hi[2] = {28, 35};
     static const int64_t shifts_top[2] = {42, 49};
-    int rounded = (n + 7) & ~7;
     int i = 0;
-    for (; i < rounded; i += 8) {
+    for (; i + 8 <= n; i += 8) {
         uint16x8_t v = vshlq_u16(vld1q_u16(codes_la + i),
                                   vdupq_n_s16((int16_t)-right_shift));
         v = vandq_u16(v, vdupq_n_u16(0x7F));
@@ -772,9 +766,8 @@ static inline int pack_d7(uint8_t *out, const uint16_t *codes_la,
 static inline int pack_d8(uint8_t *out, const uint16_t *codes_la,
                           int n, int right_shift)
 {
-    int rounded = (n + 15) & ~15;
     int i = 0;
-    for (; i < rounded; i += 16) {
+    for (; i + 16 <= n; i += 16) {
         uint16x8_t v0 = vshlq_u16(vld1q_u16(codes_la + i    ),
                                    vdupq_n_s16((int16_t)-right_shift));
         uint16x8_t v1 = vshlq_u16(vld1q_u16(codes_la + i + 8),
@@ -858,13 +851,6 @@ static void encode_node_neon(const pivco_huffman_table_t *table,
         int total_bytes = (n * D + 7) >> 3;
         uint8_t *out = *out_ptr;
         *out_ptr += total_bytes;
-        /* Zero-pad codes_la past n so pack_D_bits's SIMD path can
-         * overpack to the next stride boundary without writing
-         * garbage past the legit byte end.  The encoder's *out_ptr
-         * advance leaves overpacked zero bytes to be overwritten by
-         * the next subtree's output; the codes_la slack ensures we
-         * don't write past the input buffer. */
-        for (int k = 0; k < 16; k++) codes_la[n + k] = 0;
         PROF_TIC();
         pack_D_bits_dense(out, n, D, depth, codes_la);
         PROF_TOC(PROF_ENC_FLAT, n);

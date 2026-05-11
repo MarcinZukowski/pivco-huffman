@@ -576,22 +576,91 @@ static inline void flat_decode_direct_avx512(uint8_t *symbols, int n,
 #undef DST_DIRECT
 }
 
-/* Dense-codes pack: extract D bits per element from codes_la, pack
- * LSB-first.  Stays scalar for x86 -- per-byte / per-lane variable
- * shifts available on AVX2+ but the dominant slice here is the node
- * partition, not enc_flat.  Symmetric to the NEON helper. */
+/* Per-D SIMD bit-pack helpers -- symmetric to the NEON pack_dN in
+ * pivco_huffman_neon.c.  Each one extracts the D-bit local code from
+ * codes_la, shifts each lane k by k*D, and horizontally ORs the
+ * results.  Overpacks to ceil(n / 8) * 8 elements (D=8 uses stride
+ * 16); caller must zero-pad codes_la past n by 16+ entries. */
+
+/* D=2..7: 8 codes per iter via uint64 lanes (max shift 7*7=49 < 64). */
+#define PACK_DN_AVX512_UNIFIED(NAME, D_VAL, BITS_OUT)                          \
+static inline int NAME(uint8_t *out, const uint16_t *codes_la,                 \
+                       int n, int right_shift)                                  \
+{                                                                              \
+    static const int64_t shifts[8] = {                                         \
+        0, D_VAL, 2*D_VAL, 3*D_VAL, 4*D_VAL, 5*D_VAL, 6*D_VAL, 7*D_VAL         \
+    };                                                                         \
+    __m512i shift_vec = _mm512_loadu_si512((const __m512i *)shifts);           \
+    __m512i mask_vec  = _mm512_set1_epi64((1ULL << D_VAL) - 1);                \
+    int i = 0;                                                                 \
+    for (; i + 8 <= n; i += 8) {                                               \
+        __m128i v16 = _mm_loadu_si128((const __m128i *)(codes_la + i));        \
+        __m512i v64 = _mm512_cvtepu16_epi64(v16);                              \
+        v64 = _mm512_srli_epi64(v64, right_shift);                             \
+        v64 = _mm512_and_si512(v64, mask_vec);                                 \
+        v64 = _mm512_sllv_epi64(v64, shift_vec);                               \
+        uint64_t packed = _mm512_reduce_add_epi64(v64);                        \
+        int bi = i * D_VAL / 8;                                                \
+        memcpy(out + bi, &packed, (BITS_OUT + 7) / 8);                         \
+    }                                                                          \
+    return i;                                                                  \
+}
+PACK_DN_AVX512_UNIFIED(pack_d2_avx512, 2, 16)
+PACK_DN_AVX512_UNIFIED(pack_d3_avx512, 3, 24)
+PACK_DN_AVX512_UNIFIED(pack_d4_avx512, 4, 32)
+PACK_DN_AVX512_UNIFIED(pack_d5_avx512, 5, 40)
+PACK_DN_AVX512_UNIFIED(pack_d6_avx512, 6, 48)
+PACK_DN_AVX512_UNIFIED(pack_d7_avx512, 7, 56)
+#undef PACK_DN_AVX512_UNIFIED
+
+/* D=8: byte-aligned.  32 codes / iter via vpmovqb-style narrow + store. */
+static inline int pack_d8_avx512(uint8_t *out, const uint16_t *codes_la,
+                                  int n, int right_shift)
+{
+    int i = 0;
+    for (; i + 32 <= n; i += 32) {
+        __m512i v = _mm512_loadu_si512((const __m512i *)(codes_la + i));
+        v = _mm512_srli_epi16(v, right_shift);
+        /* Narrow uint16 lanes to uint8 (drop high byte): vpmovwb. */
+        __m256i bytes = _mm512_cvtepi16_epi8(v);
+        _mm256_storeu_si256((__m256i *)(out + i), bytes);
+    }
+    return i;
+}
+
+/* Dense-codes pack with per-D SIMD dispatch.  Symmetric to the NEON
+ * pack_D_bits_dense in pivco_huffman_neon.c. */
 static inline void pack_D_bits_dense_avx512(uint8_t *out, int n, int D,
                                              int depth,
                                              const uint16_t *codes_la)
 {
     int total_bytes = (n * D + 7) >> 3;
     if (total_bytes > 0) out[total_bytes - 1] = 0;
-    uint32_t mask = (1u << D) - 1;
     int right_shift = 16 - depth - D;
-    uint64_t buf = 0;
-    int bits_in_buf = 0;
-    int byte_idx = 0;
-    for (int i = 0; i < n; i++) {
+
+    int i = 0;
+    switch (D) {
+    case 2: i = pack_d2_avx512(out, codes_la, n, right_shift); break;
+    case 3: i = pack_d3_avx512(out, codes_la, n, right_shift); break;
+    case 4: i = pack_d4_avx512(out, codes_la, n, right_shift); break;
+    case 5: i = pack_d5_avx512(out, codes_la, n, right_shift); break;
+    case 6: i = pack_d6_avx512(out, codes_la, n, right_shift); break;
+    case 7: i = pack_d7_avx512(out, codes_la, n, right_shift); break;
+    case 8: i = pack_d8_avx512(out, codes_la, n, right_shift); break;
+    default: break;
+    }
+    if (i >= n) return;
+
+    /* Scalar tail (only fires for D >= 9, which shouldn't happen with
+     * PIVCO_MAX_CODE_LEN = 11 and a leaf D = depth bound). */
+    uint32_t mask = (1u << D) - 1;
+    int bit_pos = i * D;
+    int byte_idx = bit_pos >> 3;
+    int bits_in_buf = bit_pos & 7;
+    uint64_t buf = bits_in_buf > 0
+        ? (uint64_t)out[byte_idx] & ((1u << bits_in_buf) - 1)
+        : 0;
+    for (; i < n; i++) {
         uint32_t local = ((uint32_t)codes_la[i] >> right_shift) & mask;
         buf |= ((uint64_t)local) << bits_in_buf;
         bits_in_buf += D;

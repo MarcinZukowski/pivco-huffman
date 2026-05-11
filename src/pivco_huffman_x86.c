@@ -403,23 +403,211 @@ static inline void flat_decode_direct_x86(uint8_t *symbols, int n,
     }
 }
 
-/* Dense-codes pack: extract D bits per element from codes_la, pack
- * LSB-first into the byte stream.  Stays scalar for now -- D=2..8
- * SIMD pack on x86 needs per-byte / per-lane variable shifts that
- * aren't available before AVX2 (and the dominant slice on x86 is
- * enc_node_full, not enc_flat).  Symmetric to the NEON helper. */
+/* ============ Per-D SIMD bit-pack helpers ============
+ *
+ * Symmetric to the NEON pack_dN in pivco_huffman_neon.c and the
+ * AVX-512 variants in pivco_huffman_avx512.c.  Each one extracts the
+ * D-bit local code from codes_la and packs LSB-first into the byte
+ * stream.  Overpacks to a stride boundary; caller must zero-pad
+ * codes_la past n by 16+ entries.
+ *
+ * Two implementation tiers gated by PIVCO_HAS_AVX2:
+ *   AVX2:  uses _mm256_sllv_epi64 for per-lane shifts (D=3,5,6,7)
+ *          and AVX2-widened SSE primitives for D=2,4,8.
+ *   SSE4.1: hand-rolled tricks (_mm_maddubs_epi16 weighted pair-add
+ *          for D=2,4, _mm_mullo_epi32 multiply-as-shift for D=3, and
+ *          scalar for D=5,6,7 since SSE has no uint64 per-lane shift).
+ */
+
+#ifdef PIVCO_HAS_AVX2
+/* AVX2 D=3,5,6,7: 8 codes per iter via __m256i uint64 lanes (8 lanes
+ * × max shift 7*7 = 49 < 64).  Same shape as the AVX-512 macro just
+ * narrower.  Wait — __m256i has 4 uint64 lanes; AVX2's _mm256_sllv_
+ * epi64 takes 4 lanes.  Use 2× __m256i to cover 8 codes per iter. */
+#define PACK_DN_AVX2_UNIFIED(NAME, D_VAL, BITS_OUT)                            \
+static inline int NAME(uint8_t *out, const uint16_t *codes_la,                 \
+                       int n, int right_shift)                                  \
+{                                                                              \
+    static const int64_t shifts_lo[4] = {0,         D_VAL,   2*D_VAL, 3*D_VAL};\
+    static const int64_t shifts_hi[4] = {4*D_VAL, 5*D_VAL, 6*D_VAL, 7*D_VAL};  \
+    __m256i sl = _mm256_loadu_si256((const __m256i *)shifts_lo);               \
+    __m256i sh = _mm256_loadu_si256((const __m256i *)shifts_hi);               \
+    __m256i mask_vec = _mm256_set1_epi64x((1LL << D_VAL) - 1);                 \
+    int i = 0;                                                                 \
+    for (; i + 8 <= n; i += 8) {                                               \
+        __m128i v16 = _mm_loadu_si128((const __m128i *)(codes_la + i));        \
+        /* Lo half: codes 0..3 widened to uint64x4. */                         \
+        __m256i lo = _mm256_cvtepu16_epi64(v16);                               \
+        /* Hi half: codes 4..7 widened to uint64x4. */                         \
+        __m256i hi = _mm256_cvtepu16_epi64(_mm_unpackhi_epi64(v16, v16));      \
+        lo = _mm256_and_si256(_mm256_srli_epi64(lo, right_shift), mask_vec);   \
+        hi = _mm256_and_si256(_mm256_srli_epi64(hi, right_shift), mask_vec);   \
+        lo = _mm256_sllv_epi64(lo, sl);                                        \
+        hi = _mm256_sllv_epi64(hi, sh);                                        \
+        __m256i sum = _mm256_add_epi64(lo, hi);                                \
+        /* Horizontal-add 4 uint64 lanes into one. */                          \
+        __m128i s128 = _mm_add_epi64(_mm256_castsi256_si128(sum),              \
+                                      _mm256_extracti128_si256(sum, 1));       \
+        uint64_t packed = _mm_cvtsi128_si64(s128)                              \
+                        + _mm_cvtsi128_si64(_mm_unpackhi_epi64(s128, s128));   \
+        int bi = i * D_VAL / 8;                                                \
+        memcpy(out + bi, &packed, (BITS_OUT + 7) / 8);                         \
+    }                                                                          \
+    return i;                                                                  \
+}
+PACK_DN_AVX2_UNIFIED(pack_d3_avx2, 3, 24)
+PACK_DN_AVX2_UNIFIED(pack_d5_avx2, 5, 40)
+PACK_DN_AVX2_UNIFIED(pack_d6_avx2, 6, 48)
+PACK_DN_AVX2_UNIFIED(pack_d7_avx2, 7, 56)
+#undef PACK_DN_AVX2_UNIFIED
+#endif
+
+/* SSE4.1 D=2: 16 codes -> 4 bytes.  Pack 4 codes per byte via
+ * _mm_maddubs_epi16 weighted pair-add (weights {1,4,16,64}); narrow to
+ * bytes; store 4 bytes. */
+static inline int pack_d2_sse(uint8_t *out, const uint16_t *codes_la,
+                              int n, int right_shift)
+{
+    /* Weights: [1, 4, 16, 64] repeated 4× as int8.  Note int8 max is
+     * 127, so 64 fits (just). */
+    const __m128i weights = _mm_setr_epi8(1, 4, 16, 64, 1, 4, 16, 64,
+                                           1, 4, 16, 64, 1, 4, 16, 64);
+    int i = 0;
+    for (; i + 16 <= n; i += 16) {
+        __m128i v0 = _mm_loadu_si128((const __m128i *)(codes_la + i    ));
+        __m128i v1 = _mm_loadu_si128((const __m128i *)(codes_la + i + 8));
+        v0 = _mm_srli_epi16(v0, right_shift);
+        v1 = _mm_srli_epi16(v1, right_shift);
+        v0 = _mm_and_si128(v0, _mm_set1_epi16(0x3));
+        v1 = _mm_and_si128(v1, _mm_set1_epi16(0x3));
+        __m128i bytes = _mm_packus_epi16(v0, v1);  /* 16 bytes, each 0..3 */
+        /* step1[k] = bytes[2k]*w[2k] + bytes[2k+1]*w[2k+1].
+         * Pairs: (b0*1 + b1*4), (b2*16 + b3*64), (b4*1 + b5*4), ... */
+        __m128i step1 = _mm_maddubs_epi16(bytes, weights);
+        /* Sum adjacent int16 pairs to get final bytes. */
+        __m128i step2 = _mm_hadd_epi16(step1, _mm_setzero_si128());
+        /* step2 lanes 0..3 hold the 4 packed bytes (low 8 bits). */
+        __m128i out_bytes = _mm_packus_epi16(step2, _mm_setzero_si128());
+        uint32_t packed4 = (uint32_t)_mm_cvtsi128_si32(out_bytes);
+        memcpy(out + (i * 2 / 8), &packed4, 4);
+    }
+    return i;
+}
+
+/* SSE4.1 D=4: 16 codes -> 8 bytes.  Pair (c[2k], c[2k+1]) into one
+ * byte each via _mm_maddubs_epi16 with weights {1, 16}. */
+static inline int pack_d4_sse(uint8_t *out, const uint16_t *codes_la,
+                              int n, int right_shift)
+{
+    const __m128i weights = _mm_setr_epi8(1, 16, 1, 16, 1, 16, 1, 16,
+                                           1, 16, 1, 16, 1, 16, 1, 16);
+    int i = 0;
+    for (; i + 16 <= n; i += 16) {
+        __m128i v0 = _mm_loadu_si128((const __m128i *)(codes_la + i    ));
+        __m128i v1 = _mm_loadu_si128((const __m128i *)(codes_la + i + 8));
+        v0 = _mm_srli_epi16(v0, right_shift);
+        v1 = _mm_srli_epi16(v1, right_shift);
+        v0 = _mm_and_si128(v0, _mm_set1_epi16(0xF));
+        v1 = _mm_and_si128(v1, _mm_set1_epi16(0xF));
+        __m128i bytes = _mm_packus_epi16(v0, v1);  /* 16 bytes, each 0..15 */
+        /* Pair-add: step1[k] (int16) = bytes[2k]*1 + bytes[2k+1]*16. */
+        __m128i step1 = _mm_maddubs_epi16(bytes, weights);
+        /* Narrow to bytes (low 8 bits of each lane). */
+        __m128i out_bytes = _mm_packus_epi16(step1, _mm_setzero_si128());
+        _mm_storel_epi64((__m128i *)(out + (i * 4 / 8)), out_bytes);
+    }
+    return i;
+}
+
+/* SSE4.1 D=8: 16 codes -> 16 bytes, byte-aligned.  Trivial. */
+static inline int pack_d8_sse(uint8_t *out, const uint16_t *codes_la,
+                              int n, int right_shift)
+{
+    int i = 0;
+    for (; i + 16 <= n; i += 16) {
+        __m128i v0 = _mm_loadu_si128((const __m128i *)(codes_la + i    ));
+        __m128i v1 = _mm_loadu_si128((const __m128i *)(codes_la + i + 8));
+        v0 = _mm_srli_epi16(v0, right_shift);
+        v1 = _mm_srli_epi16(v1, right_shift);
+        __m128i bytes = _mm_packus_epi16(v0, v1);
+        _mm_storeu_si128((__m128i *)(out + i), bytes);
+    }
+    return i;
+}
+
+/* SSE4.1 D=3: 8 codes -> 24 bits via _mm_mullo_epi32 multiply-as-shift.
+ * SSE4.1 lacks _mm_sllv_epi32; multiplying uint32 by 2^k achieves the
+ * same per-lane left shift.  Same FastPFor horizontal-bitpacking
+ * trick, applied to encode. */
+static inline int pack_d3_sse(uint8_t *out, const uint16_t *codes_la,
+                              int n, int right_shift)
+{
+    const __m128i mlo = _mm_setr_epi32(1, 8, 64, 512);
+    const __m128i mhi = _mm_setr_epi32(4096, 32768, 262144, 2097152);
+    int i = 0;
+    for (; i + 8 <= n; i += 8) {
+        __m128i v = _mm_loadu_si128((const __m128i *)(codes_la + i));
+        v = _mm_srli_epi16(v, right_shift);
+        v = _mm_and_si128(v, _mm_set1_epi16(0x7));
+        /* Widen 8 uint16 lanes to 4+4 uint32 lanes. */
+        __m128i vlo = _mm_unpacklo_epi16(v, _mm_setzero_si128());
+        __m128i vhi = _mm_unpackhi_epi16(v, _mm_setzero_si128());
+        /* Per-lane shift via multiply (no _mm_sllv_epi32 in SSE4.1). */
+        vlo = _mm_mullo_epi32(vlo, mlo);
+        vhi = _mm_mullo_epi32(vhi, mhi);
+        /* Sum the two halves then horizontally reduce. */
+        __m128i s = _mm_add_epi32(vlo, vhi);
+        s = _mm_hadd_epi32(s, s);
+        s = _mm_hadd_epi32(s, s);
+        uint32_t packed = (uint32_t)_mm_cvtsi128_si32(s);
+        int bi = i * 3 / 8;
+        out[bi    ] = (uint8_t)(packed       );
+        out[bi + 1] = (uint8_t)(packed >>  8);
+        out[bi + 2] = (uint8_t)(packed >> 16);
+    }
+    return i;
+}
+
+/* Dense-codes pack with per-D SIMD dispatch.  D=2/4/8 use SSE4.1
+ * directly; D=3/5/6/7 use AVX2 sllv where available, falling back to
+ * scalar on SSE4.1-only hosts (D=3 has an SSE multiply-as-shift
+ * version, D=5/6/7 stay scalar since SSE has no uint64 per-lane
+ * shift). */
 static inline void pack_D_bits_dense_x86(uint8_t *out, int n, int D,
                                           int depth,
                                           const uint16_t *codes_la)
 {
     int total_bytes = (n * D + 7) >> 3;
     if (total_bytes > 0) out[total_bytes - 1] = 0;
-    uint32_t mask = (1u << D) - 1;
     int right_shift = 16 - depth - D;
-    uint64_t buf = 0;
-    int bits_in_buf = 0;
-    int byte_idx = 0;
-    for (int i = 0; i < n; i++) {
+
+    int i = 0;
+    switch (D) {
+    case 2: i = pack_d2_sse(out, codes_la, n, right_shift); break;
+    case 4: i = pack_d4_sse(out, codes_la, n, right_shift); break;
+    case 8: i = pack_d8_sse(out, codes_la, n, right_shift); break;
+#ifdef PIVCO_HAS_AVX2
+    case 3: i = pack_d3_avx2(out, codes_la, n, right_shift); break;
+    case 5: i = pack_d5_avx2(out, codes_la, n, right_shift); break;
+    case 6: i = pack_d6_avx2(out, codes_la, n, right_shift); break;
+    case 7: i = pack_d7_avx2(out, codes_la, n, right_shift); break;
+#else
+    case 3: i = pack_d3_sse(out, codes_la, n, right_shift); break;
+    /* D=5,6,7 fall through to scalar tail on SSE4.1-only hosts. */
+#endif
+    default: break;
+    }
+    if (i >= n) return;
+
+    /* Scalar tail (D=5,6,7 on SSE-only, or D >= 9). */
+    uint32_t mask = (1u << D) - 1;
+    int bit_pos = i * D;
+    int byte_idx = bit_pos >> 3;
+    int bits_in_buf = bit_pos & 7;
+    uint64_t buf = bits_in_buf > 0
+        ? (uint64_t)out[byte_idx] & ((1u << bits_in_buf) - 1)
+        : 0;
+    for (; i < n; i++) {
         uint32_t local = ((uint32_t)codes_la[i] >> right_shift) & mask;
         buf |= ((uint64_t)local) << bits_in_buf;
         bits_in_buf += D;

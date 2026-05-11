@@ -1,0 +1,24 @@
+[ 83%] Linking C executable pivco_huffman_tests
+[100%] Built target pivco_huffman_tests
+=== ALL PASSED (0 failures) ===
+=== PIVCO-Huffman Encode Benchmarks (PIVCO_MAX_CODE_LEN=11) ===
+Sequence: 4M, Repeats: 25 (100M/run), Block: 4096, Runs: 5 (drop 2)
+Distribution set: MAIN (9 distributions; pass --all for full sweep)
+
+ENCODE M/s    |  pivco_s    pivco |  trad_4s |  huf0_x1  huf0_x2 |   ratio
+--------------|-------------------|----------|-------------------|--------
+proba80       |      113     1152 |      612 |      643      643 |  1.79x
+english       |       33      643 |      424 |      640      640 |  1.00x
+flat_M5       |      363      402 |      590 |      645      644 |  0.62x
+html_wiki     |       26      491 |      364 |      620      622 |  0.79x
+prose_pride   |       24      536 |      388 |      627      631 |  0.85x
+image_jpeg    |       40      317 |      443 |      604      605 |  0.52x
+json_api      |       24      497 |      372 |      629      631 |  0.79x
+gzip_random   |      300     1727 |      512 |     2207     2208 |  0.78x
+chinese_text  |       26      435 |      365 |      626      627 |  0.69x
+
+  5 runs of 100M symbols each (25x 4M), drop 2 slowest, warn if spread > 5%
+  PIVCO/trad encode in 4096-symbol blocks; huf0 in 128KB chunks
+  ratio = pivco / max(huf0_x1, huf0_x2)
+  CPU freq drift: +0.1% (OK)
+  Total wall time: 157.4 seconds
