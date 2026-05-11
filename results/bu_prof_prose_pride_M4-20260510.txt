@@ -1,0 +1,38 @@
+Total encoded: 2419062 bytes (4724.7 per block, max_enc=33554432)
+Verify: rc=0 consumed=4732 match=1
+out=0xc22400000 enc_buf=0xc20400000
+Decoding 512 blocks x 20000 reps = 83886080000 symbols (prose_pride)
+CPU pin: ok
+Cycle counter freq: 999.99 MHz
+Decoder mode: bottom-up
+Starting decode loop...
+  block 0: off=0 len=4732
+    rc=0 consumed=4732
+  block 1: off=4732 len=4726
+    rc=0 consumed=4726
+  block 2: off=9458 len=4754
+    rc=0 consumed=4754
+  block 3: off=14212 len=4715
+    rc=0 consumed=4715
+  block 4: off=18927 len=4706
+    rc=0 consumed=4706
+83886.1 M symbols in 28.52 s = 2941 M/s
+
+=== pivco_prof: prose_pride / BLK=8192 ===
+  wall: 28.521 s   blocks: 10240000   counter freq: 999.99 MHz
+
+  primitive                               calls       elements  elem/call        ticks    ns/call    ns/elem
+  -------------------------------------------------------------------------------------------------
+  bu_tree_merge                        81920000   229209520000     2798.0  15047323779      183.7       0.07
+  bu_tree_merge_bcast_left             61440000    21011000000      342.0   1614710298       26.3       0.08
+  bu_merge_both_const                  41260000    37660960000      912.8   1589587572       38.5       0.04
+  bu_flat_decode                       40960000    37675180000      919.8   1372579312       33.5       0.04
+  bu_popcount_K                       143360000   250220520000     1745.4   8204923940       57.2       0.03
+
+  Per-BLK averages:
+    bu_tree_merge                         8.0 calls/BLK      22383.7 elems/BLK
+    bu_tree_merge_bcast_left              6.0 calls/BLK       2051.9 elems/BLK
+    bu_merge_both_const                   4.0 calls/BLK       3677.8 elems/BLK
+    bu_flat_decode                        4.0 calls/BLK       3679.2 elems/BLK
+    bu_popcount_K                        14.0 calls/BLK      24435.6 elems/BLK
+

@@ -17,11 +17,27 @@
 
 #include "pivco_huffman.h"
 #include "pivco_huffman_common.h"
+#include "pivco_prof.h"
 #include <string.h>
 
 #ifdef PIVCO_HAS_SSE4
 #include <smmintrin.h>  /* SSE4.1 */
 #include <immintrin.h>  /* AVX/AVX-512 umbrella; harmless on SSE-only builds */
+
+static inline int popcount_K_right_x86(const uint8_t *bm, int nbytes, int K) {
+    PROF_TIC();
+    int K_right = 0;
+    int last = nbytes - 1;
+    for (int b = 0; b < nbytes; b++) {
+        uint8_t byte = bm[b];
+        int valid = (b == last) ? (K - (b << 3)) : 8;
+        if (valid > 8) valid = 8;
+        uint8_t valid_mask = (valid == 8) ? 0xFFu : (uint8_t)((1u << valid) - 1);
+        K_right += __builtin_popcount(byte & valid_mask);
+    }
+    PROF_TOC(PROF_BU_POPCOUNT_K, K);
+    return K_right;
+}
 
 /* ---------- expand_tab: per-mask-byte shuffle pattern ---------- */
 static uint8_t expand_tab[256][8] __attribute__((aligned(32)));
@@ -51,6 +67,7 @@ static inline void tree_merge(const uint8_t *bm, int K,
                                const uint8_t *left,
                                const uint8_t *right,
                                uint8_t *out) {
+    PROF_TIC();
     int lc = 0, rc = 0;
     int j = 0;
 #ifdef __AVX512VBMI2__
@@ -85,6 +102,7 @@ static inline void tree_merge(const uint8_t *bm, int K,
         int mb = (bm[j >> 3] >> (j & 7)) & 1;
         out[j] = mb ? right[rc++] : left[lc++];
     }
+    PROF_TOC(PROF_BU_TREE_MERGE, K);
 }
 
 /* ---------- broadcast-left (constant left input) ---------- */
@@ -92,6 +110,7 @@ static inline void tree_merge_bcast_left(const uint8_t *bm, int K,
                                           uint8_t left_sym,
                                           const uint8_t *right,
                                           uint8_t *out) {
+    PROF_TIC();
     int rc = 0;
     int j = 0;
     __m128i Lbcast8 = _mm_set1_epi8((char)left_sym);
@@ -123,6 +142,7 @@ static inline void tree_merge_bcast_left(const uint8_t *bm, int K,
         int mb = (bm[j >> 3] >> (j & 7)) & 1;
         out[j] = mb ? right[rc++] : left_sym;
     }
+    PROF_TOC(PROF_BU_TREE_MERGE_BCAST_LEFT, K);
 }
 
 /* ---------- broadcast-right (constant right input) ---------- */
@@ -130,6 +150,7 @@ static inline void tree_merge_bcast_right(const uint8_t *bm, int K,
                                            const uint8_t *left,
                                            uint8_t right_sym,
                                            uint8_t *out) {
+    PROF_TIC();
     int lc = 0;
     int j = 0;
     __m128i Rbcast8 = _mm_set1_epi8((char)right_sym);
@@ -159,6 +180,7 @@ static inline void tree_merge_bcast_right(const uint8_t *bm, int K,
         int mb = (bm[j >> 3] >> (j & 7)) & 1;
         out[j] = mb ? right_sym : left[lc++];
     }
+    PROF_TOC(PROF_BU_TREE_MERGE_BCAST_RIGHT, K);
 }
 
 /* ---------- both-leaves (both inputs constants) ----------
@@ -168,6 +190,7 @@ static inline void tree_merge_bcast_right(const uint8_t *bm, int K,
 static inline void merge_both_const(const uint8_t *bm, int K,
                                      uint8_t left_sym, uint8_t right_sym,
                                      uint8_t *out) {
+    PROF_TIC();
     __m128i vsym0 = _mm_set1_epi8((char)left_sym);
     __m128i vsym1 = _mm_set1_epi8((char)right_sym);
     __m128i bits  = _mm_setr_epi8(1,2,4,8,16,32,64,(char)128,
@@ -187,6 +210,7 @@ static inline void merge_both_const(const uint8_t *bm, int K,
         int mb = (bm[j >> 3] >> (j & 7)) & 1;
         out[j] = mb ? right_sym : left_sym;
     }
+    PROF_TOC(PROF_BU_MERGE_BOTH_CONST, K);
 }
 
 /* ---------- D-bit flat decode ----------
@@ -197,7 +221,9 @@ extern void pivco_huffman_flat_decode_direct_x86_(uint8_t *symbols, int n,
 static inline void flat_decode_to_buffer(uint8_t *out, int n,
                                           const uint8_t *bm, int D,
                                           const uint8_t *c2s) {
+    PROF_TIC();
     pivco_huffman_flat_decode_direct_x86_(out, n, bm, D, c2s);
+    PROF_TOC(PROF_BU_FLAT_DECODE, n);
 }
 
 /* ---------- Recursive bottom-up decode ---------- */
@@ -214,11 +240,15 @@ static void decode_subtree_bu(const pivco_huffman_table_t *table,
     switch ((pivco_node_type_t)table->node_type[node_id]) {
 
     case PIVCO_NODE_SKIP:
-        memset(out_buf, table->prefill_sym, (size_t)K);
+        { PROF_TIC();
+          memset(out_buf, table->prefill_sym, (size_t)K);
+          PROF_TOC(PROF_BU_LEAF_MEMSET, K); }
         return;
 
     case PIVCO_NODE_LEAF:
-        memset(out_buf, (uint8_t)node->symbol, (size_t)K);
+        { PROF_TIC();
+          memset(out_buf, (uint8_t)node->symbol, (size_t)K);
+          PROF_TOC(PROF_BU_LEAF_MEMSET, K); }
         return;
 
     case PIVCO_NODE_INTERNAL_FLAT: {
@@ -254,14 +284,7 @@ static void decode_subtree_bu(const pivco_huffman_table_t *table,
                               out_buf);
             return;
         }
-        int K_right = 0;
-        for (int b = 0; b < nbytes; b++) {
-            uint8_t byte = bm[b];
-            int valid = (b == nbytes - 1) ? (K - (b << 3)) : 8;
-            if (valid > 8) valid = 8;
-            uint8_t vm = (valid == 8) ? 0xFFu : (uint8_t)((1u << valid) - 1);
-            K_right += __builtin_popcount(byte & vm);
-        }
+        int K_right = popcount_K_right_x86(bm, nbytes, K);
         uint8_t *right_buf = scratch_top;
         decode_subtree_bu(table, node->right, K_right,
                           right_buf, in_ptr, scratch_top + K_right);
@@ -279,14 +302,7 @@ static void decode_subtree_bu(const pivco_huffman_table_t *table,
                               table->prefill_sym, out_buf);
             return;
         }
-        int K_right = 0;
-        for (int b = 0; b < nbytes; b++) {
-            uint8_t byte = bm[b];
-            int valid = (b == nbytes - 1) ? (K - (b << 3)) : 8;
-            if (valid > 8) valid = 8;
-            uint8_t vm = (valid == 8) ? 0xFFu : (uint8_t)((1u << valid) - 1);
-            K_right += __builtin_popcount(byte & vm);
-        }
+        int K_right = popcount_K_right_x86(bm, nbytes, K);
         int K_left = K - K_right;
         uint8_t *left_buf = scratch_top;
         decode_subtree_bu(table, node->left, K_left,
@@ -312,14 +328,7 @@ static void decode_subtree_bu(const pivco_huffman_table_t *table,
             return;
         }
         if (left_kind == (uint8_t)PIVCO_NODE_LEAF) {
-            int K_right = 0;
-            for (int b = 0; b < nbytes; b++) {
-                uint8_t byte = bm[b];
-                int valid = (b == nbytes - 1) ? (K - (b << 3)) : 8;
-                if (valid > 8) valid = 8;
-                uint8_t vm = (valid == 8) ? 0xFFu : (uint8_t)((1u << valid) - 1);
-                K_right += __builtin_popcount(byte & vm);
-            }
+            int K_right = popcount_K_right_x86(bm, nbytes, K);
             uint8_t *right_buf = scratch_top;
             decode_subtree_bu(table, node->right, K_right,
                               right_buf, in_ptr, scratch_top + K_right);
@@ -329,14 +338,7 @@ static void decode_subtree_bu(const pivco_huffman_table_t *table,
             return;
         }
         if (right_kind == (uint8_t)PIVCO_NODE_LEAF) {
-            int K_right = 0;
-            for (int b = 0; b < nbytes; b++) {
-                uint8_t byte = bm[b];
-                int valid = (b == nbytes - 1) ? (K - (b << 3)) : 8;
-                if (valid > 8) valid = 8;
-                uint8_t vm = (valid == 8) ? 0xFFu : (uint8_t)((1u << valid) - 1);
-                K_right += __builtin_popcount(byte & vm);
-            }
+            int K_right = popcount_K_right_x86(bm, nbytes, K);
             int K_left = K - K_right;
             uint8_t *left_buf = scratch_top;
             decode_subtree_bu(table, node->left, K_left,
@@ -347,14 +349,7 @@ static void decode_subtree_bu(const pivco_huffman_table_t *table,
             return;
         }
 
-        int K_right = 0;
-        for (int b = 0; b < nbytes; b++) {
-            uint8_t byte = bm[b];
-            int valid = (b == nbytes - 1) ? (K - (b << 3)) : 8;
-            if (valid > 8) valid = 8;
-            uint8_t valid_mask = (valid == 8) ? 0xFFu : (uint8_t)((1u << valid) - 1);
-            K_right += __builtin_popcount(byte & valid_mask);
-        }
+        int K_right = popcount_K_right_x86(bm, nbytes, K);
         int K_left = K - K_right;
         uint8_t *left_buf  = scratch_top;
         uint8_t *right_buf = scratch_top + K_left;

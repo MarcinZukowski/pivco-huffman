@@ -1,0 +1,27 @@
+[100%] Linking C executable pivco_huffman_profile_english
+[100%] Built target pivco_huffman_profile_english
+    rc=0 consumed=4754
+  block 3: off=14212 len=4715
+    rc=0 consumed=4715
+  block 4: off=18927 len=4706
+    rc=0 consumed=4706
+83886.1 M symbols in 46.35 s = 1810 M/s
+
+=== pivco_prof: prose_pride / BLK=8192 ===
+  wall: 46.347 s   blocks: 10240000   counter freq: 2699.98 MHz
+
+  primitive                               calls       elements  elem/call        ticks    ns/call    ns/elem
+  -------------------------------------------------------------------------------------------------
+  bu_tree_merge                        81920000   229209520000     2798.0  24427204404      110.4       0.04
+  bu_tree_merge_bcast_left             61440000    21011000000      342.0   6550762394       39.5       0.12
+  bu_merge_both_const                  41260000    37660960000      912.8   7067077008       63.4       0.07
+  bu_flat_decode                       40960000    37675180000      919.8  30603692588      276.7       0.30
+  bu_popcount_K                       143360000   250220520000     1745.4  41668404886      107.7       0.06
+
+  Per-BLK averages:
+    bu_tree_merge                         8.0 calls/BLK      22383.7 elems/BLK
+    bu_tree_merge_bcast_left              6.0 calls/BLK       2051.9 elems/BLK
+    bu_merge_both_const                   4.0 calls/BLK       3677.8 elems/BLK
+    bu_flat_decode                        4.0 calls/BLK       3679.2 elems/BLK
+    bu_popcount_K                        14.0 calls/BLK      24435.6 elems/BLK
+

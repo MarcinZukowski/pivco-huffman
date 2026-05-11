@@ -46,6 +46,16 @@ typedef enum {
     PROF_FLAT_DECODE_SCATTER,
     PROF_FLAT_DECODE_DIRECT,
 
+    /* Bottom-up decoder (pivco_huffman_bu_{neon,x86}.c) per-primitive
+     * timings.  Elements = bytes processed at this call. */
+    PROF_BU_TREE_MERGE,             /* general 2-buffer merge */
+    PROF_BU_TREE_MERGE_BCAST_LEFT,  /* left side broadcast constant */
+    PROF_BU_TREE_MERGE_BCAST_RIGHT, /* right side broadcast constant */
+    PROF_BU_MERGE_BOTH_CONST,       /* BOTH_LEAVES / both-leaf collapse */
+    PROF_BU_FLAT_DECODE,            /* INTERNAL_FLAT direct-to-buffer */
+    PROF_BU_POPCOUNT_K,             /* compute K_right from bitmap */
+    PROF_BU_LEAF_MEMSET,            /* LEAF / SKIP: write K copies of sym */
+
     /* Recursion + entry call counts (count-only; recursive timing
      * would double-count). */
     PROF_DECODE_NODE,

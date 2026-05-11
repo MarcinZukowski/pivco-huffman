@@ -25,6 +25,13 @@ static const char *prof_names[PROF_COUNT] = {
     [PROF_SCATTER_BOTH_LEAVES] = "scatter_both_leaves",
     [PROF_FLAT_DECODE_SCATTER] = "flat_decode_scatter",
     [PROF_FLAT_DECODE_DIRECT]  = "flat_decode_direct",
+    [PROF_BU_TREE_MERGE]            = "bu_tree_merge",
+    [PROF_BU_TREE_MERGE_BCAST_LEFT] = "bu_tree_merge_bcast_left",
+    [PROF_BU_TREE_MERGE_BCAST_RIGHT]= "bu_tree_merge_bcast_right",
+    [PROF_BU_MERGE_BOTH_CONST]      = "bu_merge_both_const",
+    [PROF_BU_FLAT_DECODE]           = "bu_flat_decode",
+    [PROF_BU_POPCOUNT_K]            = "bu_popcount_K",
+    [PROF_BU_LEAF_MEMSET]           = "bu_leaf_memset",
     [PROF_DECODE_NODE]         = "decode_node (call count)",
     [PROF_DECODE_ENTRY]        = "pivco_huffman_decode (entry)",
 };

@@ -118,15 +118,39 @@ int main(int argc, char **argv)
 
     pivco_prof_reset();
 
+    /* Decoder selection: env PIVCO_PROFILE_MODE = "bu" routes to the
+     * bottom-up decoder so we can profile its primitives.  Default
+     * keeps the existing top-down path. */
+    const char *mode_env = getenv("PIVCO_PROFILE_MODE");
+    int use_bu = (mode_env && strcmp(mode_env, "bu") == 0);
+    printf("Decoder mode: %s\n", use_bu ? "bottom-up" : "top-down");
+
     printf("Starting decode loop...\n"); fflush(stdout);
     double t0 = now_sec();
     for (int r = 0; r < REPS; r++) {
         for (int b = 0; b < NBLOCKS; b++) {
             size_t consumed;
             if (r == 0 && b < 5) printf("  block %d: off=%zu len=%zu\n", b, enc_off[b], enc_off[b+1]-enc_off[b]);
-            int rc = pivco_huffman_decode(enc_buf + enc_off[b],
+            int rc;
+            if (use_bu) {
+#if defined(PIVCO_HAS_NEON)
+                rc = pivco_huffman_decode_bu_neon(enc_buf + enc_off[b],
+                                                   enc_off[b + 1] - enc_off[b],
+                                                   &table, out + b * N, &consumed);
+#elif defined(PIVCO_HAS_SSE4)
+                rc = pivco_huffman_decode_bu_x86(enc_buf + enc_off[b],
+                                                  enc_off[b + 1] - enc_off[b],
+                                                  &table, out + b * N, &consumed);
+#else
+                rc = pivco_huffman_decode(enc_buf + enc_off[b],
                                           enc_off[b + 1] - enc_off[b],
                                           &table, out + b * N, &consumed);
+#endif
+            } else {
+                rc = pivco_huffman_decode(enc_buf + enc_off[b],
+                                          enc_off[b + 1] - enc_off[b],
+                                          &table, out + b * N, &consumed);
+            }
             if (r == 0 && b < 5) printf("    rc=%d consumed=%zu\n", rc, consumed);
             if (consumed != enc_off[b + 1] - enc_off[b]) {
                 printf("MISMATCH block %d: encoded=%zu consumed=%zu rc=%d\n",
