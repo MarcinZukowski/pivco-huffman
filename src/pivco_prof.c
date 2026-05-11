@@ -15,12 +15,12 @@
 pivco_prof_counter_t pivco_prof_counters[PROF_COUNT];
 
 static const char *prof_names[PROF_COUNT] = {
-    [PROF_NODE_FULL]           = "node full       (decode_node)",
-    [PROF_NODE_HALF_RIGHT]     = "node half-right (decode_node)",
-    [PROF_NODE_HALF_LEFT]      = "node half-left  (decode_node)",
-    [PROF_ROOT_FULL]           = "root full       (entry)",
-    [PROF_ROOT_HALF_RIGHT]     = "root half-right (entry)",
-    [PROF_ROOT_HALF_LEFT]      = "root half-left  (entry)",
+    [PROF_NODE_FULL]           = "node_full",
+    [PROF_NODE_HALF_RIGHT]     = "node_half_right",
+    [PROF_NODE_HALF_LEFT]      = "node_half_left",
+    [PROF_ROOT_FULL]           = "root_full",
+    [PROF_ROOT_HALF_RIGHT]     = "root_half_right",
+    [PROF_ROOT_HALF_LEFT]      = "root_half_left",
     [PROF_SCATTER_SYM]         = "scatter_sym",
     [PROF_SCATTER_BOTH_LEAVES] = "scatter_both_leaves",
     [PROF_FLAT_DECODE_SCATTER] = "flat_decode_scatter",
@@ -32,8 +32,8 @@ static const char *prof_names[PROF_COUNT] = {
     [PROF_BU_FLAT_DECODE]           = "bu_flat_decode",
     [PROF_BU_POPCOUNT_K]            = "bu_popcount_K",
     [PROF_BU_LEAF_MEMSET]           = "bu_leaf_memset",
-    [PROF_DECODE_NODE]         = "decode_node (call count)",
-    [PROF_DECODE_ENTRY]        = "pivco_huffman_decode (entry)",
+    [PROF_DECODE_NODE]         = "decode_node_calls",
+    [PROF_DECODE_ENTRY]        = "decode_entry",
 };
 
 const char *pivco_prof_name(pivco_prof_id_t id) {
@@ -75,39 +75,65 @@ void pivco_prof_dump(const char *label,
         printf("   counter freq: %.2f MHz", tick_freq_hz / 1e6);
     printf("\n");
 
-    printf("\n  %-32s %12s %14s %10s %12s %10s %10s\n",
-           "primitive", "calls", "elements", "elem/call", "ticks",
-           "ns/call", "ns/elem");
+    printf("\n  %-32s %12s %14s %10s %10s %10s %7s\n",
+           "primitive", "calls", "elements", "elem/call",
+           "ns/call", "ns/elem", "% wall");
     printf("  ---------------------------------------------------------"
-           "----------------------------------------\n");
+           "-----------------------------------------\n");
+
+    /* Sum of timed (non-count-only) primitive ns to compute "unaccounted". */
+    double total_timed_ns = 0.0;
+    for (int i = 0; i < PROF_COUNT; i++) {
+        pivco_prof_counter_t *c = &pivco_prof_counters[i];
+        if (c->calls == 0 || c->ticks == 0 || tick_freq_hz <= 0) continue;
+        total_timed_ns += (double)c->ticks * 1e9 / tick_freq_hz;
+    }
+    double wall_ns = wall_seconds * 1e9;
 
     for (int i = 0; i < PROF_COUNT; i++) {
         pivco_prof_counter_t *c = &pivco_prof_counters[i];
         if (c->calls == 0) continue;
 
-        double ns_per_call = 0, ns_per_elem = 0;
+        double ns_per_call = 0, ns_per_elem = 0, pct_wall = 0;
         if (c->ticks > 0 && tick_freq_hz > 0) {
             double ns = (double)c->ticks * 1e9 / tick_freq_hz;
             ns_per_call = ns / (double)c->calls;
             ns_per_elem = c->elements > 0 ? ns / (double)c->elements : 0;
-        }
-
-        char ticks_str[32];
-        if (c->ticks > 0) {
-            snprintf(ticks_str, sizeof(ticks_str), "%llu",
-                     (unsigned long long)c->ticks);
-        } else {
-            snprintf(ticks_str, sizeof(ticks_str), "(count-only)");
+            pct_wall    = wall_ns > 0 ? 100.0 * ns / wall_ns : 0;
         }
 
         double elem_per_call = (double)c->elements / (double)c->calls;
-        printf("  %-32s %12llu %14llu %10.1f %12s %10.1f %10.2f\n",
-               pivco_prof_name((pivco_prof_id_t)i),
-               (unsigned long long)c->calls,
-               (unsigned long long)c->elements,
-               elem_per_call,
-               ticks_str,
-               ns_per_call, ns_per_elem);
+        if (c->ticks > 0) {
+            printf("  %-32s %12llu %14llu %10.1f %10.1f %10.2f %6.2f%%\n",
+                   pivco_prof_name((pivco_prof_id_t)i),
+                   (unsigned long long)c->calls,
+                   (unsigned long long)c->elements,
+                   elem_per_call,
+                   ns_per_call, ns_per_elem, pct_wall);
+        } else {
+            printf("  %-32s %12llu %14llu %10.1f %10s %10s %7s\n",
+                   pivco_prof_name((pivco_prof_id_t)i),
+                   (unsigned long long)c->calls,
+                   (unsigned long long)c->elements,
+                   elem_per_call,
+                   "(count)", "(count)", "—");
+        }
+    }
+
+    /* Unaccounted line: wall - sum of timed primitives.
+     * Includes recursion / dispatch / cache effects / anything not
+     * inside an explicit PROF_TIC/TOC region. */
+    if (tick_freq_hz > 0 && wall_ns > 0) {
+        double unaccounted_ns = wall_ns - total_timed_ns;
+        double pct = 100.0 * unaccounted_ns / wall_ns;
+        printf("  %-32s %12s %14s %10s %10.1f %10s %6.2f%%\n",
+               "(unaccounted)", "", "", "",
+               n_blocks > 0 ? unaccounted_ns / (double)n_blocks : 0.0,
+               "—", pct);
+        printf("  %-32s %12s %14s %10s %10.1f %10s %6.2f%%\n",
+               "TOTAL (wall)", "", "", "",
+               n_blocks > 0 ? wall_ns / (double)n_blocks : 0.0,
+               "—", 100.0);
     }
 
     if (n_blocks > 0) {
