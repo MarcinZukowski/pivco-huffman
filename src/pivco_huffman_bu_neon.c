@@ -38,18 +38,54 @@
 
 /* Popcount K_right bits from the first nbytes of bm, where K total bits
  * are valid (the last byte may have fewer than 8 valid bits).
- * Extracted into a named function so the profiler can attribute its
- * cost separately — it shows up in every HALF / INTERNAL_FULL node. */
+ *
+ * Vectorised: 64-byte main loop processes four 16-byte vectors per iter
+ * with 4-wide ILP — 4 independent vcntq_u8, then a 3-level lane-wise
+ * add tree (vaddq_u8 × 3) keeping the intermediate sums in u8 (max 32
+ * at the root), then one vpaddlq_u8 widen-and-pair-add to u16 (max 64),
+ * then one vaddq_u16 into the u16x8 accumulator.  vaddq_u8 (~4/cycle on
+ * M-series) beats vpaddq_u8 (~2/cycle, shuffle-mux cost) for the same
+ * data-reduction shape.  16-byte mop-up handles 1..3 leftover vectors,
+ * scalar tail handles 0..15 full bytes plus the optional partial last
+ * byte (K & 7 bits valid). */
 static inline int popcount_K_right(const uint8_t *bm, int nbytes, int K) {
+    (void)nbytes;   /* derivable from K; kept for API stability */
     PROF_TIC();
-    int K_right = 0;
-    int last = nbytes - 1;
-    for (int b = 0; b < nbytes; b++) {
-        uint8_t byte = bm[b];
-        int valid = (b == last) ? (K - (b << 3)) : 8;
-        if (valid > 8) valid = 8;
-        uint8_t valid_mask = (valid == 8) ? 0xFFu : (uint8_t)((1u << valid) - 1);
-        K_right += __builtin_popcount(byte & valid_mask);
+    int full_bytes = K >> 3;
+    int partial_bits = K & 7;
+
+    uint16x8_t acc_v = vdupq_n_u16(0);
+    int b = 0;
+    for (; b + 64 <= full_bytes; b += 64) {
+        uint8x16_t v0 = vld1q_u8(bm + b);
+        uint8x16_t v1 = vld1q_u8(bm + b + 16);
+        uint8x16_t v2 = vld1q_u8(bm + b + 32);
+        uint8x16_t v3 = vld1q_u8(bm + b + 48);
+        uint8x16_t c0 = vcntq_u8(v0);
+        uint8x16_t c1 = vcntq_u8(v1);
+        uint8x16_t c2 = vcntq_u8(v2);
+        uint8x16_t c3 = vcntq_u8(v3);
+        /* 3-level lane-wise add tree, all in u8 (max 32 at the root). */
+        uint8x16_t s01 = vaddq_u8(c0, c1);
+        uint8x16_t s23 = vaddq_u8(c2, c3);
+        uint8x16_t s   = vaddq_u8(s01, s23);
+        acc_v = vaddq_u16(acc_v, vpaddlq_u8(s));
+    }
+    for (; b + 16 <= full_bytes; b += 16) {
+        uint8x16_t v = vld1q_u8(bm + b);
+        acc_v = vaddq_u16(acc_v, vpaddlq_u8(vcntq_u8(v)));
+    }
+    int K_right = (int)vaddvq_u16(acc_v);
+
+    /* Scalar tail: remaining 0..15 full bytes. */
+    for (; b < full_bytes; b++) {
+        K_right += __builtin_popcount(bm[b]);
+    }
+
+    /* Optional partial byte holding the final (K & 7) bits. */
+    if (partial_bits) {
+        uint8_t valid_mask = (uint8_t)((1u << partial_bits) - 1);
+        K_right += __builtin_popcount(bm[full_bytes] & valid_mask);
     }
     PROF_TOC(PROF_BU_POPCOUNT_K, K);
     return K_right;
@@ -102,6 +138,34 @@ static inline void tree_merge(const uint8_t *bm, int K,
     PROF_TIC();
     int lc = 0, rc = 0;
     int j = 0;
+    /* 2x unroll (stride-16): two independent merges per iteration.
+     * Adjacent 8-byte groups have independent loads / TBLs / stores so
+     * OOO overlaps the second's load with the first's TBL.  Only
+     * lc/rc carry a real dep, and that's short-latency integer add.
+     * Mirrors node_full's stride-16 unroll in pivco_huffman_neon.c. */
+    for (; j + 16 <= K; j += 16) {
+        uint8_t m0 = bm[j >> 3];
+        uint8x8_t  L0    = vld1_u8(left + lc);
+        uint8x8_t  R0    = vld1_u8(right + rc);
+        uint8x16_t both0 = vcombine_u8(L0, R0);
+        uint8x8_t  shuf0 = vld1_u8(expand_tab[m0]);
+        uint8x8_t  o0    = vqtbl1_u8(both0, shuf0);
+        vst1_u8(out + j, o0);
+        int nr0 = expand_popcnt[m0];
+        rc += nr0;
+        lc += (8 - nr0);
+
+        uint8_t m1 = bm[(j >> 3) + 1];
+        uint8x8_t  L1    = vld1_u8(left + lc);
+        uint8x8_t  R1    = vld1_u8(right + rc);
+        uint8x16_t both1 = vcombine_u8(L1, R1);
+        uint8x8_t  shuf1 = vld1_u8(expand_tab[m1]);
+        uint8x8_t  o1    = vqtbl1_u8(both1, shuf1);
+        vst1_u8(out + j + 8, o1);
+        int nr1 = expand_popcnt[m1];
+        rc += nr1;
+        lc += (8 - nr1);
+    }
     for (; j + 8 <= K; j += 8) {
         uint8_t m  = bm[j >> 3];
         uint8x8_t  L    = vld1_u8(left + lc);
@@ -114,7 +178,9 @@ static inline void tree_merge(const uint8_t *bm, int K,
         rc += nr;
         lc += (8 - nr);
     }
-    /* scalar tail (1..7 leftover) */
+    /* scalar tail (1..7 leftover).  out_buf has no SIMD-tail padding
+     * guarantee (root call writes user buffer; child recursions pack
+     * scratch buffers contiguously), so we keep this scalar. */
     for (; j < K; j++) {
         int mb = (bm[j >> 3] >> (j & 7)) & 1;
         out[j] = mb ? right[rc++] : left[lc++];
@@ -132,6 +198,23 @@ static inline void tree_merge_bcast_left(const uint8_t *bm, int K,
     int rc = 0;
     int j = 0;
     uint8x8_t Lbcast = vdup_n_u8(left_sym);
+    for (; j + 16 <= K; j += 16) {
+        uint8_t m0 = bm[j >> 3];
+        uint8x8_t  R0    = vld1_u8(right + rc);
+        uint8x16_t both0 = vcombine_u8(Lbcast, R0);
+        uint8x8_t  shuf0 = vld1_u8(expand_tab[m0]);
+        uint8x8_t  o0    = vqtbl1_u8(both0, shuf0);
+        vst1_u8(out + j, o0);
+        rc += expand_popcnt[m0];
+
+        uint8_t m1 = bm[(j >> 3) + 1];
+        uint8x8_t  R1    = vld1_u8(right + rc);
+        uint8x16_t both1 = vcombine_u8(Lbcast, R1);
+        uint8x8_t  shuf1 = vld1_u8(expand_tab[m1]);
+        uint8x8_t  o1    = vqtbl1_u8(both1, shuf1);
+        vst1_u8(out + j + 8, o1);
+        rc += expand_popcnt[m1];
+    }
     for (; j + 8 <= K; j += 8) {
         uint8_t m = bm[j >> 3];
         uint8x8_t  R    = vld1_u8(right + rc);
@@ -157,6 +240,23 @@ static inline void tree_merge_bcast_right(const uint8_t *bm, int K,
     int lc = 0;
     int j = 0;
     uint8x8_t Rbcast = vdup_n_u8(right_sym);
+    for (; j + 16 <= K; j += 16) {
+        uint8_t m0 = bm[j >> 3];
+        uint8x8_t  L0    = vld1_u8(left + lc);
+        uint8x16_t both0 = vcombine_u8(L0, Rbcast);
+        uint8x8_t  shuf0 = vld1_u8(expand_tab[m0]);
+        uint8x8_t  o0    = vqtbl1_u8(both0, shuf0);
+        vst1_u8(out + j, o0);
+        lc += (8 - expand_popcnt[m0]);
+
+        uint8_t m1 = bm[(j >> 3) + 1];
+        uint8x8_t  L1    = vld1_u8(left + lc);
+        uint8x16_t both1 = vcombine_u8(L1, Rbcast);
+        uint8x8_t  shuf1 = vld1_u8(expand_tab[m1]);
+        uint8x8_t  o1    = vqtbl1_u8(both1, shuf1);
+        vst1_u8(out + j + 8, o1);
+        lc += (8 - expand_popcnt[m1]);
+    }
     for (; j + 8 <= K; j += 8) {
         uint8_t m = bm[j >> 3];
         uint8x8_t  L    = vld1_u8(left + lc);
