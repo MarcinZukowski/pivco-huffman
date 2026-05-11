@@ -119,6 +119,31 @@ static inline void tree_merge(const uint8_t *bm, int K,
         rc += nr; lc += (64 - nr);
     }
 #endif
+    /* 2x unroll (stride-16): two independent 8-byte merges per iter.
+     * Mirrors the NEON 2x unroll — adjacent groups have independent
+     * loads / shuffles / stores so OOO overlaps them.  Only lc/rc
+     * cursor adds carry a real dep, and that's short-latency add. */
+    for (; j + 16 <= K; j += 16) {
+        uint8_t m0 = bm[j >> 3];
+        __m128i L0 = _mm_loadl_epi64((const __m128i *)(left + lc));
+        __m128i R0 = _mm_loadl_epi64((const __m128i *)(right + rc));
+        __m128i both0 = _mm_unpacklo_epi64(L0, R0);
+        __m128i shuf0 = _mm_loadl_epi64((const __m128i *)expand_tab[m0]);
+        __m128i o0    = _mm_shuffle_epi8(both0, shuf0);
+        _mm_storel_epi64((__m128i *)(out + j), o0);
+        int nr0 = expand_popcnt[m0];
+        rc += nr0; lc += (8 - nr0);
+
+        uint8_t m1 = bm[(j >> 3) + 1];
+        __m128i L1 = _mm_loadl_epi64((const __m128i *)(left + lc));
+        __m128i R1 = _mm_loadl_epi64((const __m128i *)(right + rc));
+        __m128i both1 = _mm_unpacklo_epi64(L1, R1);
+        __m128i shuf1 = _mm_loadl_epi64((const __m128i *)expand_tab[m1]);
+        __m128i o1    = _mm_shuffle_epi8(both1, shuf1);
+        _mm_storel_epi64((__m128i *)(out + j + 8), o1);
+        int nr1 = expand_popcnt[m1];
+        rc += nr1; lc += (8 - nr1);
+    }
     for (; j + 8 <= K; j += 8) {
         uint8_t m = bm[j >> 3];
         __m128i L = _mm_loadl_epi64((const __m128i *)(left + lc));
@@ -161,6 +186,24 @@ static inline void tree_merge_bcast_left(const uint8_t *bm, int K,
         rc += __builtin_popcountll(mask);
     }
 #endif
+    /* 2x unroll (stride-16): see tree_merge above. */
+    for (; j + 16 <= K; j += 16) {
+        uint8_t m0 = bm[j >> 3];
+        __m128i R0 = _mm_loadl_epi64((const __m128i *)(right + rc));
+        __m128i both0 = _mm_unpacklo_epi64(Lbcast8, R0);
+        __m128i shuf0 = _mm_loadl_epi64((const __m128i *)expand_tab[m0]);
+        __m128i o0    = _mm_shuffle_epi8(both0, shuf0);
+        _mm_storel_epi64((__m128i *)(out + j), o0);
+        rc += expand_popcnt[m0];
+
+        uint8_t m1 = bm[(j >> 3) + 1];
+        __m128i R1 = _mm_loadl_epi64((const __m128i *)(right + rc));
+        __m128i both1 = _mm_unpacklo_epi64(Lbcast8, R1);
+        __m128i shuf1 = _mm_loadl_epi64((const __m128i *)expand_tab[m1]);
+        __m128i o1    = _mm_shuffle_epi8(both1, shuf1);
+        _mm_storel_epi64((__m128i *)(out + j + 8), o1);
+        rc += expand_popcnt[m1];
+    }
     for (; j + 8 <= K; j += 8) {
         uint8_t m = bm[j >> 3];
         __m128i R = _mm_loadl_epi64((const __m128i *)(right + rc));
@@ -199,6 +242,24 @@ static inline void tree_merge_bcast_right(const uint8_t *bm, int K,
         lc += 64 - __builtin_popcountll(mask);
     }
 #endif
+    /* 2x unroll (stride-16): see tree_merge above. */
+    for (; j + 16 <= K; j += 16) {
+        uint8_t m0 = bm[j >> 3];
+        __m128i L0 = _mm_loadl_epi64((const __m128i *)(left + lc));
+        __m128i both0 = _mm_unpacklo_epi64(L0, Rbcast8);
+        __m128i shuf0 = _mm_loadl_epi64((const __m128i *)expand_tab[m0]);
+        __m128i o0    = _mm_shuffle_epi8(both0, shuf0);
+        _mm_storel_epi64((__m128i *)(out + j), o0);
+        lc += (8 - expand_popcnt[m0]);
+
+        uint8_t m1 = bm[(j >> 3) + 1];
+        __m128i L1 = _mm_loadl_epi64((const __m128i *)(left + lc));
+        __m128i both1 = _mm_unpacklo_epi64(L1, Rbcast8);
+        __m128i shuf1 = _mm_loadl_epi64((const __m128i *)expand_tab[m1]);
+        __m128i o1    = _mm_shuffle_epi8(both1, shuf1);
+        _mm_storel_epi64((__m128i *)(out + j + 8), o1);
+        lc += (8 - expand_popcnt[m1]);
+    }
     for (; j + 8 <= K; j += 8) {
         uint8_t m = bm[j >> 3];
         __m128i L = _mm_loadl_epi64((const __m128i *)(left + lc));
@@ -230,6 +291,28 @@ static inline void merge_both_const(const uint8_t *bm, int K,
     __m128i shuf  = _mm_setr_epi8(0,0,0,0,0,0,0,0,
                                    1,1,1,1,1,1,1,1);
     int j = 0;
+#ifdef PIVCO_HAS_AVX2
+    /* 32 output bytes per iter via 256-bit pblendvb.  vpshufb on AVX2
+     * is per-128-bit-lane, but each lane consumes a different bitmap
+     * byte (broadcast separately per lane), so the lane discipline
+     * matches the data naturally. */
+    __m256i vsym0_256 = _mm256_set1_epi8((char)left_sym);
+    __m256i vsym1_256 = _mm256_set1_epi8((char)right_sym);
+    __m256i bits_256  = _mm256_broadcastsi128_si256(bits);
+    __m256i shuf_256  = _mm256_broadcastsi128_si256(shuf);
+    for (; j + 32 <= K; j += 32) {
+        /* Load 4 bitmap bytes; put pair (b0,b1) in low lane, (b2,b3) in high. */
+        uint32_t four;
+        memcpy(&four, bm + (j >> 3), 4);
+        __m256i bm_quad = _mm256_set_epi32(0, 0, 0, (int)(four >> 16),
+                                           0, 0, 0, (int)(four & 0xFFFF));
+        __m256i bm_dup  = _mm256_shuffle_epi8(bm_quad, shuf_256);
+        __m256i masked  = _mm256_and_si256(bm_dup, bits_256);
+        __m256i mask8   = _mm256_cmpeq_epi8(masked, bits_256);
+        __m256i o       = _mm256_blendv_epi8(vsym0_256, vsym1_256, mask8);
+        _mm256_storeu_si256((__m256i *)(out + j), o);
+    }
+#endif
     for (; j + 16 <= K; j += 16) {
         __m128i bm_pair = _mm_cvtsi32_si128(*(const uint16_t *)(bm + (j >> 3)));
         __m128i bm_dup  = _mm_shuffle_epi8(bm_pair, shuf);
@@ -263,7 +346,39 @@ static inline void flat_decode_to_buffer(uint8_t *out, int n,
                                           const uint8_t *c2s) {
     PROF_TIC();
 #ifdef PIVCO_HAS_AVX512
+    /* AVX-512 has dedicated D=5/D=6 fast paths in addition to D=4. */
     pivco_huffman_flat_decode_direct_avx512_(out, n, bm, D, c2s);
+#elif defined(PIVCO_HAS_AVX2)
+    /* AVX2 fast path for D=4: 32 outputs/iter via vpshufb on the c2s
+     * lookup (D=4 means c2s has 16 entries → fits in a 128-bit lane,
+     * broadcast to both 256-bit lanes).  Other D's fall through to
+     * the SSE path which handles them. */
+    if (D == 4) {
+        __m128i c2s_lo = _mm_loadu_si128((const __m128i *)c2s);
+        __m256i c2s_v  = _mm256_broadcastsi128_si256(c2s_lo);
+        __m128i lo_mask128 = _mm_set1_epi8(0x0F);
+        int i = 0;
+        for (; i + 32 <= n; i += 32) {
+            /* 32 D=4 codes pack into 16 bytes of bm (2 codes/byte).
+             * Unpack low/high nibbles: codes[2k] = bm[k] & 0xF,
+             * codes[2k+1] = bm[k] >> 4.  Interleave them in-vector. */
+            __m128i raw   = _mm_loadu_si128((const __m128i *)(bm + (i >> 1)));
+            __m128i lo    = _mm_and_si128(raw, lo_mask128);
+            __m128i hi    = _mm_and_si128(_mm_srli_epi16(raw, 4), lo_mask128);
+            __m128i codes_lo = _mm_unpacklo_epi8(lo, hi);   /* codes 0..15  */
+            __m128i codes_hi = _mm_unpackhi_epi8(lo, hi);   /* codes 16..31 */
+            __m256i codes = _mm256_set_m128i(codes_hi, codes_lo);
+            __m256i syms = _mm256_shuffle_epi8(c2s_v, codes);
+            _mm256_storeu_si256((__m256i *)(out + i), syms);
+        }
+        if (i < n) {
+            /* Tail: hand off to SSE D=4 path for the trailing < 32 elements. */
+            pivco_huffman_flat_decode_direct_x86_(out + i, n - i,
+                                                   bm + (i >> 1), D, c2s);
+        }
+    } else {
+        pivco_huffman_flat_decode_direct_x86_(out, n, bm, D, c2s);
+    }
 #else
     pivco_huffman_flat_decode_direct_x86_(out, n, bm, D, c2s);
 #endif

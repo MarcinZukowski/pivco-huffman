@@ -105,20 +105,38 @@ if(TARGET_ARCH STREQUAL "arm64" OR TARGET_ARCH STREQUAL "aarch64")
     # handles 4 × uint32 per instruction vs TBL's 8 × uint16. SVE would
     # help at 256-bit+ vector lengths (e.g. Fujitsu A64FX).
 elseif(TARGET_ARCH STREQUAL "x86_64" OR TARGET_ARCH STREQUAL "amd64")
-    # Check for AVX-512 VBMI2 (vpcompressw) — compiler support AND CPU support
+    # Three-tier x86 SIMD dispatch:
+    #   AVX-512 VBMI2     (Ice Lake / Sapphire Rapids / Zen 4)
+    #   AVX2 + BMI2       (Haswell / Zen 1+)         <-- new
+    #   SSE4.1 + POPCNT   (Nehalem floor)
+    #
+    # Each tier is a strict superset of the next; AVX-512 always also
+    # gets PIVCO_HAS_AVX2 + PIVCO_HAS_SSE4 so the AVX2 fast paths
+    # compile in on those hosts too.
     include(CheckCCompilerFlag)
     check_c_compiler_flag("-mavx512vbmi2" COMPILER_HAS_AVX512_VBMI2)
+    check_c_compiler_flag("-mavx2"        COMPILER_HAS_AVX2)
     if(COMPILER_HAS_AVX512_VBMI2)
-        # Check if the CPU actually has avx512vbmi2
         execute_process(COMMAND grep -c avx512_vbmi2 /proc/cpuinfo
                         OUTPUT_VARIABLE CPU_HAS_AVX512 OUTPUT_STRIP_TRAILING_WHITESPACE
                         ERROR_QUIET)
     endif()
+    if(COMPILER_HAS_AVX2)
+        execute_process(COMMAND grep -c " avx2 " /proc/cpuinfo
+                        OUTPUT_VARIABLE CPU_HAS_AVX2 OUTPUT_STRIP_TRAILING_WHITESPACE
+                        ERROR_QUIET)
+    endif()
     if(COMPILER_HAS_AVX512_VBMI2 AND CPU_HAS_AVX512 AND NOT CPU_HAS_AVX512 STREQUAL "0")
-        message(STATUS "x86_64 detected — enabling AVX-512 VBMI2 + SSE4.1")
+        message(STATUS "x86_64 detected — enabling AVX-512 VBMI2 + AVX2 + SSE4.1")
         list(APPEND PIVCO_SOURCES src/pivco_huffman_avx512.c src/pivco_huffman_x86.c src/pivco_huffman_bu_x86.c)
-        add_compile_definitions(PIVCO_HAS_AVX512=1 PIVCO_HAS_SSE4=1)
-        add_compile_options(-mavx512f -mavx512bw -mavx512vl -mavx512vbmi -mavx512vbmi2 -msse4.1 -mpopcnt)
+        add_compile_definitions(PIVCO_HAS_AVX512=1 PIVCO_HAS_AVX2=1 PIVCO_HAS_SSE4=1)
+        add_compile_options(-mavx512f -mavx512bw -mavx512vl -mavx512vbmi -mavx512vbmi2
+                            -mavx2 -mbmi2 -msse4.1 -mpopcnt)
+    elseif(COMPILER_HAS_AVX2 AND CPU_HAS_AVX2 AND NOT CPU_HAS_AVX2 STREQUAL "0")
+        message(STATUS "x86_64 detected — enabling AVX2 + BMI2 + SSE4.1")
+        list(APPEND PIVCO_SOURCES src/pivco_huffman_x86.c src/pivco_huffman_bu_x86.c)
+        add_compile_definitions(PIVCO_HAS_AVX2=1 PIVCO_HAS_SSE4=1)
+        add_compile_options(-mavx2 -mbmi2 -msse4.1 -mpopcnt)
     else()
         message(STATUS "x86_64 detected — enabling SSE4.1 (+ POPCNT)")
         list(APPEND PIVCO_SOURCES src/pivco_huffman_x86.c src/pivco_huffman_bu_x86.c)
