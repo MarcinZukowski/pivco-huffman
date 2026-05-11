@@ -21,7 +21,21 @@ extern "C" {
 #endif
 
 #define PIVCO_MAX_SYMBOLS   256
-#define PIVCO_MAX_CODE_LEN  15
+
+/* Maximum Huffman code length (length-limited Huffman, like huf0).
+ * Capping at 11 matches zstd's huf0 max and bounds the canonical
+ * decode_sym/decode_len tables at 2KB each (fits L1 cleanly).  Trees
+ * for distributions with naturally deeper Huffman (e.g. prose_pride at
+ * natural max 16) get reshaped: rare deep leaves are pulled up and
+ * other leaves get longer codes per Kraft.  Compression cost is small
+ * (~0.5-1% on text-like data, 0% on most distributions whose natural
+ * max is <=11 anyway).  Decode is slightly faster on text-like
+ * distributions, slightly slower on geometric — net wash to small win
+ * on real workloads.  Override at build time if you need
+ * different trade-off: -DPIVCO_MAX_CODE_LEN=15. */
+#ifndef PIVCO_MAX_CODE_LEN
+#define PIVCO_MAX_CODE_LEN  11
+#endif
 
 /* Maximum encoded size for one block (generous upper bound):
    Sum of code bits across all symbols. Worst case: all 8-bit codes

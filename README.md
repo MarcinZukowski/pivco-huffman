@@ -785,7 +785,8 @@ the cheap direct path; deep-tree distributions (`prose_pride`,
 **Last refreshed:** 2026-04-26 07:30 UTC, commit
 [`0a99f6c`](../) (post AVX-512 / SSE4.1 bench port, leaf-child fusion +
 flat-subtree fast path both shipped).  Workload: **`prose_pride`** —
-real Project Gutenberg prose, 96 distinct bytes, max code length 15,
+real Project Gutenberg prose, 96 distinct bytes, max code length 11
+(length-limited Huffman, matching `huf0`'s default cap),
 ~47% flat-subtree coverage — the real-world deep-tree distribution
 that PIVCO most closely contests against `huf0_x2`.
 
