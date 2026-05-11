@@ -304,6 +304,13 @@ if(BUILD_BENCH)
         target_link_libraries(pivco_fusion_v5_real_kernel_cnt
             pivco_huffman counters::counters m)
         target_include_directories(pivco_fusion_v5_real_kernel_cnt PRIVATE src)
+
+        add_executable(pivco_primitives_neon_cnt
+            extras/bench_primitives_neon_cnt.cpp
+        )
+        target_link_libraries(pivco_primitives_neon_cnt
+            pivco_huffman counters::counters m)
+        target_include_directories(pivco_primitives_neon_cnt PRIVATE src)
     endif()
 
     # x86 microbenches (SSE4.1 + AVX-512 variants).  Built whenever the
@@ -353,6 +360,14 @@ if(BUILD_BENCH)
         target_link_libraries(pivco_fusion_v4_sse_cnt
             pivco_huffman counters::counters m)
         target_include_directories(pivco_fusion_v4_sse_cnt PRIVATE src)
+
+        add_executable(pivco_primitives_x86_cnt
+            extras/bench_primitives_x86_cnt.cpp
+        )
+        target_compile_options(pivco_primitives_x86_cnt PRIVATE -mbmi2 -mavx2)
+        target_link_libraries(pivco_primitives_x86_cnt
+            counters::counters m)
+        target_include_directories(pivco_primitives_x86_cnt PRIVATE src)
     endif()
 
     if(TARGET_ARCH STREQUAL "arm64" OR TARGET_ARCH STREQUAL "aarch64")
