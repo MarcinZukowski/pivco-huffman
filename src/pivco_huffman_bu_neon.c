@@ -236,7 +236,16 @@ static inline void tree_merge(const uint8_t *bm, int K,
 }
 
 /* Broadcast-left merge: left is a constant symbol (the prefill leaf).
- * Used when this node's left child is a SKIP/prefill leaf. */
+ * Used when this node's left child is a SKIP/prefill leaf.
+ *
+ * Same V4-style precomputed (nr0, m1) shuf strategy as tree_merge:
+ *   - Load 16-byte R_full once per stride-16 iter.
+ *   - Iter 0: vqtbl1 on vcombine(Lbcast, low(R_full)) with expand_tab[m0].
+ *   - Iter 1: vqtbl2 over (Lbcast_q, R_full) with expand_tab_pre[nr0][m1].
+ *     L-lane indices in [0..15] hit Lbcast_q (any value → left_sym).
+ *     R-lane indices in [16..31] hit R_full[idx-16] = R_full[count_ones+nr0].
+ *     The table's R-shift formula (raw + 8 + nr0) is exactly what we need.
+ */
 static inline void tree_merge_bcast_left(const uint8_t *bm, int K,
                                           uint8_t left_sym,
                                           const uint8_t *right,
@@ -244,23 +253,27 @@ static inline void tree_merge_bcast_left(const uint8_t *bm, int K,
     PROF_TIC();
     int rc = 0;
     int j = 0;
-    uint8x8_t Lbcast = vdup_n_u8(left_sym);
+    uint8x8_t  Lbcast   = vdup_n_u8(left_sym);
+    uint8x16_t Lbcast_q = vdupq_n_u8(left_sym);
     for (; j + 16 <= K; j += 16) {
+        uint8x16_t R_full = vld1q_u8(right + rc);
+
+        /* Iter 0: vqtbl1 on the low half of R_full + Lbcast. */
         uint8_t m0 = bm[j >> 3];
-        uint8x8_t  R0    = vld1_u8(right + rc);
-        uint8x16_t both0 = vcombine_u8(Lbcast, R0);
+        uint8x16_t both0 = vcombine_u8(Lbcast, vget_low_u8(R_full));
         uint8x8_t  shuf0 = vld1_u8(expand_tab[m0]);
         uint8x8_t  o0    = vqtbl1_u8(both0, shuf0);
         vst1_u8(out + j, o0);
-        rc += expand_popcnt[m0];
+        int nr0 = expand_popcnt[m0];
 
+        /* Iter 1: vqtbl2 over (Lbcast_q, R_full) with precomputed shuf. */
         uint8_t m1 = bm[(j >> 3) + 1];
-        uint8x8_t  R1    = vld1_u8(right + rc);
-        uint8x16_t both1 = vcombine_u8(Lbcast, R1);
-        uint8x8_t  shuf1 = vld1_u8(expand_tab[m1]);
-        uint8x8_t  o1    = vqtbl1_u8(both1, shuf1);
+        uint8x16x2_t src = {{ Lbcast_q, R_full }};
+        uint8x8_t shuf1  = vld1_u8(expand_tab_pre[nr0][m1]);
+        uint8x8_t o1     = vqtbl2_u8(src, shuf1);
         vst1_u8(out + j + 8, o1);
-        rc += expand_popcnt[m1];
+
+        rc += nr0 + expand_popcnt[m1];
     }
     for (; j + 8 <= K; j += 8) {
         uint8_t m = bm[j >> 3];
@@ -278,7 +291,12 @@ static inline void tree_merge_bcast_left(const uint8_t *bm, int K,
     PROF_TOC(PROF_BU_TREE_MERGE_BCAST_LEFT, K);
 }
 
-/* Broadcast-right merge: right is a constant symbol (HALF_LEFT case). */
+/* Broadcast-right merge: right is a constant symbol (HALF_LEFT case).
+ *
+ * Mirror of tree_merge_bcast_left.  After iter 0, lc advances by
+ * (8 - nr0) where nr0 = popcount(m0).  expand_tab_pre[nr0][m1]'s
+ * L-shift formula (raw + (8-nr0)) is exactly what we need, and the
+ * R-lane formula puts indices in [16..31] which hit Rbcast_q. */
 static inline void tree_merge_bcast_right(const uint8_t *bm, int K,
                                            const uint8_t *left,
                                            uint8_t right_sym,
@@ -286,23 +304,27 @@ static inline void tree_merge_bcast_right(const uint8_t *bm, int K,
     PROF_TIC();
     int lc = 0;
     int j = 0;
-    uint8x8_t Rbcast = vdup_n_u8(right_sym);
+    uint8x8_t  Rbcast   = vdup_n_u8(right_sym);
+    uint8x16_t Rbcast_q = vdupq_n_u8(right_sym);
     for (; j + 16 <= K; j += 16) {
+        uint8x16_t L_full = vld1q_u8(left + lc);
+
+        /* Iter 0: vqtbl1 on the low half of L_full + Rbcast. */
         uint8_t m0 = bm[j >> 3];
-        uint8x8_t  L0    = vld1_u8(left + lc);
-        uint8x16_t both0 = vcombine_u8(L0, Rbcast);
+        uint8x16_t both0 = vcombine_u8(vget_low_u8(L_full), Rbcast);
         uint8x8_t  shuf0 = vld1_u8(expand_tab[m0]);
         uint8x8_t  o0    = vqtbl1_u8(both0, shuf0);
         vst1_u8(out + j, o0);
-        lc += (8 - expand_popcnt[m0]);
+        int nr0 = expand_popcnt[m0];
 
+        /* Iter 1: vqtbl2 over (L_full, Rbcast_q) with precomputed shuf. */
         uint8_t m1 = bm[(j >> 3) + 1];
-        uint8x8_t  L1    = vld1_u8(left + lc);
-        uint8x16_t both1 = vcombine_u8(L1, Rbcast);
-        uint8x8_t  shuf1 = vld1_u8(expand_tab[m1]);
-        uint8x8_t  o1    = vqtbl1_u8(both1, shuf1);
+        uint8x16x2_t src = {{ L_full, Rbcast_q }};
+        uint8x8_t shuf1  = vld1_u8(expand_tab_pre[nr0][m1]);
+        uint8x8_t o1     = vqtbl2_u8(src, shuf1);
         vst1_u8(out + j + 8, o1);
-        lc += (8 - expand_popcnt[m1]);
+
+        lc += (16 - nr0 - expand_popcnt[m1]);
     }
     for (; j + 8 <= K; j += 8) {
         uint8_t m = bm[j >> 3];
