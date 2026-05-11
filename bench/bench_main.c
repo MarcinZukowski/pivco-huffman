@@ -12,6 +12,7 @@ extern void         bench_init(void);
 extern int          bench_num_distributions(void);
 extern const char  *bench_dist_name(int idx);
 extern const uint64_t *bench_dist_freq(int idx);
+extern int          bench_dist_is_main(int idx);
 extern void         bench_generate_symbols(int dist_idx, uint8_t *symbols,
                                            int n_symbols, uint64_t seed);
 
@@ -82,8 +83,25 @@ static double cpu_freq_check(void)
 
 int main(int argc, char **argv)
 {
+    /* Defaults: MAIN-only distribution set, DEFAULT_REPEATS repeats.
+     * argv parsing accepts a `--all` flag in any position and treats the
+     * first non-flag argument as the repeat count. */
     int repeats = DEFAULT_REPEATS;
-    if (argc > 1) repeats = atoi(argv[1]);
+    int run_all = 0;
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--all") == 0) {
+            run_all = 1;
+        } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
+            printf("Usage: %s [repeats] [--all]\n"
+                   "  repeats   passes over 4M symbols per timed run (default %d)\n"
+                   "  --all     run every distribution (default: MAIN set only)\n",
+                   argv[0], DEFAULT_REPEATS);
+            return 0;
+        } else {
+            int r = atoi(argv[i]);
+            if (r > 0) repeats = r;
+        }
+    }
     if (repeats < 1) repeats = 1;
 
     /* PIVCO_BENCH_QUICK: skip every comparator (run only pivco_n), reduce
@@ -102,10 +120,13 @@ int main(int argc, char **argv)
 
     printf("=== PIVCO-Huffman Benchmarks%s (PIVCO_MAX_CODE_LEN=%d) ===\n",
            quick ? " (QUICK)" : "", PIVCO_MAX_CODE_LEN);
-    printf("Sequence: %dM, Repeats: %d (%dM/run), Block: %d, Runs: %d (drop %d)\n\n",
+    printf("Sequence: %dM, Repeats: %d (%dM/run), Block: %d, Runs: %d (drop %d)\n",
            TOTAL_SYMBOLS / (1024*1024), repeats,
            (int)((size_t)TOTAL_SYMBOLS * repeats / (1024*1024)),
            BLK, runs, drop_worst);
+    printf("Distribution set: %s\n\n",
+           run_all ? "ALL (29 distributions)"
+                   : "MAIN (9 distributions; pass --all for full sweep)");
 
     /* Per-distribution compression-size + tree-shape stats.  Filled in
      * inside the per-distribution loop, printed at the end. */
@@ -136,16 +157,17 @@ int main(int argc, char **argv)
         printf("%-13s | %7s\n", "DECODE M/s", "pivco_n");
         printf("--------------|--------\n");
     } else {
-        printf("%-13s | %7s %7s %7s | %7s %7s | %7s %7s %7s | %7s | %7s\n",
-               "DECODE M/s", "pivco_s", "pivco_n", "pivco_p",
+        printf("%-13s | %7s %7s %7s %7s | %7s %7s | %7s %7s %7s | %7s | %7s\n",
+               "DECODE M/s", "pivco_s", "pivco_n", "pivco_bu", "pivco_p",
                "trad_1s", "trad_4s",
                "huf0_1s", "huf0_x1", "huf0_x2",
                "rans_x2", "ratio");
-        printf("--------------|-------------------------|-----------------|------"
+        printf("--------------|---------------------------------|-----------------|------"
                "----------------------|---------|--------\n");
     }
 
     for (int d = 0; d < n_dist; d++) {
+        if (!run_all && !bench_dist_is_main(d)) continue;
         const char *name = bench_dist_name(d);
         const uint64_t *freq = bench_dist_freq(d);
 
@@ -337,7 +359,7 @@ int main(int argc, char **argv)
     var = stable_median(runs_arr, runs, drop_worst, label); \
 } while(0)
 
-        double p_dec_s = 0, p_dec_n = 0, p_dec_pfx = 0;
+        double p_dec_s = 0, p_dec_n = 0, p_dec_pfx = 0, p_dec_bu = 0;
         double t_dec_1s = 0, t_dec_4s = 0;
         double h_dec_1s = 0, h_dec_4s = 0, h_dec_x2 = 0;
         double r_dec_2 = 0;
@@ -369,6 +391,25 @@ int main(int argc, char **argv)
                     table, dec_buf + (size_t)b * BLK, &consumed);
             }
         }, "pivco_n");
+
+        /* Bottom-up tree_merge decoder.  Same encoded stream as the
+         * top-down decoder; routed per-arch.  See pivco_huffman_bu_*.c. */
+        BENCH(p_dec_bu, {
+            for (int b = 0; b < NBLOCKS; b++) {
+                size_t consumed;
+#if defined(PIVCO_HAS_NEON)
+                pivco_huffman_decode_bu_neon(
+                    neon_enc_buf + neon_enc_off[b],
+                    neon_enc_off[b+1] - neon_enc_off[b],
+                    table, dec_buf + (size_t)b * BLK, &consumed);
+#elif defined(PIVCO_HAS_SSE4)
+                pivco_huffman_decode_bu_x86(
+                    neon_enc_buf + neon_enc_off[b],
+                    neon_enc_off[b+1] - neon_enc_off[b],
+                    table, dec_buf + (size_t)b * BLK, &consumed);
+#endif
+            }
+        }, "pivco_bu");
 #endif
 
       if (!quick) {
@@ -465,6 +506,7 @@ int main(int argc, char **argv)
 
         double p_best = p_dec_n > p_dec_s ? p_dec_n : p_dec_s;
         if (p_dec_pfx > p_best) p_best = p_dec_pfx;
+        if (p_dec_bu  > p_best) p_best = p_dec_bu;
         double t_best = h_dec_4s;
         if (h_dec_x2 > t_best)  t_best = h_dec_x2;
         if (t_dec_4s > t_best) t_best = t_dec_4s;
@@ -477,8 +519,8 @@ int main(int argc, char **argv)
             (void)ratio;
             printf("%-13s | %7.0f\n", name, p_dec_n);
         } else {
-            printf("%-13s | %7.0f %7.0f %7.0f | %7.0f %7.0f | %7.0f %7.0f %7.0f | %7.0f | %5.2fx\n",
-                   name, p_dec_s, p_dec_n, p_dec_pfx, t_dec_1s, t_dec_4s,
+            printf("%-13s | %7.0f %7.0f %7.0f %7.0f | %7.0f %7.0f | %7.0f %7.0f %7.0f | %7.0f | %5.2fx\n",
+                   name, p_dec_s, p_dec_n, p_dec_bu, p_dec_pfx, t_dec_1s, t_dec_4s,
                    h_dec_1s, h_dec_4s, h_dec_x2, r_dec_2, ratio);
         }
 
