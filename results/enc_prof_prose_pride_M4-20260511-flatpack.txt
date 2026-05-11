@@ -1,0 +1,30 @@
+Total encoded: 2419062 bytes (4724.7 per block, max_enc=33554432)
+Verify: rc=0 consumed=4732 match=1
+out=0x426400000 enc_buf=0x424400000
+Decoding 512 blocks x 20000 reps = 83886080000 symbols (prose_pride)
+CPU pin: ok
+Cycle counter freq: 999.99 MHz
+Profile mode: encode
+Starting encode loop...
+83886.1 M symbols in 47.71 s = 1758 M/s
+
+=== pivco_prof: ENCODE prose_pride / BLK=8192 ===
+  wall: 47.715 s   blocks: 10240000   counter freq: 999.99 MHz
+
+  primitive                               calls       elements  elem/call    ns/call    ns/elem  % wall
+  --------------------------------------------------------------------------------------------------
+  enc_init                             10240000    83886080000     8192.0     1566.6       0.19  33.62%
+  enc_node_full                       184620000   287881480000     1559.3      153.4       0.10  59.34%
+  enc_flat                             40960000    37675180000      919.8       55.8       0.06   4.79%
+  enc_node_calls                      225580000   325556660000     1443.2    (count)    (count)     —
+  enc_entry                            10240000    83886080000     8192.0    (count)    (count)     —
+  (unaccounted)                                                                104.9        —   2.25%
+  TOTAL (wall)                                                                4659.6        — 100.00%
+
+  Per-BLK averages:
+    enc_init                              1.0 calls/BLK       8192.0 elems/BLK
+    enc_node_full                        18.0 calls/BLK      28113.4 elems/BLK
+    enc_flat                              4.0 calls/BLK       3679.2 elems/BLK
+    enc_node_calls                       22.0 calls/BLK      31792.6 elems/BLK
+    enc_entry                             1.0 calls/BLK       8192.0 elems/BLK
+

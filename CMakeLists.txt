@@ -210,6 +210,11 @@ if(BUILD_BENCH)
         )
         target_link_libraries(pivco_encode_split_micro pivco_huffman m)
         target_include_directories(pivco_encode_split_micro PRIVATE src)
+
+        add_executable(pivco_enc_init_micro
+            extras/bench_enc_init.c
+        )
+        target_link_libraries(pivco_enc_init_micro pivco_huffman m)
     endif()
 
     add_executable(pivco_huffman_profile_english
