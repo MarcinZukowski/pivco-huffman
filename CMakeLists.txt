@@ -217,6 +217,14 @@ if(BUILD_BENCH)
         target_link_libraries(pivco_enc_init_micro pivco_huffman m)
     endif()
 
+    # Partition u8 vs u16 microbench: works on any tier (each ISA is
+    # #ifdef-gated inside the source).
+    add_executable(pivco_partition_u8_vs_u16
+        extras/bench_partition_u8_vs_u16.c
+    )
+    target_link_libraries(pivco_partition_u8_vs_u16 pivco_huffman m)
+    target_include_directories(pivco_partition_u8_vs_u16 PRIVATE src)
+
     add_executable(pivco_huffman_profile_english
         bench/bench_profile_english.c
         bench/bench_distributions.c
