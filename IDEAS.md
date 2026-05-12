@@ -69,6 +69,74 @@ but enc_flat is already only ~15% of c8i wall.  Net: 3-5%.
 
 Defer behind enc_init.
 
+## AVX-512 BW tier for Cascade Lake (c5) — open (2026-05-12)
+
+c5 (Xeon Platinum 8275CL) has AVX-512 F/BW/CD/DQ/VL but NOT VBMI2.
+Our cmake currently puts c5 in the AVX2 tier because it greps for
+`avx512_vbmi2` in /proc/cpuinfo, which c5 doesn't have.
+
+c5 DOES have AVX-512 BW, which is all the vpermi2w enc_init trick
+needs.  But the rest of pivco_huffman_avx512.c uses
+_mm512_maskz_compress_epi16 (vpcompressw, requires VBMI2) — so we
+can't just enable the AVX-512 build on c5.
+
+The clean approach is a new "AVX-512 BW" tier between AVX2 and
+AVX-512 VBMI2:
+
+  AVX-512 VBMI2  → c8a, c8i  (current AVX-512 tier)
+  AVX-512 BW     → c5         (new — uses vpermi2w enc_init, AVX2
+                                partition, SSE pack)
+  AVX2           → c4, c6a
+  SSE4.1         → c3
+
+Cost: ~30-60 min — new cmake feature detect + conditional pivco_
+encode_x86.c block (or new pivco_encode_avx512_bw.c) that uses
+vpermi2w for enc_init while keeping the AVX2 partition.
+
+Estimated win on c5: enc_init is ~19% of wall at 0.25 ns/elem (BLK=
+4096).  vpermi2w on c5 probably ~0.10 ns/elem given Cascade Lake's
+slightly older vpermi2w pipeline.  Total wall savings ~10-12%,
+prose_pride 691 → ~775 M/s.  Crosses huf0_x2 parity (0.76× → 0.85×).
+
+Smaller payoff than the c8a/c8i case (since c5's bottleneck is the
+SSE partition, not enc_init).  Defer unless c5 specifically becomes
+important.
+
+## ~~AVX2 partition_16 stride for enc_node_full~~ — tried, lost (2026-05-12)
+
+Tried AVX2 stride-16 for the partition: load 16 codes as __m256i,
+build a 16-bit mask via vpsllw + vpacksswb + vpmovmskb, split into
+two 8-bit halves, run two parallel SSE partition_8's against the
+existing 256-entry compress_tab, store the four 128-bit results
+sequentially.
+
+Same shape as the NEON V4 unroll for `bu_tree_merge`.
+
+**Reality:** ±1-2% on every SSE/AVX2 host (within noise).
+
+  prose_pride M/s    pre   post   Δ
+  c3 SSE             536   534    flat
+  c4 Haswell         664   655   -1%
+  c5 Cascade L       691   678   -2%
+  c6a Zen 3          791   786    flat
+
+**Why it didn't help:** the win on NEON V4 came from collapsing the
+TBL critical path (separate gathers per iter -> fused 2x loads + a
+single precomputed shuf table).  Here the per-element work is
+unchanged — pshufb throughput is ~3/cycle on Zen 3, 1 store/cycle.
+Per-element pshufb + store remains identical between stride-8 and
+stride-16; the throughput limit is per-element, not per-iter.
+
+The cursor dependency (`n_left += 8 - nr_lo` then `n_left += 8 -
+nr_hi` before the second store) IS shortened (one chain per 16
+elements vs two per 16 in back-to-back stride-8 iters), but the
+OoO engine on Zen 3 already overlaps the cursor chain at stride-8.
+
+Reverted.  Same pattern as the iota_root_8 and NEON root-fusion
+experiments: count the busiest pipe, not the op count.  The
+busiest pipe on AVX2 hosts here is pshufb + store, which doesn't
+care about loop unrolling.
+
 ## SSE4.1 / AVX2 enc_node_full gap vs huf0 on text — open (2026-05-12)
 
 Older Intel hosts (c3 Ivy Bridge, c4 Haswell, c5 Cascade Lake) and

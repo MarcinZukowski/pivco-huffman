@@ -797,112 +797,156 @@ int pivco_huffman_encode_avx512(const uint8_t *symbols,
      * partition's 64-byte vpcompressw store at n_left + 32 worst case. */
     uint16_t codes_la[PIVCO_BLOCK_SIZE + 32];
 
-    /* ===== AVX-512 vectorised enc_init via vpermi2w hierarchical gather =====
+    /* ===== AVX-512 enc_init via byte-split vpermex2var_epi8 =====
      *
-     * The scalar version is one byte-load + one uint16-load + one
-     * uint16-store per element.  M4 microbench (extras/bench_enc_init)
-     * established that's LSU-bound at ~0.2 ns/elem -- NEON_TBL only
-     * buys 11% because 256 entries exceed any single TBL window.
+     * Refinement of the original vpermi2w (uint16) version.  Same idea
+     * -- 4 parallel chunked table lookups + blend by char's top bits --
+     * but split each uint16 entry into its low byte and high byte,
+     * doing the lookups on BYTE permutes instead of uint16 permutes.
      *
-     * AVX-512 escapes the LSU floor.  `vpermex2var_epi16` (AVX-512BW,
-     * a.k.a. vpermi2w) is a single instruction that:
-     *   - takes TWO 32-entry uint16 source registers (64 entries total)
-     *   - and 32 uint16 lane indices
-     *   - returns 32 uint16 selected values, one per lane
+     * Why this wins on AVX-512 VBMI:
      *
-     * The key fact: it uses only the LOW 6 BITS of each index, so an
-     * index value v selects entry (v & 0x3F) from the combined 64-entry
-     * source.  That's exactly the within-group offset (char & 0x3F)
-     * once we split the 256-entry table into 4 groups of 64 by the
-     * top 2 bits of the symbol.
+     *  1. vpermex2var_epi8 covers 128 entries per call (64 indices ×
+     *     2-source × 64 bytes) vs vpermex2var_epi16's 64 entries.  So
+     *     the 256-byte lo_table needs only 2 chunks (1 mask blend)
+     *     instead of the uint16 path's 4 chunks (3 mask blends).
      *
-     * Table layout (8 × __m512i × 32 uint16 = 8 × 64 B = 512 B):
-     *   group 0  chars [  0,  64)   ->  (t0, t1)  covers entries [  0,  64)
-     *   group 1  chars [ 64, 128)   ->  (t2, t3)  covers entries [ 64, 128)
-     *   group 2  chars [128, 192)   ->  (t4, t5)  covers entries [128, 192)
-     *   group 3  chars [192, 256)   ->  (t6, t7)  covers entries [192, 256)
+     *  2. The chunk-selector mask is char >> 7 -- exactly bit 7 of each
+     *     char byte -- so `_mm512_movepi8_mask(chars)` produces it in
+     *     one instruction.  The uint16 path needs vpsrlw + 3× vpcmpeqw
+     *     to compute three comparisons against {1, 2, 3}.
      *
-     * Per 32 input chars we do 4 lookups (one against each group), and
-     * each lookup gives the correct uint16 for chars that happen to
-     * live in that group AND a (wrong but harmless) value for chars
-     * that don't.  A 4-way blend chained by `group == k` masks then
-     * selects the right one per lane.
+     *  3. 64 chars / iter (vs 32 in the uint16 path) -- one ZMM load of
+     *     symbols, one ZMM produced per byte half.
      *
-     * Worked example for one lane:
-     *   char = 0xA3 = 163.  group = 163 >> 6 = 2.  char & 0x3F = 35.
-     *   r0 = code_la[ 0 + 35] (group-0 chunk; wrong)
-     *   r1 = code_la[64 + 35] (group-1; wrong)
-     *   r2 = code_la[128 + 35] = code_la[163] (group-2; correct)
-     *   r3 = code_la[192 + 35] (group-3; wrong)
-     *   Blend chain picks r2 because group==2 matches.
+     * Per 64 input chars:
+     *    1× vmovdqu64               (load 64 chars)
+     *    1× vpmovb2m                (top bit -> 64-bit chunk-selector mask)
+     *    4× vpermex2var_epi8        (2× lo lookup + 2× hi lookup, 1 per chunk)
+     *    2× vpblendmb               (1 for lo, 1 for hi)
+     *    2× vpermex2var_epi8        (interleave lo+hi into 2× uint16 streams)
+     *    2× vmovdqu64               (store 64 uint16 codes_la)
+     *  = 12 ops / 64 chars = 0.19 ops/char
      *
-     * Op count per 32 chars:
-     *    1× vpmovzxbw   (widen 32 bytes -> 32 uint16)
-     *    1× vpsrlw      (group = syms >> 6)
-     *    4× vpermi2w    (one per chunk pair)
-     *    3× vpcmpeqw    (group == 1, 2, 3; group==0 implicit by base res)
-     *    3× vpblendmw   (mask-blend)
-     *    1× vmovdqu64   (store 32 uint16)
-     *  = 13 ops / 32 chars = 0.41 ops/char, no scalar LSU pressure.
+     * vs the old uint16 path: 13 ops / 32 chars = 0.41 ops/char.
+     * Theoretical 2.2x throughput.
      *
-     * Register pressure: 8 ZMM held for the table + 3 ZMM for the
-     * comparison constants + ~5 working ZMM = ~16 of the 32 available.
-     * Comfortable margin.
+     * Lookup geometry (lo byte table; same for hi):
+     *   chunk 0 (chars [  0, 128)):  (lo_c0p1, lo_c0p2) hold lo bytes
+     *                                for entries [0, 63] and [64, 127].
+     *   chunk 1 (chars [128, 256)):  (lo_c1p1, lo_c1p2) hold lo bytes
+     *                                for entries [128, 191] and [192, 255].
+     *   vpermex2var_epi8 uses low 7 bits of each index, so a char value
+     *   c naturally selects entry (c & 0x7F) within whichever chunk it
+     *   belongs to.  For c < 128 the chunk-0 lookup is correct; for
+     *   c >= 128 the chunk-1 lookup is.  vpmovb2m(chars) gives the
+     *   per-lane chunk selector directly.
      *
-     * Measured wins (c8i / c8a) on prose_pride, ns/blk for enc_init:
-     *   c8a Zen 5:        1856 -> 267  (7.0x; 46% wall -> 11% wall)
-     *   c8i Granite:      1848 -> 826  (2.2x; 34% wall -> 19% wall)
-     * c8a Zen 5 prose_pride encode 2037 -> 3424 M/s (+68%).
-     * Asymmetry is Granite Rapids' slower vpermi2w throughput. */
+     * The two byte halves are then interleaved into the sequential
+     * uint16 stream by two more vpermex2var_epi8 calls with constant
+     * selector tables (inter_sel0 produces uint16 codes for chars
+     * 0..31, inter_sel1 for chars 32..63).  This avoids the in-lane
+     * vpunpcklbw / vpunpckhbw limitation (those don't span 128-bit
+     * lanes, so they'd put codes out of order across the ZMM).
+     *
+     * Register pressure: 4 lo + 4 hi byte-table chunks + 2 interleave
+     * selectors + ~5 working = ~15 ZMM, fine in the 32-ZMM AVX-512 file.
+     *
+     * Requires AVX-512 VBMI for vpermex2var_epi8 (gated by build tier:
+     * c8a Zen 5, c8i Granite Rapids).  Falls back to the uint16 path
+     * for the (currently impossible) n < 64 tail. */
 
-    /* Load all 8 chunks of the code_la table.  Pinned for the duration
-     * of the loop in ZMM registers; the compiler does NOT spill these
-     * even at -O3 (we have plenty of headroom). */
-    __m512i t0 = _mm512_loadu_si512((const __m512i *)&table->code_la[  0]);
-    __m512i t1 = _mm512_loadu_si512((const __m512i *)&table->code_la[ 32]);
-    __m512i t2 = _mm512_loadu_si512((const __m512i *)&table->code_la[ 64]);
-    __m512i t3 = _mm512_loadu_si512((const __m512i *)&table->code_la[ 96]);
-    __m512i t4 = _mm512_loadu_si512((const __m512i *)&table->code_la[128]);
-    __m512i t5 = _mm512_loadu_si512((const __m512i *)&table->code_la[160]);
-    __m512i t6 = _mm512_loadu_si512((const __m512i *)&table->code_la[192]);
-    __m512i t7 = _mm512_loadu_si512((const __m512i *)&table->code_la[224]);
-    /* Broadcast constants for the group comparison. */
-    __m512i one   = _mm512_set1_epi16(1);
-    __m512i two   = _mm512_set1_epi16(2);
-    __m512i three = _mm512_set1_epi16(3);
+    /* --- Build lo/hi byte tables from the uint16 code_la table. --- *
+     * Each byte-table chunk holds 64 sequential entries' lo (or hi)
+     * bytes; two chunks per byte-half pair the chars [0,128) and
+     * [128,256) regions for vpermex2var_epi8. */
+    __m512i u0 = _mm512_loadu_si512((const __m512i *)&table->code_la[  0]);
+    __m512i u1 = _mm512_loadu_si512((const __m512i *)&table->code_la[ 32]);
+    __m512i u2 = _mm512_loadu_si512((const __m512i *)&table->code_la[ 64]);
+    __m512i u3 = _mm512_loadu_si512((const __m512i *)&table->code_la[ 96]);
+    __m512i u4 = _mm512_loadu_si512((const __m512i *)&table->code_la[128]);
+    __m512i u5 = _mm512_loadu_si512((const __m512i *)&table->code_la[160]);
+    __m512i u6 = _mm512_loadu_si512((const __m512i *)&table->code_la[192]);
+    __m512i u7 = _mm512_loadu_si512((const __m512i *)&table->code_la[224]);
+
+    /* vpmovwb: narrow each __m512i of 32 uint16 to a __m256i of 32
+     * uint8 (low byte only). */
+    __m512i lo_c0p1 = _mm512_inserti64x4(
+        _mm512_castsi256_si512(_mm512_cvtepi16_epi8(u0)),
+        _mm512_cvtepi16_epi8(u1), 1);     /* entries 0..63 lo bytes */
+    __m512i lo_c0p2 = _mm512_inserti64x4(
+        _mm512_castsi256_si512(_mm512_cvtepi16_epi8(u2)),
+        _mm512_cvtepi16_epi8(u3), 1);     /* entries 64..127 lo bytes */
+    __m512i lo_c1p1 = _mm512_inserti64x4(
+        _mm512_castsi256_si512(_mm512_cvtepi16_epi8(u4)),
+        _mm512_cvtepi16_epi8(u5), 1);     /* entries 128..191 lo bytes */
+    __m512i lo_c1p2 = _mm512_inserti64x4(
+        _mm512_castsi256_si512(_mm512_cvtepi16_epi8(u6)),
+        _mm512_cvtepi16_epi8(u7), 1);     /* entries 192..255 lo bytes */
+
+    /* Hi bytes: shift right by 8 first to put the hi byte at low. */
+    __m512i hi_c0p1 = _mm512_inserti64x4(
+        _mm512_castsi256_si512(_mm512_cvtepi16_epi8(_mm512_srli_epi16(u0, 8))),
+        _mm512_cvtepi16_epi8(_mm512_srli_epi16(u1, 8)), 1);
+    __m512i hi_c0p2 = _mm512_inserti64x4(
+        _mm512_castsi256_si512(_mm512_cvtepi16_epi8(_mm512_srli_epi16(u2, 8))),
+        _mm512_cvtepi16_epi8(_mm512_srli_epi16(u3, 8)), 1);
+    __m512i hi_c1p1 = _mm512_inserti64x4(
+        _mm512_castsi256_si512(_mm512_cvtepi16_epi8(_mm512_srli_epi16(u4, 8))),
+        _mm512_cvtepi16_epi8(_mm512_srli_epi16(u5, 8)), 1);
+    __m512i hi_c1p2 = _mm512_inserti64x4(
+        _mm512_castsi256_si512(_mm512_cvtepi16_epi8(_mm512_srli_epi16(u6, 8))),
+        _mm512_cvtepi16_epi8(_mm512_srli_epi16(u7, 8)), 1);
+
+    /* Interleave selectors.  vpermex2var_epi8 takes 64 byte indices and
+     * picks from two 64-byte sources; bit 6 of the index selects which
+     * source (0 = first / lo, 0x40 = second / hi).  We want the output
+     * to be the sequential uint16 stream for chars 0..31 (resp. 32..63):
+     *   out_byte[2k]   = lo[k_offset + k]       (low byte of uint16 k)
+     *   out_byte[2k+1] = hi[k_offset + k]       (high byte of uint16 k)
+     */
+    static const uint8_t inter_sel0_tab[64] __attribute__((aligned(64))) = {
+         0, 64,  1, 65,  2, 66,  3, 67,  4, 68,  5, 69,  6, 70,  7, 71,
+         8, 72,  9, 73, 10, 74, 11, 75, 12, 76, 13, 77, 14, 78, 15, 79,
+        16, 80, 17, 81, 18, 82, 19, 83, 20, 84, 21, 85, 22, 86, 23, 87,
+        24, 88, 25, 89, 26, 90, 27, 91, 28, 92, 29, 93, 30, 94, 31, 95
+    };
+    static const uint8_t inter_sel1_tab[64] __attribute__((aligned(64))) = {
+        32, 96, 33, 97, 34, 98, 35, 99, 36,100, 37,101, 38,102, 39,103,
+        40,104, 41,105, 42,106, 43,107, 44,108, 45,109, 46,110, 47,111,
+        48,112, 49,113, 50,114, 51,115, 52,116, 53,117, 54,118, 55,119,
+        56,120, 57,121, 58,122, 59,123, 60,124, 61,125, 62,126, 63,127
+    };
+    __m512i sel0 = _mm512_load_si512((const __m512i *)inter_sel0_tab);
+    __m512i sel1 = _mm512_load_si512((const __m512i *)inter_sel1_tab);
 
     PROF_TIC();
     int i = 0;
-    for (; i + 32 <= N; i += 32) {
-        /* Load 32 chars, widen to 32 uint16 lanes. */
-        __m256i chars = _mm256_loadu_si256((const __m256i *)(symbols + i));
-        __m512i syms  = _mm512_cvtepu8_epi16(chars);
-        /* Top 2 bits select which of the 4 chunk-pairs holds the
-         * correct entry for this lane. */
-        __m512i group = _mm512_srli_epi16(syms, 6);
+    for (; i + 64 <= N; i += 64) {
+        /* Load 64 chars in one shot. */
+        __m512i chars = _mm512_loadu_si512((const __m512i *)(symbols + i));
+        /* Top bit = chunk selector (0 if char in [0,128), 1 if [128,256)). */
+        __mmask64 hi_chunk = _mm512_movepi8_mask(chars);
 
-        /* Four parallel 64-entry table lookups.  Only the lookup
-         * matching `group` for each lane gives the correct value;
-         * the other three lookups produce wrong-group entries that
-         * get masked out by the blend chain below. */
-        __m512i r0 = _mm512_permutex2var_epi16(t0, syms, t1);  /* entries   0..63  */
-        __m512i r1 = _mm512_permutex2var_epi16(t2, syms, t3);  /* entries  64..127 */
-        __m512i r2 = _mm512_permutex2var_epi16(t4, syms, t5);  /* entries 128..191 */
-        __m512i r3 = _mm512_permutex2var_epi16(t6, syms, t7);  /* entries 192..255 */
+        /* Lo-byte lookup against both chunks; blend by chunk selector. */
+        __m512i lo0 = _mm512_permutex2var_epi8(lo_c0p1, chars, lo_c0p2);
+        __m512i lo1 = _mm512_permutex2var_epi8(lo_c1p1, chars, lo_c1p2);
+        __m512i lo  = _mm512_mask_blend_epi8(hi_chunk, lo0, lo1);
 
-        /* 4-way select: start with r0 (the group==0 candidate), then
-         * overwrite lanes where group is 1, 2, or 3.  The chain has 3
-         * data-dependent blends -- but the four vpermi2w can overlap. */
-        __m512i res = r0;
-        res = _mm512_mask_blend_epi16(_mm512_cmpeq_epi16_mask(group, one),   res, r1);
-        res = _mm512_mask_blend_epi16(_mm512_cmpeq_epi16_mask(group, two),   res, r2);
-        res = _mm512_mask_blend_epi16(_mm512_cmpeq_epi16_mask(group, three), res, r3);
+        /* Hi-byte lookup symmetric. */
+        __m512i hi0 = _mm512_permutex2var_epi8(hi_c0p1, chars, hi_c0p2);
+        __m512i hi1 = _mm512_permutex2var_epi8(hi_c1p1, chars, hi_c1p2);
+        __m512i hi  = _mm512_mask_blend_epi8(hi_chunk, hi0, hi1);
 
-        _mm512_storeu_si512((__m512i *)(codes_la + i), res);
+        /* Interleave lo + hi into sequential uint16 stream. */
+        __m512i out0 = _mm512_permutex2var_epi8(lo, sel0, hi);  /* chars 0..31 */
+        __m512i out1 = _mm512_permutex2var_epi8(lo, sel1, hi);  /* chars 32..63 */
+
+        _mm512_storeu_si512((__m512i *)(codes_la + i     ), out0);
+        _mm512_storeu_si512((__m512i *)(codes_la + i + 32), out1);
     }
-    /* Scalar tail.  PIVCO_BLOCK_SIZE is always a multiple of 32 on
-     * AVX-512 hosts, so this is currently dead code -- kept defensively
-     * in case the block size ever drops. */
+    /* Scalar tail.  PIVCO_BLOCK_SIZE is always a multiple of 64 on
+     * AVX-512 hosts, so this is currently dead code -- kept defensively. */
     for (; i < N; i++) codes_la[i] = table->code_la[symbols[i]];
     PROF_TOC(PROF_ENC_INIT, N);
 

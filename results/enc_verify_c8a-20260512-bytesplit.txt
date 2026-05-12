@@ -1,0 +1,62 @@
+[100%] Built target pivco_huffman_profile_english
+---decode bench---
+DECODE M/s    | pivco_s pivco_n pivco_bu | trad_4s | huf0_x1 huf0_x2 |   ratio
+english       |     117    3324    9555 |    1210 |    1763    3184 |  3.00x
+html_wiki     |      89    2523    5092 |    1148 |    1760    2699 |  1.89x
+prose_pride   |      85    2559    6236 |    1147 |    1762    2988 |  2.09x
+image_jpeg    |     135    2697    4451 |    1212 |    1752    1673 |  2.54x
+json_api      |      83    2520    5300 |    1148 |    1767    2868 |  1.85x
+english       |    10   30   12    3    1   13 |   12   10 |    2230250    2241386 |    2235169    2227841    2228088    2215515
+html_wiki     |    11  197   90    9    1   96 |   21   13 |    2959047    2975943 |    2961212    2910766    2911016    2870339
+prose_pride   |    11   96   46    4    1   44 |   19   16 |    2419062    2436790 |    2422522    2403707    2403956    2375005
+image_jpeg    |    10  256  121    6    1  127 |    9    4 |    4154045    4160381 |    4159142    4152083    4152331    4135145
+---encode all---
+=== PIVCO-Huffman Encode Benchmarks (PIVCO_MAX_CODE_LEN=11) ===
+Sequence: 4M, Repeats: 25 (100M/run), Block: 8192, Runs: 5 (drop 2)
+Distribution set: ALL (29 distributions)
+
+ENCODE M/s    |  pivco_s    pivco |  trad_4s |  huf0_x1  huf0_x2 |   ratio
+--------------|-------------------|----------|-------------------|--------
+proba80       |      196    13807 |     1235 |     1388     1388 |  9.95x
+proba50       |       63     7874 |      967 |     1540     1539 |  5.11x
+proba14       |       41     3814 |      774 |     1690     1691 |  2.26x
+proba02       |       42     3047 |      640 |     1651     1651 |  1.85x
+bell_s10      |       71     4955 |      660 |     1721     1719 |  2.88x
+bell_s30      |       42     3325 |      645 |     1674     1669 |  1.99x
+bell_s80      |       76     5321 |      918 |     4908     4911 |  1.08x
+uniform       |      592    33688 |     1130 |     4849     4861 |  6.93x
+english       |       52     4524 |      794 |     1684     1681 |  2.69x
+zipfian       |       38     3496 |      549 |     1661     1660 |  2.10x
+sparse_4      |      962     8240 |     1796 |     1624     1624 |  5.07x
+sparse_16     |      823     9096 |     1495 |     1710     1711 |  5.32x
+geometric     |       64     7924 |      816 |     1534     1535 |  5.16x
+two_sym_eq    |      124    17715 |     1981 |     1511     1511 | 11.73x
+two_sym_90/10 |      360    18675 |     1980 |     1334     1334 | 14.00x
+flat_M3       |      889     8670 |     1640 |     1661     1660 |  5.22x
+flat_M5       |      755     8643 |     1391 |     1760     1759 |  4.91x
+flat_M6       |      703     7719 |     1297 |     1778     1778 |  4.34x
+flat_M7       |      644     8613 |     1214 |     1681     1680 |  5.12x
+html_wiki     |       41     3215 |      656 |     1707     1705 |  1.88x
+prose_pride   |       37     3664 |      690 |     1670     1668 |  2.19x
+image_jpeg    |       64     4512 |      882 |     1565     1563 |  2.88x
+json_api      |       37     3279 |      688 |     1705     1704 |  1.92x
+source_c      |       41     3240 |      614 |     1678     1677 |  1.93x
+log_apache    |       40     3106 |      735 |     1732     1731 |  1.79x
+dna_fasta     |       61     8279 |     1113 |     1601     1601 |  5.17x
+csv_numeric   |       52     4758 |      761 |     1616     1616 |  2.94x
+gzip_random   |      593    33643 |     1130 |     4851     4852 |  6.93x
+chinese_text  |       40     3507 |      641 |     1716     1717 |  2.04x
+
+  5 runs of 100M symbols each (25x 4M), drop 2 slowest, warn if spread > 5%
+  PIVCO/trad encode in 8192-symbol blocks; huf0 in 128KB chunks
+---encode prof---
+=== pivco_prof: ENCODE prose_pride / BLK=8192 ===
+  wall: 23.846 s   blocks: 10240000   counter freq: 2599.98 MHz
+
+  primitive                               calls       elements  elem/call    ns/call    ns/elem  % wall
+  --------------------------------------------------------------------------------------------------
+  enc_init                             10240000    83886080000     8192.0      137.0       0.02   5.88%
+  enc_node_full                       184620000   287881480000     1559.3       83.7       0.05  64.83%
+  enc_flat                             40960000    37675180000      919.8      102.1       0.11  17.53%
+  enc_node_calls                      225580000   325556660000     1443.2    (count)    (count)     —
+  enc_entry                            10240000    83886080000     8192.0    (count)    (count)     —
