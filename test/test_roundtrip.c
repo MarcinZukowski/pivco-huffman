@@ -213,6 +213,23 @@ static int test_roundtrip_dist(const char *name, const uint64_t freq[PIVCO_MAX_S
         }
     }
 
+    /* Cross-check: NEON-encoded stream against scalar decoder.
+     * Catches encoder bugs that NEON decode reads symmetrically. */
+    {
+        uint8_t cross_dec[PIVCO_BLOCK_SIZE];
+        size_t cross_consumed;
+        rc = pivco_huffman_decode_scalar(neon_enc, neon_len, &table,
+                                          cross_dec, &cross_consumed);
+        if (rc != PIVCO_OK) FAIL("neon-enc -> scalar-dec rc=%d", rc);
+        for (int i = 0; i < PIVCO_BLOCK_SIZE; i++) {
+            if (symbols[i] != cross_dec[i]) {
+                FAIL("neon-enc / scalar-dec mismatch at %d: "
+                     "expected %d, got %d",
+                     i, symbols[i], cross_dec[i]);
+            }
+        }
+    }
+
     /* Prefix backend — works on both flat and non-flat trees with
      * min_len in [1, 8]. */
     if (table.min_len >= 1 && table.min_len <= 8) {
