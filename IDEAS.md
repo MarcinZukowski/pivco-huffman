@@ -1,5 +1,178 @@
 # PIVCO-Huffman Decode Ideas
 
+## SIMD/GPU Huffman literature survey — open (2026-05-12)
+
+**Status: research only, individual items below to be evaluated.**
+
+Survey of 2018-2026 SIMD/GPU Huffman work, looking for techniques
+applicable to this library.  Confirmed that the core DFS tree-walk
+SIMD partition (vqtbl1q/pshufb/vpcompressw at internal nodes) has no
+prior art -- novel.  Closest conceptual relative: alias-Huffman.
+
+### Encoder-side findings
+
+- **vpcompressw to memory is ~40× slower on Zen 4** (Lemire, Feb
+  2025).  We use the explicit register-then-store pattern in source,
+  but GCC may fuse into the memory-form instruction.  Suspicious
+  candidate for c8a's encoder regression with the uint8 dispatch on
+  -- worth checking generated asm before pursuing further.
+  https://lemire.me/blog/2025/02/14/avx-512-gotcha-avoid-compressing-words-to-memory-with-amd-zen-4-processors/
+
+- **MSB-first canonical-table build + bit-reverse permute** (ryg,
+  Oodle, Aug 2021).  Eliminates scatter writes in `build_table` by
+  building in natural sequential order then applying a SIMD-friendly
+  bit-reverse permutation.  Direct port to our `huffman_table.c`.
+  Minor in absolute terms (build_table is amortized) but useful for
+  multi-block scenarios.
+  https://fgiesen.wordpress.com/2021/08/30/entropy-coding-in-oodle-data-huffman-coding/
+
+- **Reduction-based parallel encoder** (Tian/Rivera, "Revisiting
+  Huffman", PACT 2021).  Iteratively merge encoded symbol pairs
+  segmented-scan style.  Alternative to per-symbol shift-or; might
+  map cleanly to vpcompressw byte-aligned re-merges.  Worth a small
+  prototype if encoder gets stuck.
+  https://arxiv.org/abs/2010.10039
+
+### Decoder-side findings
+
+- **Oodle 6-stream BMI2 decode design** (ryg, Oct 2023).  6 streams
+  × 5 symbols/iter, ~1.37 RDTSC ticks/symbol on Zen 4.  Pair-of-3
+  topology with explicit issue-slot accounting (188 slots/iter).
+  Worth reading carefully -- SOTA branchless decoder reference even
+  if we keep our tree-walk approach.
+  https://fgiesen.wordpress.com/2023/10/29/entropy-decoding-in-oodle-data-x86-64-6-stream-huffman-decoders/
+
+- **Alias Huffman coding** (ryg, 2014).  Walker alias method applied
+  to canonical Huffman: every code decodes via single fixed-width
+  D-bit table lookup, even when codes are longer than D.  This is
+  the conceptual generalization of our flat-subtree path to the
+  whole table.  Worth understanding deeply -- it's the technique
+  closest to what we're already doing.
+  https://fgiesen.wordpress.com/2014/12/09/from-the-archives-alias-huffman-coding/
+
+- **Gap arrays for multicore intra-stream decode** (Yamamoto et al.,
+  ICPP 2020).  Auxiliary bit-offset array at fixed-symbol intervals
+  enables parallel decode within one stream (skip self-sync scan).
+  Relevant for our `extras/bench_multicore.c` if we want multi-core
+  decode of huge streams someday.
+  https://dl.acm.org/doi/10.1145/3404397.3404429
+
+- **AVX-512 Huffman-SIMD encoder** (IEEE TCE 2023): 8 sub-tables
+  with flag bits to fit register budget, 2.66× speedup.  Reference
+  AVX-512 encoder design point; kernel ideas less novel.
+  https://dl.acm.org/doi/abs/10.1109/TCE.2023.3347229
+
+### GPU-specific (might inspire CPU)
+
+- **GDEFLATE / Brotli-G 32-way bit swizzling**: codeword bits spread
+  across 32 substreams so a warp can each grab a contiguous bit
+  window.  CPU analog: if we bit-interleaved our flat-subtree packed
+  regions across 4-8 streams, decode could be one VPMULTISHIFTQB +
+  shift-and-mask per N symbols.  Worth a microbench.
+  https://www.ietf.org/archive/id/draft-uralsky-gdeflate-00.html
+  https://gpuopen.com/brotlig-sdk/
+
+- **PHD subsequence pipelining** (DAC 2024).  "Subsequence" granularity
+  between block and symbol is also useful on CPU for multi-way decode
+  decomposition.
+  https://dl.acm.org/doi/10.1145/3649329.3655967
+
+- **Rivera IPDPS '22 shared-memory Huffman decode**: 3.64× over cuSZ
+  via shared-memory tuning + coalesced access.  GPU-specific.
+  https://github.com/codyjrivera/ipdps22-opthuffdec
+
+### Repos to study
+- https://github.com/weissenberger/gpuhd (CUDA, self-sync)
+- https://github.com/szcompressor/cuSZ (GPU pipeline reference)
+- https://github.com/microsoft/DirectStorage (GDEFLATE)
+- https://github.com/veluca93/fpnge (AVX2 PNG; concise custom-Huffman kernel)
+- https://github.com/powturbo/TurboBench (TurboHF ~1 Gsym/s claim)
+
+### Explicitly NOT worth re-reading
+huf0/zstd 11-bit branchless (covered), FSE/tANS, range/arith coding,
+classical canonical-Huffman LUTs (Nekrich), ASPLOS SIMD FSM papers,
+2026 "Single-Stage Huffman Encoder for ML Compression"
+(arxiv 2601.10673) is fixed-codebook, not applicable.
+
+### Decode-specific findings (second pass)
+
+- **dougallj "decoder convergence" parallel decode** (Jul 2022,
+  ~25% DEFLATE speedup on M1).  Run N decoders at N consecutive
+  byte-offsets; advance the lowest-offset one until duplicates
+  collapse -- guaranteed sync point within MAX_CODE_LEN bytes.
+  Different from gap arrays / Yamamoto: needs no encoder
+  cooperation and works on any prefix code.  **This is the most
+  interesting find of the survey** -- gives intra-stream parallelism
+  with zero metadata cost.  Hard to apply to our DFS tree-walk
+  format directly (we partition by depth, not bit position) but
+  worth deeply understanding.
+  https://dougallj.wordpress.com/2022/07/30/parallelising-huffman-decoding-and-x86-disassembly-by-synchronising-non-self-synchronising-prefix-codes/
+
+- **`vpmultishiftqb` (AVX-512 VBMI) as bit-field gather.**  Extracts
+  arbitrary 8-bit fields starting at any bit position from 64-bit
+  lanes in parallel -- exactly the "read up to 8 codewords from one
+  register" primitive.  Almost no public Huffman impl uses it.
+  Could replace our flat-subtree packed-region read on Intel: one
+  vpmultishiftqb gives 8 D-bit fields out of 64 bits in a single
+  op.  **Worth a microbench against our current pack/unpack.**
+  https://www.felixcloutier.com/x86/vpmultishiftqb
+  https://en.wikichip.org/wiki/x86/avx512_vbmi
+
+- **vpexpandb (AVX-512 VBMI2)** -- the decode-side complement of
+  vpcompressb.  Could be useful in the inverse of our u8 partition
+  (decode-side scatter) if we ever explore that.
+  https://en.wikichip.org/wiki/x86/avx512_vbmi2
+
+- **0x80.pl SIMD-PDEP/PEXT replacements** (Jan 2025).  Documents
+  AVX-512 vpshufbitqmb + compress as PDEP/PEXT substitutes when
+  PDEP/PEXT are slow (Zen pre-3 emulates these in microcode).
+  Could be useful for flat-subtree unpack on AMD.
+  http://0x80.pl/notesen/2025-01-05-simd-pdep-pext.html
+
+- **Intel IAA hardware Huffman + AECS** (Sapphire/Granite Rapids).
+  Tens of GB/s, programmable via QPL.  "AECS save/restore" makes
+  Huffman a pipelineable streaming primitive.  Not portable, but
+  the c8i baseline ceiling matters for context.  CMU 2025 ADMS
+  paper has real numbers.  https://db.cs.cmu.edu/papers/2025/laspias-adms2025.pdf
+  https://intel.github.io/qpl/documentation/dev_guide_docs/c_use_cases/c_huffman_only.html
+
+- **NVIDIA Blackwell HW Decompression Engine** -- 600 GB/s nvCOMP
+  4.2 (2025).  Context only; SW warp-coop GDeflate still best
+  public ref for "32 threads share one bit window".
+  https://docs.nvidia.com/cuda/nvcomp/gdeflate.html
+
+- **libjxl** -- cleanest open-source production multi-stream
+  Huffman, ships an ANS path alongside for direct comparison
+  (`lib/jxl/dec_ans.cc`, `dec_huffman.cc`).  Uses Google's Highway
+  SIMD wrappers.  https://github.com/libjxl/libjxl
+
+- **CRAM 3.1 / Genozip order-1 rANS SIMD** -- one of the few
+  domains still pushing software entropy decode hard.  Order-1
+  model competes with Huffman head-on; CRAM 3.1 supplement details
+  per-stream throughput.  https://pmc.ncbi.nlm.nih.gov/articles/PMC8896640/
+  https://github.com/divonlan/genozip
+
+- **FastLanes / ALP (CWI)** -- not Huffman, but the
+  "decode-unit-fits-in-one-SIMD-register, avoid bit-stream concept
+  entirely" philosophy is the strongest current counter-argument
+  to our DFS-tree-walk design.  Worth understanding what they trade
+  off.  https://github.com/cwida/ALP
+  https://www.vldb.org/pvldb/vol18/p4629-afroozeh.pdf
+
+### Sharp negative findings (frontier still open)
+- No SVE2 or RISC-V V Huffman work in public literature 2024-2026.
+- AVX10 added no Huffman-specific instructions beyond AVX-512.
+- The unexplored frontier is **vpmultishiftqb-based bitfield gather**
+  and **decoder-convergence parallelism** -- both untouched on ARM.
+
+### Additional production codebases to study
+- `microsoft/DirectStorage/GDeflate` -- 32-thread CUDA + scalar ref
+- `NVIDIA/nvcomp/examples/gdeflate/` -- warp-cooperative source
+- `intel/qpl` -- QPL software path co-designed with IAA
+- `cwida/FastLanes` -- decode philosophy contrast
+
+---
+
 ## AVX-512 enc_init via vpermi2w hierarchical gather — open (2026-05-12)
 
 **Status: about to test.**
