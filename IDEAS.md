@@ -1,5 +1,99 @@
 # PIVCO-Huffman Decode Ideas
 
+## AVX-512 enc_init via vpermi2w hierarchical gather — open (2026-05-12)
+
+**Status: about to test.**
+
+After the dense-codes + SIMD pack landings, `enc_init` is the
+dominant slice on AVX-512 hosts (34% of wall on c8i, **46%** on c8a
+Zen 5 where everything else is fast).  The current code is scalar:
+
+```c
+for (int i = 0; i < N; i++) codes_la[i] = table->code_la[symbols[i]];
+```
+
+256 × uint16 = 512-byte LUT.  M4 NEON microbench established this is
+LSU-bound (3 loads/cycle, output 10.4 GB/s ≈ 65% of the scalar-store
+ceiling; NEON_TBL only buys 11% per `extras/bench_enc_init.c`).
+
+**Why AVX-512 might do better than NEON could:**
+
+`_mm512_permutex2var_epi16` (AVX-512 BW): single instruction that
+permutes 32 uint16 lanes from two 32-entry source registers (= 64
+total entries) by 32 6-bit indices.  Apply 4 times with 4 different
+64-entry chunks, blend by the input's top 2 bits, and we cover the
+full 256-entry table in pure vector ops -- no LSU bottleneck.
+
+Per 32 input chars:
+```
+1× _mm256_loadu_si256        (load 32 chars)
+1× _mm512_cvtepu8_epi16      (widen to 32 uint16)
+1× _mm512_srli_epi16(v,6)    (compute group)
+4× _mm512_permutex2var_epi16 (one per 64-entry chunk)
+3× _mm512_cmpeq_epi16_mask   (group == k for k=1,2,3)
+3× _mm512_mask_blend_epi16
+1× _mm512_storeu_si512
+= 13 ops / 32 chars = 0.41 ops/char
+```
+
+Plus an 8× one-time load of the table chunks outside the loop.
+
+**Register pressure check** (user's concern): 8 ZMM registers to hold
+the table.  AVX-512 has 32 ZMM registers, so 8 + working state
+(~6-8 more) leaves plenty of headroom.
+
+**Projection** (c8i, 1843 ns/blk enc_init at 0.23 ns/elem):
+13 ops × 8192/32 iters / 2.7 GHz × ~1 cycle/op ≈ 750 ns/blk
+→ 0.09 ns/elem, 2.5× the slice.  At 34% slice, ~20% total wall =
+prose_pride 1653 → ~2000 M/s.  c8a (46% slice) would gain more in
+absolute terms.
+
+**Caveats:** vpermi2w is 3 cycles on Intel/AMD (not 1).  Actual
+end-to-end gain probably smaller than the napkin.  Measure.
+
+## AVX-512 pack_dN wider strides — open (2026-05-12)
+
+Current AVX-512 pack_dN uses 8 codes/iter via uint64 lanes (8 lanes
+× max-shift 7*7=49 fits 64-bit lane).  Wider variants possible for
+small D:
+
+- D=2: 32 codes/iter using 16 uint32 lanes (max shift 15*2=30 < 32),
+  or 64 codes/iter using 32 uint16 lanes (max shift 15*2=30 — but
+  uint16 lane only 16-bit, doesn't fit 32 bits).  So 32 codes/iter.
+- D=4: 16 codes/iter using 16 uint32 lanes (max shift 15*4=60 — too
+  big).  Use 8 lanes × uint64 (current) for 8 codes/iter.
+
+Modest impact: D=2 occurs on most text dists (4-7 flat nodes/blk).
+Doubling stride might shave 30-40% off the D=2 portion of enc_flat,
+but enc_flat is already only ~15% of c8i wall.  Net: 3-5%.
+
+Defer behind enc_init.
+
+## SSE4.1 / AVX2 enc_node_full gap vs huf0 on text — open (2026-05-12)
+
+Older Intel hosts (c3 Ivy Bridge, c4 Haswell, c5 Cascade Lake) and
+Zen 3 (c6a) still trail huf0_x2 by ~25-30% on text encode after the
+SIMD pack landing.  Bottleneck is `enc_node_full` at 0.27 ns/elem on
+c6a (vs 0.08 on AVX-512 hosts) -- driven by SSE `pshufb` partitioning
+8 elements/iter, no `vpcompressw` equivalent.
+
+Two angles, neither obvious:
+
+1. **AVX2 unrolled partition_8**.  Pair two pshufb partitions in one
+   loop iter (V4-style 2x unroll on x86).  Already tested on NEON
+   bu_tree_merge; here the partition is simpler so the gain is
+   probably smaller, maybe 10-15%.
+
+2. **AVX2 partition_16 via two pshufb + concat**.  Build a
+   compress_tab_16[65536][...] -- too big (1 MB).  Or split a 16-bit
+   mask into two 8-bit halves, run two pshufb pipelines in parallel.
+   Same effective throughput as 2x unroll.
+
+3. **Pack 4 streams in parallel** (FastLanes-style).  Would be a
+   format change.  See BITPACKING.md.
+
+Lower priority than enc_init; partition is already SIMD'd.
+
 ## Root fusion (init + root encode) — tried, lost (2026-05-11)
 
 **Hypothesis.**  The NEON encoder does a separate `enc_init` pass

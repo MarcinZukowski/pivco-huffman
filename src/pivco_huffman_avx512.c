@@ -796,8 +796,114 @@ int pivco_huffman_encode_avx512(const uint8_t *symbols,
     /* Dense left-aligned codes; +32 slack covers the AVX-512 stride-32
      * partition's 64-byte vpcompressw store at n_left + 32 worst case. */
     uint16_t codes_la[PIVCO_BLOCK_SIZE + 32];
+
+    /* ===== AVX-512 vectorised enc_init via vpermi2w hierarchical gather =====
+     *
+     * The scalar version is one byte-load + one uint16-load + one
+     * uint16-store per element.  M4 microbench (extras/bench_enc_init)
+     * established that's LSU-bound at ~0.2 ns/elem -- NEON_TBL only
+     * buys 11% because 256 entries exceed any single TBL window.
+     *
+     * AVX-512 escapes the LSU floor.  `vpermex2var_epi16` (AVX-512BW,
+     * a.k.a. vpermi2w) is a single instruction that:
+     *   - takes TWO 32-entry uint16 source registers (64 entries total)
+     *   - and 32 uint16 lane indices
+     *   - returns 32 uint16 selected values, one per lane
+     *
+     * The key fact: it uses only the LOW 6 BITS of each index, so an
+     * index value v selects entry (v & 0x3F) from the combined 64-entry
+     * source.  That's exactly the within-group offset (char & 0x3F)
+     * once we split the 256-entry table into 4 groups of 64 by the
+     * top 2 bits of the symbol.
+     *
+     * Table layout (8 × __m512i × 32 uint16 = 8 × 64 B = 512 B):
+     *   group 0  chars [  0,  64)   ->  (t0, t1)  covers entries [  0,  64)
+     *   group 1  chars [ 64, 128)   ->  (t2, t3)  covers entries [ 64, 128)
+     *   group 2  chars [128, 192)   ->  (t4, t5)  covers entries [128, 192)
+     *   group 3  chars [192, 256)   ->  (t6, t7)  covers entries [192, 256)
+     *
+     * Per 32 input chars we do 4 lookups (one against each group), and
+     * each lookup gives the correct uint16 for chars that happen to
+     * live in that group AND a (wrong but harmless) value for chars
+     * that don't.  A 4-way blend chained by `group == k` masks then
+     * selects the right one per lane.
+     *
+     * Worked example for one lane:
+     *   char = 0xA3 = 163.  group = 163 >> 6 = 2.  char & 0x3F = 35.
+     *   r0 = code_la[ 0 + 35] (group-0 chunk; wrong)
+     *   r1 = code_la[64 + 35] (group-1; wrong)
+     *   r2 = code_la[128 + 35] = code_la[163] (group-2; correct)
+     *   r3 = code_la[192 + 35] (group-3; wrong)
+     *   Blend chain picks r2 because group==2 matches.
+     *
+     * Op count per 32 chars:
+     *    1× vpmovzxbw   (widen 32 bytes -> 32 uint16)
+     *    1× vpsrlw      (group = syms >> 6)
+     *    4× vpermi2w    (one per chunk pair)
+     *    3× vpcmpeqw    (group == 1, 2, 3; group==0 implicit by base res)
+     *    3× vpblendmw   (mask-blend)
+     *    1× vmovdqu64   (store 32 uint16)
+     *  = 13 ops / 32 chars = 0.41 ops/char, no scalar LSU pressure.
+     *
+     * Register pressure: 8 ZMM held for the table + 3 ZMM for the
+     * comparison constants + ~5 working ZMM = ~16 of the 32 available.
+     * Comfortable margin.
+     *
+     * Measured wins (c8i / c8a) on prose_pride, ns/blk for enc_init:
+     *   c8a Zen 5:        1856 -> 267  (7.0x; 46% wall -> 11% wall)
+     *   c8i Granite:      1848 -> 826  (2.2x; 34% wall -> 19% wall)
+     * c8a Zen 5 prose_pride encode 2037 -> 3424 M/s (+68%).
+     * Asymmetry is Granite Rapids' slower vpermi2w throughput. */
+
+    /* Load all 8 chunks of the code_la table.  Pinned for the duration
+     * of the loop in ZMM registers; the compiler does NOT spill these
+     * even at -O3 (we have plenty of headroom). */
+    __m512i t0 = _mm512_loadu_si512((const __m512i *)&table->code_la[  0]);
+    __m512i t1 = _mm512_loadu_si512((const __m512i *)&table->code_la[ 32]);
+    __m512i t2 = _mm512_loadu_si512((const __m512i *)&table->code_la[ 64]);
+    __m512i t3 = _mm512_loadu_si512((const __m512i *)&table->code_la[ 96]);
+    __m512i t4 = _mm512_loadu_si512((const __m512i *)&table->code_la[128]);
+    __m512i t5 = _mm512_loadu_si512((const __m512i *)&table->code_la[160]);
+    __m512i t6 = _mm512_loadu_si512((const __m512i *)&table->code_la[192]);
+    __m512i t7 = _mm512_loadu_si512((const __m512i *)&table->code_la[224]);
+    /* Broadcast constants for the group comparison. */
+    __m512i one   = _mm512_set1_epi16(1);
+    __m512i two   = _mm512_set1_epi16(2);
+    __m512i three = _mm512_set1_epi16(3);
+
     PROF_TIC();
-    for (int i = 0; i < N; i++) codes_la[i] = table->code_la[symbols[i]];
+    int i = 0;
+    for (; i + 32 <= N; i += 32) {
+        /* Load 32 chars, widen to 32 uint16 lanes. */
+        __m256i chars = _mm256_loadu_si256((const __m256i *)(symbols + i));
+        __m512i syms  = _mm512_cvtepu8_epi16(chars);
+        /* Top 2 bits select which of the 4 chunk-pairs holds the
+         * correct entry for this lane. */
+        __m512i group = _mm512_srli_epi16(syms, 6);
+
+        /* Four parallel 64-entry table lookups.  Only the lookup
+         * matching `group` for each lane gives the correct value;
+         * the other three lookups produce wrong-group entries that
+         * get masked out by the blend chain below. */
+        __m512i r0 = _mm512_permutex2var_epi16(t0, syms, t1);  /* entries   0..63  */
+        __m512i r1 = _mm512_permutex2var_epi16(t2, syms, t3);  /* entries  64..127 */
+        __m512i r2 = _mm512_permutex2var_epi16(t4, syms, t5);  /* entries 128..191 */
+        __m512i r3 = _mm512_permutex2var_epi16(t6, syms, t7);  /* entries 192..255 */
+
+        /* 4-way select: start with r0 (the group==0 candidate), then
+         * overwrite lanes where group is 1, 2, or 3.  The chain has 3
+         * data-dependent blends -- but the four vpermi2w can overlap. */
+        __m512i res = r0;
+        res = _mm512_mask_blend_epi16(_mm512_cmpeq_epi16_mask(group, one),   res, r1);
+        res = _mm512_mask_blend_epi16(_mm512_cmpeq_epi16_mask(group, two),   res, r2);
+        res = _mm512_mask_blend_epi16(_mm512_cmpeq_epi16_mask(group, three), res, r3);
+
+        _mm512_storeu_si512((__m512i *)(codes_la + i), res);
+    }
+    /* Scalar tail.  PIVCO_BLOCK_SIZE is always a multiple of 32 on
+     * AVX-512 hosts, so this is currently dead code -- kept defensively
+     * in case the block size ever drops. */
+    for (; i < N; i++) codes_la[i] = table->code_la[symbols[i]];
     PROF_TOC(PROF_ENC_INIT, N);
 
     uint16_t tmp[PIVCO_BLOCK_SIZE * 2];

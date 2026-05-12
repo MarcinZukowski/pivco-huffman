@@ -1,0 +1,41 @@
+[100%] Built target pivco_huffman_profile_english
+Total encoded: 2419062 bytes (4724.7 per block, max_enc=33554432)
+Verify: rc=0 consumed=4732 match=1
+out=0x7f18b51fd010 enc_buf=0x7f18b55fe010
+Decoding 512 blocks x 20000 reps = 83886080000 symbols (prose_pride)
+CPU pin: ok
+Cycle counter freq: 2599.98 MHz
+Profile mode: encode
+Starting encode loop...
+83886.1 M symbols in 24.80 s = 3383 M/s
+
+=== pivco_prof: ENCODE prose_pride / BLK=8192 ===
+  wall: 24.799 s   blocks: 10240000   counter freq: 2599.98 MHz
+
+  primitive                               calls       elements  elem/call    ns/call    ns/elem  % wall
+  --------------------------------------------------------------------------------------------------
+  enc_init                             10240000    83886080000     8192.0      267.0       0.03  11.03%
+  enc_node_full                       184620000   287881480000     1559.3       81.7       0.05  60.84%
+  enc_flat                             40960000    37675180000      919.8      102.1       0.11  16.87%
+  enc_node_calls                      225580000   325556660000     1443.2    (count)    (count)     —
+  enc_entry                            10240000    83886080000     8192.0    (count)    (count)     —
+  (unaccounted)                                                                272.9        —  11.27%
+  TOTAL (wall)                                                                2421.8        — 100.00%
+
+  Per-BLK averages:
+    enc_init                              1.0 calls/BLK       8192.0 elems/BLK
+    enc_node_full                        18.0 calls/BLK      28113.4 elems/BLK
+    enc_flat                              4.0 calls/BLK       3679.2 elems/BLK
+    enc_node_calls                       22.0 calls/BLK      31792.6 elems/BLK
+    enc_entry                             1.0 calls/BLK       8192.0 elems/BLK
+
+---decode bench---
+DECODE M/s    | pivco_s pivco_n pivco_bu | trad_4s | huf0_x1 huf0_x2 |   ratio
+english       |     117    3276    9541 |    1212 |    1764    3187 |  2.99x
+html_wiki     |      89    2513    5076 |    1149 |    1764    2703 |  1.88x
+prose_pride   |      85    2535    6238 |    1147 |    1764    2996 |  2.08x
+image_jpeg    |     135    2687    4431 |    1212 |    1753    1680 |  2.53x
+english       |    10   30   12    3    1   13 |   12   10 |    2230250    2241386 |    2235169    2227841    2228088    2215515
+html_wiki     |    11  197   90    9    1   96 |   21   13 |    2959047    2975943 |    2961212    2910766    2911016    2870339
+prose_pride   |    11   96   46    4    1   44 |   19   16 |    2419062    2436790 |    2422522    2403707    2403956    2375005
+image_jpeg    |    10  256  121    6    1  127 |    9    4 |    4154045    4160381 |    4159142    4152083    4152331    4135145
