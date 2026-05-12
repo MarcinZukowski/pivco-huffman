@@ -172,6 +172,33 @@ add_library(huf0 ${HUF0_SOURCES})
 target_include_directories(huf0 PUBLIC ext/fse/lib)
 target_compile_options(huf0 PRIVATE -w)  # suppress warnings in external code
 
+# Brotli Huffman primitives (decoder + encoder).  Vendored under
+# ext/brotli/ via `git clone --depth 1 https://github.com/google/brotli.git`.
+# We only build the minimal Huffman subset; the rest of brotli (LZ77,
+# bit stream framing) is unused.
+set(BROTLI_HUFFMAN_SOURCES
+    ext/brotli/c/dec/huffman.c
+    ext/brotli/c/dec/bit_reader.c
+    ext/brotli/c/enc/entropy_encode.c
+    ext/brotli/c/common/platform.c
+    ext/brotli/c/common/constants.c
+)
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/ext/brotli/c/dec/huffman.c)
+    add_library(brotli_huffman ${BROTLI_HUFFMAN_SOURCES})
+    target_include_directories(brotli_huffman PUBLIC
+        ext/brotli/c/include
+        ext/brotli/c/common
+        ext/brotli/c/dec
+        ext/brotli/c/enc)
+    target_compile_options(brotli_huffman PRIVATE -w)
+    set(HAVE_BROTLI_HUFFMAN ON)
+else()
+    message(STATUS "Brotli sources not found at ext/brotli; bench_brotli "
+                   "will be skipped.  Clone with: "
+                   "git clone --depth 1 https://github.com/google/brotli.git ext/brotli")
+    set(HAVE_BROTLI_HUFFMAN OFF)
+endif()
+
 # Library
 add_library(pivco_huffman ${PIVCO_SOURCES})
 target_include_directories(pivco_huffman PUBLIC include)
@@ -203,6 +230,26 @@ if(BUILD_BENCH)
     )
     target_link_libraries(pivco_huffman_bench_encode pivco_huffman huf0 m)
     target_include_directories(pivco_huffman_bench_encode PRIVATE ext/fse/lib)
+
+    # Brotli vs pivco vs huf0_x1 comparison bench.  Standalone harness:
+    # encode + decode timing across the MAIN distribution set.  Skipped
+    # if ext/brotli/ is not present.  See IDEAS.md 2026-05-12 for the
+    # negative-result verdict; this binary kept under extras/ so the
+    # comparison stays reproducible if libjxl/brotli ever change.
+    if(HAVE_BROTLI_HUFFMAN)
+        add_executable(pivco_bench_brotli
+            extras/bench_brotli.c
+            bench/bench_distributions.c
+        )
+        target_link_libraries(pivco_bench_brotli
+            pivco_huffman huf0 brotli_huffman m)
+        target_include_directories(pivco_bench_brotli PRIVATE
+            ext/fse/lib
+            ext/brotli/c/include
+            ext/brotli/c/common
+            ext/brotli/c/dec
+            ext/brotli/c/enc)
+    endif()
 
     if(TARGET_ARCH STREQUAL "arm64" OR TARGET_ARCH STREQUAL "aarch64")
         add_executable(pivco_encode_split_micro

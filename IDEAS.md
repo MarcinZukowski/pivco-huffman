@@ -145,6 +145,14 @@ classical canonical-Huffman LUTs (Nekrich), ASPLOS SIMD FSM papers,
   Huffman, ships an ANS path alongside for direct comparison
   (`lib/jxl/dec_ans.cc`, `dec_huffman.cc`).  Uses Google's Highway
   SIMD wrappers.  https://github.com/libjxl/libjxl
+  **TESTED 2026-05-12 (via Brotli, which libjxl's Huffman is a port
+  of): consistently slower than huf0_x1 on every platform.**  Decode
+  ratio brotli/huf0_x1 = 0.48-0.77× (worse on x86, better on ARM).
+  Encode ratio 0.20-0.71×.  pivco beats brotli by 5-10× on text
+  decode.  Conclusion: huf0 is the right open-source ceiling for
+  Huffman; libjxl's reputation for fast decode comes from ANS, not
+  the prefix-code primitive.  No further work warranted on
+  brotli/libjxl as a baseline.
 
 - **CRAM 3.1 / Genozip order-1 rANS SIMD** -- one of the few
   domains still pushing software entropy decode hard.  Order-1
