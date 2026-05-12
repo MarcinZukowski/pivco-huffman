@@ -158,6 +158,24 @@ int main(int argc, char **argv)
                 free(enc); free(dec); goto skip;
             }
             pivco_huffman_encode(symbols, table, enc, &len);
+            /* Cross-compare against scalar encoder's output. */
+            uint8_t *enc_scalar = (uint8_t *)malloc(PIVCO_MAX_ENCODED_SIZE);
+            size_t len_scalar;
+            pivco_huffman_encode_scalar(symbols, table, enc_scalar, &len_scalar);
+            if (len != len_scalar) {
+                fprintf(stderr, "  %s: enc len mismatch neon=%zu scalar=%zu\n",
+                        name, len, len_scalar);
+            } else {
+                for (size_t b = 0; b < len; b++) {
+                    if (enc[b] != enc_scalar[b]) {
+                        fprintf(stderr, "  %s: enc byte mismatch at %zu: "
+                                "neon=0x%02x scalar=0x%02x\n",
+                                name, b, enc[b], enc_scalar[b]);
+                        break;
+                    }
+                }
+            }
+            free(enc_scalar);
             pivco_huffman_decode_scalar(enc, len, table, dec, &consumed);
             if (memcmp(symbols, dec, BLK) != 0) {
                 fprintf(stderr, "  %s: pivco encode roundtrip FAILED\n", name);
