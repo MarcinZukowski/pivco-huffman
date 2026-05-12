@@ -64,6 +64,9 @@ typedef enum {
     PROF_ENC_FLAT,                  /* flat-subtree node: pack_D_bits */
     PROF_ENC_FLAT_SIMD_ELEMS,       /* count-only: elems handled by SIMD path */
     PROF_ENC_FLAT_TAIL_ELEMS,       /* count-only: elems handled by scalar tail */
+    PROF_ENC_REPACK_U8,             /* uint16→uint8 repack at u8-subtree dispatch */
+    PROF_ENC_NODE_FULL_U8,          /* uint8-path partition body (mirrors NODE_FULL) */
+    PROF_ENC_FLAT_U8,               /* uint8-path flat pack (mirrors ENC_FLAT) */
 
     /* Recursion + entry call counts (count-only; recursive timing
      * would double-count). */

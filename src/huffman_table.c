@@ -680,5 +680,48 @@ int pivco_huffman_build_table(const uint64_t freq[PIVCO_MAX_SYMBOLS],
             : 0;
     }
 
+    /* Populate max_leaf_depth[node] for every internal node.  Used by
+     * the encoder to detect when a subtree's remaining bits fit in a
+     * byte and can be processed with uint8-wide partitions.  Iterative
+     * post-order via tree_node_count traversal: tree nodes are
+     * allocated in order of construction (children before parents in
+     * our build), so a single pass from node 0 to tree_node_count
+     * fills max_leaf_depth bottom-up.
+     *
+     * BUT: that ordering is not guaranteed in general.  Use recursion
+     * for correctness; the depth is small (<= PIVCO_MAX_CODE_LEN). */
+    {
+        /* Iterative DFS via an explicit small stack.  Simpler than
+         * thinking about node-allocation order, and recursion-free. */
+        int stack[2 * PIVCO_MAX_TREE_NODES];
+        int top = 0;
+        stack[top++] = table->tree_root;
+        /* First pass: count children visited per node, leaf := 0. */
+        memset(table->max_leaf_depth, 0, sizeof(table->max_leaf_depth));
+        int order[PIVCO_MAX_TREE_NODES];
+        int order_n = 0;
+        while (top > 0) {
+            int16_t id = (int16_t)stack[--top];
+            order[order_n++] = id;
+            const pivco_tree_node_t *n = &table->tree[id];
+            if (n->symbol < 0) {
+                stack[top++] = n->left;
+                stack[top++] = n->right;
+            }
+        }
+        /* Process in reverse (children before parents). */
+        for (int oi = order_n - 1; oi >= 0; oi--) {
+            int16_t id = (int16_t)order[oi];
+            const pivco_tree_node_t *n = &table->tree[id];
+            if (n->symbol >= 0) {
+                table->max_leaf_depth[id] = 0;
+            } else {
+                uint8_t l = table->max_leaf_depth[n->left];
+                uint8_t r = table->max_leaf_depth[n->right];
+                table->max_leaf_depth[id] = (uint8_t)(1 + (l > r ? l : r));
+            }
+        }
+    }
+
     return PIVCO_OK;
 }

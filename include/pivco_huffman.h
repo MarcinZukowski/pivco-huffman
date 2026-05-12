@@ -130,6 +130,13 @@ typedef struct {
     uint16_t flat_offset[PIVCO_MAX_TREE_NODES];
     uint8_t  flat_code_to_sym[PIVCO_MAX_SYMBOLS];
 
+    /* Max leaf depth in the subtree rooted at this node, relative to
+     * the global tree.  At runtime, the encoder checks
+     * `max_leaf_depth[node] - depth <= 8` to decide whether to repack
+     * codes_la from uint16 to uint8 and run subsequent partitions on
+     * byte-wide SIMD. */
+    uint8_t  max_leaf_depth[PIVCO_MAX_TREE_NODES];
+
     /* Decode dispatch type per node — see pivco_node_type_t.  Set by
      * build_table after tree, prefill_node, and flat_depth are all
      * finalized.  Decoders switch on this instead of running a chain
