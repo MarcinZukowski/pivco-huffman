@@ -1,5 +1,74 @@
 # PIVCO-Huffman Decode Ideas
 
+## Entropy-skew flat-subtree split (option 2 from FSE talk) — blocked on wire format, 2026-05-13
+
+**Status: prototype written, rolled back; needs file-codec change.**
+
+Idea: at `build_table` time, if a flat-subtree candidate of depth D has
+the top-2^(D-1) leaves' total frequency vs bottom-2^(D-1) total skewed
+past some threshold (default 0.625, matching `PIVCO_FSE_MIN_THRESHOLD`),
+*don't* mark it flat.  Let it stay a regular internal node so the
+existing partition + FSE dispatch compresses the skewed routing
+bitmap.  The children, each containing the top-half or bottom-half
+2^(D-1) leaves, are themselves smaller flat candidates and may either
+split again or stay flat.
+
+The leaves within a flat candidate are already sorted by frequency
+descending (per the existing "flat-aware Huffman tree restructurer"
+canonical-code assignment in `huffman_table.c:405`), so the top-half
+is automatically all in the LEFT subtree.  Implementation is a 20-line
+addition to `flat_mark_subtrees`: compute `L_freq/total`, skip the
+flat-mark if above threshold, recurse instead.
+
+**Why it didn't work as-is: synthetic-freq round-trip kills the skew.**
+
+`src/pivcohuf_file.c` builds the encoder-side table from synthesized
+frequencies `freq_syn[s] = 2^(max_len - code_len[s])` so the decoder
+can rebuild the same table from just the serialized code-length
+nibbles.  Side effect: **every symbol within the same code-length tier
+gets identical synthetic frequency.**  In every flat subtree, top-half
+and bottom-half sum to the same total.  Skew is exactly 0.5
+universally, no split is ever triggered.  Verified by instrumented
+build on `chinese_text` first block:
+
+```
+   real_freq build_table:                 synthetic_freq build_table:
+   [flat] D=5 node=185 skew=0.718         [flat] D=5 node=185 skew=0.500
+   [flat] D=4 node=205 skew=0.619         [flat] D=4 node=205 skew=0.500
+   [flat] D=4 node=186 skew=0.598         [flat] D=4 node=186 skew=0.500
+```
+
+The encoder uses the synthetic_freq table (so the decoder can reproduce
+it from code lengths alone), so the split decision sees no skew.
+
+**Two wire-format paths to fix:**
+
+1. **Serialize within-tier ordering.**  For each code-length tier with
+   K symbols, send `~log2(K!)` bits indicating the encoder's
+   frequency-descending order.  Decoder rebuilds the same tree.
+   Roughly 50-100 bytes/block worst case; ≤0.1% on 8K blocks.  More
+   general — also fixes any future ordering-sensitive optimizations.
+
+2. **Serialize per-flat-candidate split decisions directly.**  One
+   bit per flat-candidate node: split or don't.  Roughly 30-60
+   bits/block.  Less general but minimum-bytes.
+
+**Expected ratio impact (from `TANS-INVESTIGATION.md` flat-carve-out tax):**
+
+- chinese_text: ~1.7 pp recoverable
+- html_wiki: ~2.2 pp
+- bell_s10: ~4 pp
+- prose / json / source / log: ~0.1-0.5 pp each
+- proba80 / dna_fasta / image_jpeg: 0 (their flat subtrees are either
+  tiny or genuinely flat in real frequencies)
+
+**Open design question:** the v0 FSE dispatch already produces some of
+the same effect.  When a flat subtree is *not* skewed, we don't want
+to un-flatten (we'd just spend partition + FSE work for no gain).  The
+threshold needs to be tuned to the cost of un-flattening (D extra
+marker bytes + D partition bitmaps) vs the gain from FSE-coding the
+skewed routing bits.  Tuning depends on (1) and (2)'s actual overhead.
+
 ## SSE flat_decode_direct_x86 is mostly scalar for D in {2,3,5,6} — open (2026-05-13)
 
 **Status: known perf gap, not yet measured but mechanically obvious.**
