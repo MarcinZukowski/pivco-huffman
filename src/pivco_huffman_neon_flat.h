@@ -20,9 +20,9 @@
 #error "pivco_huffman_neon_flat.h requires aarch64 NEON"
 #endif
 
+#include <arm_neon.h>
 #include <stdint.h>
 #include <string.h>
-#include <arm_neon.h>
 
 /* D=2 unpack constants: each byte of input holds 4 codes; replicate each
  * input byte to 4 output lanes, then right-shift lane k by 2k to align
