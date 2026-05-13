@@ -1,0 +1,18 @@
+ENCODE M/s    |  pivco_s    pivco |  trad_4s |  huf0_x1  huf0_x2 |   ratio
+--------------|-------------------|----------|-------------------|--------
+proba80       |      102      946 |      615 |      642      644 |  1.47x
+english       |       34      575 |      419 |      641      641 |  0.90x
+flat_M5       |      319      379 |      593 |      644      644 |  0.59x
+html_wiki     |       27      448 |      367 |      622      622 |  0.72x
+prose_pride   |       25      247 |      233 |      328      306 |  0.75x
+image_jpeg    |       29      142 |      233 |      315      286 |  0.45x
+json_api      |       19      226 |      221 |      294      294 |  0.77x
+gzip_random   |      134      739 |      251 |     1117     1116 |  0.66x
+chinese_text  |       20      196 |      213 |      321      291 |  0.61x
+
+  5 runs of 100M symbols each (25x 4M), drop 2 slowest, warn if spread > 5%
+  PIVCO/trad encode in 4096-symbol blocks; huf0 in 128KB chunks
+  ratio = pivco / max(huf0_x1, huf0_x2)
+  CPU freq drift: +9.3% (OK)
+  Total wall time: 196.5 seconds
+  WARNING: prose_pride/pivco spread 44.2% (271..485)

@@ -1,0 +1,17 @@
+ENCODE M/s    |  pivco_s    pivco |  trad_4s |  huf0_x1  huf0_x2 |   ratio
+--------------|-------------------|----------|-------------------|--------
+proba80       |      196    13757 |     1241 |     1393     1394 |  9.87x
+english       |       53     4563 |      787 |     1689     1688 |  2.70x
+flat_M5       |      802     8630 |     1395 |     1764     1761 |  4.89x
+html_wiki     |       41     3135 |      653 |     1710     1710 |  1.83x
+prose_pride   |       37     3540 |      685 |     1676     1674 |  2.11x
+image_jpeg    |       64     4629 |      884 |     1569     1569 |  2.95x
+json_api      |       38     3272 |      684 |     1706     1704 |  1.92x
+gzip_random   |      632    33125 |     1133 |     4867     4882 |  6.79x
+chinese_text  |       40     3508 |      640 |     1698     1694 |  2.07x
+
+  5 runs of 100M symbols each (25x 4M), drop 2 slowest, warn if spread > 5%
+  PIVCO/trad encode in 8192-symbol blocks; huf0 in 128KB chunks
+  ratio = pivco / max(huf0_x1, huf0_x2)
+  CPU freq drift: +1.7% (OK)
+  Total wall time: 89.2 seconds
