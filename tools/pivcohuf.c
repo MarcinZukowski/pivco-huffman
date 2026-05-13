@@ -13,6 +13,7 @@
  */
 
 #include "pivcohuf_file.h"
+#include "pivco_prof.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -226,6 +227,11 @@ int main(int argc, char **argv)
         }
         if (write_all(out_path, out_buf, out_len, force) != 0) return 2;
         print_stats("compress", in_len, out_len, t1 - t0);
+#ifdef PIVCO_PROF
+        pivco_prof_dump("pivcohuf compress", t1 - t0,
+                         pivco_prof_probe_tick_freq(),
+                         (uint64_t)((in_len + 8191) / 8192));
+#endif
         free(out_buf);
     } else if (cmd[0] == 'd') {
         size_t uncomp_size = 0;
@@ -245,6 +251,11 @@ int main(int argc, char **argv)
         }
         if (write_all(out_path, out_buf, out_len, force) != 0) return 2;
         print_stats("decompress", in_len, out_len, t1 - t0);
+#ifdef PIVCO_PROF
+        pivco_prof_dump("pivcohuf decompress", t1 - t0,
+                         pivco_prof_probe_tick_freq(),
+                         (uint64_t)((out_len + 8191) / 8192));
+#endif
         free(out_buf);
     } else {
         usage(); return 1;

@@ -3,6 +3,7 @@
 
 #include "pivcohuf_file.h"
 #include "pivco_huffman.h"
+#include "pivco_prof.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -122,12 +123,16 @@ int pivcohuf_compress(const uint8_t *in, size_t in_len,
 
     /* Build histogram over real input. */
     uint64_t real_freq[256] = {0};
-    for (size_t i = 0; i < in_len; i++) real_freq[in[i]]++;
-    if (in_len == 0) real_freq[0] = 1;
+    { PROF_TIC();
+      for (size_t i = 0; i < in_len; i++) real_freq[in[i]]++;
+      if (in_len == 0) real_freq[0] = 1;
+      PROF_TOC(PROF_FILE_HISTOGRAM, in_len); }
 
     pivco_huffman_table_t real_table;
-    if (pivco_huffman_build_table(real_freq, &real_table) != PIVCO_OK)
-        return PIVCOHUF_ERR_INTERNAL;
+    { PROF_TIC();
+      if (pivco_huffman_build_table(real_freq, &real_table) != PIVCO_OK)
+          return PIVCOHUF_ERR_INTERNAL;
+      PROF_TOC(PROF_FILE_BUILD_TABLE_REAL, 1); }
 
     /* Rebuild the table from synthesised exponential frequencies derived
      * from the code lengths -- the decoder will do exactly the same
@@ -135,17 +140,18 @@ int pivcohuf_compress(const uint8_t *in, size_t in_len,
      * deterministically produce identical code[]/code_la[]/tree[] from
      * the same inputs.  Lengths drive compression; the resulting tree
      * shape is what matters for round-trip. */
-    uint64_t freq[256] = {0};
-    int max_len = 0;
-    for (int s = 0; s < 256; s++)
-        if (real_table.code_len[s] > max_len) max_len = real_table.code_len[s];
-    for (int s = 0; s < 256; s++)
-        if (real_table.code_len[s] > 0)
-            freq[s] = (uint64_t)1 << (max_len - real_table.code_len[s]);
-
     pivco_huffman_table_t table;
-    if (pivco_huffman_build_table(freq, &table) != PIVCO_OK)
-        return PIVCOHUF_ERR_INTERNAL;
+    { PROF_TIC();
+      uint64_t freq[256] = {0};
+      int max_len = 0;
+      for (int s = 0; s < 256; s++)
+          if (real_table.code_len[s] > max_len) max_len = real_table.code_len[s];
+      for (int s = 0; s < 256; s++)
+          if (real_table.code_len[s] > 0)
+              freq[s] = (uint64_t)1 << (max_len - real_table.code_len[s]);
+      if (pivco_huffman_build_table(freq, &table) != PIVCO_OK)
+          return PIVCOHUF_ERR_INTERNAL;
+      PROF_TOC(PROF_FILE_BUILD_TABLE_SYN, 1); }
 
     /* Pad with prefill_sym (the most-frequent symbol -- always has the
      * shortest code).  Padding with arbitrary bytes can hit pathological
@@ -181,24 +187,30 @@ int pivcohuf_compress(const uint8_t *in, size_t in_len,
     while (off < in_len) {
         size_t blk_in = in_len - off;
         const uint8_t *blk_src;
-        if (blk_in >= B) {
-            blk_src = in + off;
-            off += B;
-        } else {
-            /* Final (short) block: pad to full B with prefill_sym. */
-            if (blk_in > 0) memcpy(block_buf, in + off, blk_in);
-            memset(block_buf + blk_in, pad_byte, B - blk_in);
-            blk_src = block_buf;
-            off = in_len;
-        }
-        uint8_t *len_field = p; p += 4;
-        size_t enc_len = 0;
-        if (pivco_huffman_encode(blk_src, &table, p, &enc_len) != PIVCO_OK) {
-            free(block_buf);
-            return PIVCOHUF_ERR_INTERNAL;
-        }
-        put_u32(len_field, (uint32_t)enc_len);
-        p += enc_len;
+        uint8_t *len_field;
+        { PROF_TIC();
+          if (blk_in >= B) {
+              blk_src = in + off;
+              off += B;
+          } else {
+              /* Final (short) block: pad to full B with prefill_sym. */
+              if (blk_in > 0) memcpy(block_buf, in + off, blk_in);
+              memset(block_buf + blk_in, pad_byte, B - blk_in);
+              blk_src = block_buf;
+              off = in_len;
+          }
+          len_field = p; p += 4;
+          PROF_TOC(PROF_FILE_BLOCK_PROLOGUE, (uint64_t)B); }
+
+        { PROF_TIC();
+          size_t enc_len = 0;
+          if (pivco_huffman_encode(blk_src, &table, p, &enc_len) != PIVCO_OK) {
+              free(block_buf);
+              return PIVCOHUF_ERR_INTERNAL;
+          }
+          put_u32(len_field, (uint32_t)enc_len);
+          p += enc_len;
+          PROF_TOC(PROF_FILE_BLOCK_ENCODE, (uint64_t)B); }
     }
     free(block_buf);
 
@@ -279,19 +291,21 @@ int pivcohuf_decompress(const uint8_t *in, size_t in_len,
      * via build_table.  Trick: a symbol with length L gets frequency
      * 2^(MAX_LEN - L) -- pure exponential weights produce a length-
      * limited canonical Huffman tree with those exact lengths. */
-    uint64_t freq[256] = {0};
-    int max_len = 0;
-    for (int s = 0; s < 256; s++) {
-        if (code_lens[s] > max_len) max_len = code_lens[s];
-    }
-    for (int s = 0; s < 256; s++) {
-        if (code_lens[s] > 0) {
-            freq[s] = (uint64_t)1 << (max_len - code_lens[s]);
-        }
-    }
     pivco_huffman_table_t table;
-    if (pivco_huffman_build_table(freq, &table) != PIVCO_OK)
-        return PIVCOHUF_ERR_INTERNAL;
+    { PROF_TIC();
+      uint64_t freq[256] = {0};
+      int max_len = 0;
+      for (int s = 0; s < 256; s++) {
+          if (code_lens[s] > max_len) max_len = code_lens[s];
+      }
+      for (int s = 0; s < 256; s++) {
+          if (code_lens[s] > 0) {
+              freq[s] = (uint64_t)1 << (max_len - code_lens[s]);
+          }
+      }
+      if (pivco_huffman_build_table(freq, &table) != PIVCO_OK)
+          return PIVCOHUF_ERR_INTERNAL;
+      PROF_TOC(PROF_FILE_BUILD_TABLE_SYN, 1); }
     /* Sanity check: rebuilt code lengths must match. */
     for (int s = 0; s < 256; s++) {
         if (table.code_len[s] != code_lens[s]) {
@@ -308,16 +322,24 @@ int pivcohuf_decompress(const uint8_t *in, size_t in_len,
     size_t written = 0;
     int err = 0;
     while (p < body_end && written < uncomp_size) {
-        if (p + 4 > body_end) { err = PIVCOHUF_ERR_TOO_SHORT; break; }
-        uint32_t blk_enc_len = get_u32(p); p += 4;
-        if (p + blk_enc_len > body_end) { err = PIVCOHUF_ERR_TOO_SHORT; break; }
-        size_t blk_remaining = uncomp_size - written;
-        uint8_t *blk_out = (blk_remaining >= B) ? (out + written) : block_buf;
-        size_t consumed = 0;
-        if (pivco_huffman_decode(p, blk_enc_len, &table,
-                                 blk_out, &consumed) != PIVCO_OK) {
-            err = PIVCOHUF_ERR_INTERNAL; break;
-        }
+        uint32_t blk_enc_len;
+        uint8_t *blk_out;
+        size_t blk_remaining;
+        { PROF_TIC();
+          if (p + 4 > body_end) { err = PIVCOHUF_ERR_TOO_SHORT; break; }
+          blk_enc_len = get_u32(p); p += 4;
+          if (p + blk_enc_len > body_end) { err = PIVCOHUF_ERR_TOO_SHORT; break; }
+          blk_remaining = uncomp_size - written;
+          blk_out = (blk_remaining >= B) ? (out + written) : block_buf;
+          PROF_TOC(PROF_FILE_BLOCK_PROLOGUE, (uint64_t)B); }
+
+        { PROF_TIC();
+          size_t consumed = 0;
+          if (pivco_huffman_decode(p, blk_enc_len, &table,
+                                   blk_out, &consumed) != PIVCO_OK) {
+              err = PIVCOHUF_ERR_INTERNAL; break;
+          }
+          PROF_TOC(PROF_FILE_BLOCK_DECODE, (uint64_t)B); }
         if (blk_remaining < B) {
             memcpy(out + written, block_buf, blk_remaining);
             written = uncomp_size;

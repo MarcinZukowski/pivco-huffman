@@ -44,6 +44,15 @@ static const char *prof_names[PROF_COUNT] = {
     [PROF_DECODE_ENTRY]        = "decode_entry",
     [PROF_ENC_NODE_VISIT]      = "enc_node_calls",
     [PROF_ENC_ENTRY]           = "enc_entry",
+    [PROF_FILE_HISTOGRAM]      = "file_histogram",
+    [PROF_FILE_BUILD_TABLE_REAL] = "file_build_table_real",
+    [PROF_FILE_BUILD_TABLE_SYN]  = "file_build_table_syn",
+    [PROF_FILE_BODY_CSUM]      = "file_body_csum",
+    [PROF_FILE_HDR]            = "file_hdr",
+    [PROF_FILE_PAD]            = "file_pad",
+    [PROF_FILE_BLOCK_ENCODE]   = "file_block_encode",
+    [PROF_FILE_BLOCK_DECODE]   = "file_block_decode",
+    [PROF_FILE_BLOCK_PROLOGUE] = "file_block_prologue",
 };
 
 const char *pivco_prof_name(pivco_prof_id_t id) {

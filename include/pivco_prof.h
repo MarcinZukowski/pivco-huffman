@@ -75,6 +75,19 @@ typedef enum {
     PROF_ENC_NODE_VISIT,            /* count-only: calls to encode_node_neon */
     PROF_ENC_ENTRY,                 /* count-only: calls to pivco_huffman_encode_neon */
 
+    /* File-codec layer (pivcohuf_file.c).  Wraps the entire file-level
+     * pipeline so the CLI can show where time goes outside the
+     * block-codec inner loops. */
+    PROF_FILE_HISTOGRAM,            /* per-input histogram scan (compress only) */
+    PROF_FILE_BUILD_TABLE_REAL,     /* first build_table from real freqs (compress) */
+    PROF_FILE_BUILD_TABLE_SYN,      /* second build_table from synth freqs (both) */
+    PROF_FILE_BODY_CSUM,            /* XXH32 over body (currently disabled) */
+    PROF_FILE_HDR,                  /* header parse / write */
+    PROF_FILE_PAD,                  /* trailing-block prep (memcpy + memset) */
+    PROF_FILE_BLOCK_ENCODE,         /* per-block pivco_huffman_encode call */
+    PROF_FILE_BLOCK_DECODE,         /* per-block pivco_huffman_decode call */
+    PROF_FILE_BLOCK_PROLOGUE,       /* per-block length prefix + offset math */
+
     PROF_COUNT
 } pivco_prof_id_t;
 
