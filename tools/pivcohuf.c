@@ -166,12 +166,15 @@ static void usage(void) {
         "  pivcohuf d IN [OUT]   decompress (default OUT = IN with " EXT " stripped)\n"
         "  pivcohuf c -          stdin/stdout\n"
         "Flags:\n"
-        "  -f                    overwrite OUT if it exists\n");
+        "  -f                    overwrite OUT if it exists\n"
+        "  -r N                  re-run codec N times into the same buffer\n"
+        "                        (no extra I/O); reports per-iter timing\n");
 }
 
 int main(int argc, char **argv)
 {
     int force = 0;
+    int repeat = 1;
     /* First pass: pluck flags anywhere on the command line. */
     const char *positionals[4] = {0};
     int npos = 0;
@@ -179,6 +182,11 @@ int main(int argc, char **argv)
         if (argv[i][0] == '-' && argv[i][1] != '\0' && argv[i][2] == '\0'
             && argv[i][1] == 'f') {
             force = 1;
+        } else if (argv[i][0] == '-' && argv[i][1] == 'r' && argv[i][2] == '\0'
+                   && i + 1 < argc) {
+            repeat = atoi(argv[i + 1]);
+            if (repeat < 1) repeat = 1;
+            i++;   /* skip the N */
         } else if (npos < (int)(sizeof positionals / sizeof positionals[0])) {
             positionals[npos++] = argv[i];
         }
@@ -227,6 +235,19 @@ int main(int argc, char **argv)
         }
         if (write_all(out_path, out_buf, out_len, force) != 0) return 2;
         print_stats("compress", in_len, out_len, t1 - t0);
+        if (repeat > 1) {
+            fprintf(stderr, "  -- replaying compress %d more times into same buffer --\n", repeat - 1);
+            for (int r = 1; r < repeat; r++) {
+                size_t rep_out_len = bound;
+                double rt0 = now_sec();
+                pivcohuf_compress(in_buf, in_len, out_buf, &rep_out_len);
+                double rt1 = now_sec();
+                fprintf(stderr, "  iter %2d: time=%.3f ms  in=%.1f MB/s  out=%.1f MB/s\n",
+                        r + 1, (rt1 - rt0) * 1000.0,
+                        (double)in_len / 1.0e6 / (rt1 - rt0),
+                        (double)rep_out_len / 1.0e6 / (rt1 - rt0));
+            }
+        }
 #ifdef PIVCO_PROF
         pivco_prof_dump("pivcohuf compress", t1 - t0,
                          pivco_prof_probe_tick_freq(),
@@ -251,6 +272,19 @@ int main(int argc, char **argv)
         }
         if (write_all(out_path, out_buf, out_len, force) != 0) return 2;
         print_stats("decompress", in_len, out_len, t1 - t0);
+        if (repeat > 1) {
+            fprintf(stderr, "  -- replaying decompress %d more times into same buffer --\n", repeat - 1);
+            for (int r = 1; r < repeat; r++) {
+                size_t rep_out_len = uncomp_size;
+                double rt0 = now_sec();
+                pivcohuf_decompress(in_buf, in_len, out_buf, &rep_out_len);
+                double rt1 = now_sec();
+                fprintf(stderr, "  iter %2d: time=%.3f ms  in=%.1f MB/s  out=%.1f MB/s\n",
+                        r + 1, (rt1 - rt0) * 1000.0,
+                        (double)in_len / 1.0e6 / (rt1 - rt0),
+                        (double)rep_out_len / 1.0e6 / (rt1 - rt0));
+            }
+        }
 #ifdef PIVCO_PROF
         pivco_prof_dump("pivcohuf decompress", t1 - t0,
                          pivco_prof_probe_tick_freq(),

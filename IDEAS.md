@@ -299,6 +299,38 @@ queued up.
 
 ---
 
+## References to investigate later — added 2026-05-12
+
+User-provided reading list for when we're picking the next thing.
+Annotations are guesses from the title; verify on first read.
+
+- **Intel: Fast computation of Huffman codes** — Intel devzone article
+  on accelerating Huffman code generation, likely covers SIMD on
+  table-build / code-length assignment paths.  Most relevant to our
+  build_table cost (negligible at 1 GB but bottleneck at small files).
+  https://www.intel.com/content/www/us/en/developer/articles/technical/fast-computation-of-huffman-codes.html
+
+- **AVX-512 Huffman-SIMD** (IEEE TCE 2023, doi 10.1109/TCE.2023.3347229)
+  — same paper already referenced above in the encoder-side survey
+  (~2.66x speedup via 8 sub-tables with flag bits).  Re-listed here
+  for the "things to read deeply" stack.
+  https://dl.acm.org/doi/abs/10.1109/TCE.2023.3347229
+
+- **Versatile and scalable parallel histogram construction** —
+  directly relevant to our compress histogram bottleneck (currently
+  ~26% of 100 MB CLI wall, even after the 4-way uint32 win).  Likely
+  covers privatised sub-histograms + reduction-tree at higher
+  parallelism than our 4-way SISD interleave.
+  https://www.researchgate.net/publication/266660552_Versatile_and_scalable_parallel_histogram_construction
+
+- **SIMD vectorization of histogram functions** — academia.edu hit
+  on SIMD histograms, also directly relevant.  Look for AVX-512
+  vpconflictd-based privatisation, sort-then-RLE schemes, and any
+  NEON-friendly approaches.
+  https://www.academia.edu/89596689/SIMD_Vectorization_of_Histogram_Functions
+
+---
+
 ## AVX-512 enc_init via vpermi2w hierarchical gather — open (2026-05-12)
 
 **Status: about to test.**
