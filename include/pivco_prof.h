@@ -88,6 +88,13 @@ typedef enum {
     PROF_FILE_BLOCK_DECODE,         /* per-block pivco_huffman_decode call */
     PROF_FILE_BLOCK_PROLOGUE,       /* per-block length prefix + offset math */
 
+    /* FSE per-node entropy coding (v0.2 wire format). */
+    PROF_FSE_ENC,                   /* time spent in pivco_fse_compress, per node */
+    PROF_FSE_DEC,                   /* time spent in pivco_fse_decompress, per node */
+    PROF_FSE_HIT_COUNT,             /* count-only: nodes where FSE was actually emitted */
+    PROF_FSE_RAW_COUNT,             /* count-only: nodes that stayed raw (p<threshold or fallback) */
+    PROF_FSE_FALLBACK_COUNT,        /* count-only: FSE attempted but didn't beat raw */
+
     PROF_COUNT
 } pivco_prof_id_t;
 

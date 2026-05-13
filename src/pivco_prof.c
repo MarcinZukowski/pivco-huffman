@@ -53,6 +53,11 @@ static const char *prof_names[PROF_COUNT] = {
     [PROF_FILE_BLOCK_ENCODE]   = "file_block_encode",
     [PROF_FILE_BLOCK_DECODE]   = "file_block_decode",
     [PROF_FILE_BLOCK_PROLOGUE] = "file_block_prologue",
+    [PROF_FSE_ENC]             = "fse_enc",
+    [PROF_FSE_DEC]             = "fse_dec",
+    [PROF_FSE_HIT_COUNT]       = "fse_hit_count",
+    [PROF_FSE_RAW_COUNT]       = "fse_raw_count",
+    [PROF_FSE_FALLBACK_COUNT]  = "fse_fallback_count",
 };
 
 const char *pivco_prof_name(pivco_prof_id_t id) {

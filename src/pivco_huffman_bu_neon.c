@@ -31,6 +31,9 @@
 #include "pivco_huffman.h"
 #include "pivco_huffman_common.h"
 #include "pivco_prof.h"
+#ifdef PIVCO_HAS_FSE
+#include "pivco_fse.h"
+#endif
 #include <string.h>
 
 #ifdef PIVCO_HAS_NEON
@@ -400,6 +403,55 @@ static inline void flat_decode_to_buffer(uint8_t *out, int n,
  *
  * Bitmap stream is consumed via *in_ptr in DFS order, matching the
  * top-down decoder's reading order. */
+/* Read the per-non-flat-internal-node wire bytes that come AFTER any
+ * optional K_right header: a 1-byte marker followed by either the raw
+ * bitmap (marker == 0) or the FSE-compressed payload (marker > 0).
+ *
+ * Returns a pointer to the usable bitmap (either pointing into the
+ * input stream for the raw path, or into the caller-provided scratch
+ * for the FSE path).  Advances *in_ptr past the whole record.
+ *
+ * scratch must hold at least bitmap_bytes(K) bytes and stay live for
+ * the entire span where the returned pointer is dereferenced (i.e.,
+ * across any recursive decode_subtree_bu calls that follow). */
+static inline const uint8_t *read_bitmap_bu(const uint8_t **in_ptr,
+                                             int K,
+                                             uint8_t *scratch)
+{
+    int nbytes = bitmap_bytes(K);
+    uint8_t marker = **in_ptr;
+    *in_ptr += 1;
+    if (marker == 0) {
+        const uint8_t *bm = *in_ptr;
+        *in_ptr += nbytes;
+        return bm;
+    }
+#ifdef PIVCO_HAS_FSE
+    int t_id = marker & 0x7F;
+    int xor_flag = (marker >> 7) & 1;
+    uint16_t fse_len;
+    memcpy(&fse_len, *in_ptr, 2);
+    *in_ptr += 2;
+    size_t out_len = 0;
+    PROF_TIC();
+    (void)pivco_fse_decompress(t_id, *in_ptr, fse_len,
+                                scratch, (size_t)nbytes,
+                                (size_t)nbytes, &out_len);
+    PROF_TOC(PROF_FSE_DEC, (uint64_t)nbytes);
+    *in_ptr += fse_len;
+    if (xor_flag) pivco_fse_flip_bits(scratch, (size_t)nbytes);
+    return scratch;
+#else
+    /* FSE not built in -- corrupt stream produced by an FSE build.
+     * Best we can do without an error channel is consume `nbytes` and
+     * return zeros; the caller will produce wrong output, the file
+     * codec will catch the mismatch.  Don't fault. */
+    (void)scratch;
+    *in_ptr += nbytes;
+    return *in_ptr - nbytes;
+#endif
+}
+
 static void decode_subtree_bu(const pivco_huffman_table_t *table,
                                int16_t node_id, int K,
                                uint8_t *out_buf,
@@ -439,9 +491,8 @@ static void decode_subtree_bu(const pivco_huffman_table_t *table,
 
     case PIVCO_NODE_BOTH_LEAVES: {
         /* No K_right header (kr_header_needed returns false). */
-        int nbytes = bitmap_bytes(K);
-        const uint8_t *bm = *in_ptr;
-        *in_ptr += nbytes;
+        uint8_t bm_scratch[PIVCO_BLOCK_SIZE / 8 + 16];
+        const uint8_t *bm = read_bitmap_bu(in_ptr, K, bm_scratch);
         const pivco_tree_node_t *left_child  = &table->tree[node->left];
         const pivco_tree_node_t *right_child = &table->tree[node->right];
         merge_both_const(bm, K,
@@ -458,9 +509,8 @@ static void decode_subtree_bu(const pivco_huffman_table_t *table,
             uint16_t v; memcpy(&v, *in_ptr, 2); *in_ptr += 2;
             K_right = (int)v;
         }
-        int nbytes = bitmap_bytes(K);
-        const uint8_t *bm = *in_ptr;
-        *in_ptr += nbytes;
+        uint8_t bm_scratch[PIVCO_BLOCK_SIZE / 8 + 16];
+        const uint8_t *bm = read_bitmap_bu(in_ptr, K, bm_scratch);
 
         if (table->node_type[node->right] == (uint8_t)PIVCO_NODE_LEAF) {
             merge_both_const(bm, K,
@@ -483,9 +533,8 @@ static void decode_subtree_bu(const pivco_huffman_table_t *table,
             uint16_t v; memcpy(&v, *in_ptr, 2); *in_ptr += 2;
             K_right = (int)v;
         }
-        int nbytes = bitmap_bytes(K);
-        const uint8_t *bm = *in_ptr;
-        *in_ptr += nbytes;
+        uint8_t bm_scratch[PIVCO_BLOCK_SIZE / 8 + 16];
+        const uint8_t *bm = read_bitmap_bu(in_ptr, K, bm_scratch);
 
         if (table->node_type[node->left] == (uint8_t)PIVCO_NODE_LEAF) {
             merge_both_const(bm, K,
@@ -511,9 +560,8 @@ static void decode_subtree_bu(const pivco_huffman_table_t *table,
             uint16_t v; memcpy(&v, *in_ptr, 2); *in_ptr += 2;
             K_right = (int)v;
         }
-        int nbytes = bitmap_bytes(K);
-        const uint8_t *bm = *in_ptr;
-        *in_ptr += nbytes;
+        uint8_t bm_scratch[PIVCO_BLOCK_SIZE / 8 + 16];
+        const uint8_t *bm = read_bitmap_bu(in_ptr, K, bm_scratch);
 
         int left_kind  = table->node_type[node->left];
         int right_kind = table->node_type[node->right];
@@ -587,9 +635,8 @@ int pivco_huffman_decode_bu_neon(const uint8_t *in, size_t in_len,
      * merge with two constants over the entire block. */
     if ((pivco_node_type_t)table->node_type[table->tree_root]
         == PIVCO_NODE_BOTH_LEAVES) {
-        int nbytes = bitmap_bytes(N);
-        const uint8_t *bm = ptr;
-        ptr += nbytes;
+        uint8_t bm_scratch[PIVCO_BLOCK_SIZE / 8 + 16];
+        const uint8_t *bm = read_bitmap_bu(&ptr, N, bm_scratch);
         const pivco_tree_node_t *left_child  = &table->tree[root->left];
         const pivco_tree_node_t *right_child = &table->tree[root->right];
         merge_both_const(bm, N,

@@ -1,5 +1,8 @@
 #include "pivco_huffman.h"
 #include "pivco_huffman_common.h"
+#ifdef PIVCO_HAS_FSE
+#include "pivco_fse.h"
+#endif
 #include <stdlib.h>
 #include <string.h>
 
@@ -95,8 +98,7 @@ static void encode_node(const pivco_huffman_table_t *table,
     }
 
     /* K_right header (2026-05-12 wire format): reserve 2 bytes before
-     * the bitmap iff this node has at least one non-leaf child.
-     * Filled below after n_right is computed. */
+     * the bitmap iff this node has at least one non-leaf child. */
     int need_kr = kr_header_needed(table, node_id);
     uint8_t *kr_hdr = NULL;
     if (need_kr) {
@@ -104,7 +106,13 @@ static void encode_node(const pivco_huffman_table_t *table,
         *out_ptr += KR_HEADER_BYTES;
     }
 
-    /* Write n code bits: bit = (code >> (len - 1 - depth)) & 1 */
+    /* FSE marker byte (v0.2 wire format): always reserve, default 0 = raw.
+     * See FSE-V0.md.  v0: FSE attempt is only in the SIMD encoders; the
+     * scalar reference always emits the raw bitmap with marker = 0. */
+    uint8_t *fse_marker = *out_ptr;
+    *out_ptr += 1;
+    *fse_marker = 0;
+
     int nbytes = bitmap_bytes(n);
     uint8_t *bm = *out_ptr;
     memset(bm, 0, (size_t)nbytes);
@@ -227,10 +235,36 @@ static void decode_node(const pivco_huffman_table_t *table,
         *in_ptr += KR_HEADER_BYTES;
     }
 
-    /* Read n code bits */
+    /* FSE marker byte (v0.2): read marker; if non-zero, FSE-decode the
+     * bitmap into bm_scratch.  See FSE-V0.md. */
     int nbytes = bitmap_bytes(n);
-    const uint8_t *bm = *in_ptr;
-    *in_ptr += nbytes;
+    uint8_t bm_scratch[PIVCO_BLOCK_SIZE / 8 + 16];
+    const uint8_t *bm;
+    uint8_t marker = **in_ptr;
+    *in_ptr += 1;
+    if (marker == 0) {
+        bm = *in_ptr;
+        *in_ptr += nbytes;
+    } else {
+#ifdef PIVCO_HAS_FSE
+        int t_id = marker & 0x7F;
+        int xor_flag = (marker >> 7) & 1;
+        uint16_t fse_len;
+        memcpy(&fse_len, *in_ptr, 2);
+        *in_ptr += 2;
+        size_t out_len = 0;
+        (void)pivco_fse_decompress(t_id, *in_ptr, fse_len,
+                                    bm_scratch, (size_t)nbytes,
+                                    (size_t)nbytes, &out_len);
+        *in_ptr += fse_len;
+        if (xor_flag) pivco_fse_flip_bits(bm_scratch, (size_t)nbytes);
+        bm = bm_scratch;
+#else
+        /* FSE not built in but stream uses it -- best-effort fallback. */
+        *in_ptr += nbytes;
+        bm = *in_ptr - nbytes;
+#endif
+    }
 
     /* Check if children are leaves for stage fusion */
     const pivco_tree_node_t *left_child  = &table->tree[node->left];

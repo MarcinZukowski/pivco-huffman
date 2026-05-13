@@ -42,7 +42,7 @@ extern "C" {
 
 #define PIVCOHUF_MAGIC          "PIVCOHUF"
 #define PIVCOHUF_VERSION_MAJOR  0
-#define PIVCOHUF_VERSION_MINOR  1
+#define PIVCOHUF_VERSION_MINOR  2  /* 0.2: per-node FSE marker + payload (see FSE-V0.md) */
 #define PIVCOHUF_HEADER_SIZE    26
 
 typedef enum {

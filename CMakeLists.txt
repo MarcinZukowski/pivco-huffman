@@ -106,6 +106,24 @@ set(PIVCO_SOURCES
     src/traditional_huffman.c
 )
 
+# FSE entropy coder (Yann Collet, vendored in ext/fse).  Used for
+# per-internal-node bitmap compression on skewed partitions -- see
+# FSE-V0.md.  Sources are plain C with no SIMD deps; build-on/off via
+# the PIVCO_FSE option (default ON; OFF only for ratio-no-fse compare).
+option(PIVCO_FSE "Build the FSE entropy-coder integration" ON)
+if(PIVCO_FSE)
+    add_compile_definitions(PIVCO_HAS_FSE=1)
+    list(APPEND PIVCO_SOURCES
+        src/pivco_fse.c
+        ext/fse/lib/fse_compress.c
+        ext/fse/lib/fse_decompress.c
+        ext/fse/lib/entropy_common.c
+        ext/fse/lib/hist.c
+        ext/fse/lib/debug.c
+    )
+    include_directories(ext/fse/lib)
+endif()
+
 # SIMD support
 if(TARGET_ARCH STREQUAL "arm64" OR TARGET_ARCH STREQUAL "aarch64")
     message(STATUS "ARM64 detected — enabling NEON")

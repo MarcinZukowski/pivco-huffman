@@ -2,8 +2,18 @@
 #include "pivco_huffman_common.h"
 #include "pivco_huffman_neon_common.h"
 #include "pivco_prof.h"
+#ifdef PIVCO_HAS_FSE
+#include "pivco_fse.h"
+#endif
 #include <stdlib.h>
 #include <string.h>
+
+/* FSE dispatch threshold (table id below which we don't bother).  Table
+ * 2 corresponds to frequent-bit probability ~0.5796, where the per-bit
+ * entropy gain over raw is ~0.024 bit (~3%).  Tunable; see FSE-V0.md. */
+#ifndef PIVCO_FSE_THRESHOLD_TABLE
+#define PIVCO_FSE_THRESHOLD_TABLE 2
+#endif
 
 #ifdef PIVCO_HAS_NEON
 #include <arm_neon.h>
@@ -866,6 +876,12 @@ static void encode_node_neon(const pivco_huffman_table_t *table,
         *out_ptr += KR_HEADER_BYTES;
     }
 
+    /* FSE marker byte (v0.2 wire format): defaults to 0 = raw bitmap.
+     * Replaced after partition if FSE compression wins.  See FSE-V0.md. */
+    uint8_t *fse_marker = *out_ptr;
+    *out_ptr += 1;
+    *fse_marker = 0;
+
     int nbytes = bitmap_bytes(n);
     uint8_t *bm = *out_ptr;
     *out_ptr += nbytes;
@@ -928,6 +944,47 @@ static void encode_node_neon(const pivco_huffman_table_t *table,
         kr_hdr[0] = (uint8_t)(n_right & 0xFF);
         kr_hdr[1] = (uint8_t)((n_right >> 8) & 0xFF);
     }
+
+    /* FSE dispatch (v0): if the partition is skewed enough, FSE-encode
+     * the bitmap and replace [marker=0][raw bitmap] with
+     * [marker=table|xor][fse_len:u16][fse payload]. */
+#ifdef PIVCO_HAS_FSE
+    if (nbytes > 0) {
+        int n_major = (n_left >= n_right) ? n_left : n_right;
+        double p_major = (n > 0) ? (double)n_major / (double)n : 0.0;
+        int xor_flag = (n_right > n_left);
+        int t_id = pivco_fse_select_table(p_major);
+        int emitted_fse = 0;
+        if (t_id >= PIVCO_FSE_THRESHOLD_TABLE) {
+            uint8_t scratch[PIVCO_BLOCK_SIZE / 8 + 16];
+            uint8_t fse_out[PIVCO_BLOCK_SIZE];
+            if (xor_flag) {
+                for (int i = 0; i < nbytes; i++) scratch[i] = (uint8_t)~bm[i];
+            } else {
+                memcpy(scratch, bm, (size_t)nbytes);
+            }
+            PROF_TIC();
+            size_t fse_len = 0;
+            pivco_fse_status_t rc = pivco_fse_compress(
+                t_id, scratch, (size_t)nbytes,
+                fse_out, sizeof(fse_out), &fse_len);
+            PROF_TOC(PROF_FSE_ENC, (uint64_t)nbytes);
+            if (rc == PIVCO_FSE_OK && fse_len + 2 < (size_t)nbytes) {
+                *fse_marker = (uint8_t)((xor_flag ? 0x80 : 0) | t_id);
+                uint8_t *p = bm;
+                *p++ = (uint8_t)(fse_len & 0xFF);
+                *p++ = (uint8_t)((fse_len >> 8) & 0xFF);
+                memcpy(p, fse_out, fse_len);
+                *out_ptr = p + fse_len;
+                emitted_fse = 1;
+                PROF_COUNT_ONLY(PROF_FSE_HIT_COUNT, 1);
+            } else {
+                PROF_COUNT_ONLY(PROF_FSE_FALLBACK_COUNT, 1);
+            }
+        }
+        if (!emitted_fse) PROF_COUNT_ONLY(PROF_FSE_RAW_COUNT, 1);
+    }
+#endif
 
     /* Recurse.  Left child reads codes_la[0..n_left); right child reads
      * tmp[0..n_right).  Each grandchild gets a `tmp` cursor advanced
@@ -1264,6 +1321,43 @@ static inline int node_half_left(uint16_t *indices, int n,
     return n_left;
 }
 
+/* Read [marker, then (raw bitmap) OR (fse_len + fse payload)] from
+ * *in_ptr.  Same wire-format helper as the BU decoder; see
+ * pivco_huffman_bu_neon.c read_bitmap_bu() for the contract. */
+static inline const uint8_t *read_bitmap_td(const uint8_t **in_ptr,
+                                             int n,
+                                             uint8_t *scratch)
+{
+    int nbytes = bitmap_bytes(n);
+    uint8_t marker = **in_ptr;
+    *in_ptr += 1;
+    if (marker == 0) {
+        const uint8_t *bm = *in_ptr;
+        *in_ptr += nbytes;
+        return bm;
+    }
+#ifdef PIVCO_HAS_FSE
+    int t_id = marker & 0x7F;
+    int xor_flag = (marker >> 7) & 1;
+    uint16_t fse_len;
+    memcpy(&fse_len, *in_ptr, 2);
+    *in_ptr += 2;
+    size_t out_len = 0;
+    PROF_TIC();
+    (void)pivco_fse_decompress(t_id, *in_ptr, fse_len,
+                                scratch, (size_t)nbytes,
+                                (size_t)nbytes, &out_len);
+    PROF_TOC(PROF_FSE_DEC, (uint64_t)nbytes);
+    *in_ptr += fse_len;
+    if (xor_flag) pivco_fse_flip_bits(scratch, (size_t)nbytes);
+    return scratch;
+#else
+    (void)scratch;
+    *in_ptr += nbytes;
+    return *in_ptr - nbytes;
+#endif
+}
+
 static void decode_node_neon(const pivco_huffman_table_t *table,
                               int16_t node_id,
                               uint16_t *indices, int n,
@@ -1309,9 +1403,8 @@ static void decode_node_neon(const pivco_huffman_table_t *table,
 
     case PIVCO_NODE_BOTH_LEAVES: {
         /* No K_right header for BOTH_LEAVES (encoder didn't write one). */
-        int nbytes = bitmap_bytes(n);
-        const uint8_t *bm = *in_ptr;
-        *in_ptr += nbytes;
+        uint8_t bm_scratch[PIVCO_BLOCK_SIZE / 8 + 16];
+        const uint8_t *bm = read_bitmap_td(in_ptr, n, bm_scratch);
         const pivco_tree_node_t *left_child  = &table->tree[node->left];
         const pivco_tree_node_t *right_child = &table->tree[node->right];
         PROF_TIC();
@@ -1324,9 +1417,8 @@ static void decode_node_neon(const pivco_huffman_table_t *table,
 
     case PIVCO_NODE_HALF_RIGHT: {
         if (kr_header_needed(table, node_id)) *in_ptr += KR_HEADER_BYTES;
-        int nbytes = bitmap_bytes(n);
-        const uint8_t *bm = *in_ptr;
-        *in_ptr += nbytes;
+        uint8_t bm_scratch[PIVCO_BLOCK_SIZE / 8 + 16];
+        const uint8_t *bm = read_bitmap_td(in_ptr, n, bm_scratch);
         int n_right = node_half_right(indices, n, bm, tmp);
         decode_node_neon(table, node->right, tmp, n_right,
                          symbols, in_ptr, tmp + n_right, skip_node);
@@ -1335,9 +1427,8 @@ static void decode_node_neon(const pivco_huffman_table_t *table,
 
     case PIVCO_NODE_HALF_LEFT: {
         if (kr_header_needed(table, node_id)) *in_ptr += KR_HEADER_BYTES;
-        int nbytes = bitmap_bytes(n);
-        const uint8_t *bm = *in_ptr;
-        *in_ptr += nbytes;
+        uint8_t bm_scratch[PIVCO_BLOCK_SIZE / 8 + 16];
+        const uint8_t *bm = read_bitmap_td(in_ptr, n, bm_scratch);
         int n_left = node_half_left(indices, n, bm);
         decode_node_neon(table, node->left, indices, n_left,
                          symbols, in_ptr, tmp, skip_node);
@@ -1347,9 +1438,8 @@ static void decode_node_neon(const pivco_huffman_table_t *table,
     case PIVCO_NODE_INTERNAL_FULL:
     default: {
         if (kr_header_needed(table, node_id)) *in_ptr += KR_HEADER_BYTES;
-        int nbytes = bitmap_bytes(n);
-        const uint8_t *bm = *in_ptr;
-        *in_ptr += nbytes;
+        uint8_t bm_scratch[PIVCO_BLOCK_SIZE / 8 + 16];
+        const uint8_t *bm = read_bitmap_td(in_ptr, n, bm_scratch);
         int n_left, n_right;
         node_full(indices, n, bm, tmp, &n_left, &n_right);
         /* The right child's indices alias parent's tmp[0..n_right).
@@ -1517,10 +1607,10 @@ int pivco_huffman_decode_neon(const uint8_t *in, size_t in_len,
     /* K_right header for root (skipped by TD; encoder wrote it iff
      * root has any non-leaf child). */
     if (kr_header_needed(table, table->tree_root)) ptr += KR_HEADER_BYTES;
-    /* Read root bitmap */
-    int nbytes = bitmap_bytes(N);
-    const uint8_t *bm = ptr;
-    ptr += nbytes;
+    /* Read root bitmap (handles per-node FSE marker; bm may point into
+     * the input stream or into bm_scratch). */
+    uint8_t bm_scratch[PIVCO_BLOCK_SIZE / 8 + 16];
+    const uint8_t *bm = read_bitmap_td(&ptr, N, bm_scratch);
 
     const pivco_tree_node_t *left_child  = &table->tree[root->left];
     const pivco_tree_node_t *right_child = &table->tree[root->right];

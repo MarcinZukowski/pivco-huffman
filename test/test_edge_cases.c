@@ -253,6 +253,76 @@ static int test_adversarial(void)
     return total_fail;
 }
 
+/* FSE-specific (v0.2 wire format): inputs designed to exercise both
+ * sides of the FSE-vs-raw dispatch in the encoder.  Roundtrip only --
+ * the value here is that the FSE compress/decompress path is exercised
+ * on both highly-skewed (most nodes pick FSE) and near-uniform (most
+ * nodes stay raw) bitmaps. */
+static int test_fse_dispatch(void)
+{
+    int total_fail = 0;
+
+    /* Heavy-skew: 95% one byte, 5% spread over 20 others.  Most non-flat
+     * internal nodes in the resulting Huffman tree will have very
+     * skewed left/right partitions, hitting FSE.  Picked size 200K to
+     * span ~25 blocks at the M4 8K block size. */
+    for (size_t len = 32 * 1024; len <= 256 * 1024; len *= 4) {
+        uint8_t *buf = malloc(len);
+        if (!buf) FAIL("oom");
+        uint64_t rng = 0xfa57e7e7ULL + len;
+        for (size_t j = 0; j < len; j++) {
+            uint64_t r = xorshift64(&rng);
+            if (r % 100 < 95) buf[j] = 0;
+            else              buf[j] = (uint8_t)(1 + (r >> 8) % 20);
+        }
+        printf("[fse heavy_skew n=%zu] ", len);
+        int r = roundtrip_file(buf, len);
+        free(buf);
+        if (r) total_fail++;
+        else printf("OK\n");
+    }
+
+    /* Near-uniform: byte distribution close to 1/256 per value.  Almost
+     * no node will hit the FSE threshold; verifies the marker=0 raw
+     * path is correct end-to-end. */
+    for (size_t len = 32 * 1024; len <= 256 * 1024; len *= 4) {
+        uint8_t *buf = malloc(len);
+        if (!buf) FAIL("oom");
+        uint64_t rng = 0xfeed1234ULL + len;
+        for (size_t j = 0; j < len; j++) buf[j] = (uint8_t)xorshift64(&rng);
+        printf("[fse near_uniform n=%zu] ", len);
+        int r = roundtrip_file(buf, len);
+        free(buf);
+        if (r) total_fail++;
+        else printf("OK\n");
+    }
+
+    /* DNA-like 4-symbol alphabet: small alphabet, geometric-ish ratio,
+     * heavy on a couple symbols.  Real-data-style proxy for the
+     * dna_fasta upside (FSE captures ~8% on that). */
+    {
+        const uint8_t alphabet[] = { 'A', 'C', 'G', 'T' };
+        for (size_t len = 32 * 1024; len <= 256 * 1024; len *= 4) {
+            uint8_t *buf = malloc(len);
+            if (!buf) FAIL("oom");
+            uint64_t rng = 0xacac1234ULL + len;
+            for (size_t j = 0; j < len; j++) {
+                uint64_t r = xorshift64(&rng) % 100;
+                /* A=40%, C=25%, G=20%, T=15% */
+                int idx = r < 40 ? 0 : r < 65 ? 1 : r < 85 ? 2 : 3;
+                buf[j] = alphabet[idx];
+            }
+            printf("[fse dna_like n=%zu] ", len);
+            int r = roundtrip_file(buf, len);
+            free(buf);
+            if (r) total_fail++;
+            else printf("OK\n");
+        }
+    }
+
+    return total_fail;
+}
+
 /* ---------- entry point ---------- */
 
 int test_edge_cases_all(void)
@@ -268,5 +338,7 @@ int test_edge_cases_all(void)
     fails += test_distribution_edge_cases();
     printf("\n--- adversarial ---\n");
     fails += test_adversarial();
+    printf("\n--- FSE dispatch (v0.2 wire format) ---\n");
+    fails += test_fse_dispatch();
     return fails;
 }
