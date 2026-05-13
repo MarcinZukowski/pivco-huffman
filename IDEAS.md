@@ -1,5 +1,55 @@
 # PIVCO-Huffman Decode Ideas
 
+## SSE flat_decode_direct_x86 is mostly scalar for D in {2,3,5,6} — open (2026-05-13)
+
+**Status: known perf gap, not yet measured but mechanically obvious.**
+
+`flat_decode_direct_x86` in `src/pivco_huffman_x86.c:299` (the SSE
+entry used by `pivco_huffman_flat_decode_direct_x86_`, which is the
+BU x86 decoder's flat-subtree fast path on SSE-only hosts) is fully
+scalar except at D=4:
+
+| D | path | bytes/iter | impl |
+|---|---|---|---|
+| 2 | scalar | 4 | 4× shift + 4× `symbols[i] = c2s[code]` |
+| 3 | scalar | 8 | 8× shift + 8× per-byte write |
+| **4** | **SSE pshufb** | **16** | `_mm_shuffle_epi8(c2s_vec, codes)` |
+| 5 | scalar | 8 | 8× shift + 8× per-byte write |
+| 6 | scalar | 4 | 4× shift + 4× per-byte write |
+
+By contrast the AVX-512 backend has per-D SIMD unpackers
+(`flat_dN_unpack_avx512_*` in `pivco_huffman_avx512_flat.h`) and uses
+them from `flat_decode_direct_avx512`.  And the SSE non-flat
+partition paths (`partition_8_sse_*`) use `_mm_shuffle_epi8` heavily.
+So the SIMD primitives exist; the flat-side glue just hasn't been
+pulled up.
+
+**Concrete plan:**
+
+- D=2 / D=3 / D=4 (c2s table ≤ 16 entries): single 128-bit `c2s_vec`
+  in an `__m128i`, one `_mm_shuffle_epi8` per 16 codes.  D=4 already
+  does this.  D=2 and D=3 need a per-D unpack helper that produces
+  16-lane code vectors from packed bits (parallel to the existing
+  NEON `flat_d{2,3}_unpack` in `pivco_huffman_neon_flat.h`).
+- D=5 / D=6 (c2s table 32/64 entries, > one __m128i): two-stage
+  `_mm_shuffle_epi8` against two halves + mask-select on bit 4 (or
+  bit 5).  AVX-512 has `vpermb` to do this in one op; SSE needs
+  two pshufb + a `_mm_blendv_epi8`.  Still 16 codes per iter, just
+  ~3 vector ops instead of 1.
+
+Tail handling has to be careful since flat-subtree bitmaps don't
+necessarily end on a 16-lane boundary — mirror the NEON pattern
+which falls through to scalar for the last `<16` codes.
+
+**Expected impact:** flat-subtree path becomes the dominant cost on
+flat-heavy distributions (`flat_M*`, near-uniform like `image_jpeg`,
+`gzip_random`), where currently the per-byte writes are visible in
+profiles.  Likely 2-8× speedup on the flat decode primitive on SSE
+hosts (test-c6a / test-c5).  Net file-codec speedup will be smaller
+because flat decode is one of several primitives, but on
+distributions like image_jpeg where ~76% of bits are flat-packed
+(per `--verify-bytes` output), this is a real chunk of decode time.
+
 ## ~~BUG: encode_node_neon infinite recursion on near-uniform random~~ — FIXED 2026-05-13
 
 **Status: FIXED.  Test coverage added in `test/test_edge_cases.c`.**
