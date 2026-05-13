@@ -102,6 +102,7 @@ set(PIVCO_SOURCES
     src/pivco_huffman_scalar.c
     src/pivco_instrumentation.c
     src/pivco_prof.c
+    src/pivcohuf_file.c
     src/traditional_huffman.c
 )
 
@@ -202,6 +203,10 @@ endif()
 # Library
 add_library(pivco_huffman ${PIVCO_SOURCES})
 target_include_directories(pivco_huffman PUBLIC include)
+
+# CLI tool: pivcohuf compress/decompress files using our format.
+add_executable(pivcohuf tools/pivcohuf.c)
+target_link_libraries(pivcohuf pivco_huffman)
 
 # Tests
 option(BUILD_TESTS "Build tests" ON)
