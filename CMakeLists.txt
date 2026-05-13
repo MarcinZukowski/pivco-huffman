@@ -319,6 +319,14 @@ if(BUILD_BENCH)
     )
     target_link_libraries(pivco_flat_subtree_stats pivco_huffman m)
 
+    # Offline TANS-routing ratio bound: real files (per-block) or
+    # MAIN bench distributions (per-histogram).
+    add_executable(pivco_tans_bound
+        extras/bench_tans_bound.c
+        bench/bench_distributions.c
+    )
+    target_link_libraries(pivco_tans_bound pivco_huffman m)
+
     add_executable(pivco_dist_stats
         extras/bench_dist_stats.c
         bench/bench_distributions.c
