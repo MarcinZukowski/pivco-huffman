@@ -668,6 +668,14 @@ static void encode_node_x86(const pivco_huffman_table_t *table,
         return;
     }
 
+    /* K_right header (2026-05-12 wire format). */
+    int need_kr = kr_header_needed(table, node_id);
+    uint8_t *kr_hdr = NULL;
+    if (need_kr) {
+        kr_hdr = *out_ptr;
+        *out_ptr += KR_HEADER_BYTES;
+    }
+
     /* Bitmap + partition.  Each iter loads 8 left-aligned codes, builds
      * the mask byte via the movemask trick, partitions the SAME register
      * through compress_tab[mask] into left/right halves, writes left
@@ -718,6 +726,11 @@ static void encode_node_x86(const pivco_huffman_table_t *table,
         }
     }
     PROF_TOC(PROF_ENC_NODE_FULL, n);
+
+    if (need_kr) {
+        kr_hdr[0] = (uint8_t)(n_right & 0xFF);
+        kr_hdr[1] = (uint8_t)((n_right >> 8) & 0xFF);
+    }
 
     encode_node_x86(table, node->left, codes_la, n_left,
                      depth + 1, out_ptr, tmp + n_right);
@@ -802,6 +815,12 @@ static void decode_node_x86(const pivco_huffman_table_t *table,
         const uint8_t *c2s = &table->flat_code_to_sym[table->flat_offset[node_id]];
         flat_decode_scatter_x86(symbols, indices, n, bm, D, c2s);
         return;
+    }
+
+    /* K_right header (2026-05-12 wire format): skip 2 bytes when this
+     * node has any non-leaf child.  TD decoder doesn't use K_right. */
+    if (kr_header_needed(table, node_id)) {
+        *in_ptr += KR_HEADER_BYTES;
     }
 
     /* Read n code bits */
@@ -944,6 +963,8 @@ int pivco_huffman_decode_x86(const uint8_t *in, size_t in_len,
         return PIVCO_OK;
     }
 
+    /* K_right header for root. */
+    if (kr_header_needed(table, table->tree_root)) ptr += KR_HEADER_BYTES;
     /* Read root bitmap */
     int nbytes = bitmap_bytes(N);
     const uint8_t *bm = ptr;

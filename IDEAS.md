@@ -245,6 +245,60 @@ hope was u8 repack; that turned out symmetric).
 
 ---
 
+## Backend unification — open, deferred (2026-05-12)
+
+**Status: noted, not in flight.**
+
+Every SIMD backend has its OWN copy of the full recursive tree-walk
+dispatch, even though the dispatch logic is identical across platforms.
+Only the inner primitive (partition, mask build, scatter) differs.
+Current layout:
+
+```
+src/pivco_huffman_scalar.c       encode_node()       decode_node()
+src/pivco_huffman_neon.c         encode_node_neon()  decode_node_neon()
+src/pivco_huffman_x86.c          encode_node_x86()   decode_node_x86()
+src/pivco_huffman_avx512.c       encode_node_avx512() decode_node_avx512()
+src/pivco_huffman_bu_x86.c       decode_subtree_bu() + kr variant
+src/pivco_huffman_bu_neon.c      decode_subtree_bu() + kr variant
+```
+
+Pain point that motivated this note: the K_right wire-format change
+(2026-05-12) requires touching the same call sites in 6 files, with
+~30-50 individual edits.  Same change at each site.  A unified
+skeleton with platform primitives plugged in via macros or inline
+function pointers would mean ONE edit instead of N.
+
+Candidate architectures:
+
+1. **Header-only skeleton + macro-injected primitives**.  A single
+   `encode_node_template.h` parameterised over partition / mask-build
+   primitives.  Each backend's .c instantiates with its own macros.
+   Compile-time inlining preserves perf.  Costs flexibility for
+   per-backend specialisations (e.g. AVX-512 D=5/D=6 INTERNAL_FLAT
+   fast paths).
+
+2. **Tagged-union primitive struct + inline dispatch**.  Stored
+   primitive callbacks selected at table-build time.  Loses inlining
+   unless aggressively inlined; risky for hot path.
+
+3. **Code generation**.  M4-style or python-codegen to emit each
+   backend's body from a single source.  Heavier toolchain.
+
+Why deferred: the unification refactor itself is multi-day with
+significant risk of regressing each backend's tight loops.  Per-
+backend specialisations (AVX-512 INTERNAL_FLAT D=5/D=6, NEON D=4
+TBL fast paths, etc.) make a clean shared skeleton harder than
+it first appears.  Won't pay back unless we expect several more
+format-shape changes ahead.
+
+Re-evaluate after: (a) K_right format lands cleanly across backends;
+(b) we tally how many "touch every file" edits we've done over the
+project lifetime; (c) we have a concrete next format-shape change
+queued up.
+
+---
+
 ## AVX-512 enc_init via vpermi2w hierarchical gather — open (2026-05-12)
 
 **Status: about to test.**

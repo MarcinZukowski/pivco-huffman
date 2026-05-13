@@ -93,6 +93,16 @@ static void encode_node(const pivco_huffman_table_t *table,
         return;
     }
 
+    /* K_right header (2026-05-12 wire format): reserve 2 bytes before
+     * the bitmap iff this node has at least one non-leaf child.
+     * Filled below after n_right is computed. */
+    int need_kr = kr_header_needed(table, node_id);
+    uint8_t *kr_hdr = NULL;
+    if (need_kr) {
+        kr_hdr = *out_ptr;
+        *out_ptr += KR_HEADER_BYTES;
+    }
+
     /* Write n code bits: bit = (code >> (len - 1 - depth)) & 1 */
     int nbytes = bitmap_bytes(n);
     uint8_t *bm = *out_ptr;
@@ -117,6 +127,12 @@ static void encode_node(const pivco_huffman_table_t *table,
             /* In-place: safe because n_left <= j always */
             indices[n_left++] = indices[j];
         }
+    }
+
+    if (need_kr) {
+        /* Little-endian uint16 -- BU decoder reads via memcpy. */
+        kr_hdr[0] = (uint8_t)(n_right & 0xFF);
+        kr_hdr[1] = (uint8_t)((n_right >> 8) & 0xFF);
     }
 
     /* Recurse left, then right.
@@ -196,6 +212,13 @@ static void decode_node(const pivco_huffman_table_t *table,
         const uint8_t *c2s = &table->flat_code_to_sym[table->flat_offset[node_id]];
         flat_decode_scatter_scalar(symbols, indices, n, bm, D, c2s);
         return;
+    }
+
+    /* K_right header (2026-05-12 wire format): skip 2 bytes when this
+     * node has any non-leaf child.  TD scalar decoder doesn't need
+     * K_right (computes splits inline below). */
+    if (kr_header_needed(table, node_id)) {
+        *in_ptr += KR_HEADER_BYTES;
     }
 
     /* Read n code bits */

@@ -461,6 +461,11 @@ static void decode_subtree_bu(const pivco_huffman_table_t *table,
     }
 
     case PIVCO_NODE_HALF_RIGHT: {
+        int K_right = 0;
+        if (kr_header_needed(table, node_id)) {
+            uint16_t v; memcpy(&v, *in_ptr, 2); *in_ptr += 2;
+            K_right = (int)v;
+        }
         int nbytes = bitmap_bytes(K);
         const uint8_t *bm = *in_ptr;
         *in_ptr += nbytes;
@@ -470,7 +475,6 @@ static void decode_subtree_bu(const pivco_huffman_table_t *table,
                               out_buf);
             return;
         }
-        int K_right = popcount_K_right_x86(bm, nbytes, K);
         uint8_t *right_buf = scratch_top;
         decode_subtree_bu(table, node->right, K_right,
                           right_buf, in_ptr, scratch_top + K_right);
@@ -479,6 +483,11 @@ static void decode_subtree_bu(const pivco_huffman_table_t *table,
     }
 
     case PIVCO_NODE_HALF_LEFT: {
+        int K_right = 0;
+        if (kr_header_needed(table, node_id)) {
+            uint16_t v; memcpy(&v, *in_ptr, 2); *in_ptr += 2;
+            K_right = (int)v;
+        }
         int nbytes = bitmap_bytes(K);
         const uint8_t *bm = *in_ptr;
         *in_ptr += nbytes;
@@ -488,7 +497,6 @@ static void decode_subtree_bu(const pivco_huffman_table_t *table,
                               table->prefill_sym, out_buf);
             return;
         }
-        int K_right = popcount_K_right_x86(bm, nbytes, K);
         int K_left = K - K_right;
         uint8_t *left_buf = scratch_top;
         decode_subtree_bu(table, node->left, K_left,
@@ -499,6 +507,11 @@ static void decode_subtree_bu(const pivco_huffman_table_t *table,
 
     case PIVCO_NODE_INTERNAL_FULL:
     default: {
+        int K_right = 0;
+        if (kr_header_needed(table, node_id)) {
+            uint16_t v; memcpy(&v, *in_ptr, 2); *in_ptr += 2;
+            K_right = (int)v;
+        }
         int nbytes = bitmap_bytes(K);
         const uint8_t *bm = *in_ptr;
         *in_ptr += nbytes;
@@ -514,7 +527,6 @@ static void decode_subtree_bu(const pivco_huffman_table_t *table,
             return;
         }
         if (left_kind == (uint8_t)PIVCO_NODE_LEAF) {
-            int K_right = popcount_K_right_x86(bm, nbytes, K);
             uint8_t *right_buf = scratch_top;
             decode_subtree_bu(table, node->right, K_right,
                               right_buf, in_ptr, scratch_top + K_right);
@@ -524,7 +536,6 @@ static void decode_subtree_bu(const pivco_huffman_table_t *table,
             return;
         }
         if (right_kind == (uint8_t)PIVCO_NODE_LEAF) {
-            int K_right = popcount_K_right_x86(bm, nbytes, K);
             int K_left = K - K_right;
             uint8_t *left_buf = scratch_top;
             decode_subtree_bu(table, node->left, K_left,
@@ -535,7 +546,6 @@ static void decode_subtree_bu(const pivco_huffman_table_t *table,
             return;
         }
 
-        int K_right = popcount_K_right_x86(bm, nbytes, K);
         int K_left = K - K_right;
         uint8_t *left_buf  = scratch_top;
         uint8_t *right_buf = scratch_top + K_left;

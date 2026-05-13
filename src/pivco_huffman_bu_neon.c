@@ -438,6 +438,7 @@ static void decode_subtree_bu(const pivco_huffman_table_t *table,
     }
 
     case PIVCO_NODE_BOTH_LEAVES: {
+        /* No K_right header (kr_header_needed returns false). */
         int nbytes = bitmap_bytes(K);
         const uint8_t *bm = *in_ptr;
         *in_ptr += nbytes;
@@ -451,10 +452,12 @@ static void decode_subtree_bu(const pivco_huffman_table_t *table,
     }
 
     case PIVCO_NODE_HALF_RIGHT: {
-        /* Left child is the prefill leaf (SKIP), right child is internal
-         * OR a non-prefill leaf.  Fast path: if right is itself a LEAF
-         * (a single non-prefill symbol), the whole node degenerates to
-         * merge_both_const — no buffer materialisation needed. */
+        int K_right = 0;
+        int has_kr = kr_header_needed(table, node_id);
+        if (has_kr) {
+            uint16_t v; memcpy(&v, *in_ptr, 2); *in_ptr += 2;
+            K_right = (int)v;
+        }
         int nbytes = bitmap_bytes(K);
         const uint8_t *bm = *in_ptr;
         *in_ptr += nbytes;
@@ -466,9 +469,6 @@ static void decode_subtree_bu(const pivco_huffman_table_t *table,
                               out_buf);
             return;
         }
-
-        /* General case: recurse into right (only K_right bytes needed). */
-        int K_right = popcount_K_right(bm, nbytes, K);
         uint8_t *right_buf = scratch_top;
         decode_subtree_bu(table, node->right, K_right,
                           right_buf, in_ptr, scratch_top + K_right);
@@ -477,8 +477,12 @@ static void decode_subtree_bu(const pivco_huffman_table_t *table,
     }
 
     case PIVCO_NODE_HALF_LEFT: {
-        /* Right child is the prefill leaf (SKIP), left child is internal
-         * OR a non-prefill leaf. */
+        int K_right = 0;
+        int has_kr = kr_header_needed(table, node_id);
+        if (has_kr) {
+            uint16_t v; memcpy(&v, *in_ptr, 2); *in_ptr += 2;
+            K_right = (int)v;
+        }
         int nbytes = bitmap_bytes(K);
         const uint8_t *bm = *in_ptr;
         *in_ptr += nbytes;
@@ -491,7 +495,6 @@ static void decode_subtree_bu(const pivco_huffman_table_t *table,
             return;
         }
 
-        int K_right = popcount_K_right(bm, nbytes, K);
         int K_left = K - K_right;
         uint8_t *left_buf = scratch_top;
         decode_subtree_bu(table, node->left, K_left,
@@ -502,14 +505,16 @@ static void decode_subtree_bu(const pivco_huffman_table_t *table,
 
     case PIVCO_NODE_INTERNAL_FULL:
     default: {
+        int K_right = 0;
+        int has_kr = kr_header_needed(table, node_id);
+        if (has_kr) {
+            uint16_t v; memcpy(&v, *in_ptr, 2); *in_ptr += 2;
+            K_right = (int)v;
+        }
         int nbytes = bitmap_bytes(K);
         const uint8_t *bm = *in_ptr;
         *in_ptr += nbytes;
 
-        /* If one child is a (non-prefill) LEAF, skip materialising
-         * its buffer and use the broadcast variant of tree_merge.
-         * BOTH children leaf would have been BOTH_LEAVES upstream
-         * but is checked here defensively. */
         int left_kind  = table->node_type[node->left];
         int right_kind = table->node_type[node->right];
         if (left_kind == (uint8_t)PIVCO_NODE_LEAF
@@ -521,7 +526,6 @@ static void decode_subtree_bu(const pivco_huffman_table_t *table,
             return;
         }
         if (left_kind == (uint8_t)PIVCO_NODE_LEAF) {
-            int K_right = popcount_K_right(bm, nbytes, K);
             uint8_t *right_buf = scratch_top;
             decode_subtree_bu(table, node->right, K_right,
                               right_buf, in_ptr, scratch_top + K_right);
@@ -531,7 +535,6 @@ static void decode_subtree_bu(const pivco_huffman_table_t *table,
             return;
         }
         if (right_kind == (uint8_t)PIVCO_NODE_LEAF) {
-            int K_right = popcount_K_right(bm, nbytes, K);
             int K_left = K - K_right;
             uint8_t *left_buf = scratch_top;
             decode_subtree_bu(table, node->left, K_left,
@@ -542,13 +545,10 @@ static void decode_subtree_bu(const pivco_huffman_table_t *table,
             return;
         }
 
-        /* General case: both children are internal — recurse into both. */
-        int K_right = popcount_K_right(bm, nbytes, K);
         int K_left = K - K_right;
-
         uint8_t *left_buf  = scratch_top;
         uint8_t *right_buf = scratch_top + K_left;
-        uint8_t *new_scratch_top = scratch_top + K;  /* K = K_left + K_right */
+        uint8_t *new_scratch_top = scratch_top + K;
 
         decode_subtree_bu(table, node->left,  K_left,
                           left_buf,  in_ptr, new_scratch_top);

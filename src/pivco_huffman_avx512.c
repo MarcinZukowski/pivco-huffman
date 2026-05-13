@@ -714,6 +714,14 @@ static void encode_node_avx512(const pivco_huffman_table_t *table,
         return;
     }
 
+    /* K_right header (2026-05-12 wire format). */
+    int need_kr = kr_header_needed(table, node_id);
+    uint8_t *kr_hdr = NULL;
+    if (need_kr) {
+        kr_hdr = *out_ptr;
+        *out_ptr += KR_HEADER_BYTES;
+    }
+
     /* Bitmap + partition.  Stride 32 codes / iter:
      * - vpsllw(code_vec, depth) + vpmovw2m   -- 32-bit mask in one shot
      * - write the 32-bit mask to bm[j >> 3..j>>3 + 4)
@@ -777,6 +785,11 @@ static void encode_node_avx512(const pivco_huffman_table_t *table,
         }
     }
     PROF_TOC(PROF_ENC_NODE_FULL, n);
+
+    if (need_kr) {
+        kr_hdr[0] = (uint8_t)(n_right & 0xFF);
+        kr_hdr[1] = (uint8_t)((n_right >> 8) & 0xFF);
+    }
 
     encode_node_avx512(table, node->left,  codes_la, n_left,
                         depth + 1, out_ptr, tmp + n_right);
@@ -1164,6 +1177,7 @@ static void decode_node_avx512(const pivco_huffman_table_t *table,
     }
 
     case PIVCO_NODE_HALF_RIGHT: {
+        if (kr_header_needed(table, node_id)) *in_ptr += KR_HEADER_BYTES;
         int nbytes = bitmap_bytes(n);
         const uint8_t *bm = *in_ptr;
         *in_ptr += nbytes;
@@ -1174,6 +1188,7 @@ static void decode_node_avx512(const pivco_huffman_table_t *table,
     }
 
     case PIVCO_NODE_HALF_LEFT: {
+        if (kr_header_needed(table, node_id)) *in_ptr += KR_HEADER_BYTES;
         int nbytes = bitmap_bytes(n);
         const uint8_t *bm = *in_ptr;
         *in_ptr += nbytes;
@@ -1185,6 +1200,7 @@ static void decode_node_avx512(const pivco_huffman_table_t *table,
 
     case PIVCO_NODE_INTERNAL_FULL:
     default: {
+        if (kr_header_needed(table, node_id)) *in_ptr += KR_HEADER_BYTES;
         int nbytes = bitmap_bytes(n);
         const uint8_t *bm = *in_ptr;
         *in_ptr += nbytes;
@@ -1235,6 +1251,9 @@ int pivco_huffman_decode_avx512(const uint8_t *in, size_t in_len,
         return PIVCO_OK;
     }
 
+    /* K_right header for root (TD-skips; encoder wrote it iff root
+     * has any non-leaf child). */
+    if (kr_header_needed(table, table->tree_root)) ptr += KR_HEADER_BYTES;
     int nbytes = bitmap_bytes(N);
     const uint8_t *bm = ptr;
     ptr += nbytes;
