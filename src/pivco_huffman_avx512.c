@@ -1,6 +1,7 @@
 #include "pivco_huffman.h"
 #include "pivco_huffman_common.h"
 #include "pivco_prof.h"
+#include <stdlib.h>
 #include <string.h>
 
 #ifdef PIVCO_HAS_AVX512
@@ -963,12 +964,18 @@ int pivco_huffman_encode_avx512(const uint8_t *symbols,
     for (; i < N; i++) codes_la[i] = table->code_la[symbols[i]];
     PROF_TOC(PROF_ENC_INIT, N);
 
-    uint16_t tmp[PIVCO_BLOCK_SIZE * 2];
+    /* See pivco_huffman_neon.c for tmp sizing rationale -- skewed
+     * partitions can accumulate offset up to max_tree_depth × N. */
+    const size_t tmp_capacity =
+        (size_t)PIVCO_BLOCK_SIZE * (PIVCO_MAX_CODE_LEN + 2);
+    uint16_t *tmp = (uint16_t *)malloc(tmp_capacity * sizeof(uint16_t));
+    if (!tmp) return PIVCO_ERR_NULL;
     uint8_t *ptr = out;
 
     encode_node_avx512(table, table->tree_root, codes_la, N,
                         0, &ptr, tmp);
 
+    free(tmp);
     *out_len = (size_t)(ptr - out);
     return PIVCO_OK;
 }
@@ -1267,7 +1274,12 @@ int pivco_huffman_decode_avx512(const uint8_t *in, size_t in_len,
      * 64B-aligned to keep cache-set layout deterministic.
      * See decode_node_neon comment. */
     uint16_t indices[PIVCO_BLOCK_SIZE + 32] __attribute__((aligned(64)));
-    uint16_t tmp[PIVCO_BLOCK_SIZE * 2]       __attribute__((aligned(64)));
+    /* See pivco_huffman_neon.c encode comment -- skewed partitions
+     * accumulate up to max_tree_depth × N of offset.  Heap-alloc. */
+    const size_t tmp_capacity =
+        (size_t)PIVCO_BLOCK_SIZE * (PIVCO_MAX_CODE_LEN + 2);
+    uint16_t *tmp = (uint16_t *)aligned_alloc(64, tmp_capacity * sizeof(uint16_t));
+    if (!tmp) return PIVCO_ERR_NULL;
     int n_left = 0, n_right = 0;
 
     {
@@ -1292,6 +1304,7 @@ int pivco_huffman_decode_avx512(const uint8_t *in, size_t in_len,
     decode_node_avx512(table, root->right, tmp, n_right,
                         symbols, &ptr, tmp + n_right + 32, skip_node);
 
+    free(tmp);
     *consumed = (size_t)(ptr - in);
     return PIVCO_OK;
 }

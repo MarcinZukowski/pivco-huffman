@@ -1,5 +1,6 @@
 #include "pivco_huffman.h"
 #include "pivco_huffman_common.h"
+#include <stdlib.h>
 #include <string.h>
 
 /* Pack n*D bits, LSB-first within each byte: D bits per element, local
@@ -165,12 +166,17 @@ int pivco_huffman_encode_scalar(const uint8_t *symbols,
     uint16_t indices[PIVCO_BLOCK_SIZE];
     for (int i = 0; i < N; i++) indices[i] = (uint16_t)i;
 
-    uint16_t tmp[PIVCO_BLOCK_SIZE * 2];
+    /* See pivco_huffman_neon.c for tmp sizing rationale. */
+    const size_t tmp_capacity =
+        (size_t)PIVCO_BLOCK_SIZE * (PIVCO_MAX_CODE_LEN + 2);
+    uint16_t *tmp = (uint16_t *)malloc(tmp_capacity * sizeof(uint16_t));
+    if (!tmp) return PIVCO_ERR_NULL;
     uint8_t *ptr = out;
 
     encode_node(table, table->tree_root, indices, N,
                 0, codes, lens, &ptr, tmp);
 
+    free(tmp);
     *out_len = (size_t)(ptr - out);
     return PIVCO_OK;
 }
@@ -294,12 +300,17 @@ int pivco_huffman_decode_scalar(const uint8_t *in, size_t in_len,
     uint16_t indices[PIVCO_BLOCK_SIZE];
     for (int i = 0; i < N; i++) indices[i] = (uint16_t)i;
 
-    uint16_t tmp[PIVCO_BLOCK_SIZE * 2];
+    /* See pivco_huffman_neon.c comment. */
+    const size_t tmp_capacity =
+        (size_t)PIVCO_BLOCK_SIZE * (PIVCO_MAX_CODE_LEN + 2);
+    uint16_t *tmp = (uint16_t *)malloc(tmp_capacity * sizeof(uint16_t));
+    if (!tmp) return PIVCO_ERR_NULL;
     const uint8_t *ptr = in;
 
     decode_node(table, table->tree_root, indices, N,
                 symbols, &ptr, tmp, skip_node);
 
+    free(tmp);
     *consumed = (size_t)(ptr - in);
     return PIVCO_OK;
 }

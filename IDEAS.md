@@ -1,26 +1,26 @@
 # PIVCO-Huffman Decode Ideas
 
-## BUG: encode_node_neon infinite recursion on near-uniform random — open (2026-05-13)
+## ~~BUG: encode_node_neon infinite recursion on near-uniform random~~ — FIXED 2026-05-13
 
-**Status: known correctness bug, reproducible on M4.**
+**Status: FIXED.  Test coverage added in `test/test_edge_cases.c`.**
 
-`pivco_huffman_encode_neon` stack-overflows (>32k frames, all at the
-same PC `encode_node_neon + 244`) on certain small inputs of
-near-uniform random bytes.  Roughly 1-in-20 hit rate on a fresh 1000
-random bytes; also reproduced on random 100 B and 8193 B.  Prose
-inputs of identical sizes are unaffected, and the existing
-test_roundtrip suite does not exercise this case (no uniform-random
-roundtrip test).
+Root cause was NOT infinite recursion but **stack OOB write**.  The
+`tmp[PIVCO_BLOCK_SIZE * 2]` scratch buffer was sized for balanced
+Huffman trees (sum of n_right halves at each level → ≤ 2N total).
+For skewed trees (each level's n_right ≈ n), the offset accumulates
+to `max_tree_depth × N` ≈ 11×N elements — far past the buffer end.
+On `extras/datasets/cat-image.jpg` block 34, the partition at depth=2
+node 2 wrote to `tmp[15064..22305)` past the 16384-element buffer,
+clobbering the `pivco_huffman_table_t` on the caller's stack frame.
+Subsequent recursion read `tree[3]` as the corrupted `(-2048, -2048,
+-2048)` and dispatched to a "node" that wasn't there — hence the
+infinite-recursion-looking stack trace.
 
-Tree depth is capped at `PIVCO_MAX_CODE_LEN = 11` so depth blow-up is
-not the cause.  Most likely the SIMD partition for one node mis-routes
-all codes to a single child (n_left == n or n_right == n) while the
-child is still an internal node, so the recurse-with-same-n loop
-never terminates.  Worth dumping the offending tree + the codes_la
-vector at the failing depth to confirm.
-
-Repro: build/pivcohuf c <1000B random> /tmp/x.ph  → SIGSEGV in
-encode_node_neon, before the file codec writes anything.
+Fix: scratch buffers in all backends (`encode_node_neon`,
+`decode_node_neon`, BU equivalents, AVX-512, x86 SSE, scalar) now
+sized for the worst case `(PIVCO_MAX_CODE_LEN + 2) × BLOCK_SIZE`.
+Top-down decoders heap-allocate per-call; BU decoders use a static
+buffer at the same worst-case size.
 
 ## SIMD/GPU Huffman literature survey — open (2026-05-12)
 

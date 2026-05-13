@@ -595,7 +595,10 @@ int pivco_huffman_decode_bu_x86(const uint8_t *in, size_t in_len,
         return PIVCO_OK;
     }
 
-    static uint8_t scratch[3 * PIVCO_BLOCK_SIZE + 64]
+    /* See pivco_huffman_bu_neon.c -- skewed Huffman trees can need up
+     * to max_tree_depth × N bytes of scratch (3N is insufficient on
+     * cat-image.jpg in 2026-05-13). */
+    static uint8_t scratch[(PIVCO_MAX_CODE_LEN + 2) * PIVCO_BLOCK_SIZE + 64]
         __attribute__((aligned(64)));
 
     decode_subtree_bu(table, table->tree_root, N,

@@ -214,6 +214,7 @@ if(BUILD_TESTS)
     add_executable(pivco_huffman_tests
         test/test_main.c
         test/test_roundtrip.c
+        test/test_edge_cases.c
     )
     target_link_libraries(pivco_huffman_tests pivco_huffman)
 endif()

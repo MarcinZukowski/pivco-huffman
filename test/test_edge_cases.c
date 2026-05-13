@@ -1,0 +1,272 @@
+/* Correctness-focused tests covering small inputs, edge-case
+ * distributions, and the real-world dataset files in extras/datasets/.
+ *
+ * Tests both the low-level block codec (pivco_huffman_encode/decode)
+ * and the high-level file codec (pivcohuf_compress/decompress).  The
+ * file-codec layer is the one users hit; the block codec is the
+ * underlying primitive.  Bugs typically live in the block codec but
+ * are usually exposed via file-codec round-trips.
+ *
+ * Historical bugs caught by this suite:
+ *   - 2026-05-13: encode_node_neon + decode_subtree_bu OOB on skewed
+ *     trees (cat-image.jpg block 34) -- tmp/scratch buffer was sized
+ *     for balanced trees only, not the depth*N worst case for
+ *     adversarial skewed partitions.
+ */
+
+#include "pivco_huffman.h"
+#include "pivcohuf_file.h"
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+
+#define FAIL(msg, ...) do { printf("  FAIL: " msg "\n", ##__VA_ARGS__); return 1; } while (0)
+
+static uint64_t xorshift64(uint64_t *s) {
+    uint64_t x = *s; x ^= x << 13; x ^= x >> 7; x ^= x << 17; *s = x; return x;
+}
+
+/* ---------- helpers ---------- */
+
+/* Round-trip a byte buffer through the file codec.  Returns 0 on match. */
+static int roundtrip_file(const uint8_t *in, size_t in_len)
+{
+    size_t cap_c = pivcohuf_compress_bound(in_len);
+    uint8_t *enc = malloc(cap_c ? cap_c : 1);
+    if (!enc) FAIL("oom enc");
+    size_t enc_len = cap_c;
+    int rc = pivcohuf_compress(in, in_len, enc, &enc_len);
+    if (rc != PIVCOHUF_OK) { free(enc); FAIL("compress rc=%d", rc); }
+
+    uint8_t *dec = malloc(in_len ? in_len : 1);
+    if (!dec) { free(enc); FAIL("oom dec"); }
+    size_t dec_len = in_len;
+    rc = pivcohuf_decompress(enc, enc_len, dec, &dec_len);
+    if (rc != PIVCOHUF_OK) { free(enc); free(dec); FAIL("decompress rc=%d", rc); }
+    if (dec_len != in_len) { free(enc); free(dec); FAIL("size mismatch %zu vs %zu", dec_len, in_len); }
+    if (in_len > 0 && memcmp(in, dec, in_len) != 0) {
+        size_t i; for (i = 0; i < in_len && in[i] == dec[i]; i++) ;
+        free(enc); free(dec); FAIL("content diff at byte %zu (in=%02x dec=%02x)", i, in[i], dec[i]);
+    }
+    free(enc); free(dec);
+    return 0;
+}
+
+/* Read a whole file into a heap buffer.  *out_len receives the size.
+ * Returns NULL on failure. */
+static uint8_t *read_file(const char *path, size_t *out_len)
+{
+    struct stat st;
+    if (stat(path, &st) != 0) return NULL;
+    *out_len = (size_t)st.st_size;
+    FILE *f = fopen(path, "rb");
+    if (!f) return NULL;
+    uint8_t *buf = malloc(*out_len ? *out_len : 1);
+    if (!buf) { fclose(f); return NULL; }
+    if (*out_len && fread(buf, 1, *out_len, f) != *out_len) {
+        free(buf); fclose(f); return NULL;
+    }
+    fclose(f);
+    return buf;
+}
+
+/* ---------- tests ---------- */
+
+/* Real dataset files - the primary correctness regression suite. */
+static int test_real_datasets(void)
+{
+    const char *paths[] = {
+        "extras/datasets/cat-image.jpg",   /* near-uniform, caught the 2026-05-13 bug */
+        "extras/datasets/cat-wiki.html",
+        "extras/datasets/pride.txt",
+        "extras/datasets/json_api.json",
+        "extras/datasets/source_c.c",
+        "extras/datasets/log_apache.log",
+        "extras/datasets/dna_fasta.fa",
+        "extras/datasets/csv_numeric.csv",
+        "extras/datasets/gzip_random.gz",
+        "extras/datasets/chinese_text.txt",
+    };
+    int n = (int)(sizeof(paths)/sizeof(paths[0]));
+    int total_fail = 0;
+    for (int i = 0; i < n; i++) {
+        size_t len;
+        uint8_t *buf = read_file(paths[i], &len);
+        if (!buf) {
+            printf("[real_dataset %s] SKIP (file not found)\n", paths[i]);
+            continue;
+        }
+        printf("[real_dataset %s] ", paths[i]);
+        int r = roundtrip_file(buf, len);
+        free(buf);
+        if (r) total_fail++;
+        else   printf("OK (%zu B)\n", len);
+    }
+    return total_fail;
+}
+
+/* Edge-case sizes: 0, 1, 2, 7, 8, 16, 100, exact-block, just-over, big multi-block. */
+static int test_size_edge_cases(void)
+{
+    const size_t sizes[] = {
+        0, 1, 2, 7, 8, 16, 100, 1000,
+        PIVCO_BLOCK_SIZE - 1, PIVCO_BLOCK_SIZE, PIVCO_BLOCK_SIZE + 1,
+        2 * PIVCO_BLOCK_SIZE - 1, 2 * PIVCO_BLOCK_SIZE, 2 * PIVCO_BLOCK_SIZE + 1,
+        100000, 1 << 20,
+    };
+    int n = (int)(sizeof(sizes)/sizeof(sizes[0]));
+    int total_fail = 0;
+
+    for (int i = 0; i < n; i++) {
+        size_t len = sizes[i];
+        uint8_t *buf = malloc(len ? len : 1);
+        if (!buf) FAIL("oom");
+
+        /* Fill with mixed pattern: deterministic bytes-cycle plus
+         * occasional randomness so each block sees varied input. */
+        uint64_t rng = 0xc0ffee00ULL + (uint64_t)i * 0x9e3779b97f4a7c15ULL;
+        for (size_t j = 0; j < len; j++) {
+            buf[j] = (uint8_t)((j * 17 + 3) ^ (xorshift64(&rng) & 0xFF));
+        }
+
+        printf("[size n=%zu] ", len);
+        int r = roundtrip_file(buf, len);
+        free(buf);
+        if (r) total_fail++;
+        else printf("OK\n");
+    }
+    return total_fail;
+}
+
+/* Uniform-random small inputs - historical "encode_node_neon stack overflow
+ * on near-uniform random" bug repro.  Multiple seeds + sizes. */
+static int test_uniform_random(void)
+{
+    const size_t sizes[] = { 100, 1000, 8192, 8193, 73753, 1 << 20 };
+    int n = (int)(sizeof(sizes)/sizeof(sizes[0]));
+    int total_fail = 0;
+
+    for (int i = 0; i < n; i++) {
+        size_t len = sizes[i];
+        for (int seed_idx = 0; seed_idx < 5; seed_idx++) {
+            uint8_t *buf = malloc(len);
+            if (!buf) FAIL("oom");
+            uint64_t rng = 0xdeadbeefdeadbeefULL + (uint64_t)(i * 100 + seed_idx);
+            for (size_t j = 0; j < len; j++) buf[j] = (uint8_t)xorshift64(&rng);
+            printf("[uniform_random n=%zu seed=%d] ", len, seed_idx);
+            int r = roundtrip_file(buf, len);
+            free(buf);
+            if (r) total_fail++;
+            else printf("OK\n");
+        }
+    }
+    return total_fail;
+}
+
+/* Distribution edge cases: all-same byte, two-byte alternating, heavy skew. */
+static int test_distribution_edge_cases(void)
+{
+    int total_fail = 0;
+
+    /* All-same byte (1 symbol).  No tree branches; entire output uses
+     * the prefill optimization. */
+    for (size_t len = 1; len <= 100000; len = (len * 7) + 1) {
+        uint8_t *buf = malloc(len);
+        if (!buf) FAIL("oom");
+        memset(buf, 0x42, len);
+        printf("[all_same n=%zu] ", len);
+        int r = roundtrip_file(buf, len);
+        free(buf);
+        if (r) total_fail++;
+        else printf("OK\n");
+    }
+
+    /* Two-symbol alternating, various ratios. */
+    const struct { int p_a; const char *name; } two_sym[] = {
+        { 50, "50/50" }, { 80, "80/20" }, { 95, "95/5" }, { 99, "99/1" }
+    };
+    for (size_t len = 1024; len <= 100000; len *= 4) {
+        for (int t = 0; t < (int)(sizeof(two_sym)/sizeof(two_sym[0])); t++) {
+            uint8_t *buf = malloc(len);
+            if (!buf) FAIL("oom");
+            uint64_t rng = 0xcafef00dULL + (uint64_t)t * len;
+            int p_a = two_sym[t].p_a;
+            for (size_t j = 0; j < len; j++) {
+                buf[j] = (xorshift64(&rng) % 100 < (uint64_t)p_a) ? 0xAA : 0x55;
+            }
+            printf("[two_sym %s n=%zu] ", two_sym[t].name, len);
+            int r = roundtrip_file(buf, len);
+            free(buf);
+            if (r) total_fail++;
+            else printf("OK\n");
+        }
+    }
+
+    /* Heavy skew: one byte at 80%, 255 others uniform.  Repro for
+     * proba80-style distributions. */
+    for (size_t len = 1024; len <= 200000; len *= 4) {
+        uint8_t *buf = malloc(len);
+        if (!buf) FAIL("oom");
+        uint64_t rng = 0xfeedface00ULL + len;
+        for (size_t j = 0; j < len; j++) {
+            uint64_t r = xorshift64(&rng);
+            buf[j] = (r % 100 < 80) ? 0 : (uint8_t)((r >> 8) & 0xFF);
+        }
+        printf("[skew80 n=%zu] ", len);
+        int r = roundtrip_file(buf, len);
+        free(buf);
+        if (r) total_fail++;
+        else printf("OK\n");
+    }
+
+    return total_fail;
+}
+
+/* Adversarial: small inputs with byte distributions specifically chosen
+ * to produce highly imbalanced Huffman trees that stress the
+ * tmp/scratch sizing in the partition recursion. */
+static int test_adversarial(void)
+{
+    int total_fail = 0;
+
+    /* Repeating short pattern: a few symbols dominate, but tree depth
+     * can still be 8+ due to long-tail. */
+    for (size_t len = 8192; len <= 100000; len *= 2) {
+        uint8_t *buf = malloc(len);
+        if (!buf) FAIL("oom");
+        uint64_t rng = 0xabad1deaULL + len;
+        for (size_t j = 0; j < len; j++) {
+            uint64_t r = xorshift64(&rng) % 1000;
+            /* 50% pad, 30% second, then 20% spread over 254 others */
+            if      (r <  500) buf[j] = 0;
+            else if (r <  800) buf[j] = 1;
+            else               buf[j] = (uint8_t)((r >> 8) & 0xFF);
+        }
+        printf("[adversarial_skew n=%zu] ", len);
+        int r = roundtrip_file(buf, len);
+        free(buf);
+        if (r) total_fail++;
+        else printf("OK\n");
+    }
+    return total_fail;
+}
+
+/* ---------- entry point ---------- */
+
+int test_edge_cases_all(void)
+{
+    int fails = 0;
+    printf("\n--- real datasets ---\n");
+    fails += test_real_datasets();
+    printf("\n--- size edge cases ---\n");
+    fails += test_size_edge_cases();
+    printf("\n--- uniform random ---\n");
+    fails += test_uniform_random();
+    printf("\n--- distribution edge cases ---\n");
+    fails += test_distribution_edge_cases();
+    printf("\n--- adversarial ---\n");
+    fails += test_adversarial();
+    return fails;
+}

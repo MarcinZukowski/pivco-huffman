@@ -1,6 +1,7 @@
 #include "pivco_huffman.h"
 #include "pivco_huffman_common.h"
 #include "pivco_prof.h"
+#include <stdlib.h>
 #include <string.h>
 
 #ifdef PIVCO_HAS_SSE4
@@ -756,12 +757,17 @@ int pivco_huffman_encode_x86(const uint8_t *symbols,
     for (int i = 0; i < N; i++) codes_la[i] = table->code_la[symbols[i]];
     PROF_TOC(PROF_ENC_INIT, N);
 
-    uint16_t tmp[PIVCO_BLOCK_SIZE * 2];
+    /* See pivco_huffman_neon.c for tmp sizing rationale. */
+    const size_t tmp_capacity =
+        (size_t)PIVCO_BLOCK_SIZE * (PIVCO_MAX_CODE_LEN + 2);
+    uint16_t *tmp = (uint16_t *)malloc(tmp_capacity * sizeof(uint16_t));
+    if (!tmp) return PIVCO_ERR_NULL;
     uint8_t *ptr = out;
 
     encode_node_x86(table, table->tree_root, codes_la, N,
                      0, &ptr, tmp);
 
+    free(tmp);
     *out_len = (size_t)(ptr - out);
     return PIVCO_OK;
 }
@@ -1016,7 +1022,12 @@ int pivco_huffman_decode_x86(const uint8_t *in, size_t in_len,
      * filler; 64B-aligned to keep cache-set layout deterministic.
      * See decode_node_neon comment. */
     uint16_t indices[PIVCO_BLOCK_SIZE + 8] __attribute__((aligned(64)));
-    uint16_t tmp[PIVCO_BLOCK_SIZE * 2]      __attribute__((aligned(64)));
+    /* See pivco_huffman_neon.c comment -- heap-alloc for worst-case
+     * skewed-partition offset accumulation. */
+    const size_t tmp_capacity =
+        (size_t)PIVCO_BLOCK_SIZE * (PIVCO_MAX_CODE_LEN + 2);
+    uint16_t *tmp = (uint16_t *)aligned_alloc(64, tmp_capacity * sizeof(uint16_t));
+    if (!tmp) return PIVCO_ERR_NULL;
 
     if (left_leaf && root->left == skip_node) {
         /* Left is prefilled — half-partition right only at root */
@@ -1060,6 +1071,7 @@ int pivco_huffman_decode_x86(const uint8_t *in, size_t in_len,
                          symbols, &ptr, tmp + n_right + 8, skip_node);
     }
 
+    free(tmp);
     *consumed = (size_t)(ptr - in);
     return PIVCO_OK;
 }

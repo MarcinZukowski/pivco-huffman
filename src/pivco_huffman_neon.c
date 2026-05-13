@@ -2,6 +2,7 @@
 #include "pivco_huffman_common.h"
 #include "pivco_huffman_neon_common.h"
 #include "pivco_prof.h"
+#include <stdlib.h>
 #include <string.h>
 
 #ifdef PIVCO_HAS_NEON
@@ -957,12 +958,31 @@ int pivco_huffman_encode_neon(const uint8_t *symbols,
     for (int i = 0; i < N; i++) codes_la[i] = table->code_la[symbols[i]];
     PROF_TOC(PROF_ENC_INIT, N);
 
-    uint16_t tmp[PIVCO_BLOCK_SIZE * 2];
+    /* `tmp` scratch sizing: each RIGHT-going recursion advances the tmp
+     * cursor by the parent's n_right.  In the worst case (highly skewed
+     * partitions where most elements keep going the same way), the
+     * accumulated offset can reach (max_tree_depth) * N elements --
+     * the sum over all levels of "n_right at that level" can be as
+     * large as max_depth * N when each level passes ~all elements
+     * through to the same child.  Bound by PIVCO_MAX_CODE_LEN+2 so we
+     * have room for the SIMD 16-byte overrun and a depth that includes
+     * the K_right-header step at the bottom.
+     *
+     * 16K stack-alloc would only suffice for balanced trees; we hit a
+     * real OOB on cat-image.jpg block 34 in 2026-05-13, where a tree
+     * with three consecutive ~7K n_right partitions overran a 16K tmp
+     * into the table struct.  Heap-alloc with the worst-case bound. */
+    const size_t tmp_capacity =
+        (size_t)PIVCO_BLOCK_SIZE * (PIVCO_MAX_CODE_LEN + 2);
+    uint16_t *tmp = (uint16_t *)malloc(tmp_capacity * sizeof(uint16_t));
+    if (!tmp) return PIVCO_ERR_NULL;
+
     uint8_t *ptr = out;
 
     encode_node_neon(table, table->tree_root, codes_la, N,
                      0, &ptr, tmp);
 
+    free(tmp);
     *out_len = (size_t)(ptr - out);
     return PIVCO_OK;
 }
@@ -1555,7 +1575,15 @@ int pivco_huffman_decode_neon(const uint8_t *in, size_t in_len,
      * (uniform / two_sym_*) where the +8 offset alone shifted into
      * unfortunate associativity. */
     uint16_t indices[PIVCO_BLOCK_SIZE + 8] __attribute__((aligned(64)));
-    uint16_t tmp[PIVCO_BLOCK_SIZE * 2]      __attribute__((aligned(64)));
+    /* `tmp` scratch sizing: same OOB hazard as the encoder side, see
+     * pivco_huffman_encode_neon comment.  Each RIGHT-going recursion
+     * advances the tmp cursor by parent's n_right; in the worst case
+     * accumulated offset reaches max_tree_depth × N.  Heap-alloc with
+     * (PIVCO_MAX_CODE_LEN+2)*BLOCK_SIZE capacity. */
+    const size_t tmp_capacity =
+        (size_t)PIVCO_BLOCK_SIZE * (PIVCO_MAX_CODE_LEN + 2);
+    uint16_t *tmp = (uint16_t *)aligned_alloc(64, tmp_capacity * sizeof(uint16_t));
+    if (!tmp) return PIVCO_ERR_NULL;
 
     if (left_leaf && root->left == skip_node) {
         int n_right = root_half_right(N, bm, tmp);
@@ -1576,6 +1604,7 @@ int pivco_huffman_decode_neon(const uint8_t *in, size_t in_len,
                          symbols, &ptr, tmp + n_right + 8, skip_node);
     }
 
+    free(tmp);
     *consumed = (size_t)(ptr - in);
     return PIVCO_OK;
 }

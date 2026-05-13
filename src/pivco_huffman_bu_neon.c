@@ -602,10 +602,14 @@ int pivco_huffman_decode_bu_neon(const uint8_t *in, size_t in_len,
 
     /* Root flat subtree: handled by the recursive case (INTERNAL_FLAT). */
 
-    /* Scratch arena: bottom-up max usage is ~2N bytes for balanced trees,
-     * ~3N for adversarial unbalanced.  Allocate 3N to be safe.  64B
-     * aligned for SIMD-friendly cache lines. */
-    static uint8_t scratch[3 * PIVCO_BLOCK_SIZE + 64]
+    /* Scratch arena: each recursion level advances scratch_top by the
+     * parent's K_right (or K_left); in the worst case (highly skewed
+     * partitions, e.g. cat-image.jpg block 34 in 2026-05-13) the
+     * accumulated offset can reach max_tree_depth × N bytes -- the sum
+     * over all levels of K_right at that level can be as large as
+     * MAX_CODE_LEN × N when each level passes nearly all bytes through
+     * to the same child.  Size for the worst case.  64B aligned. */
+    static uint8_t scratch[(PIVCO_MAX_CODE_LEN + 2) * PIVCO_BLOCK_SIZE + 64]
         __attribute__((aligned(64)));
 
     decode_subtree_bu(table, table->tree_root, N,
