@@ -188,14 +188,6 @@ int pivco_huffman_decode_neon(const uint8_t *in, size_t in_len,
                               uint8_t *symbols, size_t *consumed);
 
 /* Experimental: bottom-up tree_merge decode (NEON). */
-int pivco_huffman_compute_kr_neon(const uint8_t *in, size_t in_len,
-                                   const pivco_huffman_table_t *table,
-                                   uint16_t *kr_arr, size_t kr_capacity,
-                                   size_t *kr_count);
-int pivco_huffman_decode_bu_neon_kr(const uint8_t *in, size_t in_len,
-                                     const pivco_huffman_table_t *table,
-                                     uint8_t *symbols, size_t *consumed,
-                                     const uint16_t *kr_arr);
 int pivco_huffman_decode_bu_neon(const uint8_t *in, size_t in_len,
                                   const pivco_huffman_table_t *table,
                                   uint8_t *symbols, size_t *consumed);
@@ -214,19 +206,6 @@ int pivco_huffman_decode_x86(const uint8_t *in, size_t in_len,
 int pivco_huffman_decode_bu_x86(const uint8_t *in, size_t in_len,
                                  const pivco_huffman_table_t *table,
                                  uint8_t *symbols, size_t *consumed);
-
-/* K_right experiment (x86 BU only): precompute per-internal-node
- * K_right values from an encoded block into a side buffer, then run
- * the BU decoder reading from that buffer instead of popcounting.
- * Used by extras/bench_kr; not a wire-format change. */
-int pivco_huffman_compute_kr_x86(const uint8_t *in, size_t in_len,
-                                  const pivco_huffman_table_t *table,
-                                  uint16_t *kr_arr, size_t kr_capacity,
-                                  size_t *kr_count);
-int pivco_huffman_decode_bu_x86_kr(const uint8_t *in, size_t in_len,
-                                    const pivco_huffman_table_t *table,
-                                    uint8_t *symbols, size_t *consumed,
-                                    const uint16_t *kr_arr);
 #endif
 
 /* Prior experimental NEON variants (neon2, neon2b, neon_fused_1leaf)
