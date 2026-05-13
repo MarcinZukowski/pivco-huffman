@@ -8,11 +8,42 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* FSE dispatch threshold (table id below which we don't bother).  Table
- * 2 corresponds to frequent-bit probability ~0.5796, where the per-bit
- * entropy gain over raw is ~0.024 bit (~3%).  Tunable; see FSE-V0.md. */
-#ifndef PIVCO_FSE_THRESHOLD_TABLE
-#define PIVCO_FSE_THRESHOLD_TABLE 2
+/* Dispatch threshold: only attempt FSE if the partition's
+ * frequent-bit probability >= this value (fractional, [0.5, 1.0]).
+ * Default 0.625 is between table 2's 0.5796 and table 3's 0.6464 --
+ * i.e. don't bother on partitions that are only mildly skewed.
+ * pivco_fse_select_table() will pick the appropriate table. */
+#ifndef PIVCO_FSE_MIN_THRESHOLD
+#define PIVCO_FSE_MIN_THRESHOLD 0.625
+#endif
+
+/* Per-codeword fallback threshold.  Commit FSE iff the compressed
+ * AVERAGE codeword length is at most this fraction of the raw
+ * codeword length.  At a node at depth D with n codes routed through
+ * its bitmap, every codeword passing through pays D + 1 bits raw
+ * (D bits in ancestors + 1 partition bit here) vs D + fse_frac bits
+ * after FSE, where fse_frac = (fse_len + 2 wire-prefix) * 8 / n.
+ * So we commit iff (D + fse_frac) / (D + 1) <= MIN_RATIO.
+ *
+ * Effect: at the root (D=0), we just need FSE to clear MIN_RATIO of
+ * the raw bitmap.  At D=5, we need a much sharper bitmap-level
+ * compression to be worth committing -- the 5 ancestor bits paid by
+ * every codeword dilute the local saving.  Matches the intuition
+ * "1 bit -> 0.9 bits at the root is worth it; 6 bits -> 5.9 bits is
+ * mostly noise." */
+#ifndef PIVCO_FSE_MIN_RATIO
+#define PIVCO_FSE_MIN_RATIO 0.95
+#endif
+
+/* Don't even attempt FSE on bitmaps smaller than this many bytes.
+ * Below ~32 bytes (256 codes routed through the node), the FSE
+ * per-stream flush overhead (~3 bytes) plus our 2-byte length
+ * prefix is a meaningful fraction of the raw size, so commits are
+ * unlikely.  Also: deep nodes that have few codes routed through
+ * them already use long Huffman codes -- relative FSE benefit
+ * there is small. */
+#ifndef PIVCO_FSE_MIN_BITMAP_BYTES
+#define PIVCO_FSE_MIN_BITMAP_BYTES 32
 #endif
 
 #ifdef PIVCO_HAS_NEON
@@ -949,40 +980,53 @@ static void encode_node_neon(const pivco_huffman_table_t *table,
      * the bitmap and replace [marker=0][raw bitmap] with
      * [marker=table|xor][fse_len:u16][fse payload]. */
 #ifdef PIVCO_HAS_FSE
-    if (nbytes > 0) {
+    if (nbytes >= PIVCO_FSE_MIN_BITMAP_BYTES) {
         int n_major = (n_left >= n_right) ? n_left : n_right;
         double p_major = (n > 0) ? (double)n_major / (double)n : 0.0;
         int xor_flag = (n_right > n_left);
-        int t_id = pivco_fse_select_table(p_major);
         int emitted_fse = 0;
-        if (t_id >= PIVCO_FSE_THRESHOLD_TABLE) {
-            uint8_t scratch[PIVCO_BLOCK_SIZE / 8 + 16];
-            uint8_t fse_out[PIVCO_BLOCK_SIZE];
-            if (xor_flag) {
-                for (int i = 0; i < nbytes; i++) scratch[i] = (uint8_t)~bm[i];
-            } else {
-                memcpy(scratch, bm, (size_t)nbytes);
-            }
-            PROF_TIC();
-            size_t fse_len = 0;
-            pivco_fse_status_t rc = pivco_fse_compress(
-                t_id, scratch, (size_t)nbytes,
-                fse_out, sizeof(fse_out), &fse_len);
-            PROF_TOC(PROF_FSE_ENC, (uint64_t)nbytes);
-            if (rc == PIVCO_FSE_OK && fse_len + 2 < (size_t)nbytes) {
-                *fse_marker = (uint8_t)((xor_flag ? 0x80 : 0) | t_id);
-                uint8_t *p = bm;
-                *p++ = (uint8_t)(fse_len & 0xFF);
-                *p++ = (uint8_t)((fse_len >> 8) & 0xFF);
-                memcpy(p, fse_out, fse_len);
-                *out_ptr = p + fse_len;
-                emitted_fse = 1;
-                PROF_COUNT_ONLY(PROF_FSE_HIT_COUNT, 1);
-            } else {
-                PROF_COUNT_ONLY(PROF_FSE_FALLBACK_COUNT, 1);
+        if (p_major >= PIVCO_FSE_MIN_THRESHOLD) {
+            int t_id = pivco_fse_select_table(p_major);
+            if (t_id >= 1) {
+                uint8_t scratch[PIVCO_BLOCK_SIZE / 8 + 16];
+                uint8_t fse_out[PIVCO_BLOCK_SIZE];
+                if (xor_flag) {
+                    for (int i = 0; i < nbytes; i++) scratch[i] = (uint8_t)~bm[i];
+                } else {
+                    memcpy(scratch, bm, (size_t)nbytes);
+                }
+                PROF_TIC();
+                size_t fse_len = 0;
+                pivco_fse_status_t rc = pivco_fse_compress(
+                    t_id, scratch, (size_t)nbytes,
+                    fse_out, sizeof(fse_out), &fse_len);
+                PROF_TOC(PROF_FSE_ENC, (uint64_t)nbytes);
+                /* Per-codeword commit gate.  Each codeword passing through
+                 * this node costs (depth + 1) bits raw or
+                 * (depth + fse_frac) bits with FSE, where
+                 *   fse_frac = (fse_len + 2 wire prefix) * 8 / n.
+                 * Commit iff (depth + fse_frac) <= ratio * (depth + 1). */
+                double fse_frac = (double)(fse_len + 2) * 8.0 / (double)n;
+                double codeword_ratio =
+                    ((double)depth + fse_frac) / ((double)depth + 1.0);
+                if (rc == PIVCO_FSE_OK &&
+                    codeword_ratio <= (double)PIVCO_FSE_MIN_RATIO) {
+                    *fse_marker = (uint8_t)((xor_flag ? 0x80 : 0) | t_id);
+                    uint8_t *p = bm;
+                    *p++ = (uint8_t)(fse_len & 0xFF);
+                    *p++ = (uint8_t)((fse_len >> 8) & 0xFF);
+                    memcpy(p, fse_out, fse_len);
+                    *out_ptr = p + fse_len;
+                    emitted_fse = 1;
+                    PROF_COUNT_ONLY(PROF_FSE_HIT_COUNT, 1);
+                } else {
+                    PROF_COUNT_ONLY(PROF_FSE_FALLBACK_COUNT, 1);
+                }
             }
         }
         if (!emitted_fse) PROF_COUNT_ONLY(PROF_FSE_RAW_COUNT, 1);
+    } else {
+        PROF_COUNT_ONLY(PROF_FSE_RAW_COUNT, 1);
     }
 #endif
 
