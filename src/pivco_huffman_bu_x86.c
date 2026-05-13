@@ -550,6 +550,274 @@ static void decode_subtree_bu(const pivco_huffman_table_t *table,
     }
 }
 
+/* ============================================================
+ * K_right experiment: variant decoder that reads precomputed
+ * K_right values from a side buffer instead of running
+ * popcount_K_right_x86 at each internal node.  Plus a precompute
+ * helper that walks the encoded stream once to populate the buffer.
+ *
+ * Used by extras/bench_kr to measure the upper-bound win of the
+ * "store K_right per internal node" idea (IDEAS.md 2026-05-12)
+ * without changing the wire format -- the kr_arr is sidecar memory
+ * held alongside each encoded block.  Same DFS traversal in both
+ * functions guarantees the read/write order matches.
+ * ============================================================ */
+
+static void precompute_kr_subtree(const pivco_huffman_table_t *table,
+                                   int16_t node_id, int K,
+                                   const uint8_t **in_ptr,
+                                   uint16_t **kr_ptr)
+{
+    if (K == 0) return;
+    const pivco_tree_node_t *node = &table->tree[node_id];
+
+    switch ((pivco_node_type_t)table->node_type[node_id]) {
+    case PIVCO_NODE_SKIP:
+    case PIVCO_NODE_LEAF:
+        return;
+    case PIVCO_NODE_INTERNAL_FLAT: {
+        int D = table->flat_depth[node_id];
+        int total_bytes = (K * D + 7) >> 3;
+        *in_ptr += total_bytes;
+        return;
+    }
+    case PIVCO_NODE_BOTH_LEAVES: {
+        *in_ptr += bitmap_bytes(K);
+        return;
+    }
+    case PIVCO_NODE_HALF_RIGHT: {
+        int nbytes = bitmap_bytes(K);
+        const uint8_t *bm = *in_ptr;
+        *in_ptr += nbytes;
+        if (table->node_type[node->right] == (uint8_t)PIVCO_NODE_LEAF) return;
+        int K_right = popcount_K_right_x86(bm, nbytes, K);
+        *(*kr_ptr)++ = (uint16_t)K_right;
+        precompute_kr_subtree(table, node->right, K_right, in_ptr, kr_ptr);
+        return;
+    }
+    case PIVCO_NODE_HALF_LEFT: {
+        int nbytes = bitmap_bytes(K);
+        const uint8_t *bm = *in_ptr;
+        *in_ptr += nbytes;
+        if (table->node_type[node->left] == (uint8_t)PIVCO_NODE_LEAF) return;
+        int K_right = popcount_K_right_x86(bm, nbytes, K);
+        int K_left = K - K_right;
+        *(*kr_ptr)++ = (uint16_t)K_right;
+        precompute_kr_subtree(table, node->left, K_left, in_ptr, kr_ptr);
+        return;
+    }
+    case PIVCO_NODE_INTERNAL_FULL:
+    default: {
+        int nbytes = bitmap_bytes(K);
+        const uint8_t *bm = *in_ptr;
+        *in_ptr += nbytes;
+        int left_kind  = table->node_type[node->left];
+        int right_kind = table->node_type[node->right];
+        if (left_kind == (uint8_t)PIVCO_NODE_LEAF
+            && right_kind == (uint8_t)PIVCO_NODE_LEAF) return;
+        if (left_kind == (uint8_t)PIVCO_NODE_LEAF) {
+            int K_right = popcount_K_right_x86(bm, nbytes, K);
+            *(*kr_ptr)++ = (uint16_t)K_right;
+            precompute_kr_subtree(table, node->right, K_right, in_ptr, kr_ptr);
+            return;
+        }
+        if (right_kind == (uint8_t)PIVCO_NODE_LEAF) {
+            int K_right = popcount_K_right_x86(bm, nbytes, K);
+            int K_left = K - K_right;
+            *(*kr_ptr)++ = (uint16_t)K_right;
+            precompute_kr_subtree(table, node->left, K_left, in_ptr, kr_ptr);
+            return;
+        }
+        int K_right = popcount_K_right_x86(bm, nbytes, K);
+        int K_left = K - K_right;
+        *(*kr_ptr)++ = (uint16_t)K_right;
+        precompute_kr_subtree(table, node->left,  K_left,  in_ptr, kr_ptr);
+        precompute_kr_subtree(table, node->right, K_right, in_ptr, kr_ptr);
+        return;
+    }
+    }
+}
+
+static void decode_subtree_bu_kr(const pivco_huffman_table_t *table,
+                                  int16_t node_id, int K,
+                                  uint8_t *out_buf,
+                                  const uint8_t **in_ptr,
+                                  uint8_t *scratch_top,
+                                  const uint16_t **kr_ptr)
+{
+    if (K == 0) return;
+    const pivco_tree_node_t *node = &table->tree[node_id];
+
+    switch ((pivco_node_type_t)table->node_type[node_id]) {
+    case PIVCO_NODE_SKIP:
+        memset(out_buf, table->prefill_sym, (size_t)K);
+        return;
+    case PIVCO_NODE_LEAF:
+        memset(out_buf, (uint8_t)node->symbol, (size_t)K);
+        return;
+    case PIVCO_NODE_INTERNAL_FLAT: {
+        int D = table->flat_depth[node_id];
+        int total_bytes = (K * D + 7) >> 3;
+        const uint8_t *bm = *in_ptr;
+        *in_ptr += total_bytes;
+        const uint8_t *c2s = &table->flat_code_to_sym[table->flat_offset[node_id]];
+        flat_decode_to_buffer(out_buf, K, bm, D, c2s);
+        return;
+    }
+    case PIVCO_NODE_BOTH_LEAVES: {
+        int nbytes = bitmap_bytes(K);
+        const uint8_t *bm = *in_ptr;
+        *in_ptr += nbytes;
+        merge_both_const(bm, K,
+                          (uint8_t)table->tree[node->left].symbol,
+                          (uint8_t)table->tree[node->right].symbol,
+                          out_buf);
+        return;
+    }
+    case PIVCO_NODE_HALF_RIGHT: {
+        int nbytes = bitmap_bytes(K);
+        const uint8_t *bm = *in_ptr;
+        *in_ptr += nbytes;
+        if (table->node_type[node->right] == (uint8_t)PIVCO_NODE_LEAF) {
+            merge_both_const(bm, K, table->prefill_sym,
+                              (uint8_t)table->tree[node->right].symbol,
+                              out_buf);
+            return;
+        }
+        int K_right = *(*kr_ptr)++;
+        uint8_t *right_buf = scratch_top;
+        decode_subtree_bu_kr(table, node->right, K_right,
+                              right_buf, in_ptr, scratch_top + K_right, kr_ptr);
+        tree_merge_bcast_left(bm, K, table->prefill_sym, right_buf, out_buf);
+        return;
+    }
+    case PIVCO_NODE_HALF_LEFT: {
+        int nbytes = bitmap_bytes(K);
+        const uint8_t *bm = *in_ptr;
+        *in_ptr += nbytes;
+        if (table->node_type[node->left] == (uint8_t)PIVCO_NODE_LEAF) {
+            merge_both_const(bm, K,
+                              (uint8_t)table->tree[node->left].symbol,
+                              table->prefill_sym, out_buf);
+            return;
+        }
+        int K_right = *(*kr_ptr)++;
+        int K_left = K - K_right;
+        uint8_t *left_buf = scratch_top;
+        decode_subtree_bu_kr(table, node->left, K_left,
+                              left_buf, in_ptr, scratch_top + K_left, kr_ptr);
+        tree_merge_bcast_right(bm, K, left_buf, table->prefill_sym, out_buf);
+        return;
+    }
+    case PIVCO_NODE_INTERNAL_FULL:
+    default: {
+        int nbytes = bitmap_bytes(K);
+        const uint8_t *bm = *in_ptr;
+        *in_ptr += nbytes;
+        int left_kind  = table->node_type[node->left];
+        int right_kind = table->node_type[node->right];
+        if (left_kind == (uint8_t)PIVCO_NODE_LEAF
+            && right_kind == (uint8_t)PIVCO_NODE_LEAF) {
+            merge_both_const(bm, K,
+                              (uint8_t)table->tree[node->left].symbol,
+                              (uint8_t)table->tree[node->right].symbol,
+                              out_buf);
+            return;
+        }
+        if (left_kind == (uint8_t)PIVCO_NODE_LEAF) {
+            int K_right = *(*kr_ptr)++;
+            uint8_t *right_buf = scratch_top;
+            decode_subtree_bu_kr(table, node->right, K_right,
+                                  right_buf, in_ptr, scratch_top + K_right, kr_ptr);
+            tree_merge_bcast_left(bm, K,
+                                   (uint8_t)table->tree[node->left].symbol,
+                                   right_buf, out_buf);
+            return;
+        }
+        if (right_kind == (uint8_t)PIVCO_NODE_LEAF) {
+            int K_right = *(*kr_ptr)++;
+            int K_left = K - K_right;
+            uint8_t *left_buf = scratch_top;
+            decode_subtree_bu_kr(table, node->left, K_left,
+                                  left_buf, in_ptr, scratch_top + K_left, kr_ptr);
+            tree_merge_bcast_right(bm, K, left_buf,
+                                    (uint8_t)table->tree[node->right].symbol,
+                                    out_buf);
+            return;
+        }
+        int K_right = *(*kr_ptr)++;
+        int K_left = K - K_right;
+        uint8_t *left_buf  = scratch_top;
+        uint8_t *right_buf = scratch_top + K_left;
+        uint8_t *new_scratch_top = scratch_top + K;
+        decode_subtree_bu_kr(table, node->left,  K_left,
+                              left_buf,  in_ptr, new_scratch_top, kr_ptr);
+        decode_subtree_bu_kr(table, node->right, K_right,
+                              right_buf, in_ptr, new_scratch_top, kr_ptr);
+        tree_merge(bm, K, left_buf, right_buf, out_buf);
+        return;
+    }
+    }
+}
+
+/* Walk one encoded block, popcount each internal-with-internal-child
+ * bitmap, fill kr_arr in DFS order.  Returns number of entries written. */
+int pivco_huffman_compute_kr_x86(const uint8_t *in, size_t in_len,
+                                  const pivco_huffman_table_t *table,
+                                  uint16_t *kr_arr, size_t kr_capacity,
+                                  size_t *kr_count)
+{
+    if (!in || !table || !kr_arr || !kr_count) return PIVCO_ERR_NULL;
+    init_expand_table_x86();
+    (void)in_len; (void)kr_capacity;
+    const uint8_t *ptr = in;
+    uint16_t *kr_ptr = kr_arr;
+    const int N = PIVCO_BLOCK_SIZE;
+    precompute_kr_subtree(table, table->tree_root, N, &ptr, &kr_ptr);
+    *kr_count = (size_t)(kr_ptr - kr_arr);
+    return PIVCO_OK;
+}
+
+/* Decode using a precomputed kr_arr (no popcount). */
+int pivco_huffman_decode_bu_x86_kr(const uint8_t *in, size_t in_len,
+                                    const pivco_huffman_table_t *table,
+                                    uint8_t *symbols, size_t *consumed,
+                                    const uint16_t *kr_arr)
+{
+    if (!in || !table || !symbols || !consumed || !kr_arr) return PIVCO_ERR_NULL;
+    init_expand_table_x86();
+    (void)in_len;
+    const uint8_t *ptr = in;
+    const uint16_t *kr_ptr = kr_arr;
+    const int N = PIVCO_BLOCK_SIZE;
+    const pivco_tree_node_t *root = &table->tree[table->tree_root];
+
+    if (root->symbol >= 0) {
+        memset(symbols, (uint8_t)root->symbol, (size_t)N);
+        *consumed = 0;
+        return PIVCO_OK;
+    }
+    if ((pivco_node_type_t)table->node_type[table->tree_root]
+        == PIVCO_NODE_BOTH_LEAVES) {
+        int nbytes = bitmap_bytes(N);
+        const uint8_t *bm = ptr;
+        ptr += nbytes;
+        merge_both_const(bm, N,
+                          (uint8_t)table->tree[root->left].symbol,
+                          (uint8_t)table->tree[root->right].symbol,
+                          symbols);
+        *consumed = (size_t)(ptr - in);
+        return PIVCO_OK;
+    }
+
+    static uint8_t scratch[3 * PIVCO_BLOCK_SIZE + 64]
+        __attribute__((aligned(64)));
+    decode_subtree_bu_kr(table, table->tree_root, N,
+                          symbols, &ptr, scratch, &kr_ptr);
+    *consumed = (size_t)(ptr - in);
+    return PIVCO_OK;
+}
+
 /* ---------- Entry point ---------- */
 int pivco_huffman_decode_bu_x86(const uint8_t *in, size_t in_len,
                                  const pivco_huffman_table_t *table,

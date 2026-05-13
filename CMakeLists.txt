@@ -272,6 +272,23 @@ if(BUILD_BENCH)
     target_link_libraries(pivco_partition_u8_vs_u16 pivco_huffman m)
     target_include_directories(pivco_partition_u8_vs_u16 PRIVATE src)
 
+    # K_right side-buffer experiment.  Dispatches to x86 or NEON BU
+    # backend at compile time.  See IDEAS.md 2026-05-12
+    # "Bottom-up decoder: store K_right per internal node".
+    add_executable(pivco_bench_kr
+        extras/bench_kr.c
+        bench/bench_distributions.c
+    )
+    target_link_libraries(pivco_bench_kr pivco_huffman huf0 m)
+    target_include_directories(pivco_bench_kr PRIVATE ext/fse/lib)
+
+    add_executable(pivco_bench_kr_storage
+        extras/bench_kr_storage.c
+        bench/bench_distributions.c
+    )
+    target_link_libraries(pivco_bench_kr_storage pivco_huffman huf0 m)
+    target_include_directories(pivco_bench_kr_storage PRIVATE ext/fse/lib)
+
     add_executable(pivco_huffman_profile_english
         bench/bench_profile_english.c
         bench/bench_distributions.c

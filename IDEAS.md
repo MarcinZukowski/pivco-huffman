@@ -97,15 +97,39 @@ classical canonical-Huffman LUTs (Nekrich), ASPLOS SIMD FSM papers,
 ### Decode-specific findings (second pass)
 
 - **dougallj "decoder convergence" parallel decode** (Jul 2022,
-  ~25% DEFLATE speedup on M1).  Run N decoders at N consecutive
-  byte-offsets; advance the lowest-offset one until duplicates
-  collapse -- guaranteed sync point within MAX_CODE_LEN bytes.
-  Different from gap arrays / Yamamoto: needs no encoder
-  cooperation and works on any prefix code.  **This is the most
-  interesting find of the survey** -- gives intra-stream parallelism
-  with zero metadata cost.  Hard to apply to our DFS tree-walk
-  format directly (we partition by depth, not bit position) but
-  worth deeply understanding.
+  ~25% DEFLATE speedup on M1) -- **REVIEWED 2026-05-12, beautiful
+  technique but not applicable to our format.**
+
+  Core idea: prefix codes are not formally self-synchronising, but in
+  practice they re-sync within a small bounded number of bits.  Start
+  N decoders at the first N possible bit offsets (where N = max code
+  length).  Step the lowest-offset one each iteration; when two land
+  on the same offset they have "converged" -- merge them.  Eventually
+  collapses to a single decoder whose bit-position is provably a real
+  code boundary in the stream.  Implementation uses a single uint64
+  bitset where each bit marks an active speculative decoder.
+
+  Why not applicable here:
+  - Gives intra-stream parallelism for byte-stream-of-prefix-codes
+    formats (DEFLATE, JPEG).  Our format is DFS tree-walk: bitmaps
+    per level + packed flat regions.  No prefix-code stream to find
+    a sync point in.
+  - Our blocks are independent by construction -- trivial parallelism
+    already available at block granularity.
+
+  Why the 25% is less impressive than the headline:
+  - It is ILP (single-thread, 2 decoders interleaved), not real
+    multithreading.
+  - DEFLATE's LZ77 fixup is a serial pass after the parallel decode,
+    capping the ceiling.
+  - Sync-finding overhead is real (~N speculative decodes per split).
+
+  Still worth knowing as the SOTA technique for adding parallelism
+  to a single-stream prefix code without encoder cooperation.  Most
+  directly relevant if we ever expose a multi-block stream and want
+  to give downstream tools "find a sync point and split here" without
+  needing the original block boundaries.
+
   https://dougallj.wordpress.com/2022/07/30/parallelising-huffman-decoding-and-x86-disassembly-by-synchronising-non-self-synchronising-prefix-codes/
 
 - **`vpmultishiftqb` (AVX-512 VBMI) as bit-field gather.**  Extracts
@@ -178,6 +202,46 @@ classical canonical-Huffman LUTs (Nekrich), ASPLOS SIMD FSM papers,
 - `NVIDIA/nvcomp/examples/gdeflate/` -- warp-cooperative source
 - `intel/qpl` -- QPL software path co-designed with IAA
 - `cwida/FastLanes` -- decode philosophy contrast
+
+---
+
+## LSB-first canonical code representation — reviewed 2026-05-12, parked
+
+**Status: considered, not pursued.  Marginal cleanup at substantial rewrite cost.**
+
+We currently store codes MSB-first: `code[s]` has the root bit at position
+`(code_len[s] - 1)`, and `code_la[s] = code[s] << (16 - code_len[s])` puts
+the root at bit 15 length-independently.  The MSB-first choice makes the
+partition kernel elegant via the sign-bit-extract trick (`sll(code_la, D)
+→ movepi16_mask` reads the depth-D bit in two ops).
+
+LSB-first alternative: bit-reverse the canonical codes so root sits at
+bit 0, length-independently.
+
+What WOULD improve:
+- `code_la` becomes unnecessary (`code` itself is partition-able)
+- One less 512-byte array in the table
+- Slightly cleaner conceptual model
+
+What does NOT improve (initially thought it might):
+- **u8 subtree repack** still needs a depth-dependent shift.  In LSB-first
+  the operation is `byte = code >> depth`, in MSB-first it is
+  `byte = code_la >> (8 - depth)` -- same instruction count, same cost.
+  We don't dispatch at depth=0 (max code length is 11), so the "free
+  truncate" case never fires.
+- Partition kernel cost is unchanged: `_mm_test_epi16_mask(v, 1 << D)` and
+  `_mm_slli_epi16(v, 15 - D) → movepi16_mask` are both single-op
+  equivalents of the MSB sign-bit trick.
+
+Cost: full rewrite of every SIMD partition kernel on NEON, AVX-512, SSE,
+plus build_table changes to produce LSB-first codes, plus test
+re-validation of every backend.  Multi-day refactor.
+
+Verdict: not justified by current evidence.  Logged because it surfaces
+the question "what other operations would scale-down cheaply if codes
+were oriented differently?" -- worth revisiting if we ever find a hot
+operation whose cost IS dominated by the bit-orientation (the original
+hope was u8 repack; that turned out symmetric).
 
 ---
 
