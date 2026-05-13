@@ -38,19 +38,50 @@ static void *xmalloc(size_t n) {
 }
 
 static int read_all(const char *path, uint8_t **out_buf, size_t *out_len) {
-    FILE *f;
     int from_stdin = (strcmp(path, "-") == 0);
-    if (from_stdin) {
-        f = stdin;
-    } else {
-        f = fopen(path, "rb");
-        if (!f) {
-            fprintf(stderr, "pivcohuf: cannot open '%s' for read: %s\n",
-                    path, strerror(errno));
+
+    if (!from_stdin) {
+        /* Fast path: stat the file, allocate exact size, single fread.
+         * Avoids the doubling-realloc memcpy churn (which costs O(N) of
+         * extra memcpy work on top of the actual read for a 1 GB file). */
+        struct stat st;
+        if (stat(path, &st) != 0) {
+            fprintf(stderr, "pivcohuf: cannot stat '%s': %s\n", path, strerror(errno));
             return -1;
         }
+        if (S_ISREG(st.st_mode)) {
+            size_t len = (size_t)st.st_size;
+            uint8_t *buf = (uint8_t *)xmalloc(len > 0 ? len : 1);
+            FILE *f = fopen(path, "rb");
+            if (!f) {
+                fprintf(stderr, "pivcohuf: cannot open '%s' for read: %s\n",
+                        path, strerror(errno));
+                free(buf);
+                return -1;
+            }
+            size_t got = fread(buf, 1, len, f);
+            fclose(f);
+            if (got != len) {
+                fprintf(stderr, "pivcohuf: short read on '%s' (%zu / %zu)\n",
+                        path, got, len);
+                free(buf);
+                return -1;
+            }
+            *out_buf = buf;
+            *out_len = len;
+            return 0;
+        }
+        /* Non-regular file (FIFO, char device, etc.): fall through to
+         * the doubling-buffer path below. */
     }
 
+    /* Stdin or non-regular file: size unknown, grow buffer dynamically. */
+    FILE *f = from_stdin ? stdin : fopen(path, "rb");
+    if (!f) {
+        fprintf(stderr, "pivcohuf: cannot open '%s' for read: %s\n",
+                path, strerror(errno));
+        return -1;
+    }
     size_t cap = 1 << 20, len = 0;
     uint8_t *buf = (uint8_t *)xmalloc(cap);
     for (;;) {
