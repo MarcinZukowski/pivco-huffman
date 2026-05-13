@@ -204,18 +204,15 @@ int pivcohuf_compress(const uint8_t *in, size_t in_len,
 
     size_t body_len = (size_t)(p - body);
 
-    /* Body checksum (covers BODY only). */
-    uint32_t body_csum = xxh32(body, body_len);
-
-    /* Write HEADER (positions are fixed). */
+    /* Write HEADER (positions are fixed).  Checksums temporarily disabled
+     * -- always zero (2026-05-12).  Format byte positions preserved so a
+     * later commit can turn them back on without a wire-format break. */
     memcpy(hdr + 0, PIVCOHUF_MAGIC, 8);
     hdr[8] = PIVCOHUF_VERSION_MAJOR;
     hdr[9] = PIVCOHUF_VERSION_MINOR;
     put_u64(hdr + 10, (uint64_t)body_len);
-    put_u32(hdr + 18, body_csum);
-    /* Header checksum covers bytes 0..21 (before the checksum field itself). */
-    uint32_t hdr_csum = xxh32(hdr, 22);
-    put_u32(hdr + 22, hdr_csum);
+    put_u32(hdr + 18, 0);   /* BODY_CHECKSUM = 0 (disabled) */
+    put_u32(hdr + 22, 0);   /* HEADER_CHECKSUM = 0 (disabled) */
 
     *out_len = (size_t)(p - out);
     return PIVCOHUF_OK;
@@ -231,9 +228,8 @@ static int parse_header(const uint8_t *in, size_t in_len, uint64_t *body_len)
     if (memcmp(in, PIVCOHUF_MAGIC, 8) != 0) return PIVCOHUF_ERR_BAD_MAGIC;
     if (in[8] != PIVCOHUF_VERSION_MAJOR || in[9] != PIVCOHUF_VERSION_MINOR)
         return PIVCOHUF_ERR_BAD_VERSION;
-    uint32_t got = get_u32(in + 22);
-    uint32_t expect = xxh32(in, 22);
-    if (got != expect) return PIVCOHUF_ERR_BAD_HEADER_CHECKSUM;
+    /* HEADER_CHECKSUM verification disabled (2026-05-12) -- bytes are
+     * still in the format at offset 22..25, currently always zero. */
     *body_len = get_u64(in + 10);
     return PIVCOHUF_OK;
 }
@@ -261,10 +257,7 @@ int pivcohuf_decompress(const uint8_t *in, size_t in_len,
         return PIVCOHUF_ERR_TOO_SHORT;
     size_t body_len = (size_t)body_len_u64;
     const uint8_t *body = in + PIVCOHUF_HEADER_SIZE;
-
-    uint32_t body_csum_got = get_u32(in + 18);
-    uint32_t body_csum_expect = xxh32(body, body_len);
-    if (body_csum_got != body_csum_expect) return PIVCOHUF_ERR_BAD_BODY_CHECKSUM;
+    /* BODY_CHECKSUM verification disabled (2026-05-12). */
 
     /* Parse body header. */
     if (body_len < 8 + 2 + 128) return PIVCOHUF_ERR_TOO_SHORT;
