@@ -44,12 +44,12 @@
  *        codes_la[i] = code_la_lut[symbols[i]]
  *
  *    `code_la_lut[s]` holds the per-symbol Huffman code shifted up so
- *    bit 15 is the root partition bit.  After this call, codes_la[i]
- *    has its current-depth partition bit at position 15 for the root
- *    visit; subsequent visits shift each surviving value left by 1
- *    so bit 15 stays canonical.
+ *    bit 15 is the root partition bit.  codes_la is built once per block
+ *    and DOES NOT mutate across the recursion -- the current-depth
+ *    partition bit is at position `15 - depth`, which the primitives
+ *    derive from the `depth` argument they receive.
  *
- *  int prim_build_bitmap_partition(uint16_t *codes_la, int n,
+ *  int prim_build_bitmap_partition(uint16_t *codes_la, int n, int depth,
  *                                   uint8_t *bm, uint16_t *tmp);
  *
  *    Build the n-bit partition bitmap from codes_la[0..n) and partition
@@ -57,18 +57,14 @@
  *    operation; everything around it (marker byte, optional FSE attempt
  *    that may rewrite the marker+bitmap region) is handled in codec.c.
  *
- *    Writes ceil(n/8) bytes into bm.  Bit j (for j in [0..n)) is the
- *    top bit of codes_la[j] at the moment of call; ends up at bit
+ *    Writes ceil(n/8) bytes into bm.  Bit j (for j in [0..n)) is bit
+ *    (15 - depth) of codes_la[j] at the moment of call; ends up at bit
  *    (j & 7) of byte bm[j >> 3].
  *
- *    Partitions codes_la:
+ *    Partitions codes_la (values unchanged -- no shift across levels):
  *
- *        - codes_la[0..n_left)  left  (top bit was 0), each shifted << 1
- *        - tmp[0..n_right)      right (top bit was 1), each shifted << 1
- *
- *    The shift << 1 in each partitioned value lets the next recursion
- *    level read its partition bit from bit 15 again -- bit 15 is the
- *    canonical "current depth" position throughout the encode walk.
+ *        - codes_la[0..n_left)  left  (bit was 0)
+ *        - tmp[0..n_right)      right (bit was 1)
  *
  *    Returns n_right (caller derives n_left = n - n_right).
  *
@@ -76,17 +72,24 @@
  *
  *        marker_slot = *out_ptr;  *marker_slot = 0;  *out_ptr += 1;
  *        bm = *out_ptr;  *out_ptr += bitmap_bytes(n);
- *        n_right = prim_build_bitmap_partition(codes_la, n, bm, tmp);
+ *        n_right = prim_build_bitmap_partition(codes_la, n, depth, bm, tmp);
  *        codec_maybe_fse_attempt(...);  // may rewrite marker + bm,
  *                                       // adjust *out_ptr on commit
  *        wire_commit_kr_header(kr_slot, n_right);
  *
- *  void prim_pack_dN(uint8_t *out, const uint16_t *codes_la, int n, int D);
+ *  void prim_pack_dN(uint8_t *out, const uint16_t *codes_la, int n,
+ *                     int D, int depth);
  *
- *    Flat-subtree path.  Pack the top D bits of each codes_la[i]
- *    LSB-first into out[ceil(n*D/8)] bytes.  The top D bits of codes_la
- *    at a flat-subtree node are exactly the local D-bit code that the
- *    decoder reads.
+ *    Flat-subtree path.  Pack the D bits at positions [15-depth ..
+ *    15-depth-D+1] of each codes_la[i] LSB-first into out[ceil(n*D/8)]
+ *    bytes.  Equivalent to a right-shift by `(16 - depth - D)` and a
+ *    `(1 << D) - 1` mask before packing.
+ *
+ *    The depth-threaded representation (rather than shifting codes_la
+ *    per recursion level) matches the NEON encoder's SIMD-tuned
+ *    ergonomic: vshlq_u16 with a runtime vector amount is one op,
+ *    paid once per pack_dN call rather than n times per partition
+ *    pass across the recursion.
  *
  * ---------------------------------------------------------------------------
  *  DECODE PRIMITIVES (bottom-up)

@@ -31,44 +31,46 @@ static inline void enc_init_scalar(uint16_t *codes_la, int n,
 /* Build the n-bit partition bitmap from codes_la[0..n) and partition
  * codes_la in place.  See pivco_huffman_primitives.h for the contract.
  *
- * The primitive owns ONLY the SIMD-bound work (bitmap build + partition).
- * The codec layer wraps it with the marker byte and the optional
- * FSE-attempt; that wrapping is arch-agnostic glue and lives in codec.c. */
+ * codes_la is not mutated across recursion levels; the current-depth
+ * partition bit lives at position `15 - depth` of each codes_la[j]. */
 static inline int build_bitmap_partition_scalar(uint16_t *codes_la, int n,
+                                                  int depth,
                                                   uint8_t *bm,
                                                   uint16_t *tmp)
 {
     int nbytes = bitmap_bytes(n);
     memset(bm, 0, (size_t)nbytes);
+    int bit_shift = 15 - depth;
 
-    /* Partition codes_la in place; each value is shifted << 1 in the output
-     * so the next visit reads the next-depth partition bit at bit 15. */
+    /* Partition codes_la in place; values are left UNSHIFTED so children
+     * read their own depth's partition bit from the same codes_la lane. */
     int n_left = 0, n_right = 0;
     for (int j = 0; j < n; j++) {
         uint16_t v = codes_la[j];
-        int bit = (v >> 15) & 1;
+        int bit = (v >> bit_shift) & 1;
         if (bit) {
             bm[j >> 3] |= (uint8_t)(1u << (j & 7));
-            tmp[n_right++] = (uint16_t)(v << 1);
+            tmp[n_right++] = v;
         } else {
-            codes_la[n_left++] = (uint16_t)(v << 1);
+            codes_la[n_left++] = v;
         }
     }
     return n_right;
 }
 
-/* Flat-subtree path: pack the top D bits of each codes_la[i] LSB-first
- * into out[ceil(n*D/8)] bytes. */
+/* Flat-subtree path: pack the D bits at positions [15-depth ..
+ * 15-depth-D+1] of each codes_la[i] LSB-first into out. */
 static inline void pack_dN_scalar(uint8_t *out,
                                    const uint16_t *codes_la,
-                                   int n, int D)
+                                   int n, int D, int depth)
 {
     uint32_t mask = (1u << D) - 1;
+    int right_shift = 16 - depth - D;
     uint64_t buf = 0;
     int bits_in_buf = 0;
     int byte_idx = 0;
     for (int i = 0; i < n; i++) {
-        uint32_t local = ((uint32_t)codes_la[i] >> (16 - D)) & mask;
+        uint32_t local = ((uint32_t)codes_la[i] >> right_shift) & mask;
         buf |= (uint64_t)local << bits_in_buf;
         bits_in_buf += D;
         while (bits_in_buf >= 8) {
@@ -168,14 +170,15 @@ PIVCO_PRIM_ALWAYS_INLINE void prim_enc_init(uint16_t *codes_la, int n,
 { enc_init_scalar(codes_la, n, symbols, code_la_lut); }
 
 PIVCO_PRIM_ALWAYS_INLINE int prim_build_bitmap_partition(uint16_t *codes_la, int n,
+                                                           int depth,
                                                            uint8_t *bm,
                                                            uint16_t *tmp)
-{ return build_bitmap_partition_scalar(codes_la, n, bm, tmp); }
+{ return build_bitmap_partition_scalar(codes_la, n, depth, bm, tmp); }
 
 PIVCO_PRIM_ALWAYS_INLINE void prim_pack_dN(uint8_t *out,
                                              const uint16_t *codes_la,
-                                             int n, int D)
-{ pack_dN_scalar(out, codes_la, n, D); }
+                                             int n, int D, int depth)
+{ pack_dN_scalar(out, codes_la, n, D, depth); }
 
 PIVCO_PRIM_ALWAYS_INLINE void prim_flat_decode_to_buffer(uint8_t *out, int n,
                                                            const uint8_t *bm, int D,
