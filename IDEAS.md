@@ -2812,6 +2812,80 @@ Until cloud RISC-V or a competitive chip lands, the work-to-data ratio
 is poor (~1-2 weeks of porting + intrinsics + build setup, for numbers
 that won't translate to anyone's production hardware).
 
+## flat_dN_unpack (NEON D=3/5/6): replace byte-by-byte lane inserts with single vector load + buffer overread guarantee
+
+**Status: open, likely real win on M4 + Graviton 4.**
+
+The NEON D=3 / D=5 / D=6 flat-subtree unpack helpers in
+`src/pivco_huffman_neon_flat.h` currently materialise their input
+bytes via 3–6 separate `vsetq_lane_u8` calls — one per valid byte —
+to avoid over-reading past the end of the bitmap stream:
+
+```c
+/* flat_d5_unpack: needs 5 bytes of bm */
+uint8x16_t bm_lo = vdupq_n_u8(0);
+bm_lo = vsetq_lane_u8(bm_ptr[0], bm_lo, 0);
+bm_lo = vsetq_lane_u8(bm_ptr[1], bm_lo, 1);
+bm_lo = vsetq_lane_u8(bm_ptr[2], bm_lo, 2);
+bm_lo = vsetq_lane_u8(bm_ptr[3], bm_lo, 3);
+bm_lo = vsetq_lane_u8(bm_ptr[4], bm_lo, 4);
+```
+
+Each `vsetq_lane_u8` is a scalar load + ins on the vector pipe; on
+M-series that's ~5 cycles of vector-pipe pressure per iter just to
+assemble the input.  The natural shape is a single `vld1_u8` (8-byte
+load) or `vld1q_u8` (16-byte load) — but D=5 only has 5 valid bytes
+per iter, so an 8-byte load over-reads 3, and a 16-byte load over-
+reads 11.
+
+**The fix is in the codec, not the primitive.**  Guarantee the bitmap
+region always has enough trailing padding that any flat-subtree
+unpack can do a single 16-byte vld1q_u8 without leaving allocated
+memory.  Then the AVX-512 _fast variant pattern (which already does
+exactly this, gated on a "safe load region") becomes the only path,
+and the byte-by-byte fallback goes away.
+
+The earlier byte-wise pattern was chosen because of a Neoverse-V2
+store-forward stall when the compiler implemented `memcpy(&packed,
+bm_ptr, 5) + vsetq_lane_u64` via a stack round-trip.  Going directly
+to a vector load via `vld1q_u8` (no scalar-store intermediary)
+avoids the stall — the Neoverse-V2 concern was specifically the int-
+store → vector-load forwarding, not vector loads themselves.
+
+**Concrete steps:**
+
+1. **Audit the bitmap region's actual tail layout.**  The flat-
+   subtree region for a node is `(n * D + 7) >> 3` bytes; the next
+   bitmap (or end-of-block padding, or end-of-buffer) starts
+   immediately after.  Need to confirm there's already a 16-byte
+   guard zone, or arrange for one.  Easiest path: at encode time,
+   reserve 16 bytes of padding after every flat region (or after
+   the entire wire output).  At decode time, the user-provided
+   input buffer needs the same guarantee — or the codec checks
+   "is the remaining buffer ≥ 16 bytes from this read?" and falls
+   back to a safe variant when not.
+
+2. **Add _fast / _safe variants** mirroring the AVX-512 layout:
+   `flat_d3_unpack_neon_fast` (vld1_u8 of 8 bytes), `flat_d3_unpack_
+   neon_safe` (current byte-wise pattern, for the final iteration
+   when there's no overread headroom).  D=5/D=6 the same.
+
+3. **Validate on Graviton 4** (test-c8g) — the original failure
+   case — to confirm `vld1q_u8` doesn't reintroduce the store-
+   forward issue.  M4 is the easy case; G4 is where the original
+   workaround came from.
+
+**Expected impact:**  Per-call cost drops from ~5 vector-pipe cycles
+(byte-by-byte assemble) to ~1 cycle (single vld1).  Most relevant on
+distributions where the flat-subtree path runs many small N-element
+iterations (calgary_pic D=3/5/6 regions, dna_fasta, etc.).  D=3
+should see the biggest absolute win since it currently does 3
+separate inserts; D=5/D=6 do 5/6 each.
+
+**Risk:** Wire-format guarantee — encode and decode both need to
+agree on the padding region.  Buffer-end edge cases on the very
+last bitmap in a block.
+
 ## Suggested implementation order
 
 Leaf-child fusion and the flat-subtree fast path (both the scatter
