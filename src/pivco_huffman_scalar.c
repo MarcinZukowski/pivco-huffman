@@ -1,8 +1,6 @@
 #include "pivco_huffman.h"
 #include "pivco_huffman_common.h"
-#ifdef PIVCO_HAS_FSE
-#include "pivco_fse.h"
-#endif
+#include "pivco_huffman_wire.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -97,21 +95,12 @@ static void encode_node(const pivco_huffman_table_t *table,
         return;
     }
 
-    /* K_right header (2026-05-12 wire format): reserve 2 bytes before
-     * the bitmap iff this node has at least one non-leaf child. */
-    int need_kr = kr_header_needed(table, node_id);
-    uint8_t *kr_hdr = NULL;
-    if (need_kr) {
-        kr_hdr = *out_ptr;
-        *out_ptr += KR_HEADER_BYTES;
-    }
-
-    /* FSE marker byte (v0.2 wire format): always reserve, default 0 = raw.
-     * See FSE-V0.md.  v0: FSE attempt is only in the SIMD encoders; the
-     * scalar reference always emits the raw bitmap with marker = 0. */
-    uint8_t *fse_marker = *out_ptr;
-    *out_ptr += 1;
-    *fse_marker = 0;
+    /* Per-node wire record: optional K_right header + FSE marker + bitmap.
+     * The wire-format helpers in pivco_huffman_wire.h are the single
+     * source of truth across all backends.  v0: scalar reference always
+     * emits marker=0 (FSE attempt lives only in SIMD encoders). */
+    uint8_t *kr_slot  = wire_reserve_kr_header(table, node_id, out_ptr);
+    (void)wire_reserve_fse_marker(out_ptr);
 
     int nbytes = bitmap_bytes(n);
     uint8_t *bm = *out_ptr;
@@ -138,11 +127,7 @@ static void encode_node(const pivco_huffman_table_t *table,
         }
     }
 
-    if (need_kr) {
-        /* Little-endian uint16 -- BU decoder reads via memcpy. */
-        kr_hdr[0] = (uint8_t)(n_right & 0xFF);
-        kr_hdr[1] = (uint8_t)((n_right >> 8) & 0xFF);
-    }
+    wire_commit_kr_header(kr_slot, n_right);
 
     /* Recurse left, then right.
        Left scratch starts at tmp + n_right to avoid clobbering
@@ -228,43 +213,14 @@ static void decode_node(const pivco_huffman_table_t *table,
         return;
     }
 
-    /* K_right header (2026-05-12 wire format): skip 2 bytes when this
-     * node has any non-leaf child.  TD scalar decoder doesn't need
-     * K_right (computes splits inline below). */
-    if (kr_header_needed(table, node_id)) {
-        *in_ptr += KR_HEADER_BYTES;
-    }
+    /* Per-node wire record.  TD doesn't use the K_right value (it
+     * recomputes the partition inline), so the read result is discarded.
+     * wire_read_bitmap returns either the raw stream pointer (marker==0)
+     * or bm_scratch (marker!=0, FSE path). */
+    (void)wire_read_kr_header(table, node_id, in_ptr);
 
-    /* FSE marker byte (v0.2): read marker; if non-zero, FSE-decode the
-     * bitmap into bm_scratch.  See FSE-V0.md. */
-    int nbytes = bitmap_bytes(n);
     uint8_t bm_scratch[PIVCO_BLOCK_SIZE / 8 + 16];
-    const uint8_t *bm;
-    uint8_t marker = **in_ptr;
-    *in_ptr += 1;
-    if (marker == 0) {
-        bm = *in_ptr;
-        *in_ptr += nbytes;
-    } else {
-#ifdef PIVCO_HAS_FSE
-        int t_id = marker & 0x7F;
-        int xor_flag = (marker >> 7) & 1;
-        uint16_t fse_len;
-        memcpy(&fse_len, *in_ptr, 2);
-        *in_ptr += 2;
-        size_t out_len = 0;
-        (void)pivco_fse_decompress(t_id, *in_ptr, fse_len,
-                                    bm_scratch, (size_t)nbytes,
-                                    (size_t)nbytes, &out_len);
-        *in_ptr += fse_len;
-        if (xor_flag) pivco_fse_flip_bits(bm_scratch, (size_t)nbytes);
-        bm = bm_scratch;
-#else
-        /* FSE not built in but stream uses it -- best-effort fallback. */
-        *in_ptr += nbytes;
-        bm = *in_ptr - nbytes;
-#endif
-    }
+    const uint8_t *bm = wire_read_bitmap(in_ptr, n, bm_scratch);
 
     /* Check if children are leaves for stage fusion */
     const pivco_tree_node_t *left_child  = &table->tree[node->left];
