@@ -377,6 +377,7 @@ tree (see the `prose_pride` row).
 | `csv_numeric`  | OWID CO2 dataset CSV                                   |       54 |     3.30      | 2 / 15             |
 | `gzip_random`  | gzip(`cat-wiki.html`) — near-random bytes              |      256 |     8.00      | 8 / 8              |
 | `chinese_text` | Project Gutenberg 紅樓夢 (Chinese, UTF-8)              |      151 |     5.81      | 4 / 15             |
+| `calgary_pic`  | Calgary Corpus 1bpp CCITT scanned page (mostly white)  |      159 |     1.21      | 1 / 17             |
 
 `pivco_file_to_dist FILE` regenerates a freq table for any input.
 

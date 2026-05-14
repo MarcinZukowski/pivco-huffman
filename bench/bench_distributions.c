@@ -85,6 +85,7 @@ static distribution_t distributions[] = {
     { .name = "csv_numeric" },                  /* OWID CO2 dataset CSV */
     { .name = "gzip_random",   .is_main = 1 },  /* gzip(cat-wiki.html) — near-uniform */
     { .name = "chinese_text",  .is_main = 1 },  /* Project Gutenberg 紅樓夢 */
+    { .name = "calgary_pic",   .is_main = 1 },  /* Calgary corpus 1bpp scanned page — proba80-like real dataset */
 };
 
 #define NUM_DISTRIBUTIONS (sizeof(distributions) / sizeof(distributions[0]))
@@ -250,6 +251,7 @@ static void init_distributions(void)
     memcpy(distributions[26].freq, freq_csv_numeric,  sizeof(freq_csv_numeric));
     memcpy(distributions[27].freq, freq_gzip_random,  sizeof(freq_gzip_random));
     memcpy(distributions[28].freq, freq_chinese_text, sizeof(freq_chinese_text));
+    memcpy(distributions[29].freq, freq_calgary_pic,  sizeof(freq_calgary_pic));
 }
 
 /* ---------- Public API ---------- */

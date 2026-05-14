@@ -346,6 +346,22 @@ if(BUILD_BENCH)
     )
     target_link_libraries(pivco_tans_bound pivco_huffman m)
 
+    # 4-way codec comparison: ph / phe / huf0 / fse on the same data.
+    if(PIVCO_FSE)
+        add_executable(pivco_bench_4way
+            extras/bench_4way.c
+            bench/bench_distributions.c
+        )
+        target_link_libraries(pivco_bench_4way pivco_huffman huf0 m)
+        target_include_directories(pivco_bench_4way PRIVATE ext/fse/lib)
+
+        # Per-FSE-table-id usage histogram dumper.
+        add_executable(pivco_bench_fse_table_use
+            extras/bench_fse_table_use.c
+        )
+        target_link_libraries(pivco_bench_fse_table_use pivco_huffman m)
+    endif()
+
     add_executable(pivco_dist_stats
         extras/bench_dist_stats.c
         bench/bench_distributions.c

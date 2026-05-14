@@ -168,6 +168,35 @@ pivco_impl_t pivco_huffman_get_impl(void);
 void pivco_huffman_set_fse_enabled(int enabled);
 int  pivco_huffman_get_fse_enabled(void);
 
+/* ---------- FSE table-usage stats (debug instrumentation) ----------
+ *
+ * Per-table-id counters incremented inside the encoder every time an
+ * FSE-coded bitmap is committed.  Indexed 0..25 (slot 0 = "FSE attempted
+ * but did not commit"; slots 1..25 = pivco_fse_freq[] table picked).
+ * Not thread-safe; intended for single-threaded analysis runs. */
+#define PIVCO_FSE_STATS_SLOTS 26
+void pivco_huffman_fse_stats_reset(void);
+void pivco_huffman_fse_stats_get(uint64_t commit_count[PIVCO_FSE_STATS_SLOTS],
+                                 uint64_t attempt_count[PIVCO_FSE_STATS_SLOTS],
+                                 uint64_t bytes_in[PIVCO_FSE_STATS_SLOTS],
+                                 uint64_t bytes_out[PIVCO_FSE_STATS_SLOTS]);
+
+/* Per-root-event log: one entry per block's root-node visit.
+ * Captures table_id chosen (0 if below threshold / no table), the
+ * observed p_major, whether the FSE commit succeeded, and byte counts.
+ * Useful for showing how a single tree position (the root) adapts
+ * across blocks of the same file. */
+typedef struct {
+    int    table_id;     /* 0 if below MIN_THRESHOLD / no FSE attempt */
+    double p_major;      /* observed max(n_left,n_right)/n */
+    int    committed;    /* 1 if FSE emitted, 0 otherwise */
+    int    nbytes_in;    /* raw bitmap byte count */
+    int    nbytes_out;   /* fse_len if committed; nbytes_in if not */
+} pivco_huffman_fse_root_event_t;
+
+int  pivco_huffman_fse_root_count(void);
+void pivco_huffman_fse_root_get(int idx, pivco_huffman_fse_root_event_t *out);
+
 /* ---------- Table construction ---------- */
 
 int pivco_huffman_build_table(const uint64_t freq[PIVCO_MAX_SYMBOLS],

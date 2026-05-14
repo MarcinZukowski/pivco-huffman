@@ -347,3 +347,138 @@ v0 ships when:
    FSE-enabled `pivcohuf`: report new ratio numbers vs the
    pre-FSE row.  Document deltas, especially on dna_fasta,
    chinese_text, and the synthetic proba80.
+
+---
+
+## Adaptivity in production — measured on Calgary `pic` (2026-05-13)
+
+After v0 shipped we went looking for a **realistic** proba80-like
+dataset to stress the FSE path on real, structured bytes (as opposed
+to the synthetic IID stream that bench_distributions generates from a
+fixed frequency histogram).  Two findings.
+
+### LZ4-compressed data is NOT proba80-like
+
+Tested LZ4 outputs of every file in `extras/datasets/` plus
+prose/JSON variants.  Byte-level Huffman ratios land at 86–94% of
+raw — same band as `english` / `html_wiki`, **not** the 25%-of-raw
+extreme of proba80.  Reason: LZ4 is pure LZ77 with no entropy
+coding, so the residual byte distribution after match elimination
+converges toward the source's "what LZ77 couldn't predict" floor —
+mildly skewed, not heavy-tailed.
+
+On the 4-way bench (`pivco_bench_4way --file …`):
+- `ph` ≡ `phe` on every LZ4 file (FSE dispatch never fires
+  meaningfully — partition skew at every node is too close to 50/50).
+- `huf0 − fse` gap is 0.05–0.1% on LZ4 outputs vs 27% on proba80 —
+  there's almost no fractional-bit entropy left for TANS to capture.
+
+LZ4 *flattens* byte histograms — that's what makes it fast.  Don't
+look there for proba80 stand-ins.
+
+### Calgary Corpus `pic` is a perfect realistic proba80 stand-in
+
+The 1989 Calgary Corpus `pic` file (1bpp 1728×2376 scanned CCITT
+test page of a French signal-processing textbook) has been a
+standard compression benchmark for 40 years.  Byte distribution:
+
+```
+0x00 = 447139 (87.12%)   ← 8 consecutive white pixels
+0xff =  10692  (2.08%)   ← 8 consecutive black pixels
+0x0f =   4088  (0.80%)   ← edge bytes (white→black transition)
+0x1f =   2901  (0.57%)
+... long geometric tail across 159 used byte values
+```
+
+That's textbook proba80 shape — one dominant symbol at ~87%,
+geometric falloff, sparse tail.  And it's *real bytes from a real
+scanned document*, not a synthetic stream.
+
+Headline numbers on `pic` (real bytes, file mode):
+
+| codec           | ratio   | decode M/s |
+|-----------------|---------|-----------:|
+| `ph` (FSE off)  | 21.7%   | 11602      |
+| `phe` (FSE on)  | 14.6%   |  3210      |
+| `huf0`          | 20.9%   |  2339      |
+| `fse`           | 15.4%   |   649      |
+
+`phe` beats `fse` by 0.8% on ratio while decoding 5× faster.  Why?
+
+### The structural win: per-internal-node-per-block table dispatch
+
+Yann's FSE codes a 128 KB chunk with one normalized-count table.
+`phe` codes each non-flat internal node's partition bitmap with its
+own choice from 25 pre-built quarter-power-of-two tables.  At 62
+blocks × ~1.9 non-flat root-attempt nodes/block, that's 118 FSE
+table-selection events per file, each adapting to local bitmap
+skew.
+
+Concrete demonstration: dump the **root node**'s table-id choice
+across all 62 blocks (`pivco_bench_fse_table_use extras/datasets/calgary_pic`):
+
+```
+Root-node committed-table histogram (blocks per table_id):
+tid  p_nom    blocks
+  0   no         2   ##                          ← p < 0.625, no FSE
+  3  0.646       4   ####
+  4  0.703       1   #
+  5  0.750       8   ########
+  6  0.790       6   ######
+  7  0.823       4   ####
+  8  0.851       3   ###
+  9  0.875       2   ##
+ 10  0.895       6   ######
+ 11  0.912       3   ###
+ 12  0.926       1   #
+ 13  0.938       4   ####
+ 14  0.947       2   ##
+ 15  0.956       1   #
+ 16  0.963       1   #
+ 17  0.969       2   ##
+ 18  0.974       2   ##
+ 25  0.992      10   ##########                  ← blank-page blocks
+
+Block-by-block root timeline (1-9 = tbl 1-9, a-p = tbl 10-25,
+. = below MIN_THRESHOLD):
+[   0] pppppp6558p8ad66754576.333.99dab
+[  32] bdfi536baaeciaghe765585h7adppp
+```
+
+The same tree position, in 62 blocks of the same file, picks **17
+different FSE tables**.  You can read the document's structure off
+that string:
+- Blocks 0–5: `pppppp` — table 25 (p=0.992): blank top margin.
+- Blocks 6–22: mid-tables 5/6/8/10: textbook body.
+- Block 22/26: `.` — partition too even (dense figure region).
+- Blocks 60–61: `ppp` — blank bottom margin.
+
+That whole dynamic range is what Yann's FSE averages out into a
+single 256-symbol probability table per chunk.  The ~0.8% ratio
+gap to FSE comes specifically from the 10 blocks where pivco picks
+table 25 (compresses 1024 bytes → 24 bytes — 98% reduction) plus
+the table-3 sparse-bitmap regions, neither of which a global
+per-chunk distribution can express.
+
+### Synthetic-bench note
+
+`pivco_huffman_bench`'s sweep generates IID 4M-symbol streams from
+the registered frequency histogram, so on `calgary_pic` the
+**synthetic** numbers (`phe` ≈ 16.97%, `fse` ≈ 16.35%) understate
+the real-data advantage — synthetic IID has no per-block structure
+for the dispatch to adapt to.  Real-data `phe` beats `fse`; synthetic
+`fse` slightly beats `phe`.  Use `pivco_bench_4way --file
+extras/datasets/calgary_pic` to see the real-data behavior.
+
+### Tooling
+
+- `pivco_huffman_fse_stats_reset/get` — per-table-id commit/attempt
+  counters (public API in `include/pivco_huffman.h`).
+- `pivco_huffman_fse_root_count/get` — per-block root-event log
+  (table_id chosen, observed p_major, committed flag).
+- `pivco_bench_fse_table_use FILE` — dumps the histogram + per-block
+  root timeline as shown above.
+
+All instrumentation lives in `src/pivco_huffman_neon.c`
+(`g_pivco_fse_commit[26]`, `g_pivco_fse_root_log[]`) and is
+single-threaded debug-only — not on the hot path.

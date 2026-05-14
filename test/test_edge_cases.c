@@ -88,6 +88,7 @@ static int test_real_datasets(void)
         "extras/datasets/csv_numeric.csv",
         "extras/datasets/gzip_random.gz",
         "extras/datasets/chinese_text.txt",
+        "extras/datasets/calgary_pic",     /* 1bpp CCITT scanned page — proba80-like */
     };
     int n = (int)(sizeof(paths)/sizeof(paths[0]));
     int total_fail = 0;
