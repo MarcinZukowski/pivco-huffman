@@ -84,50 +84,11 @@ extern int g_pivco_fse_root_n;
 #  endif
 #endif
 
-/* ---------- SIMD Compress Shuffle Table ----------
- *
- * For each 8-bit mask, a 16-byte TBL shuffle that packs selected
- * uint16_t elements (2 bytes each) to the front of the register.
- */
-/* Combined shuffle table: [256][32] where bytes 0-15 are the shuffle
-   for mask (right partition) and bytes 16-31 are for ~mask (left partition).
-   Both loaded with a single ldp q0, q1 — one cache line access instead
-   of two separate lookups at unrelated addresses. */
-uint8_t compress_tab[256][32] __attribute__((aligned(32)));
-uint8_t compress_popcnt[256] __attribute__((aligned(64)));
-int compress_table_ready = 0;
-
-void init_compress_table(void)
-{
-    if (compress_table_ready) return;
-    for (int mask = 0; mask < 256; mask++) {
-        /* Right (bit=1): pack selected to front */
-        int out_r = 0;
-        for (int i = 0; i < 8; i++) {
-            if (mask & (1 << i)) {
-                compress_tab[mask][out_r * 2]     = (uint8_t)(i * 2);
-                compress_tab[mask][out_r * 2 + 1] = (uint8_t)(i * 2 + 1);
-                out_r++;
-            }
-        }
-        compress_popcnt[mask] = (uint8_t)out_r;
-        for (int j = out_r * 2; j < 16; j++)
-            compress_tab[mask][j] = 0xFF;
-
-        /* Left (bit=0): pack complement to front */
-        int out_l = 0;
-        for (int i = 0; i < 8; i++) {
-            if (!(mask & (1 << i))) {
-                compress_tab[mask][16 + out_l * 2]     = (uint8_t)(i * 2);
-                compress_tab[mask][16 + out_l * 2 + 1] = (uint8_t)(i * 2 + 1);
-                out_l++;
-            }
-        }
-        for (int j = out_l * 2; j < 16; j++)
-            compress_tab[mask][16 + j] = 0xFF;
-    }
-    compress_table_ready = 1;
-}
+/* SIMD compress shuffle table + init function: storage and constructor
+ * live in pivco_huffman_neon_tables.{c,h} so codec.c (compiled per-
+ * backend) can share the same runtime tables.  See the header for the
+ * layout and the (mask -> shuf, popcount) semantics. */
+#include "pivco_huffman_neon_tables.h"
 
 /* Partition 8 uint16_t by an 8-bit mask.
    bit=1 → right_out, bit=0 → left_out.

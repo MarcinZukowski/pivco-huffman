@@ -94,66 +94,12 @@ static inline int popcount_K_right(const uint8_t *bm, int nbytes, int K) {
     return K_right;
 }
 
-/* ---------- expand_tab: per-mask-byte shuffle for tree_merge ----------
- *
- * expand_tab[m][k] for k in 0..7:
- *   - 0..7   means "take from left[count_zeros_in_m[0..k-1]]"
- *   - 8..15  means "take from right[count_ones_in_m[0..k-1]] + 8"
- *
- * Used as vqtbl1_u8 indices over a 16-byte vector built by
- *   vcombine(left[0..8), right[0..8)).  This is the iter-0 path of the
- *   stride-16 unrolled tree_merge below, and also the path for the
- *   stride-8 mop-up and bcast_left/right variants.
- *
- * expand_tab_pre[nr0][m1][k] is the pre-adjusted shuf for the SECOND
- * iter of the stride-16 unroll.  After iter 0 consumed nr0 right
- * bytes and (8-nr0) left bytes, iter 1 must read L from offset
- * (8-nr0) in L_full and R from offset nr0 in R_full — so the shuf
- * indices for a 32-byte vqtbl2 over (L_full, R_full) become:
- *
- *   L-lane idx = expand_tab[m1][k] + (8 - nr0)         ∈ [(8-nr0)..15]
- *   R-lane idx = expand_tab[m1][k] + 8 + nr0           ∈ [(16+nr0)..(23+nr0)]
- *
- * Pre-baking by (nr0, m1) collapses the dep chain from iter-0's nr0
- * to iter-1's shuf into a single indexed load.  Replaces what would
- * otherwise be ~4 vector ALU ops on the critical path.
- *
- * Table size: 9 × 256 × 8 = 18 432 bytes — fits L1d on every target.
- *
- * expand_popcnt[m] = popcount(m) (= number of right bytes consumed). */
-static uint8_t expand_tab[256][8]            __attribute__((aligned(32)));
-static uint8_t expand_tab_pre[9][256][8]     __attribute__((aligned(64)));
-static uint8_t expand_popcnt[256]            __attribute__((aligned(64)));
-static int expand_table_ready = 0;
-
-static void init_expand_table(void) {
-    if (expand_table_ready) return;
-    for (int m = 0; m < 256; m++) {
-        int n_zeros = 0, n_ones = 0;
-        for (int k = 0; k < 8; k++) {
-            if (m & (1 << k)) {
-                expand_tab[m][k] = (uint8_t)(8 + n_ones);
-                n_ones++;
-            } else {
-                expand_tab[m][k] = (uint8_t)n_zeros;
-                n_zeros++;
-            }
-        }
-        expand_popcnt[m] = (uint8_t)n_ones;
-    }
-    /* Pre-adjusted (nr0, m1) shuf table — see comment above. */
-    for (int nr0 = 0; nr0 <= 8; nr0++) {
-        for (int m = 0; m < 256; m++) {
-            for (int k = 0; k < 8; k++) {
-                uint8_t raw = expand_tab[m][k];
-                expand_tab_pre[nr0][m][k] =
-                    (raw < 8) ? (uint8_t)(raw + (8 - nr0))   /* L-lane */
-                              : (uint8_t)(raw + 8 + nr0);    /* R-lane */
-            }
-        }
-    }
-    expand_table_ready = 1;
-}
+/* expand_tab / expand_tab_pre / expand_popcnt + init_expand_table:
+ * storage and constructor live in pivco_huffman_neon_tables.{c,h} so
+ * codec.c (compiled per-backend) and this legacy file share the same
+ * 18 KB runtime tables.  See the header for the (nr0, m1) pre-bake
+ * explanation. */
+#include "pivco_huffman_neon_tables.h"
 
 /* ---------- tree_merge primitives ---------- */
 

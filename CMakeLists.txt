@@ -129,7 +129,11 @@ endif()
 # SIMD support
 if(TARGET_ARCH STREQUAL "arm64" OR TARGET_ARCH STREQUAL "aarch64")
     message(STATUS "ARM64 detected — enabling NEON")
-    list(APPEND PIVCO_SOURCES src/pivco_huffman_neon.c src/pivco_huffman_neon_prefix.c src/pivco_huffman_bu_neon.c)
+    list(APPEND PIVCO_SOURCES
+        src/pivco_huffman_neon.c
+        src/pivco_huffman_neon_prefix.c
+        src/pivco_huffman_bu_neon.c
+        src/pivco_huffman_neon_tables.c)
     add_compile_definitions(PIVCO_HAS_NEON=1)
     # Note: SVE backend exists (pivco_huffman_sve.c) but svcompact at
     # 128-bit SVE (Graviton 4) is slower than NEON TBL because it only
