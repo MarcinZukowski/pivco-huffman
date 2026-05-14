@@ -39,306 +39,42 @@
 #ifdef PIVCO_HAS_NEON
 #include <arm_neon.h>
 
-/* Popcount K_right bits from the first nbytes of bm, where K total bits
- * are valid (the last byte may have fewer than 8 valid bits).
- *
- * Vectorised: 64-byte main loop processes four 16-byte vectors per iter
- * with 4-wide ILP — 4 independent vcntq_u8, then a 3-level lane-wise
- * add tree (vaddq_u8 × 3) keeping the intermediate sums in u8 (max 32
- * at the root), then one vpaddlq_u8 widen-and-pair-add to u16 (max 64),
- * then one vaddq_u16 into the u16x8 accumulator.  vaddq_u8 (~4/cycle on
- * M-series) beats vpaddq_u8 (~2/cycle, shuffle-mux cost) for the same
- * data-reduction shape.  16-byte mop-up handles 1..3 leftover vectors,
- * scalar tail handles 0..15 full bytes plus the optional partial last
- * byte (K & 7 bits valid). */
-static inline int popcount_K_right(const uint8_t *bm, int nbytes, int K) {
-    (void)nbytes;   /* derivable from K; kept for API stability */
-    PROF_TIC();
-    int full_bytes = K >> 3;
-    int partial_bits = K & 7;
+/* Decode primitives (popcount_K_right, tree_merge, tree_merge_bcast_*,
+ * merge_both_const, flat_decode_to_buffer) live in
+ * pivco_huffman_primitives_neon.h.  This file calls them via the
+ * unsuffixed-alias static-inline wrappers below — the actual SIMD
+ * code is shared with the codec.c-compiled-as-NEON object library. */
+#include "pivco_huffman_primitives_neon.h"
+static inline int popcount_K_right(const uint8_t *bm, int nbytes, int K)
+{ return popcount_K_right_neon(bm, nbytes, K); }
 
-    uint16x8_t acc_v = vdupq_n_u16(0);
-    int b = 0;
-    for (; b + 64 <= full_bytes; b += 64) {
-        uint8x16_t v0 = vld1q_u8(bm + b);
-        uint8x16_t v1 = vld1q_u8(bm + b + 16);
-        uint8x16_t v2 = vld1q_u8(bm + b + 32);
-        uint8x16_t v3 = vld1q_u8(bm + b + 48);
-        uint8x16_t c0 = vcntq_u8(v0);
-        uint8x16_t c1 = vcntq_u8(v1);
-        uint8x16_t c2 = vcntq_u8(v2);
-        uint8x16_t c3 = vcntq_u8(v3);
-        /* 3-level lane-wise add tree, all in u8 (max 32 at the root). */
-        uint8x16_t s01 = vaddq_u8(c0, c1);
-        uint8x16_t s23 = vaddq_u8(c2, c3);
-        uint8x16_t s   = vaddq_u8(s01, s23);
-        acc_v = vaddq_u16(acc_v, vpaddlq_u8(s));
-    }
-    for (; b + 16 <= full_bytes; b += 16) {
-        uint8x16_t v = vld1q_u8(bm + b);
-        acc_v = vaddq_u16(acc_v, vpaddlq_u8(vcntq_u8(v)));
-    }
-    int K_right = (int)vaddvq_u16(acc_v);
-
-    /* Scalar tail: remaining 0..15 full bytes. */
-    for (; b < full_bytes; b++) {
-        K_right += __builtin_popcount(bm[b]);
-    }
-
-    /* Optional partial byte holding the final (K & 7) bits. */
-    if (partial_bits) {
-        uint8_t valid_mask = (uint8_t)((1u << partial_bits) - 1);
-        K_right += __builtin_popcount(bm[full_bytes] & valid_mask);
-    }
-    PROF_TOC(PROF_BU_POPCOUNT_K, K);
-    return K_right;
-}
-
-/* expand_tab / expand_tab_pre / expand_popcnt + init_expand_table:
- * storage and constructor live in pivco_huffman_neon_tables.{c,h} so
- * codec.c (compiled per-backend) and this legacy file share the same
- * 18 KB runtime tables.  See the header for the (nr0, m1) pre-bake
- * explanation. */
-#include "pivco_huffman_neon_tables.h"
-
-/* ---------- tree_merge primitives ---------- */
-
-/* Full merge: both inputs are dense byte buffers.
- *   left:  n_left  bytes  (consumed in order)
- *   right: n_right bytes  (consumed in order)
- *   bm:    K bits = bitmap selecting per output position
- *   out:   K bytes (written sequentially)
- * Requires n_left + n_right == K. */
+/* Unsuffixed-name aliases for the legacy call sites in this file. */
 static inline void tree_merge(const uint8_t *bm, int K,
-                               const uint8_t *left,
-                               const uint8_t *right,
-                               uint8_t *out) {
-    PROF_TIC();
-    int lc = 0, rc = 0;
-    int j = 0;
-    /* Stride-16 main path: load 16-byte L_full / R_full once per
-     * iter, then produce two 8-byte halves of output.
-     *
-     *   Iter 0 uses vqtbl1 over vcombine(low(L_full), low(R_full))
-     *   with the baseline expand_tab[m0] — no shift needed at the
-     *   start of the iter.
-     *
-     *   Iter 1 uses vqtbl2 over the full 32-byte (L_full, R_full)
-     *   with a PRECOMPUTED shuf from expand_tab_pre[nr0][m1].  This
-     *   collapses what would be ~4 runtime ALU ops (adjust the shuf
-     *   for the lc/rc shift caused by iter 0) into one indexed load.
-     *
-     * 16-byte loads of left/right can overread past total_left /
-     * total_right but vqtbl1/vqtbl2 only INDEX positions the shuf
-     * vector points to — by construction those are bounded by
-     * remaining_lefts / remaining_rights, so the loaded-but-unused
-     * tail bytes never reach the output.  The scratch arena packs
-     * buffers adjacent with 64 bytes of trailing pad, so the load
-     * address always lands in valid memory.
-     *
-     * +13–15% bench gain on M4, +7–10% on Graviton 4 vs the older
-     * stride-16 path with 4 × vld_8 per iter — see IDEAS.md. */
-    for (; j + 16 <= K; j += 16) {
-        uint8x16_t L_full = vld1q_u8(left  + lc);
-        uint8x16_t R_full = vld1q_u8(right + rc);
+                               const uint8_t *left, const uint8_t *right,
+                               uint8_t *out)
+{ tree_merge_neon(bm, K, left, right, out); }
 
-        /* Iter 0: vqtbl1 on the low halves with baseline shuf. */
-        uint8_t m0 = bm[j >> 3];
-        uint8x16_t both0 = vcombine_u8(vget_low_u8(L_full),
-                                        vget_low_u8(R_full));
-        uint8x8_t  shuf0 = vld1_u8(expand_tab[m0]);
-        uint8x8_t  o0    = vqtbl1_u8(both0, shuf0);
-        vst1_u8(out + j, o0);
-        int nr0 = expand_popcnt[m0];
-
-        /* Iter 1: vqtbl2 over (L_full, R_full) with pre-shifted shuf. */
-        uint8_t m1 = bm[(j >> 3) + 1];
-        uint8x16x2_t src = {{ L_full, R_full }};
-        uint8x8_t shuf1  = vld1_u8(expand_tab_pre[nr0][m1]);
-        uint8x8_t o1     = vqtbl2_u8(src, shuf1);
-        vst1_u8(out + j + 8, o1);
-        int nr1 = expand_popcnt[m1];
-
-        rc += nr0 + nr1;
-        lc += (16 - nr0 - nr1);
-    }
-    for (; j + 8 <= K; j += 8) {
-        uint8_t m  = bm[j >> 3];
-        uint8x8_t  L    = vld1_u8(left + lc);
-        uint8x8_t  R    = vld1_u8(right + rc);
-        uint8x16_t both = vcombine_u8(L, R);
-        uint8x8_t  shuf = vld1_u8(expand_tab[m]);
-        uint8x8_t  o    = vqtbl1_u8(both, shuf);
-        vst1_u8(out + j, o);
-        int nr = expand_popcnt[m];
-        rc += nr;
-        lc += (8 - nr);
-    }
-    /* scalar tail (1..7 leftover).  out_buf has no SIMD-tail padding
-     * guarantee (root call writes user buffer; child recursions pack
-     * scratch buffers contiguously), so we keep this scalar. */
-    for (; j < K; j++) {
-        int mb = (bm[j >> 3] >> (j & 7)) & 1;
-        out[j] = mb ? right[rc++] : left[lc++];
-    }
-    PROF_TOC(PROF_BU_TREE_MERGE, K);
-}
-
-/* Broadcast-left merge: left is a constant symbol (the prefill leaf).
- * Used when this node's left child is a SKIP/prefill leaf.
- *
- * Same V4-style precomputed (nr0, m1) shuf strategy as tree_merge:
- *   - Load 16-byte R_full once per stride-16 iter.
- *   - Iter 0: vqtbl1 on vcombine(Lbcast, low(R_full)) with expand_tab[m0].
- *   - Iter 1: vqtbl2 over (Lbcast_q, R_full) with expand_tab_pre[nr0][m1].
- *     L-lane indices in [0..15] hit Lbcast_q (any value → left_sym).
- *     R-lane indices in [16..31] hit R_full[idx-16] = R_full[count_ones+nr0].
- *     The table's R-shift formula (raw + 8 + nr0) is exactly what we need.
- */
 static inline void tree_merge_bcast_left(const uint8_t *bm, int K,
                                           uint8_t left_sym,
                                           const uint8_t *right,
-                                          uint8_t *out) {
-    PROF_TIC();
-    int rc = 0;
-    int j = 0;
-    uint8x8_t  Lbcast   = vdup_n_u8(left_sym);
-    uint8x16_t Lbcast_q = vdupq_n_u8(left_sym);
-    for (; j + 16 <= K; j += 16) {
-        uint8x16_t R_full = vld1q_u8(right + rc);
+                                          uint8_t *out)
+{ tree_merge_bcast_left_neon(bm, K, left_sym, right, out); }
 
-        /* Iter 0: vqtbl1 on the low half of R_full + Lbcast. */
-        uint8_t m0 = bm[j >> 3];
-        uint8x16_t both0 = vcombine_u8(Lbcast, vget_low_u8(R_full));
-        uint8x8_t  shuf0 = vld1_u8(expand_tab[m0]);
-        uint8x8_t  o0    = vqtbl1_u8(both0, shuf0);
-        vst1_u8(out + j, o0);
-        int nr0 = expand_popcnt[m0];
-
-        /* Iter 1: vqtbl2 over (Lbcast_q, R_full) with precomputed shuf. */
-        uint8_t m1 = bm[(j >> 3) + 1];
-        uint8x16x2_t src = {{ Lbcast_q, R_full }};
-        uint8x8_t shuf1  = vld1_u8(expand_tab_pre[nr0][m1]);
-        uint8x8_t o1     = vqtbl2_u8(src, shuf1);
-        vst1_u8(out + j + 8, o1);
-
-        rc += nr0 + expand_popcnt[m1];
-    }
-    for (; j + 8 <= K; j += 8) {
-        uint8_t m = bm[j >> 3];
-        uint8x8_t  R    = vld1_u8(right + rc);
-        uint8x16_t both = vcombine_u8(Lbcast, R);
-        uint8x8_t  shuf = vld1_u8(expand_tab[m]);
-        uint8x8_t  o    = vqtbl1_u8(both, shuf);
-        vst1_u8(out + j, o);
-        rc += expand_popcnt[m];
-    }
-    for (; j < K; j++) {
-        int mb = (bm[j >> 3] >> (j & 7)) & 1;
-        out[j] = mb ? right[rc++] : left_sym;
-    }
-    PROF_TOC(PROF_BU_TREE_MERGE_BCAST_LEFT, K);
-}
-
-/* Broadcast-right merge: right is a constant symbol (HALF_LEFT case).
- *
- * Mirror of tree_merge_bcast_left.  After iter 0, lc advances by
- * (8 - nr0) where nr0 = popcount(m0).  expand_tab_pre[nr0][m1]'s
- * L-shift formula (raw + (8-nr0)) is exactly what we need, and the
- * R-lane formula puts indices in [16..31] which hit Rbcast_q. */
 static inline void tree_merge_bcast_right(const uint8_t *bm, int K,
                                            const uint8_t *left,
                                            uint8_t right_sym,
-                                           uint8_t *out) {
-    PROF_TIC();
-    int lc = 0;
-    int j = 0;
-    uint8x8_t  Rbcast   = vdup_n_u8(right_sym);
-    uint8x16_t Rbcast_q = vdupq_n_u8(right_sym);
-    for (; j + 16 <= K; j += 16) {
-        uint8x16_t L_full = vld1q_u8(left + lc);
+                                           uint8_t *out)
+{ tree_merge_bcast_right_neon(bm, K, left, right_sym, out); }
 
-        /* Iter 0: vqtbl1 on the low half of L_full + Rbcast. */
-        uint8_t m0 = bm[j >> 3];
-        uint8x16_t both0 = vcombine_u8(vget_low_u8(L_full), Rbcast);
-        uint8x8_t  shuf0 = vld1_u8(expand_tab[m0]);
-        uint8x8_t  o0    = vqtbl1_u8(both0, shuf0);
-        vst1_u8(out + j, o0);
-        int nr0 = expand_popcnt[m0];
-
-        /* Iter 1: vqtbl2 over (L_full, Rbcast_q) with precomputed shuf. */
-        uint8_t m1 = bm[(j >> 3) + 1];
-        uint8x16x2_t src = {{ L_full, Rbcast_q }};
-        uint8x8_t shuf1  = vld1_u8(expand_tab_pre[nr0][m1]);
-        uint8x8_t o1     = vqtbl2_u8(src, shuf1);
-        vst1_u8(out + j + 8, o1);
-
-        lc += (16 - nr0 - expand_popcnt[m1]);
-    }
-    for (; j + 8 <= K; j += 8) {
-        uint8_t m = bm[j >> 3];
-        uint8x8_t  L    = vld1_u8(left + lc);
-        uint8x16_t both = vcombine_u8(L, Rbcast);
-        uint8x8_t  shuf = vld1_u8(expand_tab[m]);
-        uint8x8_t  o    = vqtbl1_u8(both, shuf);
-        vst1_u8(out + j, o);
-        lc += (8 - expand_popcnt[m]);
-    }
-    for (; j < K; j++) {
-        int mb = (bm[j >> 3] >> (j & 7)) & 1;
-        out[j] = mb ? right_sym : left[lc++];
-    }
-    PROF_TOC(PROF_BU_TREE_MERGE_BCAST_RIGHT, K);
-}
-
-/* Both-leaves merge: BOTH inputs are constants.  Output is just
- * left_sym at bm=0 positions and right_sym at bm=1 positions.
- * SIMD: vtst+veor blend, no TBL needed. */
 static inline void merge_both_const(const uint8_t *bm, int K,
                                      uint8_t left_sym, uint8_t right_sym,
-                                     uint8_t *out) {
-    PROF_TIC();
-    uint8x8_t vleft  = vdup_n_u8(left_sym);
-    uint8x8_t vdelta = vdup_n_u8(left_sym ^ right_sym);
-    static const uint8_t bit_pos_tab[8] = {1,2,4,8,16,32,64,128};
-    uint8x8_t vbits = vld1_u8(bit_pos_tab);
+                                     uint8_t *out)
+{ merge_both_const_neon(bm, K, left_sym, right_sym, out); }
 
-    int j = 0;
-    for (; j + 16 <= K; j += 16) {
-        uint8x8_t bits0 = vtst_u8(vdup_n_u8(bm[j >> 3]), vbits);
-        uint8x8_t bits1 = vtst_u8(vdup_n_u8(bm[(j >> 3) + 1]), vbits);
-        vst1_u8(out + j,     veor_u8(vleft, vand_u8(vdelta, bits0)));
-        vst1_u8(out + j + 8, veor_u8(vleft, vand_u8(vdelta, bits1)));
-    }
-    for (; j + 8 <= K; j += 8) {
-        uint8x8_t bits = vtst_u8(vdup_n_u8(bm[j >> 3]), vbits);
-        vst1_u8(out + j, veor_u8(vleft, vand_u8(vdelta, bits)));
-    }
-    for (; j < K; j++) {
-        int mb = (bm[j >> 3] >> (j & 7)) & 1;
-        out[j] = mb ? right_sym : left_sym;
-    }
-    PROF_TOC(PROF_BU_MERGE_BOTH_CONST, K);
-}
-
-/* ---------- D-bit flat decode (in-place sequential output) ----------
- *
- * Reads n*D packed bits, looks up each D-bit code in c2s, writes a byte
- * to out[i].  Output is dense / sequential (perfect for bottom-up).
- *
- * Reuses the vectorised D=2..8 flat-decode from pivco_huffman_neon.c
- * via a non-static wrapper, so the existing per-D unpackers don't get
- * duplicated. */
-extern void pivco_huffman_flat_decode_direct_neon_(uint8_t *symbols, int n,
-                                                    const uint8_t *bm, int D,
-                                                    const uint8_t *c2s);
 static inline void flat_decode_to_buffer(uint8_t *out, int n,
                                           const uint8_t *bm, int D,
-                                          const uint8_t *c2s) {
-    PROF_TIC();
-    pivco_huffman_flat_decode_direct_neon_(out, n, bm, D, c2s);
-    PROF_TOC(PROF_BU_FLAT_DECODE, n);
-}
+                                          const uint8_t *c2s)
+{ flat_decode_to_buffer_neon(out, n, bm, D, c2s); }
 
 /* ---------- Recursive bottom-up decode ----------
  *
