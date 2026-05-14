@@ -787,7 +787,7 @@ int pivco_huffman_encode_neon(const uint8_t *symbols,
     uint16_t codes_la[PIVCO_BLOCK_SIZE + 16];
 
     PROF_TIC();
-    for (int i = 0; i < N; i++) codes_la[i] = table->code_la[symbols[i]];
+    enc_init_neon(codes_la, N, symbols, table->code_la);
     PROF_TOC(PROF_ENC_INIT, N);
 
     /* `tmp` scratch sizing: each RIGHT-going recursion advances the tmp

@@ -273,6 +273,25 @@ static inline void flat_decode_to_buffer_neon(uint8_t *out, int n,
     PROF_TOC(PROF_BU_FLAT_DECODE, n);
 }
 
+/* ---------- Encode primitives (init) ----------
+ *
+ * enc_init_neon — gather per-symbol left-aligned codes into codes_la.
+ * `code_la_lut` is table->code_la (256 uint16 entries).
+ *
+ * Today this is a straight scalar loop; the compiler often auto-
+ * vectorises it via vqtbl1q_u8 over a 256-entry LUT, but the codegen
+ * is fragile and the LSU is the bottleneck in either form (microbench
+ * at extras/bench_enc_init.c established the NEON TBL pattern buys
+ * only ~11% over the scalar loop on M4 -- not worth the source
+ * complexity).  Kept here as a primitive so AVX-512's actual SIMD
+ * win via vpermi2w (commit 7c08c19) has a contract slot to fill. */
+static inline void enc_init_neon(uint16_t *codes_la, int n,
+                                   const uint8_t *symbols,
+                                   const uint16_t *code_la_lut)
+{
+    for (int i = 0; i < n; i++) codes_la[i] = code_la_lut[symbols[i]];
+}
+
 /* ---------- Encode primitives (flat-subtree pack) ----------
  *
  * Per-D SIMD bit-pack helpers.  Each reads D-bit codes from codes_la
@@ -554,6 +573,11 @@ static inline void pack_dN_neon(uint8_t *out, const uint16_t *codes_la,
 /* ---------- Aliases consumed by codec.c ---------- */
 
 #define PIVCO_PRIM_ALWAYS_INLINE __attribute__((always_inline)) static inline
+
+PIVCO_PRIM_ALWAYS_INLINE void prim_enc_init(uint16_t *codes_la, int n,
+                                              const uint8_t *symbols,
+                                              const uint16_t *code_la_lut)
+{ enc_init_neon(codes_la, n, symbols, code_la_lut); }
 
 PIVCO_PRIM_ALWAYS_INLINE void prim_pack_dN(uint8_t *out,
                                              const uint16_t *codes_la,
