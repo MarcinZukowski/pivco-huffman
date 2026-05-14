@@ -980,7 +980,8 @@ static void encode_node_neon(const pivco_huffman_table_t *table,
      * the bitmap and replace [marker=0][raw bitmap] with
      * [marker=table|xor][fse_len:u16][fse payload]. */
 #ifdef PIVCO_HAS_FSE
-    if (nbytes >= PIVCO_FSE_MIN_BITMAP_BYTES) {
+    if (pivco_huffman_get_fse_enabled() &&
+        nbytes >= PIVCO_FSE_MIN_BITMAP_BYTES) {
         int n_major = (n_left >= n_right) ? n_left : n_right;
         double p_major = (n > 0) ? (double)n_major / (double)n : 0.0;
         int xor_flag = (n_right > n_left);

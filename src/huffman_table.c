@@ -68,6 +68,58 @@ static void flat_mark_subtrees(pivco_huffman_table_t *t,
     flat_mark_subtrees(t, n->right, pool_cursor);
 }
 
+/* ---------- Rank-aware synthetic-frequency construction ----------
+ *
+ * Given just `code_lens` (one length per symbol) and an optional
+ * `rank_within_tier` (per-symbol 0-based rank, -1 for default), build
+ * a synth_freq array that:
+ *  - reproduces the same code lengths through pivco_huffman_build_table
+ *    (because inter-tier ratios are exact powers of 2)
+ *  - preserves the encoder's intended within-tier ordering as the
+ *    primary sort key (instead of the default smaller-sym tiebreak)
+ *
+ * Formula: synth_freq[s] = (1 << (max_len - L)) * BIG + (K_L - rank).
+ *   BIG = 1024: large enough that the within-tier offset (max 256)
+ *               can't cross the inter-tier step (factor of 2).
+ *   K_L:  count of symbols at code length L.
+ *   rank: 0 = top, K_L - 1 = bottom.  When < 0 (default), use 0
+ *         (uniform within tier, identical to original synth_freq
+ *         behavior).
+ *
+ * Both encoder and decoder feed the same code_lens + rank_within_tier
+ * into this builder, so they construct identical synth_freqs and
+ * therefore identical Huffman tables. */
+static void build_rank_aware_synth_freq(
+    const uint8_t code_lens[PIVCO_MAX_SYMBOLS],
+    const int16_t *rank_within_tier,
+    uint64_t freq_out[PIVCO_MAX_SYMBOLS])
+{
+    int max_len = 0;
+    for (int s = 0; s < PIVCO_MAX_SYMBOLS; s++) {
+        if (code_lens[s] > max_len) max_len = code_lens[s];
+    }
+    int sym_count_per_len[PIVCO_MAX_CODE_LEN + 1] = {0};
+    for (int s = 0; s < PIVCO_MAX_SYMBOLS; s++) {
+        if (code_lens[s] > 0 && code_lens[s] <= PIVCO_MAX_CODE_LEN)
+            sym_count_per_len[code_lens[s]]++;
+    }
+    const uint64_t BIG = 1024;
+    for (int s = 0; s < PIVCO_MAX_SYMBOLS; s++) {
+        freq_out[s] = 0;
+        int L = code_lens[s];
+        if (L == 0) continue;
+        uint64_t base = ((uint64_t)1 << (max_len - L)) * BIG;
+        int rank = (rank_within_tier && rank_within_tier[s] >= 0)
+                   ? rank_within_tier[s] : -1;
+        if (rank < 0) {
+            freq_out[s] = base;
+        } else {
+            int K = sym_count_per_len[L];
+            freq_out[s] = base + (uint64_t)(K - rank);
+        }
+    }
+}
+
 /* ---------- Min-heap for Huffman tree construction ---------- */
 
 typedef struct {
@@ -724,4 +776,17 @@ int pivco_huffman_build_table(const uint64_t freq[PIVCO_MAX_SYMBOLS],
     }
 
     return PIVCO_OK;
+}
+
+/* Public API: build a table from code lengths + optional within-tier
+ * ordering.  See the comment in pivco_huffman.h. */
+int pivco_huffman_build_table_from_code_lens(
+    const uint8_t code_lens[PIVCO_MAX_SYMBOLS],
+    const int16_t *rank_within_tier,
+    pivco_huffman_table_t *table)
+{
+    if (!code_lens || !table) return PIVCO_ERR_NULL;
+    uint64_t freq[PIVCO_MAX_SYMBOLS];
+    build_rank_aware_synth_freq(code_lens, rank_within_tier, freq);
+    return pivco_huffman_build_table(freq, table);
 }

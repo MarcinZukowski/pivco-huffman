@@ -1,5 +1,53 @@
 # PIVCO-Huffman Decode Ideas
 
+## v0.2 FSE marker byte is unconditional even when FSE off — tiny optimization, 2026-05-13
+
+**Status: known overhead, parked.**
+
+In the v0.2+ wire format, every non-flat internal node in the
+encoded block stream is preceded by a 1-byte FSE-dispatch marker:
+`0x00` (raw bitmap), `0x01..0x19` (FSE table id), or `0x80|id` (with
+XOR flip).  The marker is emitted unconditionally by the encoder,
+regardless of whether FSE actually fires on that node, so the
+decoder can dispatch generically.
+
+Overhead per block = (number of non-flat internal nodes) bytes.
+Typical:
+
+  proba80       5 bytes/block  (5 non-flat internal nodes; 0.06% on 8K)
+  prose_pride  ~50 bytes/block (~0.6% on 8K)
+  chinese_text ~70 bytes/block (~0.9% on 8K)
+  cat-image    ~130 bytes/block (~1.6% on 8K, but jpeg is near-
+                                 incompressible so 1.6% matters less)
+
+The overhead remains even with `--no-fse` (or
+`pivco_huffman_set_fse_enabled(0)` at runtime, added 2026-05-13).
+Runtime disable just keeps marker = 0; the byte is still there.
+
+**To recover the byte, three options, all wire-format-affecting:**
+
+1. **Branch on a build/file flag.**  Emit markers only when a
+   "FSE-may-be-present" wire-format flag is set.  Requires bumping
+   `PIVCOHUF_VERSION_MINOR` and either adding a feature-flag bit to
+   the body header or maintaining two minor versions.  Decoder
+   complexity goes up.
+2. **Conditional marker per node-type-class.**  Currently markers
+   precede ALL non-flat internal-node bitmaps.  Could restrict to
+   only the bitmap sizes where FSE has any chance to win (e.g. only
+   nodes with bitmap_bytes >= some threshold).  Decoder needs to
+   compute the same threshold to know whether to expect a marker.
+   Saves bytes on small bitmaps; mild decoder complexity.
+3. **Marker bits packed across nodes.**  Instead of 1 byte per
+   non-flat node, pack 1 bit per node into a fixed-position bit
+   vector at the start of each block.  ~8x less overhead.  Adds
+   decoder-side bit-decode but no per-node branch on marker byte.
+
+None of these are urgent.  Combined chinese_text-tier overhead is
+~0.9% of block size, well within noise of the v0 FSE ratio
+improvements (~1pp on those datasets).  Park; revisit if a future
+flat-split or other v0.x feature would benefit from the freed
+byte position.
+
 ## Entropy-skew flat-subtree split (option 2 from FSE talk) — blocked on wire format, 2026-05-13
 
 **Status: prototype written, rolled back; needs file-codec change.**
@@ -68,6 +116,67 @@ to un-flatten (we'd just spend partition + FSE work for no gain).  The
 threshold needs to be tuned to the cost of un-flattening (D extra
 marker bytes + D partition bitmaps) vs the gain from FSE-coding the
 skewed routing bits.  Tuning depends on (1) and (2)'s actual overhead.
+
+**2026-05-13 follow-up: attempted approach (1) -- rolled back.**
+
+Implemented the within-tier ordering wire format (bump to v0.3,
+ordering_mask + per-tier symbol-ID arrays) + a rank-class synth_freq
+formula meant to give every ordered chunk a uniform 0.636 skew so
+flat-split would trigger consistently.  Round-trip worked, all tests
+passed, but ratio got WORSE on every dataset (+0.1-0.9 pp).
+
+**Why it failed.**  The synth-freq-based 0.636 skew is structural --
+it depends only on the chunk shape and the encoder's serialized
+ordering, NOT on the actual block frequencies.  When `flat_mark_subtrees`
+un-flattens a chunk on this structural skew, the *real* data flowing
+through that chunk's partition bitmap is essentially 50/50 (because
+the real-freq distribution within a Huffman code tier is much closer
+to uniform than the rank-class formula assumes).  Result: every
+un-flattened node hits the FSE dispatch with a real-skew ≈ 0.5,
+falls back to raw, and pays the +3-byte (marker + 2-byte length)
+overhead for ZERO ratio benefit.
+
+The "all-chunks-split" structural decision over-fires; adding a
+MIN_SPLIT_N gate (only split if N codes >= 200) helped only marginally
+because the issue isn't chunk size, it's that **synth-freq-based
+splits can't see real-freq skew at all**.
+
+**Real path forward: per-BLOCK split decisions.**
+
+Once the within-tier ordering is shared (approach 1, which IS useful
+on its own for the K_L >= 3 decode-speed win at chunk assignment),
+the model frequencies in the synth-freq table aren't load-bearing
+for split decisions.  What matters is the **per-block real data**
+flowing through each flat-subtree's partition at encode time.  The
+encoder can compute that and emit a per-block 1-bit-per-flat-subtree-
+root marker: "un-flatten this block at this node" or "keep flat."
+
+When un-flattened: emit the partition bitmap (the v0 FSE dispatch
+already kicks in if the real per-block skew is high enough), then
+emit N*(D-1) packed bits for each of the two resulting depth-(D-1)
+flat subtrees.
+
+This is **strictly better than synth-freq-based per-file decisions**:
+the same tree gets different un-flatten choices block-by-block
+depending on each block's local data distribution.
+
+**Per-block adaptivity is a real benefit of pivco-huffman vs FSE:**
+- pivco-huffman has *one tree per file* but *per-block dispatch
+  decisions* (already true for the v0 FSE marker; would also be true
+  for the un-flatten decision).  Wire-format cost per block is tiny
+  (~32 bytes worst case, much less in practice -- only nodes with
+  flat_depth >= 2 need bits).
+- Static-tabled FSE has *one model per stream*; if data locality
+  shifts mid-stream the model degrades.  Per-block FSE tables are
+  expensive (table description ~32-128 bytes overhead per stream).
+- So pivco-huffman can capture per-block locality at near-zero
+  marginal cost; FSE can't, without paying full per-block table
+  overhead.
+
+Within-tier ordering (approach 1) lands cleanly and is its own
+small decode-speed win.  Per-block un-flatten on top of it is the
+right route to the chinese_text / html_wiki / bell_s10 ratio
+recovery that motivated this work in the first place.
 
 ## SSE flat_decode_direct_x86 is mostly scalar for D in {2,3,5,6} — open (2026-05-13)
 

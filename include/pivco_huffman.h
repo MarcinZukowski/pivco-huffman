@@ -155,10 +155,46 @@ typedef enum {
 void         pivco_huffman_set_impl(pivco_impl_t impl);
 pivco_impl_t pivco_huffman_get_impl(void);
 
+/* Runtime toggle for the encoder's FSE-dispatch path (v0.2+ wire
+ * format).  Default is enabled.  When set to 0, encode_node_* skip
+ * the FSE-compress attempt and always emit raw bitmaps with marker=0.
+ * Useful for benchmarking the no-FSE codec path without rebuilding,
+ * and for cases where the FSE overhead isn't worth its ratio gain on
+ * a specific dataset (e.g. proba80-like distributions where the
+ * partition bitmaps are too small for FSE to beat marker overhead).
+ * The decoder always supports both marker=0 (raw) and marker!=0
+ * (FSE) so files produced with FSE enabled can be decoded with FSE
+ * disabled and vice versa. */
+void pivco_huffman_set_fse_enabled(int enabled);
+int  pivco_huffman_get_fse_enabled(void);
+
 /* ---------- Table construction ---------- */
 
 int pivco_huffman_build_table(const uint64_t freq[PIVCO_MAX_SYMBOLS],
                               pivco_huffman_table_t *table);
+
+/* Build a Huffman table from already-known code lengths plus an
+ * optional explicit within-tier ordering.  This is the path used by
+ * decoders that recovered code_lens from a wire format and want to
+ * reproduce a specific encoder-supplied within-tier order (so the
+ * chunk-assignment optimization in build_table -- top-frequency byte
+ * in the largest chunk per tier -- survives a code-len-only
+ * serialization).
+ *
+ * rank_within_tier[s] = 0-based position of symbol s within its
+ * code-length tier in the encoder's intended order (lower = earlier).
+ * Pass -1 for any tier whose ordering should follow the default
+ * (smaller-sym-first tie-break, matching v0.2 behavior).  Pass NULL
+ * to use defaults for all tiers (equivalent to build_table with
+ * uniform-within-tier synth_freqs).
+ *
+ * Internally synthesises rank-aware frequencies and runs the same
+ * build pipeline as pivco_huffman_build_table -- the caller does
+ * not see the synth_freq construction. */
+int pivco_huffman_build_table_from_code_lens(
+    const uint8_t code_lens[PIVCO_MAX_SYMBOLS],
+    const int16_t *rank_within_tier,
+    pivco_huffman_table_t *table);
 
 /* ---------- PIVCO Huffman encode/decode (block of PIVCO_BLOCK_SIZE symbols) ---------- */
 

@@ -12,6 +12,22 @@ pivco_impl_t pivco_huffman_get_impl(void)
     return g_impl;
 }
 
+/* Runtime FSE encode-dispatch toggle.  Default = enabled.  When 0, the
+ * encoder's FSE dispatch path is skipped entirely -- marker byte stays
+ * 0, raw bitmap emitted, decoder reads it unchanged.  Wire format is
+ * always v0.2+ compatible regardless of this setting. */
+static int g_fse_enabled = 1;
+
+void pivco_huffman_set_fse_enabled(int enabled)
+{
+    g_fse_enabled = enabled ? 1 : 0;
+}
+
+int pivco_huffman_get_fse_enabled(void)
+{
+    return g_fse_enabled;
+}
+
 static pivco_impl_t resolve_impl(void)
 {
     if (g_impl != PIVCO_IMPL_AUTO) return g_impl;

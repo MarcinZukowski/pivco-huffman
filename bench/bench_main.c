@@ -94,8 +94,10 @@ int main(int argc, char **argv)
             run_all = 1;
         } else if (strcmp(argv[i], "--tdbu") == 0) {
             tdbu_only = 1;
+        } else if (strcmp(argv[i], "--no-fse") == 0) {
+            pivco_huffman_set_fse_enabled(0);
         } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
-            printf("Usage: %s [repeats] [--all] [--tdbu]\n"
+            printf("Usage: %s [repeats] [--all] [--tdbu] [--no-fse]\n"
                    "  repeats   passes over 4M symbols per timed run (default %d)\n"
                    "  --all     run every distribution AND every comparator\n"
                    "            (default MAIN: 9 distributions; pivco_s/n/bu,\n"
@@ -103,7 +105,9 @@ int main(int argc, char **argv)
                    "             no huf0_1s, no rans_x2)\n"
                    "  --tdbu    skip every comparator (run only pivco_n + pivco_bu);\n"
                    "            keeps the full 5-run methodology.  Use for prof-on/off\n"
-                   "            A/B without paying for trad / huf0 / rans timing.\n",
+                   "            A/B without paying for trad / huf0 / rans timing.\n"
+                   "  --no-fse  disable the encoder's FSE dispatch at runtime\n"
+                   "            (still v0.2+ wire format; marker stays 0).\n",
                    argv[0], DEFAULT_REPEATS);
             return 0;
         } else {
