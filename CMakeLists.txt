@@ -95,11 +95,13 @@ else()
     execute_process(COMMAND uname -m OUTPUT_VARIABLE TARGET_ARCH OUTPUT_STRIP_TRAILING_WHITESPACE)
 endif()
 
-# Core source files
+# Core source files (backend-agnostic).  The per-backend codec object
+# libraries (defined after the SIMD-detection block below) compile
+# src/pivco_huffman_codec.c once per backend tier with the matching
+# PIVCO_BACKEND_* define and get linked into the pivco_huffman library.
 set(PIVCO_SOURCES
     src/huffman_table.c
     src/pivco_huffman.c
-    src/pivco_huffman_scalar.c
     src/pivco_instrumentation.c
     src/pivco_prof.c
     src/pivcohuf_file.c
@@ -177,6 +179,22 @@ else()
     message(STATUS "Architecture: ${TARGET_ARCH} — SIMD disabled")
 endif()
 
+# Per-backend codec object libraries.  Each compiles the SAME
+# src/pivco_huffman_codec.c with a different PIVCO_BACKEND_* define;
+# the codec includes pivco_huffman_primitives.h which routes to the
+# matching primitives_<backend>.h.  Defined AFTER the SIMD-detection
+# add_compile_options() calls so each object inherits -m<arch> flags
+# (otherwise PIVCO_BLOCK_SIZE auto-detection would fall to the 4096
+# scalar default on every non-arm64 host).
+#
+# Phase 1+2: only the scalar codec is wired through codec.c; NEON /
+# x86 / AVX-512 still build from their legacy .c files for now.  As
+# those ports land in Phase 3+/4+/5+, the legacy .c files are
+# replaced one tier at a time by the corresponding codec object.
+add_library(pivco_codec_scalar OBJECT src/pivco_huffman_codec.c)
+target_compile_definitions(pivco_codec_scalar PRIVATE PIVCO_BACKEND_SCALAR=1)
+target_include_directories(pivco_codec_scalar PRIVATE include)
+
 # huff0/FSE library (for baseline comparison)
 set(HUF0_SOURCES
     ext/fse/lib/entropy_common.c
@@ -218,8 +236,11 @@ else()
     set(HAVE_BROTLI_HUFFMAN OFF)
 endif()
 
-# Library
-add_library(pivco_huffman ${PIVCO_SOURCES})
+# Library — backend-agnostic sources plus the per-backend codec objects.
+add_library(pivco_huffman
+    ${PIVCO_SOURCES}
+    $<TARGET_OBJECTS:pivco_codec_scalar>
+)
 target_include_directories(pivco_huffman PUBLIC include)
 
 # CLI tool: pivcohuf compress/decompress files using our format.
