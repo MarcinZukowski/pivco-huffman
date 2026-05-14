@@ -46,49 +46,19 @@
 #define PIVCO_FSE_MIN_BITMAP_BYTES 32
 #endif
 
-/* ---------- FSE per-table-id stats (debug instrumentation) ----------
- * Slot 0 = "FSE attempt that did not commit" (compressed_ratio gate
- * rejected, or compress returned fallback).  Slots 1..25 = committed
- * FSE encodes with that table_id.  Not thread-safe. */
-static uint64_t g_pivco_fse_commit[PIVCO_FSE_STATS_SLOTS];
-static uint64_t g_pivco_fse_attempt[PIVCO_FSE_STATS_SLOTS];
-static uint64_t g_pivco_fse_bytes_in[PIVCO_FSE_STATS_SLOTS];
-static uint64_t g_pivco_fse_bytes_out[PIVCO_FSE_STATS_SLOTS];
+/* FSE per-table-id stats storage moved to src/pivco_huffman.c (backend-
+ * neutral TU) so the accessor symbols resolve on every platform and
+ * codec.c can write the counters directly.  This file used to define
+ * the storage as static and the public accessors; the legacy encode
+ * path here updates them via extern. */
+extern uint64_t g_pivco_fse_commit  [PIVCO_FSE_STATS_SLOTS];
+extern uint64_t g_pivco_fse_attempt [PIVCO_FSE_STATS_SLOTS];
+extern uint64_t g_pivco_fse_bytes_in [PIVCO_FSE_STATS_SLOTS];
+extern uint64_t g_pivco_fse_bytes_out[PIVCO_FSE_STATS_SLOTS];
 
 #define PIVCO_FSE_ROOT_LOG_MAX 65536
-static pivco_huffman_fse_root_event_t g_pivco_fse_root_log[PIVCO_FSE_ROOT_LOG_MAX];
-static int g_pivco_fse_root_n;
-
-void pivco_huffman_fse_stats_reset(void)
-{
-    memset(g_pivco_fse_commit,    0, sizeof(g_pivco_fse_commit));
-    memset(g_pivco_fse_attempt,   0, sizeof(g_pivco_fse_attempt));
-    memset(g_pivco_fse_bytes_in,  0, sizeof(g_pivco_fse_bytes_in));
-    memset(g_pivco_fse_bytes_out, 0, sizeof(g_pivco_fse_bytes_out));
-    g_pivco_fse_root_n = 0;
-}
-
-void pivco_huffman_fse_stats_get(uint64_t commit[PIVCO_FSE_STATS_SLOTS],
-                                 uint64_t attempt[PIVCO_FSE_STATS_SLOTS],
-                                 uint64_t bytes_in[PIVCO_FSE_STATS_SLOTS],
-                                 uint64_t bytes_out[PIVCO_FSE_STATS_SLOTS])
-{
-    memcpy(commit,    g_pivco_fse_commit,    sizeof(g_pivco_fse_commit));
-    memcpy(attempt,   g_pivco_fse_attempt,   sizeof(g_pivco_fse_attempt));
-    memcpy(bytes_in,  g_pivco_fse_bytes_in,  sizeof(g_pivco_fse_bytes_in));
-    memcpy(bytes_out, g_pivco_fse_bytes_out, sizeof(g_pivco_fse_bytes_out));
-}
-
-int pivco_huffman_fse_root_count(void)
-{
-    return g_pivco_fse_root_n;
-}
-
-void pivco_huffman_fse_root_get(int idx, pivco_huffman_fse_root_event_t *out)
-{
-    if (idx < 0 || idx >= g_pivco_fse_root_n) { memset(out, 0, sizeof(*out)); return; }
-    *out = g_pivco_fse_root_log[idx];
-}
+extern pivco_huffman_fse_root_event_t g_pivco_fse_root_log[PIVCO_FSE_ROOT_LOG_MAX];
+extern int g_pivco_fse_root_n;
 
 #ifdef PIVCO_HAS_NEON
 #include <arm_neon.h>

@@ -18,13 +18,17 @@
  *  Primitive contract — every backend must implement these
  * ===========================================================================
  *
- *  Boundary convention.  The codec.c tree walk owns wire-record framing
- *  that is purely structural (the K_right header, the recursion order).
- *  Backend primitives own everything that depends on partition skew or
- *  data layout: the FSE marker byte, the bitmap or FSE payload, the
- *  partition itself.  This split lets each backend make its own decision
- *  on whether (and when) to attempt FSE-coding of the bitmap, without
- *  any feature-flag plumbing through codec.c.
+ *  Boundary convention.  Primitives own only the SIMD-bound work:
+ *  building the raw partition bitmap, partitioning codes_la, packing
+ *  N·D-bit flat regions, the BU merge kernels.  Everything else --
+ *  the K_right header, the FSE marker byte, the optional FSE-attempt
+ *  on the raw bitmap, the per-stats bookkeeping -- is arch-agnostic
+ *  glue and lives in codec.c.  This split is structural: when a new
+ *  backend is added, it inherits all of the wire-format and FSE logic
+ *  automatically by going through codec.c; there is no per-backend
+ *  feature flag to "remember to wire FSE here too" (the original cause
+ *  of the scalar↔SSE wire-format-drift bug this refactor exists to
+ *  fix).
  *
  * ---------------------------------------------------------------------------
  *  ENCODE PRIMITIVES
@@ -45,37 +49,37 @@
  *    visit; subsequent visits shift each surviving value left by 1
  *    so bit 15 stays canonical.
  *
- *  int prim_encode_node(uint16_t *codes_la, int n, int depth,
- *                        uint8_t **out_ptr, uint16_t *tmp);
+ *  int prim_build_bitmap_partition(uint16_t *codes_la, int n,
+ *                                   uint8_t *bm, uint16_t *tmp);
  *
- *    Emit the wire BODY of one non-flat internal node and partition
- *    codes_la.  The codec has already reserved the (optional) K_right
- *    header preceding this call; the K_right value is committed by
- *    the codec after the primitive returns.
+ *    Build the n-bit partition bitmap from codes_la[0..n) and partition
+ *    codes_la in place.  This is the only arch-specific encode-side
+ *    operation; everything around it (marker byte, optional FSE attempt
+ *    that may rewrite the marker+bitmap region) is handled in codec.c.
  *
- *    Writes, starting at *out_ptr and advancing *out_ptr past it:
+ *    Writes ceil(n/8) bytes into bm.  Bit j (for j in [0..n)) is the
+ *    top bit of codes_la[j] at the moment of call; ends up at bit
+ *    (j & 7) of byte bm[j >> 3].
  *
- *        [marker: u8]
- *        either   [bitmap: ceil(n/8) bytes]                  if marker == 0
- *        or       [fse_len: u16 LE][fse_payload: fse_len B]  if marker != 0
- *
- *    Partitions codes_la in place:
+ *    Partitions codes_la:
  *
  *        - codes_la[0..n_left)  left  (top bit was 0), each shifted << 1
  *        - tmp[0..n_right)      right (top bit was 1), each shifted << 1
  *
+ *    The shift << 1 in each partitioned value lets the next recursion
+ *    level read its partition bit from bit 15 again -- bit 15 is the
+ *    canonical "current depth" position throughout the encode walk.
+ *
  *    Returns n_right (caller derives n_left = n - n_right).
  *
- *    `depth` is supplied for the per-codeword FSE commit gate (FSE wins
- *    only when (depth + fse_frac) <= MIN_RATIO * (depth + 1) — see
- *    FSE-V0.md).  Backends that don't attempt FSE may ignore it.
+ *    codec.c wraps this primitive at every non-flat internal node:
  *
- *    Backends today:
- *      - scalar:        always emits marker=0 + raw bitmap.  No FSE attempt.
- *      - NEON:          attempts FSE when partition skew >= MIN_THRESHOLD;
- *                       commits via marker | xor_flag if the codeword gate
- *                       accepts (see primitives_neon.h).
- *      - x86, AVX-512:  same as scalar today (FSE-encode port pending).
+ *        marker_slot = *out_ptr;  *marker_slot = 0;  *out_ptr += 1;
+ *        bm = *out_ptr;  *out_ptr += bitmap_bytes(n);
+ *        n_right = prim_build_bitmap_partition(codes_la, n, bm, tmp);
+ *        codec_maybe_fse_attempt(...);  // may rewrite marker + bm,
+ *                                       // adjust *out_ptr on commit
+ *        wire_commit_kr_header(kr_slot, n_right);
  *
  *  void prim_pack_dN(uint8_t *out, const uint16_t *codes_la, int n, int D);
  *

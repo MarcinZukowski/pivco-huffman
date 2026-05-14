@@ -28,23 +28,17 @@ static inline void enc_init_scalar(uint16_t *codes_la, int n,
     for (int i = 0; i < n; i++) codes_la[i] = code_la_lut[symbols[i]];
 }
 
-/* Emit the wire BODY of one non-flat internal node and partition codes_la.
- * See pivco_huffman_primitives.h for the full contract.
+/* Build the n-bit partition bitmap from codes_la[0..n) and partition
+ * codes_la in place.  See pivco_huffman_primitives.h for the contract.
  *
- * Scalar policy: always emit marker=0 (raw bitmap, no FSE attempt).
- * `depth` is unused here; accepted to match the cross-backend signature. */
-static inline int encode_node_scalar(uint16_t *codes_la, int n, int depth,
-                                       uint8_t **out_ptr, uint16_t *tmp)
+ * The primitive owns ONLY the SIMD-bound work (bitmap build + partition).
+ * The codec layer wraps it with the marker byte and the optional
+ * FSE-attempt; that wrapping is arch-agnostic glue and lives in codec.c. */
+static inline int build_bitmap_partition_scalar(uint16_t *codes_la, int n,
+                                                  uint8_t *bm,
+                                                  uint16_t *tmp)
 {
-    (void)depth;
-
-    /* FSE marker byte (always 0 = raw bitmap on the scalar backend). */
-    **out_ptr = 0;
-    *out_ptr += 1;
-
-    /* Raw bitmap: ceil(n/8) bytes, bit j of byte (j>>3) at position (j&7). */
     int nbytes = bitmap_bytes(n);
-    uint8_t *bm = *out_ptr;
     memset(bm, 0, (size_t)nbytes);
 
     /* Partition codes_la in place; each value is shifted << 1 in the output
@@ -60,7 +54,6 @@ static inline int encode_node_scalar(uint16_t *codes_la, int n, int depth,
             codes_la[n_left++] = (uint16_t)(v << 1);
         }
     }
-    *out_ptr += nbytes;
     return n_right;
 }
 
@@ -174,9 +167,10 @@ PIVCO_PRIM_ALWAYS_INLINE void prim_enc_init(uint16_t *codes_la, int n,
                                               const uint16_t *code_la_lut)
 { enc_init_scalar(codes_la, n, symbols, code_la_lut); }
 
-PIVCO_PRIM_ALWAYS_INLINE int prim_encode_node(uint16_t *codes_la, int n, int depth,
-                                                uint8_t **out_ptr, uint16_t *tmp)
-{ return encode_node_scalar(codes_la, n, depth, out_ptr, tmp); }
+PIVCO_PRIM_ALWAYS_INLINE int prim_build_bitmap_partition(uint16_t *codes_la, int n,
+                                                           uint8_t *bm,
+                                                           uint16_t *tmp)
+{ return build_bitmap_partition_scalar(codes_la, n, bm, tmp); }
 
 PIVCO_PRIM_ALWAYS_INLINE void prim_pack_dN(uint8_t *out,
                                              const uint16_t *codes_la,

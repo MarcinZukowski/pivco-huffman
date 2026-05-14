@@ -22,9 +22,36 @@
 #include "pivco_huffman_common.h"
 #include "pivco_huffman_wire.h"
 #include "pivco_huffman_primitives.h"
+#ifdef PIVCO_HAS_FSE
+#include "pivco_fse.h"
+#endif
 
 #include <stdlib.h>
 #include <string.h>
+
+/* ---------- FSE dispatch parameters ----------
+ *
+ * The thresholds match the NEON encoder's settings so the wire format
+ * is byte-identical across backends: same skew threshold, same per-
+ * codeword cost gate, same minimum bitmap size.  See FSE-V0.md for the
+ * derivation of each value.  Overridable at build time via -D... . */
+#ifndef PIVCO_FSE_MIN_THRESHOLD
+#define PIVCO_FSE_MIN_THRESHOLD 0.625
+#endif
+#ifndef PIVCO_FSE_MIN_RATIO
+#define PIVCO_FSE_MIN_RATIO     0.95
+#endif
+#ifndef PIVCO_FSE_MIN_BITMAP_BYTES
+#define PIVCO_FSE_MIN_BITMAP_BYTES 32
+#endif
+
+/* FSE per-table-id stats live in src/pivco_huffman.c (backend-neutral
+ * TU) so the symbols resolve regardless of backend.  codec.c writes
+ * the counters every time it commits or rejects an FSE attempt. */
+extern uint64_t g_pivco_fse_commit  [PIVCO_FSE_STATS_SLOTS];
+extern uint64_t g_pivco_fse_attempt [PIVCO_FSE_STATS_SLOTS];
+extern uint64_t g_pivco_fse_bytes_in [PIVCO_FSE_STATS_SLOTS];
+extern uint64_t g_pivco_fse_bytes_out[PIVCO_FSE_STATS_SLOTS];
 
 /* ---------- Backend → entry-point name ---------- */
 
@@ -53,6 +80,88 @@
  * right goes to tmp[0..n_right); the shift-by-1 in the primitive lets
  * the next recursion read bit 15 again. */
 
+/* Arch-agnostic FSE attempt on a freshly-built raw bitmap.
+ *
+ * Inputs:
+ *   marker_slot  — points at the 1-byte FSE marker (currently 0 = raw)
+ *   bm           — points at the ceil(n/8)-byte raw bitmap region
+ *                  immediately after the marker
+ *   nbytes       — bitmap_bytes(n)
+ *   n / n_left / n_right — partition counts (for the skew test)
+ *   depth        — for the codeword-cost gate
+ *   out_ptr      — cursor; advanced past the FSE payload on commit
+ *
+ * On commit: rewrites *marker_slot, replaces bm with [fse_len:u16
+ * LE][fse_payload], advances *out_ptr to one past the payload.  Stats
+ * (g_pivco_fse_*) are bumped.
+ *
+ * On no-commit / no-attempt: stream and stats untouched.
+ *
+ * No-op when PIVCO_HAS_FSE is not defined. */
+static inline void codec_maybe_fse_attempt(uint8_t *marker_slot,
+                                            uint8_t *bm, int nbytes,
+                                            int n, int n_left, int n_right,
+                                            int depth, uint8_t **out_ptr)
+{
+#ifdef PIVCO_HAS_FSE
+    if (!pivco_huffman_get_fse_enabled()) return;
+    if (nbytes < PIVCO_FSE_MIN_BITMAP_BYTES) return;
+
+    int n_major = (n_left >= n_right) ? n_left : n_right;
+    double p_major = (n > 0) ? (double)n_major / (double)n : 0.0;
+    if (p_major < PIVCO_FSE_MIN_THRESHOLD) return;
+
+    int t_id = pivco_fse_select_table(p_major);
+    if (t_id < 1) return;
+
+    int xor_flag = (n_right > n_left);
+    uint8_t scratch[PIVCO_BLOCK_SIZE / 8 + 16];
+    if (xor_flag) {
+        for (int i = 0; i < nbytes; i++) scratch[i] = (uint8_t)~bm[i];
+    } else {
+        memcpy(scratch, bm, (size_t)nbytes);
+    }
+
+    uint8_t fse_out[PIVCO_BLOCK_SIZE];
+    size_t fse_len = 0;
+    pivco_fse_status_t rc = pivco_fse_compress(t_id, scratch, (size_t)nbytes,
+                                                fse_out, sizeof(fse_out),
+                                                &fse_len);
+    g_pivco_fse_attempt[t_id]++;
+    if (rc != PIVCO_FSE_OK) {
+        g_pivco_fse_commit[0]++;     /* slot 0 = attempted, rejected */
+        return;
+    }
+    /* Per-codeword commit gate (see FSE-V0.md):
+     *   raw: every codeword through this node costs (depth + 1) bits
+     *   fse: (depth + (fse_len + 2 wire-prefix) * 8 / n) bits
+     * Commit iff (depth + fse_frac) <= MIN_RATIO * (depth + 1). */
+    double fse_frac = (double)(fse_len + 2) * 8.0 / (double)n;
+    double codeword_ratio = ((double)depth + fse_frac) /
+                              ((double)depth + 1.0);
+    if (codeword_ratio > (double)PIVCO_FSE_MIN_RATIO) {
+        g_pivco_fse_commit[0]++;
+        return;
+    }
+
+    /* Commit: rewrite marker + bitmap region with [fse_len][payload],
+     * adjust the wire cursor to one past the payload. */
+    *marker_slot = (uint8_t)((xor_flag ? 0x80 : 0) | t_id);
+    uint8_t *p = bm;
+    *p++ = (uint8_t)( fse_len       & 0xFF);
+    *p++ = (uint8_t)((fse_len >> 8) & 0xFF);
+    memcpy(p, fse_out, fse_len);
+    *out_ptr = p + fse_len;
+
+    g_pivco_fse_commit  [t_id]++;
+    g_pivco_fse_bytes_in [t_id] += (uint64_t)nbytes;
+    g_pivco_fse_bytes_out[t_id] += (uint64_t)(fse_len + 3);
+#else
+    (void)marker_slot; (void)bm; (void)nbytes;
+    (void)n; (void)n_left; (void)n_right; (void)depth; (void)out_ptr;
+#endif
+}
+
 static void codec_encode_node(const pivco_huffman_table_t *table,
                                int16_t node_id,
                                uint16_t *codes_la, int n,
@@ -74,14 +183,32 @@ static void codec_encode_node(const pivco_huffman_table_t *table,
         return;
     }
 
-    /* Non-flat internal node.  codec.c owns only the structural K_right
-     * header; the primitive emits the FSE marker byte + the bitmap
-     * (raw or FSE-coded -- backend's call) and partitions codes_la in
-     * place.  `depth` flows into the primitive for backends whose FSE
-     * codeword-cost gate is depth-dependent. */
+    /* Non-flat internal node.  codec.c owns: K_right header reservation,
+     * FSE marker byte, optional FSE-attempt on the raw bitmap.  The
+     * arch-specific primitive does only the SIMD-bound work: build the
+     * raw bitmap and partition codes_la. */
     uint8_t *kr_slot = wire_reserve_kr_header(table, node_id, out_ptr);
-    int n_right = prim_encode_node(codes_la, n, depth, out_ptr, tmp);
+
+    /* Reserve marker (default = 0, raw bitmap). */
+    uint8_t *marker_slot = *out_ptr;
+    *marker_slot = 0;
+    *out_ptr += 1;
+
+    /* Reserve the bitmap region; primitive fills it in. */
+    int nbytes = bitmap_bytes(n);
+    uint8_t *bm = *out_ptr;
+    *out_ptr += nbytes;
+
+    int n_right = prim_build_bitmap_partition(codes_la, n, bm, tmp);
     int n_left  = n - n_right;
+
+    /* Optional FSE attempt on the raw bitmap.  On commit, marker_slot
+     * and bm region are rewritten in place and *out_ptr is advanced to
+     * the end of the FSE payload (which may be shorter than the raw
+     * bitmap region we already reserved).  No-op otherwise. */
+    codec_maybe_fse_attempt(marker_slot, bm, nbytes,
+                             n, n_left, n_right, depth, out_ptr);
+
     wire_commit_kr_header(kr_slot, n_right);
 
     codec_encode_node(table, node->left,  codes_la, n_left,  depth + 1,
