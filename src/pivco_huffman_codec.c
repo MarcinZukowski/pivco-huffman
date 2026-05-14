@@ -56,6 +56,7 @@
 static void codec_encode_node(const pivco_huffman_table_t *table,
                                int16_t node_id,
                                uint16_t *codes_la, int n,
+                               int depth,
                                uint8_t **out_ptr,
                                uint16_t *tmp)
 {
@@ -64,7 +65,7 @@ static void codec_encode_node(const pivco_huffman_table_t *table,
     const pivco_tree_node_t *node = &table->tree[node_id];
     if (node->symbol >= 0) return;  /* leaf — nothing to emit */
 
-    /* Flat-subtree fast path. */
+    /* Flat-subtree fast path: pack n*D bits, no marker, no K_right. */
     if (table->flat_depth[node_id] >= 2) {
         int D = table->flat_depth[node_id];
         int total_bytes = (n * D + 7) >> 3;
@@ -73,22 +74,19 @@ static void codec_encode_node(const pivco_huffman_table_t *table,
         return;
     }
 
-    /* Non-flat internal node: reserve wire-format slots, partition,
-     * commit K_right, recurse. */
+    /* Non-flat internal node.  codec.c owns only the structural K_right
+     * header; the primitive emits the FSE marker byte + the bitmap
+     * (raw or FSE-coded -- backend's call) and partitions codes_la in
+     * place.  `depth` flows into the primitive for backends whose FSE
+     * codeword-cost gate is depth-dependent. */
     uint8_t *kr_slot = wire_reserve_kr_header(table, node_id, out_ptr);
-    (void)wire_reserve_fse_marker(out_ptr);
-
-    int nbytes = bitmap_bytes(n);
-    uint8_t *bm = *out_ptr;
-    *out_ptr += nbytes;
-
-    int n_right = prim_encode_partition(codes_la, n, bm, tmp);
+    int n_right = prim_encode_node(codes_la, n, depth, out_ptr, tmp);
     int n_left  = n - n_right;
     wire_commit_kr_header(kr_slot, n_right);
 
-    codec_encode_node(table, node->left,  codes_la,         n_left,
+    codec_encode_node(table, node->left,  codes_la, n_left,  depth + 1,
                        out_ptr, tmp + n_right);
-    codec_encode_node(table, node->right, tmp,              n_right,
+    codec_encode_node(table, node->right, tmp,      n_right, depth + 1,
                        out_ptr, tmp + n_right);
 }
 
@@ -116,7 +114,7 @@ int CODEC_ENCODE_ENTRY(const uint8_t *symbols,
     if (!tmp) return PIVCO_ERR_NULL;
 
     uint8_t *ptr = out;
-    codec_encode_node(table, table->tree_root, codes_la, N, &ptr, tmp);
+    codec_encode_node(table, table->tree_root, codes_la, N, 0, &ptr, tmp);
 
     free(tmp);
     *out_len = (size_t)(ptr - out);

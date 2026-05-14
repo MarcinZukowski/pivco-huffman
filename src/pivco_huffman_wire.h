@@ -58,16 +58,15 @@ static inline void wire_commit_kr_header(uint8_t *slot, int n_right)
     slot[1] = (uint8_t)((n_right >> 8) & 0xFF);
 }
 
-/* Reserve the 1-byte FSE marker slot (always present in v0.2+).
- * Returns pointer to the marker byte; encoder writes 0 (raw) or
- * (xor_flag | table_id) once it decides whether to FSE-encode. */
-static inline uint8_t *wire_reserve_fse_marker(uint8_t **out_ptr)
-{
-    uint8_t *slot = *out_ptr;
-    *out_ptr += 1;
-    *slot = 0;  /* default = raw bitmap, no FSE */
-    return slot;
-}
+/* Note: the FSE marker byte + bitmap (or FSE payload) is emitted by
+ * the backend's `prim_encode_node` primitive, not by a helper here.
+ * Backends that attempt FSE-coding of the bitmap need to make that
+ * decision after building the raw bitmap, which is intrinsically
+ * backend-specific; threading a wire-helper through that flow would
+ * be more complexity than win.  The wire FORMAT — 1 byte marker
+ * followed by raw bitmap (marker == 0) or [fse_len:u16][fse_payload]
+ * (marker != 0) — is still authoritative here in the header doc, and
+ * `wire_read_bitmap` below is the corresponding decoder. */
 
 /* ---------- Decode side ---------- */
 
