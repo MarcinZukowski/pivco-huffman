@@ -2128,60 +2128,54 @@ BU is now **1.50× TD** on prose_pride.
 (`flat_M5` and `gzip_random` are flat-path and uniform respectively —
 neither exercises `tree_merge` or `popcount_K_right`.)
 
-## Bottom-up decoder: store K_right per internal node to skip popcount
+## ~~Bottom-up decoder: store K_right per internal node to skip popcount~~ — SHIPPED (5828ddb, 2026-05-12)
 
-**Status:** open follow-up to the SHIPPED entries above.  Estimated
-**5–15% additional BU win on real-text distributions, depending on
-platform** — biggest on the AVX-512 hosts.
+**Status: SHIPPED.**  Wire-format change landed at `5828ddb`; cleanup
+at `231bcac`; post-landing full sweep at `bf68feb`.
 
-`bu_popcount_K` is fundamental to the current format: at each internal
-node we have to count the "1" bits in the bitmap to learn K_right
-before we can recurse into the right child.  Both NEON SIMD popcount
-(`vcntq_u8` + `vaddvq`, 2026-05-10) and AVX-512 VPOPCNTQ
-(`_mm512_popcnt_epi64`, 2026-05-11) have already shrunk this primitive
-substantially, but it's still a measurable wall slice — and on AVX-512
-hosts where everything else is fast, it's actually a *bigger* relative
-share than on slower NEON cores.
+Wire format: at every non-flat internal node whose bitmap is followed
+by a non-leaf child recursion, the encoder writes a 2-byte little-
+endian uint16 `K_right` header immediately before the bitmap.  BU
+decoder reads it directly instead of running `popcount_K_right` per
+node; TD decoders skip the bytes.  Shared `kr_header_needed()` inline
+helper in `pivco_huffman_common.h` is consulted by every encoder +
+decoder backend (scalar / NEON / SSE+AVX2 / AVX-512).
 
-The cheap shortcut: at encode time, prepend a 1-byte (or short varint)
-`K_right` header immediately before each internal node's bitmap.
-Decoder reads one byte instead of running the popcount loop — a single
-cache-line touch already paid for the bitmap fetch.
+**Measured cross-platform BU decode win** (vs prior popcount path):
 
-**Cost:** ~1 byte per visible internal node.  prose_pride has ~95
-internal nodes per 8192-byte block → ~95 B/block = **~1.2% encoded-
-size bloat**.  Lower for skewed distributions (fewer internals),
-higher for flat ones (which mostly skip this path anyway via
-`bu_flat_decode`).
+| host                   | proba80   | english | prose_pride |
+|------------------------|----------:|--------:|------------:|
+| c8i Granite Rapids     | **+57%**  | +36%    | +35%        |
+| c8a Zen 5              |   +41%    | +42%    | +35%        |
+| c4 older Intel         |   +53%    | +14%    | +15%        |
+| c3 older Intel         |   +37%    | +13%    | +14%        |
+| c8g Graviton 4         |   +22%    | +13%    | +12%        |
+| M4 Apple               |    +0%    |  +0%    |  +0%        |
 
-**Estimated win, per platform** (prose_pride; bu_popcount_K share of
-post-optimisation BU wall):
+x86 hosts uniformly +14–57%.  Graviton 4 NEON +12–22%.  M4 unchanged
+(popcount was already cheap there).  Granite Rapids on proba80 +57%
+is the largest single platform/dist win — exactly the single-POPCNT-
+port choke the analysis predicted.
 
-| platform                          | bu_popcount_K | BU TOTAL  | popcnt % wall |  est. BU gain |
-|-----------------------------------|--------------:|----------:|--------------:|--------------:|
-| M4 (NEON)                         |    105 ns/blk |  1999 ns/blk |   **5.3%**    |  ~5%          |
-| Zen 3 (AVX2, scalar 4× POPCNT)    |    235 ns/blk |  3303 ns/blk |   **7.1%**    |  ~7%          |
-| Zen 5 Turin (AVX-512 VPOPCNTQ)    |    143 ns/blk |  1387 ns/blk |  **10.3%**    | ~10%          |
-| **Xeon Granite Rapids (AVX-512)** |    371 ns/blk |  2557 ns/blk |  **14.5%**    | **~15%**      |
+**Two implementation findings worth recording:**
 
-The Xeon win is largest because: (a) everything else on Xeon BU is
-already AVX-512–accelerated, so popcount is a bigger relative share;
-(b) Xeon ICX/Granite Rapids has a single POPCNT execution port even
-after VPOPCNTQ widening, while Zen 3+ have 4 scalar POPCNT ports.
-Removing the primitive entirely is the path to making the AVX-512
-backend really shine.
+1. **Inline beat sidecar by another 10–20% on x86.**  The sidecar
+   experiment in `extras/bench_kr_storage.c` had the value in a
+   separate region; inline (immediately before the bitmap) lets the
+   L1 prefetcher pull `K_right` into cache as part of the bitmap
+   fetch, so the load is free at the LSU.
+2. **Storage cost came in lower than budgeted.**  0.32–0.53% bloat
+   on text distributions (vs the 1.2% upper bound in the original
+   estimate), 0% on flat-dominant dists.  The `kr_header_needed`
+   gating means leaves, both-leaves nodes, and flat-subtree
+   terminals skip the header entirely.
 
-**Open design questions:**
-- Width: 1 byte covers K up to 255 (block size 256).  For K > 255 fall
-  back to a 2-byte short varint.  Most internal nodes already operate
-  on K ≪ block_size.
-- Header placement: easiest is `[K_right_byte][bitmap_bytes]`.  Slight
-  alignment cost — bitmap no longer starts on a byte boundary that's
-  a multiple of the bitmap length.  Probably fine.
-- Encoder change: trivial, popcount once at encode time per internal
-  node.
-- Worth a prototype on prose_pride / english before propagating to
-  x86 backends.
+**Possible future micro-opt — varint width (1 B if K<128 else 2 B).**
+Current format is fixed 2 bytes per popcount-site node.  A varint
+would shrink the bloat from 0.32–0.53% to ~0.16–0.27% on text (deeper
+nodes have K well under 128).  Costs: a wire-format bump and a per-
+node branch on the high bit.  Sub-1% savings on what's already a
+sub-1% cost — parked, recorded here for completeness.
 
 ## ~~NEON `bu_tree_merge`: 16-byte loads + precomputed (nr0, m1) shuf~~ — SHIPPED (2026-05-11)
 
