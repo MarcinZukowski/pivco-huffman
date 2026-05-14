@@ -547,30 +547,11 @@ static inline void flat_decode_direct_neon(uint8_t *symbols, int n,
 #undef DST_DIRECT
 }
 
-/* Dense-codes mask build (NEON "movmask" recipe).
- *
- * code_vec holds 8 left-aligned 16-bit Huffman codes.  At tree depth d,
- * bit d of the original code is at position (15 - d) of code_la; we
- * right-shift each lane by (15 - d) so the desired bit lands in the
- * LSB.  vshrq_n_u16 takes an immediate shift so we use vshlq_u16 with a
- * negative runtime vector instead.  Final movmask: shift lane k left by
- * k bits, then horizontal-add.
- *
- * Cost: 4 NEON ops (shl, and, shl, addv) per 8 codes. */
-static inline uint8_t enc_mask8_codes_la(uint16x8_t code_vec, int neg_shift_d)
-{
-    int16x8_t shr_vec = vdupq_n_s16((int16_t)neg_shift_d);
-    uint16x8_t bit_lsb = vandq_u16(vshlq_u16(code_vec, shr_vec),
-                                    vdupq_n_u16(1));
-    static const int16_t weights[8] = {0, 1, 2, 3, 4, 5, 6, 7};
-    uint16x8_t weighted = vshlq_u16(bit_lsb, vld1q_s16(weights));
-    return (uint8_t)vaddvq_u16(weighted);
-}
-
-/* Flat-subtree pack helpers (pack_d2_neon .. pack_d8_neon) and the
- * pack_dN_neon dispatcher live in pivco_huffman_primitives_neon.h so
- * codec.c can share them.  Local alias for the single legacy caller
- * below (encode_node_neon) keeps the call site short. */
+/* Encode-side SIMD primitives -- enc_mask8_codes_la_neon, the SIMD
+ * bitmap+partition kernel (build_bitmap_partition_neon), the per-D
+ * flat-pack helpers (pack_d2_neon..pack_d8_neon + pack_dN_neon
+ * dispatcher) -- all live in pivco_huffman_primitives_neon.h so the
+ * codec.c-compiled-as-NEON object library shares them. */
 #include "pivco_huffman_primitives_neon.h"
 static inline void pack_D_bits_dense(uint8_t *out, int n, int D, int depth,
                                       const uint16_t *codes_la)
@@ -621,58 +602,9 @@ static void encode_node_neon(const pivco_huffman_table_t *table,
     uint8_t *bm = *out_ptr;
     *out_ptr += nbytes;
 
-    int n_left = 0, n_right = 0;
-    int j = 0;
-    int neg_shift_d = -(15 - depth);
-
     PROF_TIC();
-    /* Stride-8 SIMD: load 8 left-aligned codes, build mask byte via the
-     * dense movmask, partition the SAME register into left/right halves
-     * using compress_tab[mask].  In-place write of the LEFT half over
-     * codes_la (n_left ≤ j invariant keeps this safe even when the
-     * 16-byte store extends past the cursor); RIGHT half goes to tmp.
-     *
-     * Per 8 elements: 1 vld, 4 NEON mask ops, 2 vld (shuf), 2 vqtbl,
-     * 2 vst.  Down from the old ~16 scalar ops per group. */
-    for (; j + 8 <= n; j += 8) {
-        uint16x8_t code_vec = vld1q_u16(codes_la + j);
-        uint8_t mask = enc_mask8_codes_la(code_vec, neg_shift_d);
-        bm[j >> 3] = mask;
-
-        const uint8_t *tab = compress_tab[mask];
-        uint8x16_t shuf_r = vld1q_u8(tab);
-        uint8x16_t shuf_l = vld1q_u8(tab + 16);
-        uint8x16_t data   = vreinterpretq_u8_u16(code_vec);
-        uint8x16_t right  = vqtbl1q_u8(data, shuf_r);
-        uint8x16_t left   = vqtbl1q_u8(data, shuf_l);
-        int nr = compress_popcnt[mask];
-        vst1q_u8((uint8_t *)(tmp      + n_right), right);
-        vst1q_u8((uint8_t *)(codes_la + n_left ), left);
-        n_right += nr;
-        n_left  += (8 - nr);
-    }
-    /* Scalar remainder.  Read all the tail codes into a temporary
-     * before writing back, since the in-place left write can overlap
-     * the read (n_left + 8 > j once we drop below a full group). */
-    if (j < n) {
-        int tail = n - j;
-        uint16_t tail_buf[8];
-        for (int k = 0; k < tail; k++) tail_buf[k] = codes_la[j + k];
-        uint8_t mask = 0;
-        int shift_d = 15 - depth;
-        for (int k = 0; k < tail; k++) {
-            int bit = (tail_buf[k] >> shift_d) & 1;
-            mask |= (uint8_t)(bit << k);
-        }
-        bm[j >> 3] = mask;
-        for (int k = 0; k < tail; k++) {
-            if (mask & (1 << k))
-                tmp[n_right++] = tail_buf[k];
-            else
-                codes_la[n_left++] = tail_buf[k];
-        }
-    }
-
+    int n_right = build_bitmap_partition_neon(codes_la, n, depth, bm, tmp);
+    int n_left  = n - n_right;
     PROF_TOC(PROF_ENC_NODE_FULL, n);
 
     if (need_kr) {
