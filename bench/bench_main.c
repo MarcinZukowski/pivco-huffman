@@ -101,7 +101,7 @@ int main(int argc, char **argv)
                    "  repeats   passes over 4M symbols per timed run (default %d)\n"
                    "  --all     run every distribution AND every comparator\n"
                    "            (default MAIN: 9 distributions; pivco_s/n/bu,\n"
-                   "             trad_4s, huf0_x1/x2 — no pivco_p, no trad_1s,\n"
+                   "             trad_4s, huf0_x1/x2 — no trad_1s,\n"
                    "             no huf0_1s, no rans_x2)\n"
                    "  --tdbu    skip every comparator (run only pivco_n + pivco_bu);\n"
                    "            keeps the full 5-run methodology.  Use for prof-on/off\n"
@@ -174,15 +174,15 @@ int main(int argc, char **argv)
         printf("%-13s | %7s %7s\n", "DECODE M/s", "pivco_n", "pivco_bu");
         printf("--------------|-----------------\n");
     } else if (run_all) {
-        printf("%-13s | %7s %7s %7s %7s | %7s %7s | %7s %7s %7s | %7s | %7s\n",
-               "DECODE M/s", "pivco_s", "pivco_n", "pivco_bu", "pivco_p",
+        printf("%-13s | %7s %7s %7s | %7s %7s | %7s %7s %7s | %7s | %7s\n",
+               "DECODE M/s", "pivco_s", "pivco_n", "pivco_bu",
                "trad_1s", "trad_4s",
                "huf0_1s", "huf0_x1", "huf0_x2",
                "rans_x2", "ratio");
-        printf("--------------|---------------------------------|-----------------|------"
+        printf("--------------|-------------------------|-----------------|------"
                "----------------------|---------|--------\n");
     } else {
-        /* MAIN comparator set: drop pivco_p, trad_1s, huf0_1s, rans_x2. */
+        /* MAIN comparator set: drop trad_1s, huf0_1s, rans_x2. */
         printf("%-13s | %7s %7s %7s | %7s | %7s %7s | %7s\n",
                "DECODE M/s", "pivco_s", "pivco_n", "pivco_bu",
                "trad_4s",
@@ -230,27 +230,6 @@ int main(int argc, char **argv)
             neon_enc_off[b + 1] = neon_enc_off[b] + len;
         }
 #endif
-
-#ifdef PIVCO_HAS_NEON
-        /* Prefix backend: runs on any table with min_len in [1, 8]. */
-        int pfx_applicable = (table->min_len >= 1 && table->min_len <= 8);
-        uint8_t *pfx_enc_buf = NULL;
-        size_t  *pfx_enc_off = NULL;
-        if (pfx_applicable) {
-            pfx_enc_buf = (uint8_t *)malloc((size_t)NBLOCKS * PIVCO_MAX_ENCODED_SIZE);
-            pfx_enc_off = (size_t *)malloc((size_t)(NBLOCKS + 1) * sizeof(size_t));
-            pfx_enc_off[0] = 0;
-            for (int b = 0; b < NBLOCKS; b++) {
-                size_t len;
-                int rc = pivco_huffman_encode_neon_prefix(
-                    symbols + (size_t)b * BLK, table,
-                    pfx_enc_buf + pfx_enc_off[b], &len);
-                if (rc != PIVCO_OK) { pfx_applicable = 0; break; }
-                pfx_enc_off[b + 1] = pfx_enc_off[b] + len;
-            }
-        }
-#endif
-
 
         /* ---- Pre-encode: trad 1-stream (chunked at BLK) ---- */
         #define TRAD_BLK BLK  /* trad uses same block size as PIVCO */
@@ -449,21 +428,6 @@ int main(int argc, char **argv)
             }
         }, "pivco_s");
 
-#ifdef PIVCO_HAS_NEON
-        if (pfx_applicable && run_all) {
-            BENCH(p_dec_pfx, {
-                for (int b = 0; b < NBLOCKS; b++) {
-                    size_t consumed;
-                    pivco_huffman_decode_neon_prefix(
-                        pfx_enc_buf + pfx_enc_off[b],
-                        pfx_enc_off[b+1] - pfx_enc_off[b],
-                        table, dec_buf + (size_t)b * BLK, &consumed);
-                }
-            }, "pivco_p");
-        }
-#endif
-
-
         /* Trad 1-stream: decode blocks (ALL-only) */
         if (run_all) {
             BENCH(t_dec_1s, {
@@ -619,9 +583,6 @@ cleanup:
         free(rans_x2_enc);
 #if defined(PIVCO_HAS_NEON) || defined(PIVCO_HAS_SSE4) || defined(PIVCO_HAS_AVX512) || defined(PIVCO_HAS_SVE)
         free(neon_enc_buf); free(neon_enc_off);
-#endif
-#ifdef PIVCO_HAS_NEON
-        if (pfx_applicable) { free(pfx_enc_buf); free(pfx_enc_off); }
 #endif
     }
 

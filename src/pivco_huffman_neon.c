@@ -1,6 +1,5 @@
 #include "pivco_huffman.h"
 #include "pivco_huffman_common.h"
-#include "pivco_huffman_neon_common.h"
 #include "pivco_prof.h"
 #ifdef PIVCO_HAS_FSE
 #include "pivco_fse.h"
@@ -1404,50 +1403,6 @@ int pivco_huffman_decode_neon(const uint8_t *in, size_t in_len,
     free(tmp);
     *consumed = (size_t)(ptr - in);
     return PIVCO_OK;
-}
-
-/* ---------- Internal wrappers exposed for pivco_huffman_neon_prefix.c ----------
- *
- * The prefix-radix backend performs a top-level K-way partition and then
- * needs to delegate each non-leaf bin's subtree (at depth M below the
- * root) to the standard 2-way neon encoder/decoder.  These thin wrappers
- * expose exactly the internal recursive entry points, preserving the
- * same contract. */
-
-void pivco_neon_decode_subtree_(const pivco_huffman_table_t *table,
-                                 int16_t node_id,
-                                 uint16_t *indices, int n,
-                                 uint8_t *symbols,
-                                 const uint8_t **in_ptr,
-                                 uint16_t *tmp,
-                                 int16_t skip_node)
-{
-    decode_node_neon(table, node_id, indices, n,
-                     symbols, in_ptr, tmp, skip_node);
-}
-
-void pivco_neon_encode_subtree_(const pivco_huffman_table_t *table,
-                                 int16_t node_id,
-                                 uint16_t *indices, int n,
-                                 int depth,
-                                 const uint16_t *codes, const uint8_t *lens,
-                                 uint8_t **out_ptr,
-                                 uint16_t *tmp)
-{
-    /* The prefix research backend (pivco_p, parked for retirement)
-     * still uses the old indices+codes+lens layout.  Adapt by
-     * gathering a dense codes_la buffer here; this path is not on the
-     * production hot path. */
-    (void)lens;
-    static uint16_t codes_la_scratch[PIVCO_BLOCK_SIZE + 8];
-    for (int k = 0; k < n; k++) {
-        uint16_t idx = indices[k];
-        uint16_t c   = codes[idx];
-        uint8_t  L   = lens[idx];
-        codes_la_scratch[k] = (uint16_t)(c << (16 - L));
-    }
-    encode_node_neon(table, node_id, codes_la_scratch, n, depth,
-                     out_ptr, tmp);
 }
 
 /* Non-static wrapper exposed for the bottom-up decoder

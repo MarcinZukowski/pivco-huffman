@@ -69,8 +69,10 @@ revisions and cite prior numbers.
 - `src/pivco_huffman_neon_flat.h` — D=2..6 unpack helpers (shared with bench_micro)
 - `src/pivco_huffman_avx512.c` + `_flat.h` — AVX-512 VBMI2 backend
 - `src/pivco_huffman_x86.c` + `_flat.h` — SSE4.1 backend
-- `src/pivco_huffman_scalar.c` — reference scalar backend
-- `src/pivco_huffman_neon_prefix.c` — research prefix-radix backend (`pivco_p` bench column)
+- `src/pivco_huffman_codec.c` — unified codec (tree-walk + dispatch); compiled per-backend, see `pivco_huffman_primitives.h`
+- `src/pivco_huffman_primitives_{scalar,neon}.h` — backend-specific primitive implementations
+- `src/pivco_huffman_wire.h` — single source of truth for the per-node wire record (K_right + FSE marker + bitmap)
+- `extras/pivco_huffman_neon_prefix.c` — retired research prefix-radix backend (moved to extras 2026-05-14; BU on the standard 2-way wire format beat it on every dist/host)
 - `bench/bench_main.c` — benchmark harness (4M × repeats methodology)
 - `bench/bench_micro.c` — per-primitive microbench (scatter, partition, flat decode, TBL/vext throughput probes, store-port topology)
 - `extras/bench_flat_subtree_stats.c` — flat-subtree applicability analyzer

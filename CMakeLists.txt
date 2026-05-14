@@ -131,7 +131,6 @@ if(TARGET_ARCH STREQUAL "arm64" OR TARGET_ARCH STREQUAL "aarch64")
     message(STATUS "ARM64 detected — enabling NEON")
     list(APPEND PIVCO_SOURCES
         src/pivco_huffman_neon.c
-        src/pivco_huffman_neon_prefix.c
         src/pivco_huffman_bu_neon.c
         src/pivco_huffman_neon_tables.c)
     add_compile_definitions(PIVCO_HAS_NEON=1)
@@ -347,15 +346,6 @@ if(BUILD_BENCH)
         bench/bench_distributions.c
     )
     target_link_libraries(pivco_multi_stage_stats pivco_huffman m)
-
-    # Prefix profiler is NEON-only (includes <arm_neon.h> directly).
-    if(TARGET_ARCH STREQUAL "aarch64")
-        add_executable(pivco_prefix_profile
-            bench/bench_prefix_profile.c
-            bench/bench_distributions.c
-        )
-        target_link_libraries(pivco_prefix_profile pivco_huffman m)
-    endif()
 
     add_executable(pivco_flat_subtree_stats
         extras/bench_flat_subtree_stats.c

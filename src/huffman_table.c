@@ -676,8 +676,8 @@ int pivco_huffman_build_table(const uint64_t freq[PIVCO_MAX_SYMBOLS],
        of a maximal flat subtree with depth >= 2 and fill its
        code_to_sym lookup.  The root itself is eligible — when the whole
        tree is flat with depth >= 2, the root gets flat_depth = max_len
-       and decode_node_neon handles the whole block directly without
-       routing through pivco_huffman_decode_neon_prefix. */
+       and the decoder handles the whole block directly via its
+       INTERNAL_FLAT dispatch arm. */
     {
         uint16_t pool_cursor = 0;
         flat_mark_subtrees(table, table->tree_root, &pool_cursor);

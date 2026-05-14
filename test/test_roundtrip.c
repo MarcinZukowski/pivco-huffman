@@ -230,30 +230,6 @@ static int test_roundtrip_dist(const char *name, const uint64_t freq[PIVCO_MAX_S
         }
     }
 
-    /* Prefix backend — works on both flat and non-flat trees with
-     * min_len in [1, 8]. */
-    if (table.min_len >= 1 && table.min_len <= 8) {
-        uint8_t pfx_enc[PIVCO_MAX_ENCODED_SIZE];
-        size_t pfx_len;
-        rc = pivco_huffman_encode_neon_prefix(symbols, &table, pfx_enc, &pfx_len);
-        if (rc == PIVCO_OK) {
-            uint8_t pfx_dec[PIVCO_BLOCK_SIZE];
-            size_t pfx_consumed;
-            rc = pivco_huffman_decode_neon_prefix(pfx_enc, pfx_len, &table, pfx_dec, &pfx_consumed);
-            if (rc != PIVCO_OK) FAIL("prefix decode returned %d", rc);
-
-            for (int i = 0; i < PIVCO_BLOCK_SIZE; i++) {
-                if (symbols[i] != pfx_dec[i])
-                    FAIL("prefix mismatch at %d: expected %d, got %d",
-                         i, symbols[i], pfx_dec[i]);
-            }
-            if (pfx_consumed != pfx_len) {
-                FAIL("prefix consumed %zu bytes, expected %zu",
-                     pfx_consumed, pfx_len);
-            }
-        }
-    }
-
     /* Bottom-up decoder (experimental).  Decodes the same neon-encoded
      * stream as the top-down decoder; output must match exactly. */
     {
