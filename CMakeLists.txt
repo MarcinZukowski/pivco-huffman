@@ -643,7 +643,7 @@ if(BUILD_BENCH)
         add_executable(pivco_fse_xy_micro
             extras/bench_fse_xy_micro.c
         )
-        target_link_libraries(pivco_fse_xy_micro pivco_huffman m)
+        target_link_libraries(pivco_fse_xy_micro pivco_huffman huf0 m)
         target_include_directories(pivco_fse_xy_micro PRIVATE src ext/fse/lib)
     endif()
 endif()

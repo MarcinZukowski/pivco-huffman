@@ -1,5 +1,111 @@
 # PIVCO-Huffman Decode Ideas
 
+## FSE wide-cursor decoder — ph+FSE angle is now plausible, 2026-05-15
+
+**Status: high-priority research direction; replaces the discarded
+"FSE x2/x4 sequential wrapper" idea.**
+
+The original FSE-on cost model in v0.3 measured FSE's stock
+2-state interleaved decoder (`HUF_decompress` shape: x=2 cursors,
+y=2 unrolled rounds) against our per-node bitmap workload and
+found a 3-4× decode penalty on FSE-firing nodes.  That number was
+the basis for the "FSE-on stays a tunable knob, not a default"
+ratio/speed tradeoff story.
+
+The 2026-05-15 microbench (`extras/bench_fse_xy_micro.c`) shows
+that penalty is not fundamental — it comes from FSE choosing
+x=2 instead of more cursors.  At the same bitstream + table,
+swapping the decoder shape to x=10..16 cursors with y=1..4
+rounds buys 2.5-3× decode speed on every platform tested.
+
+Cross-platform numbers at the bench's most representative cell
+(1440 B source bytes, pmaj=0.80) — full table in
+`results/fse_xy_micro_hufref-allhosts-20260515-*.txt`.  Decode
+MB/s:
+
+| host  | uarch                    | FSE shipping (x2y2) | best FSE (x*y)     | huf4X2 (zstd hot path) |
+|-------|--------------------------|---------------------|--------------------|------------------------|
+| M4    | Apple M4 Max             |  856                | **x16y2 = 2282**   | 2368  (FSE = 96%)      |
+| c8i   | Xeon Granite Rapids 6975 |  523                | **x10y4 = 1564**   | 1603  (FSE = 98%)      |
+| c8a   | EPYC 9R45 (Zen 5/Turin)  | 1053                | **x10y4 = 1911**   | 2657  (FSE = 72%)      |
+| c8g   | AWS Graviton 4           |  595                | **x10y1 = 1264**   | 1581  (FSE = 80%)      |
+| c6a   | EPYC 7R13 (Zen 3/Milan)  |  690                | **x4y1  = 1186**   | 1339  (FSE = 89%)      |
+
+Two clean uarch clusters:
+
+  - **Wide OOO cores (M4, c8i):** FSE with x=10..16 cursors
+    matches huf4X2 within 2-4%.  No meaningful decode-speed gap.
+  - **Other cores (c8a Zen 5, c8g Graviton 4, c6a Zen 3):** FSE
+    closes most of the gap but huf4X2's "2-symbols-per-table-
+    lookup" trick is a real architectural win — 20-28% on c8a/
+    c8g, 11% on c6a.
+
+Why this matters for ph: in v0.3 we shipped FSE-on as the
+ratio-bias end of the speed/ratio knob.  If the FSE decoder uses
+wide cursors instead of the stock 2-state shape, FSE-on becomes
+much cheaper relative to FSE-off on M4/c8i, and 20-30% cheaper
+on the other hosts — which moves the speed/ratio default lower
+on the FSE-on side.  Concretely: the per-node FSE decode cost
+shrinks enough that ratio-biased configs become competitive on
+speed-biased benchmarks too, opening up "FSE on by default"
+discussion that was firmly off the table in v0.3.
+
+Plus: FSE keeps working in the low-skew tail (pmaj < 0.60)
+where huf0 just bails ("incompressible, store raw").  So even
+on the platforms where huf4X2 has a decode-speed lead, FSE
+holds the ratio advantage across the full skew range — and is
+the only option below ~0.60.
+
+### What's needed to land this in ph
+
+1. **Pick a fixed x.**  The wire format has to commit to one
+   x value at encode time (huf0 made the same choice — 4
+   streams baked into the 6-byte jump table).  Strong
+   candidates: x=8 (universally good), x=10 (peak on c8i, M4,
+   c8a, c8g — but worst on c6a where 4 wins), x=16 (M4 peak,
+   doesn't help others).  **x=8 looks like the safe default.**
+2. **Wire format bump.**  `pivco_fse_compress` /
+   `pivco_fse_decompress` in `src/pivco_fse.c` currently use
+   FSE's shipping x=2 decoder.  Need to:
+     - replace internal encoder with the microbench's
+       `encode_x(8, ...)` shape (x cursors initialised from
+       tail, flush every 5 pushes per round).
+     - replace decoder with the microbench's `decode_x8_yN`
+       shape (main fast loop + post-overflow tail).
+     - bump the codec wire-format marker (currently the FSE
+       marker byte's top bits select table id; reserve a bit
+       for "wide FSE" vs "stock FSE" if we want to ship both,
+       or just hard-cutover).
+3. **Re-sweep.**  Rerun the MAIN-set full sweep with the new
+   FSE decoder and quantify the actual end-to-end ph+FSE win
+   on real distributions (prose_pride / html_wiki / proba80
+   are the live FSE callers — at the v0.3 default thresholds).
+4. **Pick y separately per platform if needed.**  y is a
+   decode-side knob with no wire-format consequence, so the
+   runtime dispatcher can pick the best (y=1 on c6a/c8g, y=4
+   on M4/c8i/c8a) without coordinating with the encoder.
+
+### Things the bench doesn't capture and we still need to think about
+
+- **Encode cost:** huf0 encode is 2-3× faster than FSE encode
+  in the microbench (table setup excluded from both).  ph
+  isn't currently optimising encode (we measure decode-side
+  speed against huf0); but if "FSE on by default" becomes the
+  pitch, the encode cost has to be on the table.
+- **Table-build cost:** the bench measures steady-state
+  encode/decode only.  In ph's real workload, each per-node
+  bitmap is a separate FSE table-build; the build cost may
+  dominate for small bitmaps even if steady-state decode is
+  fast.  Need to add an end-to-end bench cell that includes
+  table-build cost per node.
+- **Compression-ratio side:** more cursors = more state-init
+  bits in the bitstream (one `FSE_flushCState` per cursor at
+  the end), adding ~x · tableLog/8 bytes overhead.  For a
+  ph-typical 200-byte bitmap with tableLog=12 and x=8, that's
+  12 bytes overhead vs the current x=2's 3 bytes — a real
+  ratio cost that matters for small bitmaps.  Need to measure.
+
+
 ## Oodle's newlz_arrays_huff — semi-high priority follow-up
 
 **Status: open, semi-high priority.**  Worth a real engagement now

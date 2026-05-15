@@ -36,6 +36,9 @@
 #define FSE_STATIC_LINKING_ONLY
 #include "fse.h"
 #include "bitstream.h"
+#define HUF_STATIC_LINKING_ONLY
+#include "huf.h"
+#include "hist.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -509,6 +512,204 @@ static double time_encode_min(int x, const uint8_t *src, size_t bytes,
     return best_mbps;
 }
 
+/* ============================================================
+ *  huff0 reference path (for comparison against FSE x*y).
+ *
+ *  3 decode variants are timed:
+ *    huf1X1  =  1 stream  + X1 (single-symbol) decode table
+ *    huf4X1  =  4 streams + X1 decode table
+ *    huf4X2  =  4 streams + X2 (double-symbol) decode table — zstd's
+ *               hot path; usually fastest on x86
+ *  2 encode variants (the compressed payload differs by stream count
+ *  only; X1/X2 is a decoder-table choice, not an encoder choice):
+ *    hufC1   =  HUF_compress1X
+ *    hufC4   =  HUF_compress4X
+ *
+ *  Same min-of-N protocol as FSE, with per-batch roundtrip verify.
+ *  Table setup (HUF_compress + HUF_readDTable*) is done once per cell
+ *  outside the timed loops — we measure steady-state throughput only.
+ * ============================================================ */
+
+static HUF_CREATE_STATIC_DTABLEX1(g_huf_dt_x1, 11);
+static HUF_CREATE_STATIC_DTABLEX2(g_huf_dt_x2, 12);
+static uint32_t g_huf_ct_storage[HUF_CTABLE_SIZE_U32(255)];
+static HUF_CElt * const g_huf_ct = (HUF_CElt *)g_huf_ct_storage;
+static unsigned char g_huf_wksp[HUF_WORKSPACE_SIZE];
+
+/* g_huf*X_buf: full payload from HUF_compress*X_wksp (header + body),
+ * used by the DECODE timing path which strips the header via the
+ * g_huf*X_hdr offset.  Note: the body here may use a different
+ * tableLog than g_huf_ct (the _wksp variant may call
+ * HUF_optimalTableLog internally for small inputs), so the body
+ * bytes are NOT guaranteed to equal HUF_compress*X_usingCTable's
+ * output — we capture that separately for encode-timing verify. */
+static uint8_t g_huf1X_buf[16384];
+static uint8_t g_huf4X_buf[16384];
+static size_t  g_huf1X_total, g_huf4X_total;
+static size_t  g_huf1X_hdr,   g_huf4X_hdr;
+/* g_huf*X_uct_buf: reference output of HUF_compress*X_usingCTable
+ * (no header), used to verify the encode-timing loop's output. */
+static uint8_t g_huf1X_uct_buf[16384];
+static uint8_t g_huf4X_uct_buf[16384];
+static size_t  g_huf1X_uct_total, g_huf4X_uct_total;
+
+/* Returns 1 on success, 0 if huf0 declined (incompressible / single-
+ * symbol / oversized — none of which the bench's pmaj-distributed
+ * inputs at our cell sizes should hit at high pmaj, but pmaj near
+ * 0.50 is roughly uniform-byte territory where huf0 may bail). */
+static int huf_setup(const uint8_t *src, size_t n)
+{
+    /* Build the CTable directly from src counts; the encode-timing
+     * loop uses HUF_compress*X_usingCTable (no table build inside)
+     * to match FSE's "table setup outside timing" methodology. */
+    unsigned counts[256];
+    unsigned maxSym = 255;
+    size_t largest = HIST_count(counts, &maxSym, src, n);
+    if (HIST_isError(largest)) return 0;
+    if (largest == n) return 0;          /* single-symbol */
+
+    size_t ctbuild = HUF_buildCTable_wksp(g_huf_ct, counts, maxSym, 11,
+                                            g_huf_wksp, sizeof(g_huf_wksp));
+    if (HUF_isError(ctbuild)) return 0;
+
+    /* Self-describing payloads (header + body): keeps the decode-side
+     * setup straightforward via HUF_readDTable*_wksp. */
+    g_huf1X_total = HUF_compress1X_wksp(g_huf1X_buf, sizeof(g_huf1X_buf),
+                                         src, n, 255, 11,
+                                         g_huf_wksp, sizeof(g_huf_wksp));
+    g_huf4X_total = HUF_compress4X_wksp(g_huf4X_buf, sizeof(g_huf4X_buf),
+                                         src, n, 255, 11,
+                                         g_huf_wksp, sizeof(g_huf_wksp));
+    if (HUF_isError(g_huf1X_total) || HUF_isError(g_huf4X_total)
+        || g_huf1X_total <= 1 || g_huf4X_total <= 1) return 0;
+
+    g_huf1X_hdr = HUF_readDTableX1_wksp(g_huf_dt_x1, g_huf1X_buf,
+                                         g_huf1X_total,
+                                         g_huf_wksp, sizeof(g_huf_wksp));
+    g_huf4X_hdr = HUF_readDTableX1_wksp(g_huf_dt_x1, g_huf4X_buf,
+                                         g_huf4X_total,
+                                         g_huf_wksp, sizeof(g_huf_wksp));
+    size_t x2hdr = HUF_readDTableX2_wksp(g_huf_dt_x2, g_huf4X_buf,
+                                          g_huf4X_total,
+                                          g_huf_wksp, sizeof(g_huf_wksp));
+    if (HUF_isError(g_huf1X_hdr) || HUF_isError(g_huf4X_hdr)
+        || HUF_isError(x2hdr)) return 0;
+
+    /* Reference encoded payloads using OUR CTable (matches what the
+     * timed encode loop will produce). */
+    g_huf1X_uct_total = HUF_compress1X_usingCTable(g_huf1X_uct_buf,
+                                                     sizeof(g_huf1X_uct_buf),
+                                                     src, n, g_huf_ct);
+    g_huf4X_uct_total = HUF_compress4X_usingCTable(g_huf4X_uct_buf,
+                                                     sizeof(g_huf4X_uct_buf),
+                                                     src, n, g_huf_ct);
+    if (HUF_isError(g_huf1X_uct_total) || HUF_isError(g_huf4X_uct_total))
+        return 0;
+    return 1;
+}
+
+static size_t huf_dec_1X1(uint8_t *dec, size_t dec_cap)
+{
+    return HUF_decompress1X1_usingDTable(dec, dec_cap,
+                                          g_huf1X_buf + g_huf1X_hdr,
+                                          g_huf1X_total - g_huf1X_hdr,
+                                          g_huf_dt_x1);
+}
+static size_t huf_dec_4X1(uint8_t *dec, size_t dec_cap)
+{
+    return HUF_decompress4X1_usingDTable(dec, dec_cap,
+                                          g_huf4X_buf + g_huf4X_hdr,
+                                          g_huf4X_total - g_huf4X_hdr,
+                                          g_huf_dt_x1);
+}
+static size_t huf_dec_4X2(uint8_t *dec, size_t dec_cap)
+{
+    return HUF_decompress4X2_usingDTable(dec, dec_cap,
+                                          g_huf4X_buf + g_huf4X_hdr,
+                                          g_huf4X_total - g_huf4X_hdr,
+                                          g_huf_dt_x2);
+}
+
+/* Encode timing uses the pre-built CTable — matches FSE's
+ * "table setup outside the timing loop" methodology.  Output has
+ * no table header; it's the body that HUF_compress*X_wksp would
+ * produce after stripping its written-CTable prefix. */
+static size_t huf_enc_1X(const uint8_t *src, size_t n,
+                          uint8_t *dst, size_t cap)
+{
+    return HUF_compress1X_usingCTable(dst, cap, src, n, g_huf_ct);
+}
+static size_t huf_enc_4X(const uint8_t *src, size_t n,
+                          uint8_t *dst, size_t cap)
+{
+    return HUF_compress4X_usingCTable(dst, cap, src, n, g_huf_ct);
+}
+
+typedef size_t (*huf_dec_fn_t)(uint8_t *, size_t);
+typedef size_t (*huf_enc_fn_t)(const uint8_t *, size_t, uint8_t *, size_t);
+
+static double time_huf_decode_min(huf_dec_fn_t fn, uint8_t *dec, size_t bytes,
+                                    int iters, const uint8_t *expect_src,
+                                    const char *name, double pmaj_for_msg)
+{
+    for (int w = 0; w < 256; w++) (void)fn(dec, bytes);
+    double best_mbps = 0.0;
+    for (int b = 0; b < N_BATCHES; b++) {
+        volatile uint8_t sink = 0;
+        double t0 = now_ns();
+        for (int i = 0; i < iters; i++) {
+            (void)fn(dec, bytes);
+            sink ^= dec[0] ^ dec[bytes/2];
+        }
+        double t1 = now_ns();
+        (void)sink;
+        if (memcmp(expect_src, dec, bytes) != 0) {
+            fprintf(stderr, "HUF DECODE MISMATCH mid-timing: %s "
+                    "size=%zu pmaj=%.2f batch=%d\n",
+                    name, bytes, pmaj_for_msg, b);
+            exit(2);
+        }
+        double mbps = 1000.0 * ((double)bytes * (double)iters) / (t1 - t0);
+        if (mbps > best_mbps) best_mbps = mbps;
+    }
+    return best_mbps;
+}
+
+static double time_huf_encode_min(huf_enc_fn_t fn,
+                                    const uint8_t *src, size_t bytes,
+                                    uint8_t *scratch, size_t scratch_cap,
+                                    int iters,
+                                    const uint8_t *expect_enc,
+                                    size_t expect_enc_len,
+                                    const char *name, double pmaj_for_msg)
+{
+    for (int w = 0; w < 64; w++)
+        (void)fn(src, bytes, scratch, scratch_cap);
+    double best_mbps = 0.0;
+    for (int b = 0; b < N_BATCHES; b++) {
+        volatile size_t sink = 0;
+        double t0 = now_ns();
+        for (int i = 0; i < iters; i++)
+            sink ^= fn(src, bytes, scratch, scratch_cap);
+        double t1 = now_ns();
+        (void)sink;
+        size_t last_len = fn(src, bytes, scratch, scratch_cap);
+        if (last_len != expect_enc_len ||
+            memcmp(expect_enc, scratch, expect_enc_len) != 0) {
+            fprintf(stderr, "HUF ENCODE MISMATCH mid-timing: %s "
+                    "size=%zu pmaj=%.2f batch=%d "
+                    "(expected len=%zu got len=%zu)\n",
+                    name, bytes, pmaj_for_msg, b,
+                    expect_enc_len, last_len);
+            exit(2);
+        }
+        double mbps = 1000.0 * ((double)bytes * (double)iters) / (t1 - t0);
+        if (mbps > best_mbps) best_mbps = mbps;
+    }
+    return best_mbps;
+}
+
+
 int main(int argc, char **argv)
 {
     int iters = 50000;
@@ -569,6 +770,10 @@ int main(int argc, char **argv)
     double enc_mbps[16][8];          /* [cell][xi] */
     double dec_mbps[16][32];         /* [cell][cfg_index] */
     int    x_ok_mat[16][8] = {{0}};  /* [cell][xi] */
+    /* huff0 reference (2 encode + 3 decode columns). */
+    double huf_enc_mbps[16][2];      /* [cell][hufC1, hufC4] */
+    double huf_dec_mbps[16][3];      /* [cell][1X1, 4X1, 4X2] */
+    int    huf_ok_mat[16] = {0};
 
     for (int ci = 0; ci < n_cells; ci++) {
         size_t bytes = cells[ci].size;
@@ -631,18 +836,76 @@ int main(int argc, char **argv)
                                                 cfgs[k].name, p);
         }
 
+        /* huff0 reference path: setup, sanity-check, time. */
+        huf_ok_mat[ci] = huf_setup(src, bytes);
+        if (!huf_ok_mat[ci]) {
+            for (int j = 0; j < 2; j++) huf_enc_mbps[ci][j] = -1.0;
+            for (int j = 0; j < 3; j++) huf_dec_mbps[ci][j] = -1.0;
+        } else {
+            /* Sanity-check each huff0 decoder. */
+            memset(dec, 0xCC, bytes);
+            (void)huf_dec_1X1(dec, bytes);
+            if (memcmp(src, dec, bytes) != 0) {
+                fprintf(stderr, "HUF 1X1 SANITY MISMATCH size=%zu p=%.2f\n",
+                        bytes, p);
+                free_tables();
+                return 1;
+            }
+            memset(dec, 0xCC, bytes);
+            (void)huf_dec_4X1(dec, bytes);
+            if (memcmp(src, dec, bytes) != 0) {
+                fprintf(stderr, "HUF 4X1 SANITY MISMATCH size=%zu p=%.2f\n",
+                        bytes, p);
+                free_tables();
+                return 1;
+            }
+            memset(dec, 0xCC, bytes);
+            (void)huf_dec_4X2(dec, bytes);
+            if (memcmp(src, dec, bytes) != 0) {
+                fprintf(stderr, "HUF 4X2 SANITY MISMATCH size=%zu p=%.2f\n",
+                        bytes, p);
+                free_tables();
+                return 1;
+            }
+
+            huf_dec_mbps[ci][0] = time_huf_decode_min(huf_dec_1X1, dec, bytes,
+                                                       iters, src, "huf1X1", p);
+            huf_dec_mbps[ci][1] = time_huf_decode_min(huf_dec_4X1, dec, bytes,
+                                                       iters, src, "huf4X1", p);
+            huf_dec_mbps[ci][2] = time_huf_decode_min(huf_dec_4X2, dec, bytes,
+                                                       iters, src, "huf4X2", p);
+
+            /* Verify reference is HUF_compress*X_usingCTable output
+             * with our pre-built CTable (captured in setup). */
+            uint8_t huf_scratch[16384];
+            huf_enc_mbps[ci][0] = time_huf_encode_min(huf_enc_1X, src, bytes,
+                                                       huf_scratch, sizeof(huf_scratch),
+                                                       iters,
+                                                       g_huf1X_uct_buf,
+                                                       g_huf1X_uct_total,
+                                                       "hufC1", p);
+            huf_enc_mbps[ci][1] = time_huf_encode_min(huf_enc_4X, src, bytes,
+                                                       huf_scratch, sizeof(huf_scratch),
+                                                       iters,
+                                                       g_huf4X_uct_buf,
+                                                       g_huf4X_uct_total,
+                                                       "hufC4", p);
+        }
+
         free_tables();
     }
 
-    /* Print encode table (varies only with x). */
-    printf("\n--- ENCODE (MB/s, varies only with x) ---\n");
+    /* Print encode table (FSE varies only with x, huff0 = 2 ref cols). */
+    printf("\n--- ENCODE (MB/s, varies only with x for FSE; huff0 = ref) ---\n");
     printf("%5s %5s |", "size", "pmaj");
     for (int xi = 0; xi < n_x; xi++) {
         char lbl[8]; snprintf(lbl, sizeof(lbl), "x%d", x_values[xi]);
         printf(" %6s", lbl);
     }
+    printf("  %6s %6s", "hufC1", "hufC4");
     printf("\n%5s %5s-+", "-----", "----");
     for (int xi = 0; xi < n_x; xi++) printf("-------");
+    printf("---------------");
     printf("\n");
     for (int ci = 0; ci < n_cells; ci++) {
         printf("%5zu %5.2f |", cells[ci].size, cells[ci].p_major);
@@ -650,22 +913,29 @@ int main(int argc, char **argv)
             if (enc_mbps[ci][xi] < 0) printf(" %6s", "  -  ");
             else printf(" %6.1f", enc_mbps[ci][xi]);
         }
+        printf(" ");
+        for (int j = 0; j < 2; j++) {
+            if (huf_enc_mbps[ci][j] < 0) printf(" %6s", "  -  ");
+            else printf(" %6.1f", huf_enc_mbps[ci][j]);
+        }
         printf("\n");
     }
 
-    /* Print decode table (full x × y grid).  Visual gap between
-     * x-groups (every 3 cfgs, since y ∈ {1,2,4}). */
-    printf("\n--- DECODE (MB/s) ---\n");
+    /* Print decode table (full x × y grid + 3 huff0 ref cols).
+     * Visual gap between x-groups (every 3 cfgs, since y ∈ {1,2,4}). */
+    printf("\n--- DECODE (MB/s; huff0 = ref) ---\n");
     printf("%5s %5s |", "size", "pmaj");
     for (size_t c = 0; c < N_CFGS; c++) {
         if (c > 0 && (c % 3) == 0) printf(" ");
         printf(" %6s", cfgs[c].name);
     }
+    printf("  %6s %6s %6s", "huf1X1", "huf4X1", "huf4X2");
     printf("\n%5s %5s-+", "-----", "----");
     for (size_t c = 0; c < N_CFGS; c++) {
         if (c > 0 && (c % 3) == 0) printf("-");
         printf("-------");
     }
+    printf("-----------------------");
     printf("\n");
     for (int ci = 0; ci < n_cells; ci++) {
         printf("%5zu %5.2f |", cells[ci].size, cells[ci].p_major);
@@ -673,6 +943,11 @@ int main(int argc, char **argv)
             if (k > 0 && (k % 3) == 0) printf(" ");
             if (dec_mbps[ci][k] < 0) printf(" %6s", "  -  ");
             else printf(" %6.1f", dec_mbps[ci][k]);
+        }
+        printf(" ");
+        for (int j = 0; j < 3; j++) {
+            if (huf_dec_mbps[ci][j] < 0) printf(" %6s", "  -  ");
+            else printf(" %6.1f", huf_dec_mbps[ci][j]);
         }
         printf("\n");
     }
