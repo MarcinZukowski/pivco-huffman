@@ -373,18 +373,26 @@ static inline uint32_t extract_D_bits_neon(const uint8_t *in,
         DST(i) = c2s[code];                                                    \
     }
 
-/* uarch gate: D=5/D=6 flat-subtree TBL paths.
- * vqtbl2/vqtbl4 over a 32/64-byte source register pair are fast on Apple
- * M-series (single-cycle per 16 lanes), but on Neoverse-V2 (Graviton 4)
- * they are slow enough that the per-element scalar lookup in
- * NEON_FLAT_UNPACK_SWITCH wins.  Gate the multi-register TBL paths to
- * Apple silicon. */
+/* uarch gate: D=5/D=6 flat-subtree TBL paths -- historical relic from
+ * the TD scatter path (since retired).  The legacy comment:
+ *
+ *   "vqtbl2/vqtbl4 over a 32/64-byte source register pair are fast on
+ *    Apple M-series (single-cycle per 16 lanes), but on Neoverse-V2
+ *    (Graviton 4) they are slow enough that the per-element scalar
+ *    lookup in NEON_FLAT_UNPACK_SWITCH wins."
+ *
+ * The BU direct-path below IGNORES the gate per the legacy
+ * pivco_huffman_neon.c comment: n in the BU path is a contiguous
+ * flat-subtree count (typically the full block size 8192 for root-flat
+ * distributions like flat_M5), large enough to amortise the
+ * vqtbl{2,4} setup even on Neoverse-V2 -- on Graviton 4 the SIMD path
+ * beats scalar 3x for flat_M5 (9121 vs 2845 M/s, measured 2026-05-14
+ * after this code was briefly gated and regressed in the unify-
+ * framework refactor).  Override the gate value at build time with
+ * -DPIVCO_NEON_FAST_MULTI_TBL=0/1 only if a future scatter-path
+ * variant resurfaces; today it has no callers. */
 #ifndef PIVCO_NEON_FAST_MULTI_TBL
-#  if defined(__APPLE__)
-#    define PIVCO_NEON_FAST_MULTI_TBL 1
-#  else
-#    define PIVCO_NEON_FAST_MULTI_TBL 0
-#  endif
+#  define PIVCO_NEON_FAST_MULTI_TBL 1
 #endif
 
 /* flat_decode_direct_neon — write n D-bit symbols contiguously to

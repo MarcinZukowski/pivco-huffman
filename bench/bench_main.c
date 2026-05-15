@@ -406,6 +406,15 @@ int main(int argc, char **argv)
                     neon_enc_buf + neon_enc_off[b],
                     neon_enc_off[b+1] - neon_enc_off[b],
                     table, dec_buf + (size_t)b * BLK, &consumed);
+#elif defined(PIVCO_HAS_AVX512)
+                /* AVX-512 hosts: codec_avx512 (Phase 5 backend, 2026-05-14).
+                 * Distinct symbol from pivco_huffman_decode_bu_x86 (= codec_x86,
+                 * SSE/AVX2 only); the runtime dispatcher in pivco_huffman.c
+                 * picks this entry on AVX-512 hosts too. */
+                pivco_huffman_decode_bu_avx512(
+                    neon_enc_buf + neon_enc_off[b],
+                    neon_enc_off[b+1] - neon_enc_off[b],
+                    table, dec_buf + (size_t)b * BLK, &consumed);
 #elif defined(PIVCO_HAS_SSE4)
                 pivco_huffman_decode_bu_x86(
                     neon_enc_buf + neon_enc_off[b],
