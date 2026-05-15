@@ -1,0 +1,22 @@
+=== PIVCO-Huffman Encode Benchmarks (PIVCO_MAX_CODE_LEN=11) ===
+Sequence: 4M, Repeats: 100 (400M/run), Block: 8192, Runs: 5 (drop 2)
+Distribution set: MAIN (9 distributions; pass --all for full sweep)
+
+ENCODE M/s    |  pivco_s    pivco |  trad_4s |  huf0_x1  huf0_x2 |   ratio
+--------------|-------------------|----------|-------------------|--------
+proba80       |      500     1733 |     1356 |     1276     1264 |  1.36x
+english       |      151     1852 |     1016 |     1750     1750 |  1.06x
+flat_M5       |     1302     2451 |     2007 |     1856     1872 |  1.31x
+html_wiki     |      118     1563 |      858 |     1780     1757 |  0.88x
+prose_pride   |      108     1410 |      868 |     1685     1669 |  0.84x
+image_jpeg    |      176     1608 |     1142 |     1719     1705 |  0.94x
+json_api      |      107     1479 |      863 |     1734     1714 |  0.85x
+gzip_random   |     1132     3609 |     1577 |     6528     6529 |  0.55x
+chinese_text  |      113     1500 |      809 |     1751     1742 |  0.86x
+calgary_pic   |      412     1677 |     1146 |     1221     1220 |  1.37x
+
+  5 runs of 400M symbols each (100x 4M), drop 2 slowest, warn if spread > 5%
+  PIVCO/trad encode in 8192-symbol blocks; huf0 in 128KB chunks
+  ratio = pivco / max(huf0_x1, huf0_x2)
+  CPU freq drift: +135.2% (OK)
+  Total wall time: 171.1 seconds

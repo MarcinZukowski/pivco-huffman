@@ -1,5 +1,41 @@
 # PIVCO-Huffman Decode Ideas
 
+## Unify-framework refactor — SHIPPED 2026-05-14
+
+**Status: shipped, all four backends now share a single codec.**
+
+The four production backends (scalar, NEON, x86 SSE/AVX2,
+AVX-512 VBMI2) previously each had their own `.c` file with a
+duplicated copy of the tree walk + wire-format I/O + FSE-attempt
+logic.  That duplication was the root cause of the wire-format
+drift bug noted in `src/pivco_huffman_wire.h` ("scalar+NEON added
+the FSE marker byte in 2026-05-13, x86+AVX-512 didn't — broke
+scalar↔SSE cross-decoding").  The refactor extracted the
+arch-agnostic parts into `pivco_huffman_codec.c` (compiled once per
+backend as an OBJECT library) and pushed the SIMD into per-backend
+headers `pivco_huffman_primitives_<backend>.h`.
+
+Phase progression:
+  - **Phase 1+2** (`2429c80`): scaffold codec.c + scalar codec port
+  - **Phase 3** (`91bea73`): NEON cutover.  -1417 + -351 LoC legacy.
+  - **Phase 4** (`5d85874`): x86 cutover.  -1060 + -228 LoC legacy.
+    Surfaced + fixed the wire-format drift by adding the marker
+    byte to legacy avx512 encoder (it was the only remaining
+    encoder that hadn't been updated).
+  - **Phase 5** (`3c5ecf8`): AVX-512 cutover.  -1339 LoC legacy.
+    Adds dedicated `pivco_huffman_decode_bu_avx512` entry point
+    so the AVX-512 BU fast paths can live in their own header.
+
+Net: +1867 / -3036 LoC across the codec source tree.  Adding a
+fifth backend (RVV?  AVX10.x?) is now a primitives header plus a
+CMake OBJECT lib entry — no tree-walk duplication.
+
+No perf regression in the unify itself (codec.c is byte-identical
+work to what each backend used to do, just routed through a
+function-call boundary that inlines).  See
+`results/SUMMARY-20260514-unify-framework.md` for cross-host
+numbers.
+
 ## v0.2 FSE marker byte is unconditional even when FSE off — tiny optimization, 2026-05-13
 
 **Status: known overhead, parked.**

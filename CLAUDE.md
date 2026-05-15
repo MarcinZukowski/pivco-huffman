@@ -36,11 +36,13 @@ cmake --build build
 
 ## Architecture
 
-- **Backends**: scalar, NEON (ARM), SSE4.1 (x86), AVX-512 VBMI2 (Intel), SVE (disabled)
-- **Block size**: 8192 (ARM/AVX-512), 4096 (x86 SSE) — auto-detected
-- **Format**: DFS-ordered code bits; flat subtrees with depth D ≥ 2 emit one N·D-bit packed region instead of D bitmap levels
+- **Backends**: scalar, NEON (ARM), x86 (SSE4.1 / AVX2), AVX-512 VBMI2 (Intel).  SVE is disabled (svcompact at 128-bit isn't competitive with NEON TBL).
+- **Codec framework**: one `pivco_huffman_codec.c` compiled per backend as an OBJECT library, each pulling in `primitives_<backend>.h` (the only file with SIMD intrinsics).  Runtime dispatcher in `src/pivco_huffman.c::resolve_impl` picks the best backend per host.
+- **Block size**: 8192 (ARM/AVX-512), 4096 (x86 SSE/AVX2) — auto-detected per backend at compile time
+- **Wire format**: see `src/pivco_huffman_wire.h` for the canonical doc.  Per-node record: `[optional K_right:u16 LE][FSE marker:u8][bitmap or FSE payload]`.  Flat subtrees (D ≥ 2) skip the header and emit one N·D-bit packed region.
 - **Key data structures**:
-  - `compress_tab[256][32]` combined shuffle table (TBL/pshufb partition)
+  - `compress_tab[256][32]` combined shuffle table (TBL/pshufb partition; per-arch in `pivco_huffman_{neon,x86}_tables.c`)
+  - `expand_tab[256][8]` BU tree_merge shuffle table (same files)
   - `table->flat_depth[node]`, `table->flat_offset[node]`,
     `table->flat_code_to_sym[pool]` — per-table flat-subtree dispatch
 
@@ -63,16 +65,34 @@ revisions and cite prior numbers.
 
 ## Key Files
 
+The codec is a single tree-walk + wire-format engine in
+`pivco_huffman_codec.c`, compiled once per backend (`PIVCO_BACKEND_*`)
+into an OBJECT library.  Each compile pulls in the matching
+`pivco_huffman_primitives_<backend>.h` via the router header
+`pivco_huffman_primitives.h`.  The unify-framework refactor landed in
+five phases ending 2026-05-14; before that, each backend had its own
+.c file with a duplicated tree walk -- now all four share one.
+
 - `include/pivco_huffman.h` — public API + table struct
 - `src/huffman_table.c` — `pivco_huffman_build_table` + flat-subtree detection
-- `src/pivco_huffman_neon.c` — main NEON decode/encode (hot path)
-- `src/pivco_huffman_neon_flat.h` — D=2..6 unpack helpers (shared with bench_micro)
-- `src/pivco_huffman_avx512.c` + `_flat.h` — AVX-512 VBMI2 backend
-- `src/pivco_huffman_x86.c` + `_flat.h` — SSE4.1 backend
-- `src/pivco_huffman_codec.c` — unified codec (tree-walk + dispatch); compiled per-backend, see `pivco_huffman_primitives.h`
-- `src/pivco_huffman_primitives_{scalar,neon}.h` — backend-specific primitive implementations
+- `src/pivco_huffman_codec.c` — unified codec.  Compiled once per backend
+  with `-DPIVCO_BACKEND_{SCALAR,NEON,X86,AVX512}`.  Owns: tree walk
+  (encode + BU decode), wire-format I/O via `pivco_huffman_wire.h`,
+  optional FSE attempt on the raw bitmap.  Does not include any SIMD.
+- `src/pivco_huffman_primitives.h` — router; selects the backend header
+  based on the `PIVCO_BACKEND_*` define
+- `src/pivco_huffman_primitives_scalar.h` — scalar primitive implementations
+- `src/pivco_huffman_primitives_neon.h` — NEON primitive implementations
+- `src/pivco_huffman_primitives_x86.h` — SSE4.1 + AVX2 primitive implementations
+- `src/pivco_huffman_primitives_avx512.h` — AVX-512 VBMI2 primitive implementations
 - `src/pivco_huffman_wire.h` — single source of truth for the per-node wire record (K_right + FSE marker + bitmap)
+- `src/pivco_huffman_neon_tables.{c,h}` — shared NEON compress_tab + expand_tab
+- `src/pivco_huffman_x86_tables.{c,h}` — shared x86 compress_tab + expand_tab (used by codec_x86 + codec_avx512 BU SSE-tail)
+- `src/pivco_huffman_neon_flat.h` — D=2..6 NEON unpack helpers (shared with bench_micro)
+- `src/pivco_huffman_x86_flat.h` — D=4 SSE unpack helper
+- `src/pivco_huffman_avx512_flat.h` — D=2..6 AVX-512 VBMI2 unpack helpers
 - `extras/pivco_huffman_neon_prefix.c` — retired research prefix-radix backend (moved to extras 2026-05-14; BU on the standard 2-way wire format beat it on every dist/host)
+- `extras/legacy_td/README.md` — git-archaeology pointer for the retired top-down decoders
 - `bench/bench_main.c` — benchmark harness (4M × repeats methodology)
 - `bench/bench_micro.c` — per-primitive microbench (scatter, partition, flat decode, TBL/vext throughput probes, store-port topology)
 - `extras/bench_flat_subtree_stats.c` — flat-subtree applicability analyzer
