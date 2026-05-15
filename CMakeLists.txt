@@ -634,6 +634,18 @@ if(BUILD_BENCH)
         extras/file_to_dist.c
     )
     target_link_libraries(pivco_file_to_dist m)
+
+    if(PIVCO_FSE)
+        # FSE cursor-count × unroll microbench (research; see IDEAS.md
+        # "FSE cursor-count + unroll experiment").  Hand-rolled FSE
+        # encoder + decoders varying x and y; doesn't touch the codec
+        # wire format or runtime API.
+        add_executable(pivco_fse_xy_micro
+            extras/bench_fse_xy_micro.c
+        )
+        target_link_libraries(pivco_fse_xy_micro pivco_huffman m)
+        target_include_directories(pivco_fse_xy_micro PRIVATE src ext/fse/lib)
+    endif()
 endif()
 
 # HTML figure generation.  Reads `results/sweep_*.txt` and emits

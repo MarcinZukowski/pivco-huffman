@@ -1,90 +1,57 @@
 # PIVCO-Huffman Decode Ideas
 
-## FSE x2 / x4 parallel-stream wrapper — open, 2026-05-15
+## Oodle's newlz_arrays_huff — semi-high priority follow-up
 
-**Status: open, candidate for closing the decode-speed cost of the
-FSE knob.**  FSE coding is one of the ratio/speed tuning parameters
-ph exposes; toggle and thresholds are runtime-configurable
-(`pivco_huffman_set_fse_enabled`, the `PIVCO_FSE_MIN_*` build-time
-overrides).  At the current parameter floor, FSE-on gets a 25-90%
-compression-ratio win on heavy-skew bitmaps in exchange for ~3-4×
-per-node decode cost on the FSE-firing nodes — the README's
-default-recommended bench config (`--no-fse`) is the speed end of
-that tradeoff curve.  This entry is the leading hypothesis for
-narrowing the speed cost; even if it works, FSE-on remains a
-tunable knob rather than a forced default — ph deliberately exposes
-ratio/speed tradeoffs as parameters rather than burying them in a
-single "level" abstraction.
+**Status: open, semi-high priority.**  Worth a real engagement now
+that we have a stable codec to compare against.
 
-huf0's decode wins on real text vs us partly because it interleaves
-2 or 4 independent decoder streams (x2 / x4) per Huffman block, so
-each stream's serial dep chain runs in parallel with the others —
-ILP that FSE in our v0.3 wire format doesn't currently exploit.
-Our FSE invocations are per-node single-stream
-(`pivco_fse_compress` / `pivco_fse_decompress` on the raw bitmap),
-so each FSE-coded node pays the full dep chain.
+The reference: [`newlz_arrays_huff.cpp`](https://github.com/WorkingRobot/OodleUE/blob/main/Engine/Source/Runtime/OodleDataCompression/Sdks/2.9.16/src/oodle2/core/newlz_arrays_huff.cpp)
+in the OodleUE source.  Per ryg, the shipping decoder runs at
+~1.3-1.5 cycles/symbol on the key decode loop (across the 8
+targets Oodle has to ship for); his experimental x86-64-only
+decoder hits ~0.54 cycles/symbol on Ryzen 7950X3D with a
+different bitstream format.  For comparison: huf0_x2 at the
+2026-05-15 sweep is roughly 0.4-0.5 ns/byte on Xeon AVX-512
+(~1.6-2.0 cyc/symbol at 4 GHz on 8-bit symbols).  Oodle is the
+closest we're going to get to "what's the practical ceiling for a
+shipping Huffman decoder on real hardware".
 
-Hypothesis: a thin x2 / x4 wrapper that splits each per-node bitmap
-into N chunks at encode time, FSE-codes each independently, and
-decodes the N chunks with interleaved state at decode time, should
-buy back the same kind of ILP that x2/x4 buys huf0.  Concrete
-shape:
+The driver functions are `newlz_put_array` / `newlz_get_array`;
+implementation depends on the "rrhuffman" subsystem.  Build note:
+the ASM kernels (NASM files under various `_x64_generic`,
+`_bmi2`, `_zen2` variants) are technically optional but
+representative perf requires them.  Build flags: `-DOODLE_HISTO_
+X64GENERIC_ASM`, `-DNEWLZ_X64GENERIC_HUFF_ASM`.
 
-  - encode: chunk size = ceil(bitmap_bytes / N), each chunk goes
-    through its own `pivco_fse_compress`; wire prefix is N × u16
-    lengths instead of the current 1 × u16 `fse_len`.
-  - decode: spin up N FSE decoder states with separate cursors,
-    advance all N per iteration (manually interleaved or compiler-
-    unrolled); the per-iter dep chain length stays the same but
-    throughput gets N× the chunks' ILP.
+Things to learn:
 
-Open questions, all blocking a ship decision:
+1. **Decoder shape that gets to 1.3 cyc/sym.**  Our current
+   `pivco_bu` is doing ~0.2-0.4 ns/byte on M4/c8i for real-text
+   distributions — at ~4 GHz that's 0.8-1.6 cycles/byte, but the
+   decoder is doing tree-walk + partition + merge, not pure
+   per-symbol Huffman.  The cycles/symbol on the Huffman portion
+   alone, normalised for our setup, would be a useful
+   apples-to-apples reference.
+2. **What "x64-bmi2" and "x64-zen2" variants do differently from
+   the generic path.**  BMI2 implies `pdep` / `bzhi` / `pext` --
+   if we can identify why those help Huffman decode, we might be
+   able to apply the same to our partition / merge primitives.
+3. **The "different bitstream" in ryg's 0.54-cyc experimental
+   decoder.**  Pure curiosity — what wire-format change unlocked
+   the speedup, and is any of it transferable to a tree-walk
+   architecture like ours?
+4. **Whether benchmarking + publishing Oodle results is OK under
+   the UE EULA** -- ryg flagged this:
+   https://www.unrealengine.com/eula/unreal.  Need to read before
+   shipping numbers to results/.
 
-  1. **Per-chunk size floor.**  FSE's table state + setup is fixed-
-     cost per stream; with our typical bitmap sizes (32 B … 1 KB),
-     N=2 might still be net positive but N=4 could easily be a
-     wash or a loss.  Need to sweep N ∈ {1, 2, 4} against the
-     MAIN distribution set.
+The bar to fold this into ph: there isn't one.  ph stays a
+research vehicle (per `memory/project_research_not_product.md`);
+Oodle's decoder is closed-source-ish reference data we want
+because it's the published ceiling, not because we'd ever
+integrate it.
 
-  2. **Compression-ratio cost.**  Splitting reduces per-stream
-     context length — the FSE table is trained on the whole node
-     bitmap today; with N streams each gets ~1/N the context.
-     For heavy-skew bitmaps (proba80, calgary_pic) the per-byte
-     entropy doesn't move much, but for mid-skew bitmaps the
-     ratio cost could erase the speed win.
-
-  3. **Wire-format header overhead.**  Today: 1 × u16 fse_len.
-     With N streams: N × u16 (or a 1-byte count + N × u16
-     lengths).  ~2-6 extra bytes per FSE-coded node.  For
-     proba80-style hosts where FSE fires on ~5 nodes per block,
-     that's tens of bytes per block — small but measurable
-     against the v0.3 FSE byte budget.
-
-  4. **Decoder dispatch.**  Today `wire_read_bitmap` reads
-     `[marker][fse_len:u16][fse_payload]` and feeds it to one
-     `pivco_fse_decompress`.  An x2 / x4 path either (a) adds new
-     marker values to the FSE marker byte for the wider variants,
-     or (b) folds the chunk count into the existing marker (e.g.
-     top 2 bits select N ∈ {1, 2, 4}).  (b) keeps the marker space
-     intact at the cost of one constant slot.
-
-  Measurement plan: stand up a `pivco_fse_x2_compress` /
-  `pivco_fse_x4_compress` (and matching decompress) as static-
-  inline wrappers around the existing FSE primitives in
-  `src/pivco_fse.c`.  Wire format frozen behind a build flag (no
-  v0.4 wire bump until the win is real).  Run `pivco_huffman_bench`
-  with the wrapper enabled and compare against the v0.3 baseline
-  on M4 / c6a / c8g / c8i for the FSE-firing distributions.
-  Decide ship / discard based on the prose_pride / html_wiki /
-  proba80 numbers — those are the live FSE callers.
-
-The complementary measurement is whether huf0's x2 / x4 ILP win
-shows up in OUR partition-bitmap workload at all: our bitmaps are
-much smaller than huf0's 128 KB chunks (per-node bitmap ≤ 1024 B
-on 8K blocks), so the per-stream dep chain may already be too
-short for x4 to amortise its setup.  If x2 wins and x4 doesn't,
-that's the answer.
-
+Local copy: ryg-cloned the relevant subset to `~/src/OodleUE/`.
 ## Unify-framework refactor — SHIPPED 2026-05-14
 
 **Status: shipped, all four backends now share a single codec.**
