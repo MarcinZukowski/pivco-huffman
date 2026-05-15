@@ -1,0 +1,42 @@
+=== PIVCO-Huffman Encode Benchmarks (PIVCO_MAX_CODE_LEN=11) ===
+Sequence: 4M, Repeats: 100 (400M/run), Block: 8192, Runs: 5 (drop 2)
+Distribution set: ALL (29 distributions)
+
+ENCODE M/s    |  pivco_s    pivco |  trad_4s |  huf0_x1  huf0_x2 |   ratio
+--------------|-------------------|----------|-------------------|--------
+proba80       |      448     1662 |     1281 |     1197     1190 |  1.39x
+proba50       |      165     2110 |     1071 |     1352     1353 |  1.56x
+proba14       |      106     1639 |      887 |     1675     1675 |  0.98x
+proba02       |      108     1434 |      774 |     1716     1694 |  0.84x
+bell_s10      |      176     1856 |      793 |     1730     1718 |  1.07x
+bell_s30      |      107     1394 |      781 |     1716     1700 |  0.81x
+bell_s80      |      182     1623 |     1173 |     6118     6254 |  0.26x
+uniform       |     1087     3472 |     1510 |     6285     6247 |  0.55x
+english       |      133     1762 |      938 |     1670     1666 |  1.05x
+zipfian       |       98     1449 |      645 |     1640     1622 |  0.88x
+sparse_4      |     1391     3375 |     2448 |     1475     1468 |  2.29x
+sparse_16     |     1320     3394 |     2110 |     1713     1702 |  1.98x
+geometric     |      160     1773 |      882 |     1329     1322 |  1.33x
+two_sym_eq    |      317     2767 |     2541 |     1261     1256 |  2.19x
+two_sym_90/10 |      767     1895 |     2417 |     1195     1185 |  1.59x
+flat_M3       |     1371     2920 |     2272 |     1599     1615 |  1.81x
+flat_M5       |     1230     2288 |     1863 |     1786     1788 |  1.28x
+flat_M6       |     1210     2203 |     1657 |     1798     1795 |  1.23x
+flat_M7       |     1164     2179 |     1572 |     1762     1741 |  1.24x
+html_wiki     |      104     1491 |      779 |     1701     1684 |  0.88x
+prose_pride   |       96     1385 |      800 |     1635     1630 |  0.85x
+image_jpeg    |      160     1576 |     1107 |     1684     1657 |  0.94x
+json_api      |       99     1508 |      839 |     1758     1746 |  0.86x
+source_c      |      112     1623 |      757 |     1697     1676 |  0.96x
+log_apache    |      107     1571 |      931 |     1798     1779 |  0.87x
+dna_fasta     |      167     1923 |     1355 |     1511     1503 |  1.27x
+csv_numeric   |      140     1626 |      917 |     1536     1553 |  1.05x
+gzip_random   |     1130     3595 |     1554 |     6425     6449 |  0.56x
+chinese_text  |      109     1527 |      802 |     1789     1773 |  0.85x
+calgary_pic   |      400     1738 |     1151 |     1213     1210 |  1.43x
+
+  5 runs of 400M symbols each (100x 4M), drop 2 slowest, warn if spread > 5%
+  PIVCO/trad encode in 8192-symbol blocks; huf0 in 128KB chunks
+  ratio = pivco / max(huf0_x1, huf0_x2)
+  WARNING: CPU freq dropped 22.8% (throttling?)
+  Total wall time: 509.7 seconds
