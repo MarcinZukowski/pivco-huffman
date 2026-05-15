@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>pivco-huffman — primitive costs (placeholder)</title>
+
+<style>
+
+body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        margin: 0; padding: 0; color: #222; }
+.page-header { padding: 12px 18px; background: #f7f7f7;
+                border-bottom: 1px solid #ddd; position: relative; }
+.page-header h1 { margin: 0 0 4px 0; font-size: 16px; font-weight: 600; }
+.page-header .subtitle { font-size: 12px; color: #666; }
+.page-header .gen-ts { position: absolute; top: 10px; right: 18px;
+                        color: #555; font-size: 11px;
+                        font-family: "SF Mono", Menlo, monospace;
+                        background: white; padding: 2px 8px;
+                        border: 1px solid #ddd; border-radius: 3px; }
+
+.section { padding: 12px 18px; }
+.section h2 { font-size: 14px; margin: 0 0 8px 0; font-weight: 600; }
+
+.controls { padding: 8px 18px; background: #fafafa; border-bottom: 1px solid #eee;
+            font-size: 12px; }
+.controls .lbl { font-weight: 600; color: #555; margin-right: 8px; }
+.controls .pill { display: inline-block; padding: 2px 8px;
+                    margin: 0 3px 3px 0; border: 1px solid #bbb;
+                    border-radius: 12px; cursor: pointer; background: white;
+                    user-select: none; font-size: 11px; }
+.controls .pill.on  { background: #2c5aa0; color: white; border-color: #2c5aa0; }
+.controls .pill.off { background: #fff; color: #999; }
+
+table.grid { border-collapse: collapse; font-size: 11px;
+                font-variant-numeric: tabular-nums;
+                font-family: "SF Mono", Menlo, monospace; }
+table.grid th, table.grid td { padding: 3px 8px; border: 1px solid #ddd;
+                                 text-align: right; white-space: nowrap; }
+table.grid th.dist, table.grid td.dist { text-align: left; font-family: inherit;
+                                            font-weight: 500; }
+table.grid thead th { background: #ececec; }
+table.grid tbody tr:hover td {
+    box-shadow: inset 0 2px 0 0 #222, inset 0 -2px 0 0 #222;
+}
+table.grid tbody tr:hover td:first-child {
+    box-shadow: inset 0 2px 0 0 #222, inset 0 -2px 0 0 #222,
+                inset 2px 0 0 0 #222;
+}
+table.grid tbody tr:hover td:last-child {
+    box-shadow: inset 0 2px 0 0 #222, inset 0 -2px 0 0 #222,
+                inset -2px 0 0 0 #222;
+}
+/* Per-host group separators. */
+table.grid th.group-end, table.grid td.group-end {
+    border-right: 2px solid #777;
+}
+
+/* Tier coloring -- diverging palette centered on parity.
+ * Same classes used by table cells AND legend swatches. */
+.empty       { color: #ccc; text-align: center; }
+.tier-win-a  { background: #006d2c; color: white; font-weight: 600; }
+.tier-win-b  { background: #31a354; color: white; }
+.tier-win-c  { background: #74c476; }
+.tier-win-d  { background: #c7e9c0; }
+.tier-parity { background: #fef8d1; }
+.tier-loss-d { background: #fee0b6; }
+.tier-loss-c { background: #fdb863; }
+.tier-loss-b { background: #e08214; color: white; }
+.tier-loss-a { background: #b35806; color: white; font-weight: 600; }
+
+.legend { font-size: 11px; padding: 8px 18px; color: #555;
+            border-bottom: 1px solid #eee; }
+.legend .swatch { display: inline-block; width: 32px; height: 14px;
+                   vertical-align: middle; margin: 0 4px 0 8px;
+                   border: 1px solid #ccc; }
+
+.footer { padding: 12px 18px; font-size: 11px; color: #888;
+            border-top: 1px solid #eee; background: #fafafa; }
+.footer a { color: #557; }
+
+
+</style>
+</head>
+<body>
+<div class="page-header">
+<span class="gen-ts">generated 2026-05-15 10:28:30</span>
+<h1>pivco-huffman — primitive costs (placeholder)</h1>
+<div class="subtitle">pivco-huffman — research/exploration project</div>
+</div>
+
+<div class="section">
+<p>Per-primitive microbench cost (<code>bench_micro</code>) figure is
+not yet implemented.  Parser for <code>results/bench_micro-*.txt</code>
+is the missing piece; once landed this page will show ns/elem and
+GB/s per primitive × platform with tier coloring.</p>
+
+<p>Tracking: <a href="../IDEAS.md">IDEAS.md</a>.  Static reference
+copy of the current numbers is in the project
+<a href="../README.md#cross-platform-primitive-costs">README</a>
+"Cross-platform primitive costs" section.</p>
+</div>
+<div class="footer">
+Generated from <code>results/sweep_*.txt</code> by
+<code>extras/figures/build.py</code>.
+Re-run after a sweep: <code>cmake --build build --target figures</code>.
+</div>
+</body>
+</html>

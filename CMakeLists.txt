@@ -635,3 +635,20 @@ if(BUILD_BENCH)
     )
     target_link_libraries(pivco_file_to_dist m)
 endif()
+
+# HTML figure generation.  Reads `results/sweep_*.txt` and emits
+# `figures/*.html`.  Manual run: `python3 extras/figures/build.py`.
+# Part of the sweep workflow: after running pivco_huffman_bench(_encode)
+# on each host and saving the outputs under results/, do
+#     cmake --build build --target figures
+# to regenerate the per-figure HTML pages from the latest data.
+find_program(PYTHON3_EXECUTABLE python3)
+if(PYTHON3_EXECUTABLE)
+    add_custom_target(figures
+        COMMAND ${PYTHON3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/extras/figures/build.py
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+        COMMENT "Generating HTML figures into figures/ from results/sweep_*.txt"
+        VERBATIM
+    )
+endif()

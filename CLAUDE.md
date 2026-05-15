@@ -61,7 +61,11 @@ rsync -avz --delete --exclude='build/' --exclude='build-asan/' \
 
 After every full sweep, save the per-platform raw output and a
 headline-level `.md` summary to `results/` so we can diff across
-revisions and cite prior numbers.
+revisions and cite prior numbers.  Then regenerate the HTML
+figures with `cmake --build build --target figures` (or run
+`python3 extras/figures/build.py` directly) — outputs go to
+`figures/` at the project root, read by `extras/figures/build.py`
+from the most recent sweep tag.
 
 ## Key Files
 
