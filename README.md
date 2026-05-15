@@ -47,23 +47,35 @@ a time.  Plus a **flat-subtree fast path**: every maximal flat subtree
 of depth D ≥ 2 in the Huffman tree emits a single N·D-bit packed
 region instead of D levels of bitmaps, decoded via direct lookup.
 
-**Apple M4: wins on all 29 benched distributions** — 1.08× to 10.0×
-huf0/trad_4s.  Concrete:
-- `gzip_random` / `image_jpeg` (high-entropy, 256-symbol): **2.5×** /
-  **1.78×** huf0_x2 (huf0 fails on near-uniform; PIVCO doesn't).
-- `proba80` strongly skewed: **9.3 GB/s**, 3.6× huf0.
-- `uniform` / `flat_M*` fully flat: **2.5–4.8×** huf0 / trad_4s.
+Concrete on Apple M4, `pivco_bu` decode vs `huf0_x2`
+(default-recommended `--no-fse` configuration):
+- `proba80` heavily skewed: **15.3 GB/s, 5.9× huf0_x2**.
+- `proba50` / `proba14`: **9.2 / 5.2 GB/s, 3.6× / 2.1×**.
+- `flat_M*` fully flat: **20–24 GB/s, 4.1–4.8×**.
+- `uniform` / `bell_*` near-uniform: **4–6 GB/s, 2.8–3.2×** (`huf0`
+  fails on uniform; PIVCO doesn't).
 - `english` / `prose_pride` / `html_wiki` / `chinese_text` real text:
-  **1.08–1.33×** huf0_x2.
+  **4.3–4.8 GB/s, 2.0–2.5× huf0_x2**.
+- `gzip_random` / `image_jpeg` high-entropy: **4.1–4.9 GB/s,
+  2.7–3.2×**.
 
-**Portable but uneven across ISAs:**
-- **Xeon AVX-512 VBMI2** wins 25/29 (deepest-tree real text within
-  ±10% of parity; everything else wins 1.0–13×).
-- **Graviton 4 NEON** wins 16/29 — strong on synthetic but loses
-  the real text/markup cluster at 0.6–0.8×.
-- **Zen 3 SSE4.1** wins 8/29 (synthetic flat-tree only); real text
-  hits 0.44–0.55× because pure SSE4.1 lacks `vpcompressw`-class
-  partition primitives.
+Cross-ISA, the SIMD primitive landscape spreads ratios across an
+order of magnitude even at the same algorithm:
+- **Xeon AVX-512 VBMI2** (`vpcompressw` partition + `vpexpandb`
+  tree_merge): 1.43–13.8× across the 30-distribution grid.
+- **Apple M4 NEON** (TBL partition + `vqtbl1` tree_merge): 1.43–10.7×.
+- **Graviton 4 NEON** (same NEON ISA, slower `vqtbl{2,4}` at small n):
+  1.29–8.59×.
+- **Zen 3 SSE/AVX2** (`pshufb` partition, no `vpcompressw`): 0.94×
+  on three deep-real-text rows, 1.06–22.5× on everything else.
+
+The Zen-3 0.94× rows are interesting on their own merits (real-text
+trees of Dmax 15 stress the per-cycle partition cost; the
+`vpcompressw` primitive that Xeon and Zen 4+ enjoy is the obvious
+gap-closer).  They're not framed as "things to fix" — ph is a
+research vehicle for what SIMD Huffman decoding can do at the
+algorithmic edge, not a tool people will compress with.  Losses are
+data, wins are observations.
 
 The bench grid intentionally includes 10 real-world byte
 distributions (Wikipedia HTML, Project Gutenberg prose, JPEG image,
@@ -105,48 +117,49 @@ The serial dependency chain (can't start the next symbol until you know
 how many bits the current one consumed) limits throughput to ~1 symbol
 per 3-4 cycles, even with 4-stream ILP tricks (huff0/zstd).
 
-**PIVCO-Huffman decode** processes all N symbols of the block in
-parallel, with per-node dispatch:
+**PIVCO-Huffman decode** processes all K symbols of the subtree at
+once, with per-node dispatch.  The production path is bottom-up: each
+call writes a contiguous K-byte output buffer for its subtree, then
+the parent merges its two child buffers per the bitmap.
 
 ```
-decode_node(indices[], n, tree_node):
+decode_subtree(node, K, out_buf):
   if leaf:
-    write tree_node->symbol to all n indices
+    memset(out_buf, node->symbol, K)
     return
 
-  if tree_node is a flat-subtree root (D >= 2):
-    read n*D packed bits from stream
-    for each element: symbols[indices[i]] = code_to_sym[D-bit code]
-    return                              # no recursion below this
+  if node is a flat-subtree root (D >= 2):
+    read K*D packed bits from stream
+    for k in [0..K): out_buf[k] = code_to_sym[D-bit code k]
+    return                                # no recursion below this
 
-  read n code bits (bitmap) from stream
+  read K-bit bitmap (or FSE-coded equivalent) from stream
+  K_right = read_kr_header()              # 2 bytes if non-trivial node
 
-  if both children are leaves:           # stage fusion (D=1 case)
-    scatter sym_left/sym_right based on code bits — no partition
+  if both children are leaves:            # BOTH_LEAVES fast path
+    merge_both_const(out_buf, K, bitmap, left->sym, right->sym)
     return
-  if prefill leaf is one side:           # half-partition
-    compact only the other side, recurse
-    return
-  SIMD-partition indices into left[] (bit=0) and right[] (bit=1)
-  decode_node(left,  n_left,  tree_node->left)    # leaf child handled
-  decode_node(right, n_right, tree_node->right)   # at entry, not here
+
+  decode_subtree(node->left,  K - K_right, left_buf)
+  decode_subtree(node->right, K_right,     right_buf)
+  tree_merge(out_buf, K, bitmap, left_buf, right_buf)
 ```
 
-At each mixed-depth internal node, the block of indices is split into
-two dense sub-arrays using a TBL-based SIMD compress (precomputed
-256-entry shuffle table, one `vqtbl1q_u8` per 8 uint16_t indices on
-NEON).  At each leaf, the symbol is scatter-written to all indices in
-the list.  At each flat-subtree root, the whole subtree is collapsed
-into a single packed-bit region — the decoder performs `n` D-bit
-extracts + `n` table lookups + `n` scalar byte stores, with no
-recursion below that node.
+At each mixed-depth internal node, the two child output buffers get
+gather-merged into the parent output using a TBL-based 8-wide merge
+on NEON / SSE4.1 (`expand_tab[bitmap_byte]`-driven `vqtbl1` or
+`pshufb`), or `vpexpandb` 64-byte chunks on AVX-512 VBMI2.  At each
+leaf, `memset` fills the buffer.  At each flat-subtree root, the
+whole subtree is collapsed into a single packed-bit region — the
+decoder performs K D-bit extracts + K table lookups + K sequential
+byte stores, with no recursion below that node.
 
-**Stage fusion and flat-subtree are the same mechanism at different
-depths.**  `scatter_both_leaves` is exactly the D=1 case of the
+**Both-leaves and flat-subtree are the same mechanism at different
+depths.**  `merge_both_const` is exactly the D=1 case of the
 flat-subtree path (one bit per element, 2-entry inline `syms[]`
 lookup).  Flat-subtree at D ≥ 2 generalises it to deeper regions of
 the tree using a per-subtree `code_to_sym` table.  Both replace D
-levels of partition-and-recurse with a single packed-bit scatter.
+levels of partition-and-recurse with a single packed-bit blend.
 
 **Coverage of the two paths** (measured on the standard bench
 distributions, see `extras/bench_flat_subtree_stats.c`):
@@ -163,52 +176,98 @@ load indices → load bits → shuffle/lookup → store.
 ### Encoded Format
 
 The encoded data is a DFS-ordered bitstream matching the tree walk.
-At each internal tree-walk node with `n` active symbols, `ceil(n/8)`
-bytes of bitmap (one bit per element) are stored.  At each flat-subtree
-root with `n` active symbols and depth `D`, a single
-`ceil(n·D/8)`-byte packed region is stored — one `D`-bit code per
-element, no per-level framing.
+See `src/pivco_huffman_wire.h` for the authoritative format spec.
+Per-node record (v0.3, since 2026-05-13):
+
+```
+[optional K_right_header : uint16 LE, 2 bytes]   if kr_header_needed()
+[FSE marker             : uint8,     1 byte]     always
+[bitmap body]                                    marker == 0: raw n-bit
+                                                  bitmap, ceil(n/8) bytes
+                                                 marker != 0: [fse_len:u16
+                                                  LE][fse_payload]
+                                                  (FSE-compressed bitmap)
+```
+
+The K_right header (2 bytes) is emitted at every internal node whose
+right child is non-leaf, letting the bottom-up decoder size each
+child's output buffer ahead of time instead of computing it from a
+bitmap popcount.  Adds 2 bytes per qualifying node; saves a popcount
+pass per node at decode time.
+
+The FSE marker byte gates per-node entropy coding of the partition
+bitmap: when the bitmap is heavily skewed (one bit value dominates
+≥ 62.5%) and the per-codeword cost ratio passes the commit gate, the
+encoder ships an FSE-compressed payload instead of the raw bitmap.
+Decoder dispatches generically based on the marker byte.  Wire
+overhead when FSE doesn't fire: 1 byte per non-flat internal node
+(~0.06% on proba80, ~1.6% on incompressible image data).
+**FSE coding is experimental and disabled in the headline bench
+numbers below** (`--no-fse`); see Implementation section item 5 for
+the rationale.  The marker byte is still emitted unconditionally so
+the wire format is stable when the runtime gate flips.
+
+At each flat-subtree root with `n` active symbols and depth `D`, a
+single `ceil(n·D/8)`-byte packed region is stored — one `D`-bit
+code per element, no per-level framing, no marker byte (the flat
+path doesn't FSE-code).
 
 The decoder has the Huffman tree, so it knows which path each node
 uses and exactly how many bytes to consume.  No continuation bitmaps
-or stream-level metadata are needed — the Huffman tree structure is
-sufficient.
+or stream-level metadata are needed — the Huffman tree structure
+plus the per-node K_right / FSE markers are sufficient.
 
 Encoded size equals traditional Huffman (sum of code lengths) plus
-byte-alignment rounding, which is typically 1-4% overhead.  The
-flat-subtree format is marginally tighter than bitmap-per-level on
-flat-heavy regions (one tail padding for the whole packed region vs
-`D` per-level paddings).
+byte-alignment rounding, which is typically 1-4% overhead — minus
+the FSE win on skewed bitmaps (~25% on proba80, ~24% on
+calgary_pic).  The flat-subtree format is marginally tighter than
+bitmap-per-level on flat-heavy regions (one tail padding for the
+whole packed region vs `D` per-level paddings).
 
 ## Implementation
 
-Written in C11 with four backends.  Each backend implements both the
-SIMD tree-walk partition and the flat-subtree packed-bit fast path;
-detection of which path applies at which node is shared in
-`src/huffman_table.c` (`pivco_huffman_build_table`).
+Written in C11.  After the unify-framework refactor landed 2026-05-14,
+the entire encode + bottom-up decode tree walk + wire-format I/O live
+in **one source file**, `src/pivco_huffman_codec.c`, compiled four
+times — once per backend — into separate OBJECT libraries.  Each
+compile pulls in the matching `src/pivco_huffman_primitives_<backend>.h`
+via the router header `pivco_huffman_primitives.h`.  Adding a fifth
+backend is a primitives header plus a CMake OBJECT lib entry; the
+tree walk and wire format are inherited automatically.  The runtime
+dispatcher in `src/pivco_huffman.c::resolve_impl` picks the best
+backend per host.
 
-- **Scalar**: bitmap-based partition. For each of n indices, extract
-  the code bit, write to left or right output. O(n) per tree node.
-  Flat-subtree decode unpacks `D`-bit codes via a scalar shift chain
-  specialised for `D ∈ {2,3,4,5,6,7,8}`.
+Tree-shape detection (which nodes get the flat-subtree fast path,
+which get tree-walk partition, which collapse to BOTH_LEAVES /
+HALF_RIGHT / HALF_LEFT / SKIP) happens once at
+`pivco_huffman_build_table` time and is shared across backends in
+`src/huffman_table.c`.
 
-- **NEON** (AArch64): TBL-based SIMD partition. Processes 8 × uint16_t
-  indices per iteration using `vqtbl1q_u8` with a combined 8KB shuffle
-  table (256 entries × 32 bytes: right + left patterns contiguous,
-  loaded with a single `ldp q0, q1`). 12 instructions per 8 indices.
-  Flat-subtree decode uses the same scalar D-bit unpacker as the
-  reference path; fast paths for `D ∈ {2,3,4,5,6,7,8}` one byte at a
-  time.
+Backends:
 
-- **SSE4.1** (x86-64): `pshufb`-based partition, same 8-wide approach
-  as NEON with the combined shuffle table.  Flat-subtree decode
-  mirrors the NEON scalar unpacker.
+- **Scalar**: portable C bitmap partition and scalar D-bit unpack.
+  Specialisations for `D ∈ {2,3,4,5,6,7,8}` in the unpack switch.
+  No SIMD — used on RISC-V and as a fallback.
+
+- **NEON** (AArch64): TBL-based 8-wide partition (`vqtbl1q_u8` over a
+  combined 8KB shuffle table loaded with a single `ldp q0, q1`,
+  12 instructions per 8 indices).  Bottom-up `tree_merge` via
+  `vqtbl1q_u8` over `expand_tab[mask]` (V4 strategy: 16-byte loads +
+  precomputed `(nr0, m1)` shuf, ~13-15% gain on M4).  Flat-subtree
+  SIMD unpack for `D ∈ {2,3,4,5,6}`; D=7/8 scalar.
+
+- **x86 SSE4.1 / AVX2** (x86-64 non-AVX-512): `pshufb`-based 8-wide
+  partition mirroring NEON.  Bottom-up `tree_merge` uses 2x-unrolled
+  stride-16 pshufb over `expand_tab[mask]`.  AVX2 widens
+  `merge_both_const` to 32-byte `pblendvb` and gives D=4 flat decode
+  a 32-byte vpshufb fast path.
 
 - **AVX-512 VBMI2** (x86-64): `vpcompressw` partition — 32 × uint16_t
-  per iteration in a single instruction. No shuffle table needed.
-  Available on Intel Granite Rapids (Xeon 6000P) and later.  The
-  flat-subtree D-bit unpack is currently scalar; a VBMI2
-  `vpmultishiftqb` implementation is on the shortlist (see IDEAS.md).
+  per iteration in a single instruction, no shuffle table.  BU
+  `tree_merge` via `vpexpandb` (64-byte chunks, ~0.023 ns/byte on
+  Xeon Granite Rapids).  Flat-subtree D=5/D=6 SIMD via
+  `vpermexvar_epi8` over zmm/ymm c2s registers (the AVX-512-only
+  wins).  Available on Ice Lake+ / Zen 4+.
 
 An **SVE** backend exists but is disabled: at 128-bit SVE (Graviton 4),
 `svcompact` handles only 4 × uint32 (requiring widen/narrow), which
@@ -228,20 +287,40 @@ vector lengths (e.g. Fujitsu A64FX).
    derives which symbols terminate at each level from the tree itself.
    This eliminates the 2x size overhead that explicit bitmaps caused.
 
-3. **In-place left partition**: The left (bit=0) partition is written
-   back into the input indices array. Safe because output position <=
-   input position (n_left <= j). The right (bit=1) partition goes to
-   a scratch buffer. Scratch space usage is O(N) total.
+3. **Bottom-up tree_merge decode**: Production decode is bottom-up
+   since 2026-05-12 (`5828ddb` K_right wire format).  Each call
+   decodes a subtree into a contiguous K-byte output buffer; internal
+   nodes recurse into children (which write to scratch), then merge
+   via the bitmap.  Beats the prior top-down scatter approach on
+   every benched distribution.  The K_right header (2 bytes per
+   non-leaf-child internal node) lets the decoder size each child's
+   buffer ahead of time instead of computing it from a popcount.
 
-4. **DFS-ordered encoding**: The encoder walks the tree in the same
-   DFS order as the decoder, emitting code bits at each internal node.
-   This makes the format self-describing given the Huffman tree — no
-   per-node headers or metadata.
+4. **DFS-ordered encoding**, v0.3 wire format (2026-05-13).  The
+   encoder walks the tree in the same DFS order as the decoder.
+   Per non-flat internal node, the on-the-wire record is
+   `[optional K_right:u16 LE][FSE marker:u8][bitmap or FSE
+   payload]`.  See `src/pivco_huffman_wire.h` for the authoritative
+   format spec.
 
-For step-by-step traces of the hot SIMD kernels (`partition_8`,
-`flat_dN_unpack`, `scatter_both_leaves`) with worked examples and
-register-state-per-instruction walkthroughs, see
-[`KERNELS.md`](KERNELS.md).
+5. **Per-node FSE coding of partition bitmaps** is implemented
+   but **experimental — not enabled in the headline bench
+   numbers below**.  When toggled on at runtime
+   (`pivco_huffman_set_fse_enabled(1)`, default on, or via the
+   bench's lack of `--no-fse`), heavily-skewed bitmaps get
+   FSE-compressed at encode time (gated on partition skew +
+   per-codeword cost) for ~25% compression-ratio win on heavy-skew
+   distributions (proba80, calgary_pic) at the cost of ~3-4× decode
+   speed on the FSE-firing nodes specifically.  The decode-speed
+   tradeoff isn't right yet for "default" status; see
+   [`IDEAS.md`](IDEAS.md) "FSE x2 / x4 parallel-stream wrapper" for
+   the planned ILP-based remediation.  The benchmark tables and
+   per-platform commentary below use `--no-fse` to reflect the
+   default-recommended path.
+
+For step-by-step traces of the hot SIMD kernels (NEON `partition_8`,
+`tree_merge`, `flat_dN_unpack`) with worked examples and register-
+state-per-instruction walkthroughs, see [`KERNELS.md`](KERNELS.md).
 
 ## Baselines
 
@@ -383,254 +462,279 @@ tree (see the `prose_pride` row).
 
 ## Benchmark Results
 
-**Methodology**: Decode a 4M-symbol sequence, repeated 25 times per
-timed run (100M symbols/run). 5 runs, drop 2 slowest, report median
+**Methodology**: Decode a 4M-symbol sequence, repeated 100 times per
+timed run (400M symbols/run). 5 runs, drop 2 slowest, report median
 of 3 best. Each codec uses its natural block size: PIVCO/trad use
-4096-8192 symbol blocks, huf0 uses 128KB chunks, rANS decodes full 4M.
+4096-8192 symbol blocks (auto-detected per backend), huf0 uses 128KB
+chunks, rANS decodes full 4M.
 
 Baselines include huf0 X1 (single-symbol lookup) and X2 (double-symbol
 lookup). "vs best" = best PIVCO / best of all other decoders.
 
-Full detailed results with system info in `results/` directory.
+Per-host raw sweep files in [`results/`](results/) — most recent on
+the current code at the time of this README is
+[`results/SUMMARY-20260515-unify-all.md`](results/SUMMARY-20260515-unify-all.md)
+(after the 2026-05-14 unify-framework refactor; see also
+[`results/SUMMARY-20260514-unify-framework.md`](results/SUMMARY-20260514-unify-framework.md)
+for the MAIN-set sweep that validated the refactor).
 
 ### Apple M4 Max (NEON, 128KB L1D, block 8192)
 
-*(as of [a1e742cded9f059d4e165177deca1ac8e26ba49e](../) commit, 2026-04-25; 30 reps × 4M
-symbols, median of 3 of 5 runs.  Full sweep file:
-[`results/20260425-2344-a1e742c-mega-sweep.md`](results/20260425-2344-a1e742c-mega-sweep.md).
-Real-world distributions (`html_wiki` … `chinese_text`) source files in
+*(post unify-framework refactor, 2026-05-15; 100 reps × 4M symbols,
+median of 3 of 5 runs.  Full sweep file:
+[`results/sweep_m4-20260515-unify-all-nofse.txt`](results/sweep_m4-20260515-unify-all-nofse.txt).
+Real-world distributions (`html_wiki` … `calgary_pic`) source files in
 [`extras/datasets/`](extras/datasets/).)*
 
 | Distribution  | PIVCO NEON | huf0 X1 | huf0 X2 | trad 4s | vs best |
 |---------------|----------:|--------:|--------:|--------:|--------:|
-| proba80       |      9335 |    1392 |    2584 |    1631 | **3.61x** |
-| proba50       |      4945 |    1386 |    2627 |    1495 | **1.88x** |
-| proba14       |      2819 |    1399 |    2541 |    1489 | **1.11x** |
-| english       |      3291 |    1360 |    2472 |    1556 | **1.33x** |
-| zipfian       |      2632 |    1353 |    1805 |    1551 | **1.46x** |
-| geometric     |      4959 |    1365 |    2572 |     687 | **1.93x** |
-| bell_s10      |      3125 |    1362 |    2325 |     673 | **1.34x** |
-| bell_s30      |      2366 |    1352 |    1428 |     680 | **1.66x** |
-| bell_s80      |      2857 |       0 |       0 |    1586 | **1.80x** |
-| proba02       |      2558 |    1363 |    1503 |    1486 | **1.70x** |
-| uniform       |      3928 |       0 |       0 |    1584 | **2.48x** |
-| sparse_4      |     44463 |    3479 |    5212 |    1619 | **8.53x** |
-| sparse_16     |     45491 |    3208 |    4565 |    1617 | **9.97x** |
-| flat_M3       |     22841 |    3507 |    5375 |    1618 | **4.25x** |
-| flat_M5       |     24004 |    3513 |    5127 |    1619 | **4.68x** |
-| flat_M6       |     21669 |    3421 |    4486 |    1607 | **4.83x** |
-| flat_M7       |      5017 |    3516 |    2748 |    1592 | **1.43x** |
-| two_sym_eq    |     25359 |    3477 |    5305 |    1620 | **4.78x** |
-| two_sym_90/10 |     25497 |    3476 |    5093 |    1622 | **5.01x** |
-| html_wiki     |      2429 |    1359 |    2186 |     676 | **1.11x** |
-| prose_pride   |      2586 |    1344 |    2398 |     678 | **1.08x** |
-| image_jpeg    |      2774 |    1356 |    1322 |    1558 | **1.78x** |
-| json_api      |      2580 |    1369 |    2273 |     677 | **1.13x** |
-| source_c      |      2917 |    1371 |    2232 |     679 | **1.31x** |
-| log_apache    |      2527 |    1353 |    2212 |     676 | **1.14x** |
-| dna_fasta     |      3785 |    1360 |    2625 |    1564 | **1.44x** |
-| csv_numeric   |      3562 |    1347 |    2530 |     681 | **1.41x** |
-| gzip_random   |      3950 |       0 |       0 |    1591 | **2.48x** |
-| chinese_text  |      2585 |    1341 |    2009 |     683 | **1.29x** |
+| proba80       |     15339 |    1360 |    2617 |    1605 | **5.91x** |
+| proba50       |      9151 |    1344 |    2550 |    1466 | **3.62x** |
+| proba14       |      5204 |    1338 |    2482 |    1461 | **2.10x** |
+| proba02       |      4516 |    1315 |    1472 |    1464 | **3.08x** |
+| bell_s10      |      6398 |    1314 |    2261 |    1457 | **2.83x** |
+| bell_s30      |      4329 |    1326 |    1402 |    1472 | **2.94x** |
+| bell_s80      |      4335 |       0 |       0 |    1567 | **2.77x** |
+| uniform       |      5017 |       0 |       0 |    1577 | **3.18x** |
+| english       |      6142 |    1314 |    2414 |    1508 | **2.55x** |
+| zipfian       |      4159 |    1305 |    1763 |    1508 | **2.36x** |
+| sparse_4      |     47619 |    3408 |    5034 |    1575 | **9.46x** |
+| sparse_16     |     46162 |    3120 |    4435 |    1579 | **10.68x** |
+| geometric     |      7360 |    1310 |    2500 |    1453 | **2.94x** |
+| two_sym_eq    |     24863 |    3411 |    5168 |    1583 | **4.82x** |
+| two_sym_90/10 |     24860 |    3397 |    4938 |    1580 | **5.03x** |
+| flat_M3       |     21478 |    3402 |    5244 |    1577 | **4.10x** |
+| flat_M5       |     24006 |    3407 |    5005 |    1572 | **4.80x** |
+| flat_M6       |     19963 |    3338 |    4363 |    1563 | **4.58x** |
+| flat_M7       |      4829 |    3420 |    2673 |    1562 | **1.43x** |
+| html_wiki     |      4316 |    1304 |    2110 |    1453 | **2.05x** |
+| prose_pride   |      4713 |    1299 |    2312 |    1458 | **2.04x** |
+| image_jpeg    |      4092 |    1302 |    1278 |    1509 | **2.71x** |
+| json_api      |      4267 |    1290 |    2199 |    1451 | **1.94x** |
+| source_c      |      4664 |    1305 |    2158 |    1472 | **2.18x** |
+| log_apache    |      4490 |    1305 |    2135 |    1457 | **2.10x** |
+| dna_fasta     |      8323 |    1320 |    2558 |    1515 | **3.25x** |
+| csv_numeric   |      6359 |    1305 |    2459 |    1461 | **2.59x** |
+| gzip_random   |      4931 |       0 |       0 |    1559 | **3.19x** |
+| chinese_text  |      4826 |    1311 |    1945 |    1452 | **2.50x** |
+| calgary_pic   |     11274 |    1292 |    2369 |    1460 | **4.76x** |
+
+(`--no-fse` numbers — FSE coding of partition bitmaps is a separate
+ratio/speed knob, see Implementation notes.)
 
 ### Intel Xeon 6975P-C (AVX-512 VBMI2 + VBMI, 48KB L1D, block 8192)
 
-*(as of [a1e742cded9f059d4e165177deca1ac8e26ba49e](../) commit, 2026-04-25; AWS `test-c8i`,
-2 vCPU, GCC 11.5.0, Amazon Linux 2023; 30 reps × 4M symbols)*
+*(post unify-framework refactor, 2026-05-15; AWS `test-c8i`,
+2 vCPU, GCC 11.5.0, Amazon Linux 2023; 100 reps × 4M symbols.
+Full sweep file:
+[`results/sweep_c8i-20260515-unify-all-nofse.txt`](results/sweep_c8i-20260515-unify-all-nofse.txt).)*
 
 | Distribution  | PIVCO AVX512 | huf0 X1 | huf0 X2 | trad 4s | vs best |
-|---------------|------------:|--------:|--------:|--------:|--------:|
-| proba80       |       5673 |    1062 |    1817 |     722 | **3.12x** |
-| proba50       |       2733 |    1062 |    1810 |     652 | **1.51x** |
-| proba14       |       1886 |    1065 |    1744 |     651 | **1.08x** |
-| english       |       2187 |    1059 |    1760 |     681 | **1.24x** |
-| zipfian       |       1749 |    1051 |    1263 |     681 | **1.39x** |
-| geometric     |       2846 |    1063 |    1810 |     274 | **1.57x** |
-| bell_s10      |       1967 |    1050 |    1613 |     273 | **1.22x** |
-| bell_s30      |       1397 |    1051 |     985 |     273 | **1.33x** |
-| bell_s80      |       2319 |       0 |       0 |     696 | **3.33x** |
-| proba02       |       1558 |    1051 |    1040 |     650 | **1.48x** |
-| uniform       |       4581 |       0 |       0 |     702 | **6.52x** |
-| sparse_4      |      24008 |    1066 |    1832 |     723 | **13.11x** |
-| sparse_16     |      20011 |    1067 |    1816 |     722 | **11.02x** |
-| flat_M3       |      21813 |    1067 |    1824 |     721 | **11.96x** |
-| flat_M5       |      18406 |    1065 |    1808 |     721 | **10.18x** |
-| flat_M6       |      17104 |    1063 |    1684 |     717 | **10.16x** |
-| flat_M7       |       3793 |    1063 |     921 |     708 | **3.57x** |
-| two_sym_eq    |       4628 |    1062 |    1826 |     722 | **2.53x** |
-| two_sym_90/10 |       8651 |    1062 |    1810 |     724 | **4.78x** |
-| html_wiki     |       1383 |    1054 |    1509 |     273 |   0.92x |
-| prose_pride   |       1487 |    1053 |    1660 |     274 |   0.90x |
-| image_jpeg    |       1968 |    1053 |     912 |     681 | **1.87x** |
-| json_api      |       1546 |    1057 |    1587 |     273 |   0.97x |
-| source_c      |       1556 |    1057 |    1551 |     273 | **1.00x** |
-| log_apache    |       1544 |    1060 |    1530 |     273 | **1.01x** |
-| dna_fasta     |       2662 |    1059 |    1804 |     682 | **1.48x** |
-| csv_numeric   |       1963 |    1060 |    1745 |     274 | **1.13x** |
-| gzip_random   |       4582 |       0 |       0 |     702 | **6.53x** |
-| chinese_text  |       1583 |    1053 |    1396 |     273 | **1.13x** |
+|---------------|----------:|--------:|--------:|--------:|--------:|
+| proba80       |     22581 |    1139 |    1930 |     798 | **11.70x** |
+| proba50       |     11091 |    1143 |    1927 |     723 | **5.76x** |
+| proba14       |      5849 |    1149 |    1862 |     722 | **3.14x** |
+| proba02       |      4388 |    1131 |    1108 |     721 | **3.88x** |
+| bell_s10      |      7240 |    1133 |    1722 |     721 | **4.20x** |
+| bell_s30      |      4693 |    1134 |    1051 |     721 | **4.14x** |
+| bell_s80      |      4202 |       0 |       0 |     775 | **5.44x** |
+| uniform       |      4415 |       0 |       0 |     786 | **5.63x** |
+| english       |      7909 |    1143 |    1875 |     757 | **4.22x** |
+| zipfian       |      4593 |    1132 |    1340 |     757 | **3.43x** |
+| sparse_4      |     24021 |    1138 |    1947 |     799 | **12.34x** |
+| sparse_16     |     20008 |    1146 |    1928 |     798 | **10.39x** |
+| geometric     |     10503 |    1146 |    1925 |     722 | **5.46x** |
+| two_sym_eq    |     26598 |    1128 |    1943 |     799 | **13.69x** |
+| two_sym_90/10 |     26551 |    1124 |    1922 |     799 | **13.81x** |
+| flat_M3       |     21834 |    1145 |    1937 |     799 | **11.28x** |
+| flat_M5       |     18481 |    1149 |    1917 |     796 | **9.64x** |
+| flat_M6       |     17137 |    1147 |    1770 |     793 | **9.69x** |
+| flat_M7       |      3727 |    1144 |     985 |     791 | **3.27x** |
+| html_wiki     |      4765 |    1136 |    1608 |     721 | **2.96x** |
+| prose_pride   |      5689 |    1135 |    1768 |     721 | **3.22x** |
+| image_jpeg    |      3891 |    1132 |     975 |     755 | **3.44x** |
+| json_api      |      5023 |    1138 |    1687 |     721 | **2.98x** |
+| source_c      |      5159 |    1139 |    1647 |     722 | **3.13x** |
+| log_apache    |      4899 |    1143 |    1628 |     722 | **3.01x** |
+| dna_fasta     |     13615 |    1144 |    1920 |     758 | **7.09x** |
+| csv_numeric   |      7156 |    1145 |    1861 |     722 | **3.84x** |
+| gzip_random   |      4416 |       0 |       0 |     786 | **5.63x** |
+| chinese_text  |      5623 |    1137 |    1483 |     720 | **3.79x** |
+| calgary_pic   |      9764 |    1128 |    1858 |     723 | **5.26x** |
 
 ### AWS Graviton 4 Neoverse V2 (NEON, 64KB L1D, block 8192)
 
-*(as of [a1e742cded9f059d4e165177deca1ac8e26ba49e](../) commit, 2026-04-25; AWS `test-c8g`,
-2 vCPU c8g.large pinned `taskset -c 0`, GCC 11.5.0, Amazon Linux 2023; 30 reps × 4M symbols.
-D=5/D=6 NEON paths gated off via `PIVCO_NEON_FAST_MULTI_TBL=0`.)*
+*(post unify-framework refactor, 2026-05-15; AWS `test-c8g`,
+2 vCPU c8g.large pinned `taskset -c 0`, GCC 11.5.0, Amazon Linux 2023;
+100 reps × 4M symbols.  Full sweep file:
+[`results/sweep_c8g-20260515-unify-all-nofse.txt`](results/sweep_c8g-20260515-unify-all-nofse.txt).
+D=5/D=6 NEON paths re-enabled on the BU direct path since 2026-05-15
+— see `IDEAS.md` and the lifted `PIVCO_NEON_FAST_MULTI_TBL` gate.)*
 
 | Distribution  | PIVCO NEON | huf0 X1 | huf0 X2 | trad 4s | vs best |
 |---------------|----------:|--------:|--------:|--------:|--------:|
-| proba80       |      4034 |     939 |    1680 |    1020 | **2.40x** |
-| proba50       |      2007 |     933 |    1686 |     838 | **1.19x** |
-| proba14       |      1132 |     936 |    1636 |     815 |   0.69x |
-| english       |      1167 |     931 |    1640 |     892 |   0.71x |
-| zipfian       |      1003 |     925 |    1189 |     889 |   0.84x |
-| geometric     |      1957 |     933 |    1680 |     229 | **1.17x** |
-| bell_s10      |      1293 |     926 |    1519 |     229 |   0.85x |
-| bell_s30      |       925 |     926 |     927 |     229 | **1.00x** |
-| bell_s80      |      1314 |       0 |       0 |     910 | **1.44x** |
-| proba02       |      1015 |     926 |     980 |     823 | **1.04x** |
-| uniform       |      2549 |       0 |       0 |     933 | **2.73x** |
-| sparse_4      |     15217 |     940 |    1686 |    1021 | **9.02x** |
-| sparse_16     |     15830 |     941 |    1651 |    1011 | **9.59x** |
-| flat_M3       |      6997 |     940 |    1685 |    1013 | **4.15x** |
-| flat_M5       |      3188 |     941 |    1655 |    1007 | **1.93x** |
-| flat_M6       |      2460 |     937 |    1541 |     979 | **1.60x** |
-| flat_M7       |      2786 |     936 |     858 |     953 | **2.92x** |
-| two_sym_eq    |     16000 |     938 |    1684 |    1021 | **9.50x** |
-| two_sym_90/10 |     16042 |     938 |    1666 |    1022 | **9.63x** |
-| html_wiki     |       925 |     927 |    1425 |     229 |   0.65x |
-| prose_pride   |       999 |     927 |    1564 |     227 |   0.64x |
-| image_jpeg    |      1236 |     923 |     849 |     872 | **1.34x** |
-| json_api      |       938 |     929 |    1493 |     228 |   0.63x |
-| source_c      |      1061 |     930 |    1453 |     228 |   0.73x |
-| log_apache    |       938 |     930 |    1443 |     229 |   0.65x |
-| dna_fasta     |      1531 |     935 |    1670 |     909 |   0.92x |
-| csv_numeric   |      1288 |     931 |    1632 |     228 |   0.79x |
-| gzip_random   |      2548 |       0 |       0 |     935 | **2.72x** |
-| chinese_text  |      1030 |     926 |    1319 |     229 |   0.78x |
+| proba80       |      8523 |    1049 |    1927 |    1029 | **4.42x** |
+| proba50       |      5095 |    1038 |    1935 |     900 | **2.63x** |
+| proba14       |      2630 |    1042 |    1869 |     897 | **1.41x** |
+| proba02       |      2271 |    1031 |    1117 |     894 | **2.03x** |
+| bell_s10      |      3180 |    1032 |    1709 |     897 | **1.86x** |
+| bell_s30      |      2192 |    1031 |    1060 |     894 | **2.07x** |
+| bell_s80      |      2165 |       0 |       0 |     992 | **2.18x** |
+| uniform       |      2398 |       0 |       0 |    1000 | **2.40x** |
+| english       |      3076 |    1037 |    1869 |     954 | **1.65x** |
+| zipfian       |      2116 |    1030 |    1350 |     955 | **1.57x** |
+| sparse_4      |     16714 |    1050 |    1945 |    1026 | **8.59x** |
+| sparse_16     |     15165 |    1052 |    1888 |    1020 | **8.04x** |
+| geometric     |      4155 |    1038 |    1935 |     899 | **2.15x** |
+| two_sym_eq    |     12860 |    1047 |    1939 |    1026 | **6.63x** |
+| two_sym_90/10 |     12856 |    1046 |    1917 |    1026 | **6.71x** |
+| flat_M3       |      9860 |    1052 |    1944 |    1024 | **5.10x** |
+| flat_M5       |      9195 |    1051 |    1868 |    1022 | **4.94x** |
+| flat_M6       |      9299 |    1044 |    1712 |    1019 | **5.43x** |
+| flat_M7       |      2519 |    1045 |     984 |    1011 | **2.41x** |
+| html_wiki     |      2184 |    1032 |    1610 |     906 | **1.36x** |
+| prose_pride   |      2417 |    1032 |    1784 |     895 | **1.36x** |
+| image_jpeg    |      2011 |    1034 |     970 |     948 | **1.98x** |
+| json_api      |      2179 |    1034 |    1689 |     898 | **1.29x** |
+| source_c      |      2428 |    1035 |    1655 |     898 | **1.47x** |
+| log_apache    |      2259 |    1036 |    1628 |     897 | **1.39x** |
+| dna_fasta     |      4512 |    1043 |    1914 |     959 | **2.36x** |
+| csv_numeric   |      3264 |    1037 |    1872 |     900 | **1.74x** |
+| gzip_random   |      2398 |       0 |       0 |     999 | **2.40x** |
+| chinese_text  |      2442 |    1032 |    1487 |     897 | **1.64x** |
+| calgary_pic   |      5926 |    1031 |    1839 |     901 | **3.22x** |
 
-### AMD EPYC 7R13 Zen 3 (SSE4.1, 32KB L1D, block 4096)
+### AMD EPYC 7R13 Zen 3 (AVX2 + SSE4.1, 32KB L1D, block 4096)
 
-*(as of [a1e742cded9f059d4e165177deca1ac8e26ba49e](../) commit, 2026-04-25; AWS `test-c6a`,
-2 vCPU, GCC 11.5.0, Amazon Linux 2023; 30 reps × 4M symbols)*
+*(post unify-framework refactor, 2026-05-15; AWS `test-c6a`,
+2 vCPU, clang-20, Amazon Linux 2023; 100 reps × 4M symbols.
+Full sweep file:
+[`results/sweep_c6a-20260515-unify-all-nofse.txt`](results/sweep_c6a-20260515-unify-all-nofse.txt).
+Note: Zen 3 lacks AVX-512, so codec_x86 (SSE/AVX2 paths) is dispatched
+— `vpcompressw`-class partition is unavailable, expressed via pshufb
++ compress_tab instead.)*
 
-| Distribution  | PIVCO SSE | huf0 X1 | huf0 X2 | trad 4s | vs best |
+| Distribution  | PIVCO SSE/AVX2 | huf0 X1 | huf0 X2 | trad 4s | vs best |
 |---------------|----------:|--------:|--------:|--------:|--------:|
-| proba80       |      1989 |     957 |    1741 |     861 | **1.14x** |
-| proba50       |      1248 |     953 |    1704 |     695 |   0.73x |
-| proba14       |       755 |     954 |    1639 |     692 |   0.46x |
-| english       |       883 |     949 |    1651 |     758 |   0.53x |
-| zipfian       |       703 |     944 |    1191 |     757 |   0.59x |
-| geometric     |      1257 |     953 |    1701 |     171 |   0.74x |
-| bell_s10      |       869 |     945 |    1515 |     171 |   0.57x |
-| bell_s30      |       631 |     941 |     935 |     171 |   0.67x |
-| bell_s80      |       915 |       0 |       0 |     771 | **1.19x** |
-| proba02       |       696 |     943 |     989 |     692 |   0.70x |
-| uniform       |      3080 |       0 |       0 |     816 | **3.78x** |
-| sparse_4      |      2714 |     960 |    1732 |     869 | **1.57x** |
-| sparse_16     |     21333 |     959 |    1724 |     860 | **12.37x** |
-| flat_M3       |      2506 |     960 |    1728 |     863 | **1.45x** |
-| flat_M5       |      2658 |     960 |    1714 |     856 | **1.55x** |
-| flat_M6       |      2238 |     958 |    1638 |     843 | **1.37x** |
-| flat_M7       |      2274 |     955 |     871 |     841 | **2.38x** |
-| two_sym_eq    |      1491 |     956 |    1733 |     871 |   0.86x |
-| two_sym_90/10 |      1493 |     957 |    1743 |     871 |   0.86x |
-| html_wiki     |       632 |     945 |    1418 |     171 |   0.45x |
-| prose_pride   |       688 |     945 |    1557 |     171 |   0.44x |
-| image_jpeg    |       850 |     943 |     866 |     757 |   0.90x |
-| json_api      |       662 |     948 |    1489 |     171 |   0.44x |
-| source_c      |       722 |     948 |    1451 |     171 |   0.50x |
-| log_apache    |       668 |     950 |    1437 |     171 |   0.46x |
-| dna_fasta     |      1125 |     950 |    1710 |     760 |   0.66x |
-| csv_numeric   |       915 |     950 |    1635 |     171 |   0.56x |
-| gzip_random   |      3081 |       0 |       0 |     816 | **3.77x** |
-| chinese_text  |       716 |     946 |    1310 |     171 |   0.55x |
+| proba80       |      8087 |    1081 |    1631 |     929 | **4.96x** |
+| proba50       |      4235 |    1083 |    1615 |     806 | **2.63x** |
+| proba14       |      1624 |     999 |    1530 |     802 | **1.06x** |
+| proba02       |      1245 |     992 |     912 |     802 | **1.26x** |
+| bell_s10      |      2213 |     992 |    1402 |     803 | **1.58x** |
+| bell_s30      |      1340 |     992 |     866 |     802 | **1.35x** |
+| bell_s80      |      1505 |       0 |       0 |     891 | **1.69x** |
+| uniform       |      2963 |       0 |       0 |     907 | **3.27x** |
+| english       |      1753 |     993 |    1533 |     861 | **1.14x** |
+| zipfian       |      1400 |     986 |    1104 |     860 | **1.27x** |
+| sparse_4      |      2945 |    1003 |    1619 |     931 | **1.82x** |
+| sparse_16     |     24519 |    1002 |    1606 |     928 | **15.27x** |
+| geometric     |      3751 |     999 |    1576 |     807 | **2.38x** |
+| two_sym_eq    |     36417 |     998 |    1622 |     931 | **22.45x** |
+| two_sym_90/10 |     36245 |    1001 |    1635 |     931 | **22.17x** |
+| flat_M3       |      2650 |    1004 |    1625 |     929 | **1.63x** |
+| flat_M5       |      2306 |    1005 |    1571 |     924 | **1.47x** |
+| flat_M6       |      2197 |    1002 |    1498 |     921 | **1.47x** |
+| flat_M7       |      2163 |     998 |     833 |     916 | **2.17x** |
+| html_wiki     |      1246 |     993 |    1312 |     802 |   0.95x |
+| prose_pride   |      1568 |     990 |    1452 |     803 | **1.08x** |
+| image_jpeg    |      1412 |     991 |     798 |     859 | **1.42x** |
+| json_api      |      1312 |     992 |    1391 |     802 |   0.94x |
+| source_c      |      1514 |     996 |    1340 |     803 | **1.13x** |
+| log_apache    |      1247 |     995 |    1323 |     802 |   0.94x |
+| dna_fasta     |      4535 |    1007 |    1596 |     864 | **2.84x** |
+| csv_numeric   |      2210 |     993 |    1533 |     805 | **1.44x** |
+| gzip_random   |      2967 |       0 |       0 |     908 | **3.27x** |
+| chinese_text  |      1503 |     995 |    1204 |     803 | **1.25x** |
+| calgary_pic   |      3827 |     991 |    1527 |     807 | **2.51x** |
 
-### Cross-Platform Summary (PIVCO SIMD vs best other decoder)
+### Cross-Platform Summary
 
-*(as of [a1e742cded9f059d4e165177deca1ac8e26ba49e](../) commit, 2026-04-25; see per-platform
-sections above for raw M/s.  Real-world byte distributions
-(`html_wiki` … `chinese_text`) sourced from the files in
-[`extras/datasets/`](extras/datasets/).)*
+*(post unify-framework refactor, 2026-05-15; see per-platform
+sections above for raw M/s.  `--no-fse` configuration — FSE
+parameter tuning trades decode speed for compression ratio on
+heavy-skew nodes, see Implementation notes.  Real-world byte
+distributions (`html_wiki` … `calgary_pic`) sourced from the files
+in [`extras/datasets/`](extras/datasets/).)*
 
-| Distribution | M4 NEON | Xeon AVX-512 | Graviton4 NEON | Zen3 SSE |
+`pivco_bu` vs `huf0_x2` (or `trad_4s` where `huf0` fails), one
+column per host:
+
+| Distribution | M4 NEON | Xeon AVX-512 | Graviton4 NEON | Zen3 SSE/AVX2 |
 |---|---:|---:|---:|---:|
-| **two_sym_90/10** | **5.01x** | **4.78x** | **9.63x** | 0.86x |
-| **two_sym_eq** | **4.78x** | **2.53x** | **9.50x** | 0.86x |
-| **proba80** | **3.61x** | **3.12x** | **2.40x** | **1.14x** |
-| **proba50** | **1.88x** | **1.51x** | **1.19x** | 0.73x |
-| **proba14** | **1.11x** | **1.08x** | 0.69x | 0.46x |
-| **english** | **1.33x** | **1.24x** | 0.71x | 0.53x |
-| **zipfian** | **1.46x** | **1.39x** | 0.84x | 0.59x |
-| **geometric** | **1.93x** | **1.57x** | **1.17x** | 0.74x |
-| **bell_s10** | **1.34x** | **1.22x** | 0.85x | 0.57x |
-| **bell_s30** | **1.66x** | **1.33x** | **1.00x** | 0.67x |
-| **bell_s80** | **1.80x** | **3.33x** | **1.44x** | **1.19x** |
-| **proba02** | **1.70x** | **1.48x** | **1.04x** | 0.70x |
-| **uniform** | **2.48x** | **6.52x** | **2.73x** | **3.78x** |
-| **sparse_4** | **8.53x** | **13.11x** | **9.02x** | **1.57x** |
-| **sparse_16** | **9.97x** | **11.02x** | **9.59x** | **12.37x** |
-| **flat_M3** | **4.25x** | **11.96x** | **4.15x** | **1.45x** |
-| **flat_M5** | **4.68x** | **10.18x** | **1.93x** | **1.55x** |
-| **flat_M6** | **4.83x** | **10.16x** | **1.60x** | **1.37x** |
-| **flat_M7** | **1.43x** | **3.57x** | **2.92x** | **2.38x** |
-| `html_wiki`     ‡ | **1.11x** | 0.92x | 0.65x | 0.45x |
-| `prose_pride`   ‡ | **1.08x** | 0.90x | 0.64x | 0.44x |
-| `image_jpeg`    ‡ | **1.78x** | **1.87x** | **1.34x** | 0.90x |
-| `json_api`      ‡ | **1.13x** | 0.97x | 0.63x | 0.44x |
-| `source_c`      ‡ | **1.31x** | **1.00x** | 0.73x | 0.50x |
-| `log_apache`    ‡ | **1.14x** | **1.01x** | 0.65x | 0.46x |
-| `dna_fasta`     ‡ | **1.44x** | **1.48x** | 0.92x | 0.66x |
-| `csv_numeric`   ‡ | **1.41x** | **1.13x** | 0.79x | 0.56x |
-| `gzip_random`   ‡ | **2.48x** | **6.53x** | **2.72x** | **3.77x** |
-| `chinese_text`  ‡ | **1.29x** | **1.13x** | 0.78x | 0.55x |
+| proba80         | **5.91x** | **11.70x** | **4.42x** | **4.96x** |
+| proba50         | **3.62x** | **5.76x** | **2.63x** | **2.63x** |
+| proba14         | **2.10x** | **3.14x** | **1.41x** | **1.06x** |
+| proba02         | **3.08x** | **3.88x** | **2.03x** | **1.26x** |
+| bell_s10        | **2.83x** | **4.20x** | **1.86x** | **1.58x** |
+| bell_s30        | **2.94x** | **4.14x** | **2.07x** | **1.35x** |
+| bell_s80        | **2.77x** | **5.44x** | **2.18x** | **1.69x** |
+| uniform         | **3.18x** | **5.63x** | **2.40x** | **3.27x** |
+| english         | **2.55x** | **4.22x** | **1.65x** | **1.14x** |
+| zipfian         | **2.36x** | **3.43x** | **1.57x** | **1.27x** |
+| sparse_4        | **9.46x** | **12.34x** | **8.59x** | **1.82x** |
+| sparse_16       | **10.68x** | **10.39x** | **8.04x** | **15.27x** |
+| geometric       | **2.94x** | **5.46x** | **2.15x** | **2.38x** |
+| two_sym_eq      | **4.82x** | **13.69x** | **6.63x** | **22.45x** |
+| two_sym_90/10   | **5.03x** | **13.81x** | **6.71x** | **22.17x** |
+| flat_M3         | **4.10x** | **11.28x** | **5.10x** | **1.63x** |
+| flat_M5         | **4.80x** | **9.64x** | **4.94x** | **1.47x** |
+| flat_M6         | **4.58x** | **9.69x** | **5.43x** | **1.47x** |
+| flat_M7         | **1.43x** | **3.27x** | **2.41x** | **2.17x** |
+| `html_wiki`   ‡ | **2.05x** | **2.96x** | **1.36x** | 0.95x |
+| `prose_pride` ‡ | **2.04x** | **3.22x** | **1.36x** | **1.08x** |
+| `image_jpeg`  ‡ | **2.71x** | **3.44x** | **1.98x** | **1.42x** |
+| `json_api`    ‡ | **1.94x** | **2.98x** | **1.29x** | 0.94x |
+| `source_c`    ‡ | **2.18x** | **3.13x** | **1.47x** | **1.13x** |
+| `log_apache`  ‡ | **2.10x** | **3.01x** | **1.39x** | 0.94x |
+| `dna_fasta`   ‡ | **3.25x** | **7.09x** | **2.36x** | **2.84x** |
+| `csv_numeric` ‡ | **2.59x** | **3.84x** | **1.74x** | **1.44x** |
+| `gzip_random` ‡ | **3.19x** | **5.63x** | **2.40x** | **3.27x** |
+| `chinese_text`‡ | **2.50x** | **3.79x** | **1.64x** | **1.25x** |
+| `calgary_pic` ‡ | **4.76x** | **5.26x** | **3.22x** | **2.51x** |
 
-‡ Real-world byte-frequency distributions (added 2026-04-25).
-Source files in [`extras/datasets/`](extras/datasets/), regeneration
-via `pivco_file_to_dist`.
+‡ Real-world byte-frequency distributions.  Source files in
+[`extras/datasets/`](extras/datasets/), regeneration via
+`pivco_file_to_dist`.  `calgary_pic` is the Calgary Corpus 1bpp
+CCITT scanned page (real-world proba80-shaped: 1.21 b/B entropy).
 
-Win counts: **M4 28/29**, **Xeon 25/29**, **Graviton 4 16/29**,
-**Zen 3 8/29**.  PIVCO is unconditionally the right default on
-Apple silicon; close to it on Xeon AVX-512 (only the deepest real-
-text trees lose, by ≤10%).  Graviton 4 and Zen 3 lose most of the
-real-text cluster — the existing IDEAS.md "Zen 3 hybrid block
-decoder" follow-up (per-table fallback to huf0_x2 when flat-subtree
-coverage is low) addresses this directly.
+Observations across the grid:
 
-**Post-flat-subtree (April 2026):**  The flat-subtree fast path
-(flat regions of the tree emit one N·D-bit packed region instead of
-D bitmap levels) flipped the historical loss cluster — `bell_*`,
-`proba02`, `zipfian`, `english` — from 0.44–0.98× into 0.48–2.76×,
-winning against huf0/trad_4s on M4 and Xeon AVX-512 for the full set,
-and on Graviton 4 for several.  Flat-tree synthetics (`uniform` / 
-`sparse_*` / `flat_M*`) also moved sharply up because the unified
-flat-subtree path bypasses the `indices[]` materialisation and prefill
-memset that the old dedicated prefix backend still paid.
+- **Cost asymmetry between platforms is the most striking part of
+  this data.**  Same algorithm, same C source, four backends —
+  ratios span 0.94× (Zen 3 deep-real-text) to 23× (Zen 3
+  `two_sym_eq`).  Xeon AVX-512 has the lowest minimum ratio (2.96×)
+  and the highest dynamic range; Graviton 4 sits between M4 and
+  Zen 3 on every dimension.
+- **The K_right wire format (`5828ddb`, 2026-05-12) is the big
+  recent landing.**  Real-text BU decode wins jumped from
+  0.44-1.08× in late April to 0.94-3.22× now.  The `vpcompressw`
+  partition + K_right-sized child buffers together amortise the
+  per-node overhead that real-text trees (many internal nodes,
+  Dmax 15) used to lose to.
+- **`vpcompressw` matters on the partition path, but the BU
+  tree_merge bridge made it less critical.**  Zen 3 has no
+  `vpcompressw` and now wins 27/30 distributions — up from 8/29
+  in April.  The partition cost is still real (the deepest-tree
+  real-text distributions are the closest-to-parity losses) but
+  the structural advantage of AVX-512 has narrowed.
+- **Graviton 4 D=5/D=6 SIMD flat-decode was briefly disabled** by
+  a too-broad uarch gate in the unify-framework refactor.
+  Restored 2026-05-15; before the fix, `flat_M5` was 1.93× on c8g
+  vs the 4.94× shown above.  The `vqtbl{2,4}q_u8`-over-32/64-byte-
+  source pattern remains slow on Neoverse-V2 at small n, which is
+  why the gate exists in the first place; the BU direct path keeps
+  n large enough to amortise.
+- **`two_sym_*` ratios spike on Zen 3 (22-23×)** because those are
+  the only synthetic distributions where BOTH_LEAVES-at-root
+  fires, hitting the per-block fast-path that bypasses
+  `codec_decode_subtree` entirely.  The recent `8be22e7` restore
+  of that fast path was the difference between 1.03× and 22.5×
+  on these rows.
 
-Platform coverage of wins across the **29-distribution grid** (19
-synthetic + 10 real-world from the
-[20260425-2344 mega sweep](results/20260425-2344-a1e742c-mega-sweep.md)):
-- **Apple M4 Max (NEON)**: 28/29 wins.  Loss is only `bell_s30` ≈
-  parity (1.00×); everything else ≥ 1.08×.  Real-world distributions
-  all win 1.08–2.48×.
-- **Intel Xeon 6975P-C (AVX-512)**: 25/29 wins.  Remaining losses are
-  `proba14` 0.69× ⚠ wait that's Graviton — Xeon losses are deepest
-  real text: `prose_pride` 0.90×, `html_wiki` 0.92×, `json_api`
-  0.97×, plus synthetic `proba14` is at parity (1.08×) just barely
-  winning.  AVX-512's `vpcompressw` partition stays fast but real
-  prose's max_len 15 amortises poorly.
-- **AWS Graviton 4 (NEON)**: 16/29 wins.  Most real-world text loses
-  at 0.63–0.78× (`prose_pride` 0.64×, `html_wiki` 0.65×,
-  `json_api` 0.63×, `chinese_text` 0.78×).  Only `image_jpeg` 1.34×
-  and `gzip_random` 2.72× win on real data.  Graviton 4 NEON `tbl`
-  throughput is below M4's; partition cost outside flat subtrees
-  dominates on deep trees.
-- **AMD EPYC 7R13 (Zen 3 SSE4.1)**: 8/29 wins.  Flat-tree synthetics
-  win cleanly (`uniform` 3.78×, `flat_M*` 1.4–2.4×, `sparse_16`
-  12.4×).  Real-world text crashes to 0.44–0.55× — pure SSE4.1 lacks
-  the `vpcompressw`-class partition primitive, so the per-cycle
-  partition cost matters more here.  See IDEAS.md "Zen 3 hybrid
-  block decoder" for the remediation plan (per-table fallback to
-  huf0_x2 when flat-subtree coverage is low).
+FSE-coded bitmaps are a separate ratio/speed knob, see
+Implementation notes; enabling FSE moves several of the
+proba80-shaped distributions toward lower decode speed and ~25%
+smaller encoded size.
 
 ### Compression Ratio
 
@@ -639,13 +743,13 @@ overhead being byte-alignment rounding at each tree node.
 
 ### Block Size Sweep
 
-*(Numbers below are pre-flat-subtree (early 2026-04) and stale for
-flat-heavy distributions where the new fast path dominates.  The
-N-dependence for stick-tree-shaped distributions (proba80/50) is
-still a useful reference.  A fresh block-size sweep against the
-current code is still TODO; it hasn't been re-run since the major
-flat-subtree, leaf-fusion, and Graviton 4 D=5/D=6 gate changes
-landed.)*
+*(Numbers below are pre-flat-subtree (early 2026-04) and stale.
+They pre-date flat-subtree, leaf-fusion, the Graviton 4 D=5/D=6
+gate, the K_right wire format, FSE-coded bitmaps, and the
+unify-framework codec refactor.  N-dependence for stick-tree-shaped
+distributions (proba80/50) was always closest to flat across N once
+the prefill memset landed; the table below is consistent with that.
+A fresh block-size sweep on the current code is still TODO.)*
 
 PIVCO NEON decode throughput (M/s) by block size. Measured with the
 4M realistic workload (each block size is recompiled and re-benchmarked):
@@ -671,6 +775,13 @@ PIVCO NEON decode throughput (M/s) by block size. Measured with the
 Bottoms-up per-element cost of every SIMD primitive the decoder uses,
 isolated from the surrounding control flow.  Useful for reasoning about
 which inner-loop pieces are the bottleneck at a given D / table shape.
+
+The primitives below are the same bodies that landed in the
+`primitives_<backend>.h` headers as part of the 2026-05-14
+unify-framework refactor — the microbench cost is functionally
+identical, only the file location changed.  `flat_scatter_*` were
+the TD-era scatter variants (since retired); production decode uses
+the contiguous `flat_direct_*` rows.
 
 Measured by [`bench/bench_micro.c`](bench/bench_micro.c) on all four
 test platforms (block N = 8192, 100k repeats per row, ~820M elements
@@ -782,6 +893,22 @@ the cheap direct path; deep-tree distributions (`prose_pride`,
 `html_wiki`) pay the partition cost per level repeatedly.
 
 ## Profiling
+
+> **Historical snapshot.**  The profile below was taken on the
+> top-down decoder (`decode_node_neon`, `partition_8`,
+> `scatter_both_leaves`, `flat_decode_scatter_neon`) on 2026-04-26.
+> The production decoder has been bottom-up since 2026-05-12
+> (`5828ddb` K_right wire format) and the source files referenced
+> here (`pivco_huffman_neon.c`) have been folded into
+> `pivco_huffman_codec.c` + `pivco_huffman_primitives_neon.h` as of
+> the 2026-05-14 unify-framework refactor.  The per-function names
+> below no longer exist verbatim.  The section is retained because
+> the qualitative breakdown — partition body 41%, flat-subtree 24%,
+> leaf scatter 18%, recursion glue 12% — and especially the
+> conclusion that **NEON store-port throughput, not TBL latency, is
+> the partition bottleneck** still describe the bottom-up decoder
+> faithfully (the BU `tree_merge` is store-port bound for the same
+> reason).  A BU re-profile is planned.
 
 **Last refreshed:** 2026-04-26 07:30 UTC, commit
 [`0a99f6c`](../) (post AVX-512 / SSE4.1 bench port, leaf-child fusion +
