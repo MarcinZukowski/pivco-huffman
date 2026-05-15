@@ -289,6 +289,11 @@ int pivco_huffman_decode_sve(const uint8_t *in, size_t in_len,
 int pivco_huffman_encode_avx512(const uint8_t *symbols,
                                  const pivco_huffman_table_t *table,
                                  uint8_t *out, size_t *out_len);
+
+/* Bottom-up tree_merge decode (AVX-512 VBMI2). */
+int pivco_huffman_decode_bu_avx512(const uint8_t *in, size_t in_len,
+                                    const pivco_huffman_table_t *table,
+                                    uint8_t *symbols, size_t *consumed);
 #endif
 
 /* Top-down (TD) decode entry points have been retired (2026-05-14).

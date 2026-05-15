@@ -161,7 +161,6 @@ elseif(TARGET_ARCH STREQUAL "x86_64" OR TARGET_ARCH STREQUAL "amd64")
     if(COMPILER_HAS_AVX512_VBMI2 AND CPU_HAS_AVX512 AND NOT CPU_HAS_AVX512 STREQUAL "0")
         message(STATUS "x86_64 detected — enabling AVX-512 VBMI2 + AVX2 + SSE4.1")
         list(APPEND PIVCO_SOURCES
-            src/pivco_huffman_avx512.c
             src/pivco_huffman_x86_tables.c)
         add_compile_definitions(PIVCO_HAS_AVX512=1 PIVCO_HAS_AVX2=1 PIVCO_HAS_SSE4=1)
         add_compile_options(-mavx512f -mavx512bw -mavx512vl -mavx512vbmi -mavx512vbmi2
@@ -208,14 +207,20 @@ if(TARGET_ARCH STREQUAL "arm64" OR TARGET_ARCH STREQUAL "aarch64")
 endif()
 
 if(TARGET_ARCH STREQUAL "x86_64" OR TARGET_ARCH STREQUAL "amd64")
-    # All x86 tiers (SSE-only / AVX2 / AVX-512 VBMI2) build the same
-    # pivco_codec_x86 object lib.  primitives_x86.h gates AVX2 and
-    # AVX-512 fast paths internally via PIVCO_HAS_AVX2 / __AVX512VBMI2__,
-    # so a single OBJECT lib serves all three -- we don't fork into
-    # separate codec_x86_sse / codec_x86_avx2 / codec_x86_avx512.
+    # pivco_codec_x86 covers SSE4.1 + AVX2 tiers (primitives_x86.h gates
+    # AVX2 fast paths via PIVCO_HAS_AVX2).  AVX-512 builds add codec_avx512
+    # below; the runtime dispatcher picks one or the other.  We don't fork
+    # codec_x86 itself into per-ISA flavors -- one OBJECT lib serves the
+    # SSE / AVX2 spectrum.
     add_library(pivco_codec_x86 OBJECT src/pivco_huffman_codec.c)
     target_compile_definitions(pivco_codec_x86 PRIVATE PIVCO_BACKEND_X86=1)
     target_include_directories(pivco_codec_x86 PRIVATE include)
+endif()
+
+if(COMPILER_HAS_AVX512_VBMI2 AND CPU_HAS_AVX512 AND NOT CPU_HAS_AVX512 STREQUAL "0")
+    add_library(pivco_codec_avx512 OBJECT src/pivco_huffman_codec.c)
+    target_compile_definitions(pivco_codec_avx512 PRIVATE PIVCO_BACKEND_AVX512=1)
+    target_include_directories(pivco_codec_avx512 PRIVATE include)
 endif()
 
 # huff0/FSE library (for baseline comparison)
@@ -261,14 +266,16 @@ endif()
 
 # Library — backend-agnostic sources plus the per-backend codec objects.
 # The scalar codec is always linked.  NEON is linked on aarch64 hosts;
-# x86 (one OBJECT lib serving SSE / AVX2 / AVX-512 VBMI2 via internal
-# gating) is linked on x86_64 hosts.  AVX-512 still comes from its
-# legacy .c file via PIVCO_SOURCES until Phase 5 lands.
+# x86 (SSE / AVX2) is linked on x86_64 hosts; AVX-512 is additionally
+# linked on AVX-512 VBMI2 hosts (the dispatcher picks at runtime).
 set(PIVCO_CODEC_OBJECTS $<TARGET_OBJECTS:pivco_codec_scalar>)
 if(TARGET_ARCH STREQUAL "arm64" OR TARGET_ARCH STREQUAL "aarch64")
     list(APPEND PIVCO_CODEC_OBJECTS $<TARGET_OBJECTS:pivco_codec_neon>)
 elseif(TARGET_ARCH STREQUAL "x86_64" OR TARGET_ARCH STREQUAL "amd64")
     list(APPEND PIVCO_CODEC_OBJECTS $<TARGET_OBJECTS:pivco_codec_x86>)
+    if(COMPILER_HAS_AVX512_VBMI2 AND CPU_HAS_AVX512 AND NOT CPU_HAS_AVX512 STREQUAL "0")
+        list(APPEND PIVCO_CODEC_OBJECTS $<TARGET_OBJECTS:pivco_codec_avx512>)
+    endif()
 endif()
 add_library(pivco_huffman
     ${PIVCO_SOURCES}

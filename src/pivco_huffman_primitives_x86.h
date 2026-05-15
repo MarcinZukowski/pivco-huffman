@@ -11,21 +11,15 @@
  * _mm_mullo_epi32 multiply-as-shift for D=3) and falls back to scalar
  * for D=5/6/7 (no uint64 per-lane shift in SSE).
  *
- * AVX-512 VBMI2 specific fast paths are gated by __AVX512VBMI2__ inside
- * this file (BU tree_merge 64-byte chunks via vpexpandb; popcount via
- * VPOPCNTQ; D=5/D=6 flat decode via pivco_huffman_flat_decode_direct_
- * avx512_ in pivco_huffman_avx512.c).  This matches the legacy
- * bu_x86.c layout the codec replaces: there is no separate
- * pivco_huffman_decode_bu_avx512 entry point today -- AVX-512 hosts
- * dispatch through the same pivco_huffman_decode_bu_x86 /
- * pivco_huffman_encode_x86 entries.  Phase 5 will likely split them
- * when adding a dedicated codec_avx512 OBJECT library.
+ * AVX-512 VBMI2 fast paths live in primitives_avx512.h (Phase 5
+ * landed 2026-05-14).  On AVX-512 hosts the runtime dispatcher routes
+ * to codec_avx512, so this file does NOT need to gate __AVX512* fast
+ * paths internally.  Even when the codec_x86 OBJECT lib is compiled
+ * on an AVX-512 host (with -mavx512vbmi2 enabled globally), it's
+ * never reached at runtime there.
  *
  * Internal header.  Included by pivco_huffman_primitives.h when
- * PIVCO_BACKEND_X86 is defined.  Also #included by the legacy
- * src/pivco_huffman_bu_x86.c during the Phase 4 transition (the
- * legacy file calls these primitives directly until step 4.3 retires
- * it).  Not part of the public API.
+ * PIVCO_BACKEND_X86 is defined.  Not part of the public API.
  */
 
 #ifndef PIVCO_HUFFMAN_PRIMITIVES_X86_H
@@ -60,21 +54,10 @@ static inline void codec_init_x86(void)
 /* ---------- Decode primitives (bottom-up) ---------- */
 
 /* popcount_K_right_x86 — count "1" bits in the first K bits of bm.
- *
- * Three tiers, picked at compile time:
- *
- *  - AVX-512 VPOPCNTQ (Ice Lake+ / Zen 4+): 64-byte main loop with
- *    _mm512_popcnt_epi64 — one ZMM popcount = 8 × 64-bit popcounts in
- *    a single 1c-throughput instruction.  Note: gated on the macro
- *    rather than PIVCO_HAS_AVX512 since this file is shared with the
- *    SSE/AVX2 tier; on AVX-512 hosts the codec selects the AVX-512
- *    backend instead, so this path is rarely hit there, but it's
- *    correct if it is.
- *  - Scalar 64-bit POPCNT, 4-way unrolled.
- *  - Mop-up + partial byte tail.
- *
- * `nbytes` is derivable from K; kept for signature stability with the
- * NEON BU backend. */
+ * Scalar 64-bit POPCNT, 4-way unrolled.  No codec.c caller (codec uses
+ * wire_read_kr_header for the value at read time); kept for signature
+ * stability with the NEON BU backend.  `nbytes` is derivable from K.
+ * VPOPCNTQ fast path lives in primitives_avx512.h. */
 static inline int popcount_K_right_x86(const uint8_t *bm, int nbytes, int K)
 {
     (void)nbytes;
@@ -84,14 +67,6 @@ static inline int popcount_K_right_x86(const uint8_t *bm, int nbytes, int K)
     int b = 0;
     int K_right = 0;
 
-#ifdef __AVX512VPOPCNTDQ__
-    __m512i acc = _mm512_setzero_si512();
-    for (; b + 64 <= full_bytes; b += 64) {
-        __m512i v = _mm512_loadu_si512((const __m512i *)(bm + b));
-        acc = _mm512_add_epi64(acc, _mm512_popcnt_epi64(v));
-    }
-    K_right = (int)_mm512_reduce_add_epi64(acc);
-#else
     uint64_t a0 = 0, a1 = 0, a2 = 0, a3 = 0;
     for (; b + 32 <= full_bytes; b += 32) {
         uint64_t v0, v1, v2, v3;
@@ -105,7 +80,6 @@ static inline int popcount_K_right_x86(const uint8_t *bm, int nbytes, int K)
         a3 += __builtin_popcountll(v3);
     }
     K_right = (int)(a0 + a1 + a2 + a3);
-#endif
 
     for (; b + 8 <= full_bytes; b += 8) {
         uint64_t v;
@@ -127,11 +101,8 @@ static inline int popcount_K_right_x86(const uint8_t *bm, int nbytes, int K)
  * _mm_unpacklo_epi64(L8, R8) with expand_tab[mask].  2x-unrolled
  * stride-16 main path: two independent 8-byte merges per iter so OOO
  * overlaps loads / shuffles / stores.  Only lc/rc cursor adds carry a
- * real dep, and that's short-latency add.
- *
- * AVX-512 VBMI2: 64-byte chunks via two _mm512_maskz_expandloadu_epi8
- * calls (one with mask, one with ~mask) ORed together.  ~0.023 ns/byte
- * on Xeon Ice Lake+ per microbench. */
+ * real dep, and that's short-latency add.  AVX-512 VBMI2 64-byte
+ * vpexpandb fast path lives in primitives_avx512.h. */
 static inline void tree_merge_x86(const uint8_t *bm, int K,
                                     const uint8_t *left,
                                     const uint8_t *right,
@@ -140,20 +111,6 @@ static inline void tree_merge_x86(const uint8_t *bm, int K,
     PROF_TIC();
     int lc = 0, rc = 0;
     int j = 0;
-#ifdef __AVX512VBMI2__
-    for (; j + 64 <= K; j += 64) {
-        uint64_t mask;
-        memcpy(&mask, bm + (j >> 3), 8);
-        __mmask64 m  = (__mmask64)mask;
-        __mmask64 nm = ~m;
-        __m512i L = _mm512_maskz_expandloadu_epi8(nm, left + lc);
-        __m512i R = _mm512_maskz_expandloadu_epi8(m,  right + rc);
-        __m512i o = _mm512_or_si512(L, R);
-        _mm512_storeu_si512((__m512i *)(out + j), o);
-        int nr = __builtin_popcountll(mask);
-        rc += nr; lc += (64 - nr);
-    }
-#endif
     for (; j + 16 <= K; j += 16) {
         uint8_t m0 = bm[j >> 3];
         __m128i L0 = _mm_loadl_epi64((const __m128i *)(left + lc));
@@ -205,18 +162,6 @@ static inline void tree_merge_bcast_left_x86(const uint8_t *bm, int K,
     int rc = 0;
     int j = 0;
     __m128i Lbcast8 = _mm_set1_epi8((char)left_sym);
-#ifdef __AVX512VBMI2__
-    __m512i Lbcast64 = _mm512_set1_epi8((char)left_sym);
-    for (; j + 64 <= K; j += 64) {
-        uint64_t mask;
-        memcpy(&mask, bm + (j >> 3), 8);
-        __mmask64 m  = (__mmask64)mask;
-        __m512i R = _mm512_maskz_expandloadu_epi8(m, right + rc);
-        __m512i o = _mm512_mask_mov_epi8(Lbcast64, m, R);
-        _mm512_storeu_si512((__m512i *)(out + j), o);
-        rc += __builtin_popcountll(mask);
-    }
-#endif
     for (; j + 16 <= K; j += 16) {
         uint8_t m0 = bm[j >> 3];
         __m128i R0 = _mm_loadl_epi64((const __m128i *)(right + rc));
@@ -260,19 +205,6 @@ static inline void tree_merge_bcast_right_x86(const uint8_t *bm, int K,
     int lc = 0;
     int j = 0;
     __m128i Rbcast8 = _mm_set1_epi8((char)right_sym);
-#ifdef __AVX512VBMI2__
-    __m512i Rbcast64 = _mm512_set1_epi8((char)right_sym);
-    for (; j + 64 <= K; j += 64) {
-        uint64_t mask;
-        memcpy(&mask, bm + (j >> 3), 8);
-        __mmask64 m  = (__mmask64)mask;
-        __mmask64 nm = ~m;
-        __m512i L = _mm512_maskz_expandloadu_epi8(nm, left + lc);
-        __m512i o = _mm512_mask_mov_epi8(L, m, Rbcast64);
-        _mm512_storeu_si512((__m512i *)(out + j), o);
-        lc += 64 - __builtin_popcountll(mask);
-    }
-#endif
     for (; j + 16 <= K; j += 16) {
         uint8_t m0 = bm[j >> 3];
         __m128i L0 = _mm_loadl_epi64((const __m128i *)(left + lc));
@@ -513,31 +445,16 @@ static inline void flat_decode_direct_x86_inner(uint8_t *symbols, int n,
 #undef DST_DIRECT
 }
 
-/* AVX-512 VBMI2 D=5/D=6 fast paths live in pivco_huffman_avx512.c.
- * On AVX-512 hosts the codec routes flat decode through that entry
- * point (vpmultishiftqb-based D=5/D=6 unpacks beat the scalar fallback
- * by ~3x).  Phase 5 will pull this into primitives_avx512.h alongside
- * a dedicated codec_avx512 OBJECT lib. */
-#ifdef PIVCO_HAS_AVX512
-extern void pivco_huffman_flat_decode_direct_avx512_(uint8_t *symbols, int n,
-                                                      const uint8_t *bm, int D,
-                                                      const uint8_t *c2s);
-#endif
-
 /* flat_decode_to_buffer_x86 — D-bit flat-subtree decode into a
- * contiguous output buffer.  AVX-512 hosts route through the avx512.c
- * entry for its D=5/D=6 fast paths; otherwise calls the in-file
- * dispatcher (AVX2 D=4 32-byte path or SSE D=4 16-byte path). */
+ * contiguous output buffer.  AVX2 D=4 32-byte path or SSE D=4 16-byte
+ * path; scalar unrolled tail for other D.  AVX-512 D=5/D=6 fast paths
+ * live in primitives_avx512.h. */
 static inline void flat_decode_to_buffer_x86(uint8_t *out, int n,
                                                const uint8_t *bm, int D,
                                                const uint8_t *c2s)
 {
     PROF_TIC();
-#ifdef PIVCO_HAS_AVX512
-    pivco_huffman_flat_decode_direct_avx512_(out, n, bm, D, c2s);
-#else
     flat_decode_direct_x86_inner(out, n, bm, D, c2s);
-#endif
     PROF_TOC(PROF_BU_FLAT_DECODE, n);
 }
 

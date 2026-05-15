@@ -127,13 +127,14 @@ int pivco_huffman_decode(const uint8_t *in, size_t in_len,
                          const pivco_huffman_table_t *table,
                          uint8_t *symbols, size_t *consumed)
 {
-    /* Bottom-up tree_merge is the primary decode path (2026-05-12 K_right
-     * landing -- see results/SUMMARY-20260512-kr-landing.md).  Top-down
-     * stream-scatter is retired but kept compiled in for ratio comparisons
-     * via pivco_huffman_decode_{neon,x86,avx512} direct entry points. */
+    /* Bottom-up tree_merge is the production decode path (since 2026-05-12
+     * K_right landing).  Each backend's BU entry comes from codec.c
+     * compiled with the matching PIVCO_BACKEND_* define. */
     switch (resolve_impl()) {
     case PIVCO_IMPL_NEON:
-#if defined(PIVCO_HAS_AVX512) || defined(PIVCO_HAS_SSE4)
+#ifdef PIVCO_HAS_AVX512
+        return pivco_huffman_decode_bu_avx512(in, in_len, table, symbols, consumed);
+#elif defined(PIVCO_HAS_SSE4)
         return pivco_huffman_decode_bu_x86(in, in_len, table, symbols, consumed);
 #elif defined(PIVCO_HAS_NEON)
         return pivco_huffman_decode_bu_neon(in, in_len, table, symbols, consumed);
