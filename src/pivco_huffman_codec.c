@@ -423,11 +423,38 @@ int CODEC_DECODE_ENTRY(const uint8_t *in, size_t in_len,
 
     const int N = PIVCO_BLOCK_SIZE;
     const pivco_tree_node_t *root = &table->tree[table->tree_root];
+    const uint8_t *ptr = in;
 
     /* Root-is-leaf: fill everything with the single symbol. */
     if (root->symbol >= 0) {
         memset(symbols, (uint8_t)root->symbol, (size_t)N);
         *consumed = 0;
+        return PIVCO_OK;
+    }
+
+    /* Fast path: BOTH_LEAVES at root.  Common on heavily-skewed
+     * distributions (proba80, two_sym_eq, calgary_pic) where one
+     * symbol dominates and its tree has just a 1-bit code: hot blocks
+     * collapse to "read the K-bit partition, blend two symbols".  The
+     * legacy bu_neon / bu_x86 entries kept this fast path and it
+     * accounted for the proba80 win: skipping the recursive
+     * codec_decode_subtree machinery (switch dispatch + bm_scratch
+     * stack frame + scratch TLS reference) saves ~1.5 us per block on
+     * Apple M4 and Xeon Granite Rapids, where the actual merge is
+     * only ~200 ns.  Lost during the unify-framework refactor;
+     * restored 2026-05-14 after a ~3-4x regression on proba80 across
+     * all hosts. */
+    if ((pivco_node_type_t)table->node_type[table->tree_root]
+        == PIVCO_NODE_BOTH_LEAVES) {
+        uint8_t bm_scratch[PIVCO_BLOCK_SIZE / 8 + 16];
+        const uint8_t *bm = wire_read_bitmap(&ptr, N, bm_scratch);
+        const pivco_tree_node_t *left_child  = &table->tree[root->left];
+        const pivco_tree_node_t *right_child = &table->tree[root->right];
+        prim_merge_both_const(bm, N,
+                               (uint8_t)left_child->symbol,
+                               (uint8_t)right_child->symbol,
+                               symbols);
+        *consumed = (size_t)(ptr - in);
         return PIVCO_OK;
     }
 
@@ -437,7 +464,6 @@ int CODEC_DECODE_ENTRY(const uint8_t *in, size_t in_len,
     static __thread uint8_t scratch[(size_t)PIVCO_BLOCK_SIZE *
                                      (PIVCO_MAX_CODE_LEN + 2)];
 
-    const uint8_t *ptr = in;
     codec_decode_subtree(table, table->tree_root, N,
                           symbols, &ptr, scratch);
 
