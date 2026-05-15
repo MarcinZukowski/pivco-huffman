@@ -130,8 +130,6 @@ endif()
 if(TARGET_ARCH STREQUAL "arm64" OR TARGET_ARCH STREQUAL "aarch64")
     message(STATUS "ARM64 detected — enabling NEON")
     list(APPEND PIVCO_SOURCES
-        src/pivco_huffman_neon.c
-        src/pivco_huffman_bu_neon.c
         src/pivco_huffman_neon_tables.c)
     add_compile_definitions(PIVCO_HAS_NEON=1)
     # Note: SVE backend exists (pivco_huffman_sve.c) but svcompact at
@@ -190,13 +188,20 @@ endif()
 # (otherwise PIVCO_BLOCK_SIZE auto-detection would fall to the 4096
 # scalar default on every non-arm64 host).
 #
-# Phase 1+2: only the scalar codec is wired through codec.c; NEON /
-# x86 / AVX-512 still build from their legacy .c files for now.  As
-# those ports land in Phase 3+/4+/5+, the legacy .c files are
-# replaced one tier at a time by the corresponding codec object.
+# Scalar is always built.  NEON is built on aarch64 hosts (Phase 3
+# cutover landed 2026-05-14, replacing the legacy
+# pivco_huffman_neon.c + pivco_huffman_bu_neon.c).  x86 and AVX-512
+# still build from their legacy .c files until Phase 4 and Phase 5
+# of the unify-framework refactor land.
 add_library(pivco_codec_scalar OBJECT src/pivco_huffman_codec.c)
 target_compile_definitions(pivco_codec_scalar PRIVATE PIVCO_BACKEND_SCALAR=1)
 target_include_directories(pivco_codec_scalar PRIVATE include)
+
+if(TARGET_ARCH STREQUAL "arm64" OR TARGET_ARCH STREQUAL "aarch64")
+    add_library(pivco_codec_neon OBJECT src/pivco_huffman_codec.c)
+    target_compile_definitions(pivco_codec_neon PRIVATE PIVCO_BACKEND_NEON=1)
+    target_include_directories(pivco_codec_neon PRIVATE include)
+endif()
 
 # huff0/FSE library (for baseline comparison)
 set(HUF0_SOURCES
@@ -240,9 +245,17 @@ else()
 endif()
 
 # Library — backend-agnostic sources plus the per-backend codec objects.
+# The scalar codec is always linked.  The NEON codec is linked on aarch64
+# hosts only (the codec_neon OBJECT library is only defined there); x86
+# and AVX-512 still come from their legacy .c files via PIVCO_SOURCES
+# until Phase 4 / Phase 5 of the unify-framework refactor.
+set(PIVCO_CODEC_OBJECTS $<TARGET_OBJECTS:pivco_codec_scalar>)
+if(TARGET_ARCH STREQUAL "arm64" OR TARGET_ARCH STREQUAL "aarch64")
+    list(APPEND PIVCO_CODEC_OBJECTS $<TARGET_OBJECTS:pivco_codec_neon>)
+endif()
 add_library(pivco_huffman
     ${PIVCO_SOURCES}
-    $<TARGET_OBJECTS:pivco_codec_scalar>
+    ${PIVCO_CODEC_OBJECTS}
 )
 target_include_directories(pivco_huffman PUBLIC include)
 

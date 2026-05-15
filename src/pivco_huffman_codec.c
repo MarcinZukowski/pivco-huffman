@@ -222,12 +222,19 @@ int CODEC_ENCODE_ENTRY(const uint8_t *symbols,
                        uint8_t *out, size_t *out_len)
 {
     if (!symbols || !table || !out || !out_len) return PIVCO_ERR_NULL;
+    prim_codec_init();
 
     const int N = PIVCO_BLOCK_SIZE;
 
     /* Per-block left-aligned codes.  Built once per block via
      * prim_enc_init (a gather from table->code_la[symbols[i]]). */
-    uint16_t codes_la[PIVCO_BLOCK_SIZE];
+    /* +16 slack: NEON's build_bitmap_partition primitive does a stride-8
+     * SIMD partition whose 16-byte vst1q_u8 store can land up to 8 uint16
+     * elements past the cursor at end-of-buffer.  The scalar primitive
+     * doesn't need the padding but it costs us 16 bytes of stack per
+     * call.  Same trick + same rationale as the legacy NEON encoder
+     * carried since dense-codes_la landed (b31d269 2026-05-11). */
+    uint16_t codes_la[PIVCO_BLOCK_SIZE + 16];
     prim_enc_init(codes_la, N, symbols, table->code_la);
 
     /* Scratch arena for the right-half partitions at each recursion
@@ -412,6 +419,7 @@ int CODEC_DECODE_ENTRY(const uint8_t *in, size_t in_len,
 {
     if (!in || !table || !symbols || !consumed) return PIVCO_ERR_NULL;
     (void)in_len;
+    prim_codec_init();
 
     const int N = PIVCO_BLOCK_SIZE;
     const pivco_tree_node_t *root = &table->tree[table->tree_root];

@@ -30,6 +30,16 @@
  *  of the scalar↔SSE wire-format-drift bug this refactor exists to
  *  fix).
  *
+ *  Lifecycle:
+ *
+ *  void prim_codec_init(void);
+ *
+ *    Idempotent lazy-init for any backend-specific runtime tables
+ *    (e.g. NEON's compress_tab + expand_tab pre-bakes).  codec.c
+ *    calls this once at every encode/decode entry.  Scalar's
+ *    implementation is empty; NEON's calls init_compress_table and
+ *    init_expand_table.
+ *
  * ---------------------------------------------------------------------------
  *  ENCODE PRIMITIVES
  * ---------------------------------------------------------------------------

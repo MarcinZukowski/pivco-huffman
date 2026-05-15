@@ -17,6 +17,9 @@
 #include <stdint.h>
 #include <string.h>
 
+/* Backend lifecycle.  Scalar has no runtime tables to lazy-init. */
+static inline void codec_init_scalar(void) { /* no-op */ }
+
 /* ---------- Encode primitives ---------- */
 
 /* Build per-block codes_la array.  Just an indexed gather; the LUT
@@ -163,6 +166,9 @@ static inline void tree_merge_scalar(const uint8_t *bm, int K,
 /* ---------- Aliases consumed by codec.c ---------- */
 
 #define PIVCO_PRIM_ALWAYS_INLINE __attribute__((always_inline)) static inline
+
+PIVCO_PRIM_ALWAYS_INLINE void prim_codec_init(void)
+{ codec_init_scalar(); }
 
 PIVCO_PRIM_ALWAYS_INLINE void prim_enc_init(uint16_t *codes_la, int n,
                                               const uint8_t *symbols,

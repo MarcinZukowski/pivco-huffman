@@ -21,11 +21,21 @@
 #include "pivco_huffman.h"
 #include "pivco_huffman_common.h"
 #include "pivco_huffman_neon_tables.h"   /* expand_tab*, compress_tab* */
+#include "pivco_huffman_neon_flat.h"     /* flat_d{2,3,4,5,6}_unpack */
 #include "pivco_prof.h"
 
 #include <arm_neon.h>
 #include <stdint.h>
 #include <string.h>
+
+/* Backend lifecycle.  Lazily build the compress_tab + expand_tab pre-
+ * bake tables that the NEON partition / tree_merge primitives index
+ * into.  Idempotent and cheap after the first call. */
+static inline void codec_init_neon(void)
+{
+    init_compress_table();
+    init_expand_table();
+}
 
 /* ---------- Decode primitives (bottom-up) ---------- */
 
@@ -257,19 +267,257 @@ static inline void merge_both_const_neon(const uint8_t *bm, int K,
     PROF_TOC(PROF_BU_MERGE_BOTH_CONST, K);
 }
 
+/* ---------- Flat-subtree decode (contiguous output) ----------
+ *
+ * Reads n*D packed bits, looks up each D-bit code in c2s, writes the
+ * resulting bytes to out[0..n).  Output is dense / sequential -- the
+ * BU codec calls this when it hits a PIVCO_NODE_INTERNAL_FLAT.
+ *
+ * Per-D SIMD specialisations (D=2..6) live below; D=7..8 and any
+ * D > 6 fall through to the NEON_FLAT_UNPACK_SWITCH scalar tail.
+ * The per-D unpack helpers (flat_d{2,3,4,5,6}_unpack) come from
+ * pivco_huffman_neon_flat.h.
+ */
+
+/* Extract D bits at bit position `bit_pos` from `in`.  D <= 16.  Used
+ * by NEON_FLAT_UNPACK_SWITCH's scalar tail. */
+static inline uint32_t extract_D_bits_neon(const uint8_t *in,
+                                             int bit_pos, int D)
+{
+    int byte_idx = bit_pos >> 3;
+    int bit_off  = bit_pos & 7;
+    uint32_t val = (uint32_t)in[byte_idx];
+    if (bit_off + D > 8)  val |= ((uint32_t)in[byte_idx + 1]) << 8;
+    if (bit_off + D > 16) val |= ((uint32_t)in[byte_idx + 2]) << 16;
+    return (val >> bit_off) & ((1u << D) - 1);
+}
+
+/* Per-D switch shared by anyone unpacking D-bit codes into a byte
+ * stream.  `DST(k)` is the destination expression for output element k. */
+#define NEON_FLAT_UNPACK_SWITCH(DST)                                          \
+    int i = 0;                                                                \
+    switch (D) {                                                              \
+    case 2:                                                                   \
+        for (; i + 4 <= n; i += 4) {                                          \
+            uint8_t b = bm[i >> 2];                                           \
+            DST(i    ) = c2s[(b     ) & 3];                                   \
+            DST(i + 1) = c2s[(b >> 2) & 3];                                   \
+            DST(i + 2) = c2s[(b >> 4) & 3];                                   \
+            DST(i + 3) = c2s[(b >> 6) & 3];                                   \
+        } break;                                                              \
+    case 3:                                                                   \
+        for (; i + 8 <= n; i += 8) {                                          \
+            const uint8_t *p = bm + ((i * 3) >> 3);                           \
+            uint32_t w = (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16); \
+            DST(i    ) = c2s[(w      ) & 7];                                  \
+            DST(i + 1) = c2s[(w >>  3) & 7];                                  \
+            DST(i + 2) = c2s[(w >>  6) & 7];                                  \
+            DST(i + 3) = c2s[(w >>  9) & 7];                                  \
+            DST(i + 4) = c2s[(w >> 12) & 7];                                  \
+            DST(i + 5) = c2s[(w >> 15) & 7];                                  \
+            DST(i + 6) = c2s[(w >> 18) & 7];                                  \
+            DST(i + 7) = c2s[(w >> 21) & 7];                                  \
+        } break;                                                              \
+    case 4:                                                                   \
+        for (; i + 2 <= n; i += 2) {                                          \
+            uint8_t b = bm[i >> 1];                                           \
+            DST(i    ) = c2s[b & 0x0F];                                       \
+            DST(i + 1) = c2s[b >> 4];                                         \
+        } break;                                                              \
+    case 5:                                                                   \
+        for (; i + 8 <= n; i += 8) {                                          \
+            const uint8_t *p = bm + ((i * 5) >> 3);                           \
+            uint64_t w = (uint64_t)p[0] | ((uint64_t)p[1] << 8)               \
+                       | ((uint64_t)p[2] << 16) | ((uint64_t)p[3] << 24)      \
+                       | ((uint64_t)p[4] << 32);                              \
+            DST(i    ) = c2s[(w      ) & 0x1F];                               \
+            DST(i + 1) = c2s[(w >>  5) & 0x1F];                               \
+            DST(i + 2) = c2s[(w >> 10) & 0x1F];                               \
+            DST(i + 3) = c2s[(w >> 15) & 0x1F];                               \
+            DST(i + 4) = c2s[(w >> 20) & 0x1F];                               \
+            DST(i + 5) = c2s[(w >> 25) & 0x1F];                               \
+            DST(i + 6) = c2s[(w >> 30) & 0x1F];                               \
+            DST(i + 7) = c2s[(w >> 35) & 0x1F];                               \
+        } break;                                                              \
+    case 6:                                                                   \
+        for (; i + 4 <= n; i += 4) {                                          \
+            const uint8_t *p = bm + ((i * 6) >> 3);                           \
+            uint32_t w = (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16); \
+            DST(i    ) = c2s[(w      ) & 0x3F];                               \
+            DST(i + 1) = c2s[(w >>  6) & 0x3F];                               \
+            DST(i + 2) = c2s[(w >> 12) & 0x3F];                               \
+            DST(i + 3) = c2s[(w >> 18) & 0x3F];                               \
+        } break;                                                              \
+    case 7:                                                                   \
+        for (; i + 8 <= n; i += 8) {                                          \
+            const uint8_t *p = bm + ((i * 7) >> 3);                           \
+            uint64_t w = (uint64_t)p[0] | ((uint64_t)p[1] << 8)               \
+                       | ((uint64_t)p[2] << 16) | ((uint64_t)p[3] << 24)      \
+                       | ((uint64_t)p[4] << 32) | ((uint64_t)p[5] << 40)      \
+                       | ((uint64_t)p[6] << 48);                              \
+            DST(i    ) = c2s[(w      ) & 0x7F];                               \
+            DST(i + 1) = c2s[(w >>  7) & 0x7F];                               \
+            DST(i + 2) = c2s[(w >> 14) & 0x7F];                               \
+            DST(i + 3) = c2s[(w >> 21) & 0x7F];                               \
+            DST(i + 4) = c2s[(w >> 28) & 0x7F];                               \
+            DST(i + 5) = c2s[(w >> 35) & 0x7F];                               \
+            DST(i + 6) = c2s[(w >> 42) & 0x7F];                               \
+            DST(i + 7) = c2s[(w >> 49) & 0x7F];                               \
+        } break;                                                              \
+    case 8:                                                                   \
+        for (; i < n; i++) DST(i) = c2s[bm[i]];                               \
+        break;                                                                \
+    }                                                                          \
+    for (; i < n; i++) {                                                       \
+        uint32_t code = extract_D_bits_neon(bm, i * D, D);                     \
+        DST(i) = c2s[code];                                                    \
+    }
+
+/* uarch gate: D=5/D=6 flat-subtree TBL paths.
+ * vqtbl2/vqtbl4 over a 32/64-byte source register pair are fast on Apple
+ * M-series (single-cycle per 16 lanes), but on Neoverse-V2 (Graviton 4)
+ * they are slow enough that the per-element scalar lookup in
+ * NEON_FLAT_UNPACK_SWITCH wins.  Gate the multi-register TBL paths to
+ * Apple silicon. */
+#ifndef PIVCO_NEON_FAST_MULTI_TBL
+#  if defined(__APPLE__)
+#    define PIVCO_NEON_FAST_MULTI_TBL 1
+#  else
+#    define PIVCO_NEON_FAST_MULTI_TBL 0
+#  endif
+#endif
+
+/* flat_decode_direct_neon — write n D-bit symbols contiguously to
+ * out[].  Internal dispatcher: SIMD per-D specialisation for D=2..6,
+ * scalar tail for D=7..8 and any unhandled D. */
+static inline void flat_decode_direct_neon_inner(uint8_t *symbols, int n,
+                                                   const uint8_t *bm, int D,
+                                                   const uint8_t *c2s)
+{
+    if (D == 2) {
+        uint8x16_t c2s_vec = vld1q_u8(c2s);
+        int i = 0;
+        for (; i + 16 <= n; i += 16) {
+            uint8x16_t codes = flat_d2_unpack(bm + (i >> 2));
+            uint8x16_t syms  = vqtbl1q_u8(c2s_vec, codes);
+            vst1q_u8(symbols + i, syms);
+        }
+        for (; i + 4 <= n; i += 4) {
+            uint8_t b = bm[i >> 2];
+            symbols[i    ] = c2s[(b     ) & 3];
+            symbols[i + 1] = c2s[(b >> 2) & 3];
+            symbols[i + 2] = c2s[(b >> 4) & 3];
+            symbols[i + 3] = c2s[(b >> 6) & 3];
+        }
+        for (; i < n; i++) {
+            uint32_t code = extract_D_bits_neon(bm, i * D, D);
+            symbols[i] = c2s[code];
+        }
+        return;
+    }
+    if (D == 3) {
+        uint8x16_t c2s_vec = vld1q_u8(c2s);
+        int i = 0;
+        for (; i + 16 <= n; i += 16) {
+            uint8x8_t codes_lo = flat_d3_unpack(bm + ((i      * 3) >> 3));
+            uint8x8_t codes_hi = flat_d3_unpack(bm + (((i + 8) * 3) >> 3));
+            uint8x16_t codes = vcombine_u8(codes_lo, codes_hi);
+            uint8x16_t syms  = vqtbl1q_u8(c2s_vec, codes);
+            vst1q_u8(symbols + i, syms);
+        }
+        for (; i + 8 <= n; i += 8) {
+            uint8x8_t codes = flat_d3_unpack(bm + ((i * 3) >> 3));
+            uint8x8_t syms  = vqtbl1_u8(c2s_vec, codes);
+            vst1_u8(symbols + i, syms);
+        }
+        for (; i < n; i++) {
+            uint32_t code = extract_D_bits_neon(bm, i * D, D);
+            symbols[i] = c2s[code];
+        }
+        return;
+    }
+#if PIVCO_NEON_FAST_MULTI_TBL
+    if (D == 5) {
+        uint8x16x2_t c2s_vec;
+        c2s_vec.val[0] = vld1q_u8(c2s);
+        c2s_vec.val[1] = vld1q_u8(c2s + 16);
+        int i = 0;
+        for (; i + 16 <= n; i += 16) {
+            uint8x8_t codes_lo = flat_d5_unpack(bm + ((i      * 5) >> 3));
+            uint8x8_t codes_hi = flat_d5_unpack(bm + (((i + 8) * 5) >> 3));
+            uint8x16_t codes = vcombine_u8(codes_lo, codes_hi);
+            uint8x16_t syms  = vqtbl2q_u8(c2s_vec, codes);
+            vst1q_u8(symbols + i, syms);
+        }
+        for (; i + 8 <= n; i += 8) {
+            uint8x8_t codes = flat_d5_unpack(bm + ((i * 5) >> 3));
+            uint8x8_t syms  = vqtbl2_u8(c2s_vec, codes);
+            vst1_u8(symbols + i, syms);
+        }
+        for (; i < n; i++) {
+            uint32_t code = extract_D_bits_neon(bm, i * D, D);
+            symbols[i] = c2s[code];
+        }
+        return;
+    }
+    if (D == 6) {
+        uint8x16x4_t c2s_vec;
+        c2s_vec.val[0] = vld1q_u8(c2s);
+        c2s_vec.val[1] = vld1q_u8(c2s + 16);
+        c2s_vec.val[2] = vld1q_u8(c2s + 32);
+        c2s_vec.val[3] = vld1q_u8(c2s + 48);
+        int i = 0;
+        for (; i + 16 <= n; i += 16) {
+            uint8x8_t codes_lo = flat_d6_unpack(bm + ((i      * 6) >> 3));
+            uint8x8_t codes_hi = flat_d6_unpack(bm + (((i + 8) * 6) >> 3));
+            uint8x16_t codes = vcombine_u8(codes_lo, codes_hi);
+            uint8x16_t syms  = vqtbl4q_u8(c2s_vec, codes);
+            vst1q_u8(symbols + i, syms);
+        }
+        for (; i + 8 <= n; i += 8) {
+            uint8x8_t codes = flat_d6_unpack(bm + ((i * 6) >> 3));
+            uint8x8_t syms  = vqtbl4_u8(c2s_vec, codes);
+            vst1_u8(symbols + i, syms);
+        }
+        for (; i < n; i++) {
+            uint32_t code = extract_D_bits_neon(bm, i * D, D);
+            symbols[i] = c2s[code];
+        }
+        return;
+    }
+#endif /* PIVCO_NEON_FAST_MULTI_TBL */
+    if (D == 4) {
+        uint8x16_t c2s_vec = vld1q_u8(c2s);
+        int i = 0;
+        for (; i + 16 <= n; i += 16) {
+            uint8x16_t codes = flat_d4_unpack(bm + (i >> 1));
+            uint8x16_t syms  = vqtbl1q_u8(c2s_vec, codes);
+            vst1q_u8(symbols + i, syms);
+        }
+        for (; i + 2 <= n; i += 2) {
+            uint8_t b = bm[i >> 1];
+            symbols[i    ] = c2s[b & 0x0F];
+            symbols[i + 1] = c2s[b >> 4];
+        }
+        for (; i < n; i++) {
+            uint32_t code = extract_D_bits_neon(bm, i * D, D);
+            symbols[i] = c2s[code];
+        }
+        return;
+    }
+#define DST_DIRECT(k) symbols[k]
+    NEON_FLAT_UNPACK_SWITCH(DST_DIRECT)
+#undef DST_DIRECT
+}
+
 /* flat_decode_to_buffer_neon — D-bit flat-subtree decode into a
- * contiguous output buffer.  Calls into the legacy SIMD per-D
- * dispatcher in pivco_huffman_neon.c; once that file is retired in
- * Phase 3 step 3.8, this wrapper will pull the dispatch inline. */
-extern void pivco_huffman_flat_decode_direct_neon_(uint8_t *symbols, int n,
-                                                    const uint8_t *bm, int D,
-                                                    const uint8_t *c2s);
+ * contiguous output buffer.  Calls the dispatcher above. */
 static inline void flat_decode_to_buffer_neon(uint8_t *out, int n,
                                                 const uint8_t *bm, int D,
                                                 const uint8_t *c2s)
 {
     PROF_TIC();
-    pivco_huffman_flat_decode_direct_neon_(out, n, bm, D, c2s);
+    flat_decode_direct_neon_inner(out, n, bm, D, c2s);
     PROF_TOC(PROF_BU_FLAT_DECODE, n);
 }
 
@@ -663,6 +911,9 @@ static inline void pack_dN_neon(uint8_t *out, const uint16_t *codes_la,
 /* ---------- Aliases consumed by codec.c ---------- */
 
 #define PIVCO_PRIM_ALWAYS_INLINE __attribute__((always_inline)) static inline
+
+PIVCO_PRIM_ALWAYS_INLINE void prim_codec_init(void)
+{ codec_init_neon(); }
 
 PIVCO_PRIM_ALWAYS_INLINE void prim_enc_init(uint16_t *codes_la, int n,
                                               const uint8_t *symbols,
