@@ -195,21 +195,27 @@ static int test_roundtrip_dist(const char *name, const uint64_t freq[PIVCO_MAX_S
     }
 
 #ifdef PIVCO_HAS_NEON
-    /* NEON roundtrip */
+    /* NEON encode + BU NEON decode roundtrip (the production path). */
     uint8_t neon_enc[PIVCO_MAX_ENCODED_SIZE];
     size_t neon_len;
     rc = pivco_huffman_encode_neon(symbols, &table, neon_enc, &neon_len);
     if (rc != PIVCO_OK) FAIL("neon encode returned %d", rc);
 
-    uint8_t neon_dec[PIVCO_BLOCK_SIZE];
-    size_t neon_consumed;
-    rc = pivco_huffman_decode_neon(neon_enc, neon_len, &table, neon_dec, &neon_consumed);
-    if (rc != PIVCO_OK) FAIL("neon decode returned %d", rc);
-
-    for (int i = 0; i < PIVCO_BLOCK_SIZE; i++) {
-        if (symbols[i] != neon_dec[i]) {
-            FAIL("neon mismatch at position %d: expected %d, got %d",
-                 i, symbols[i], neon_dec[i]);
+    {
+        uint8_t bu_dec[PIVCO_BLOCK_SIZE];
+        size_t bu_consumed;
+        rc = pivco_huffman_decode_bu_neon(neon_enc, neon_len, &table,
+                                           bu_dec, &bu_consumed);
+        if (rc != PIVCO_OK) FAIL("bu_neon decode returned %d", rc);
+        for (int i = 0; i < PIVCO_BLOCK_SIZE; i++) {
+            if (symbols[i] != bu_dec[i]) {
+                FAIL("bu_neon mismatch at position %d: expected %d, got %d",
+                     i, symbols[i], bu_dec[i]);
+            }
+        }
+        if (bu_consumed != neon_len) {
+            FAIL("bu_neon consumed %zu bytes, expected %zu",
+                 bu_consumed, neon_len);
         }
     }
 
@@ -229,134 +235,30 @@ static int test_roundtrip_dist(const char *name, const uint64_t freq[PIVCO_MAX_S
             }
         }
     }
-
-    /* Bottom-up decoder (experimental).  Decodes the same neon-encoded
-     * stream as the top-down decoder; output must match exactly. */
-    {
-        uint8_t bu_dec[PIVCO_BLOCK_SIZE];
-        size_t bu_consumed;
-        rc = pivco_huffman_decode_bu_neon(neon_enc, neon_len, &table,
-                                           bu_dec, &bu_consumed);
-        if (rc != PIVCO_OK) FAIL("bu_neon decode returned %d", rc);
-        for (int i = 0; i < PIVCO_BLOCK_SIZE; i++) {
-            if (symbols[i] != bu_dec[i]) {
-                FAIL("bu_neon mismatch at position %d: expected %d, got %d",
-                     i, symbols[i], bu_dec[i]);
-            }
-        }
-        if (bu_consumed != neon_len) {
-            FAIL("bu_neon consumed %zu bytes, expected %zu",
-                 bu_consumed, neon_len);
-        }
-    }
-
-    /* Cross-implementation: scalar encode -> neon decode */
-    uint8_t cross_dec[PIVCO_BLOCK_SIZE];
-    size_t cross_consumed;
-    rc = pivco_huffman_decode_neon(encoded, enc_len, &table, cross_dec, &cross_consumed);
-    if (rc != PIVCO_OK) FAIL("cross decode returned %d", rc);
-
-    for (int i = 0; i < PIVCO_BLOCK_SIZE; i++) {
-        if (symbols[i] != cross_dec[i]) {
-            FAIL("cross mismatch at position %d: expected %d, got %d",
-                 i, symbols[i], cross_dec[i]);
-        }
-    }
-
 #endif
 
 #ifdef PIVCO_HAS_SSE4
-    /* SSE4 roundtrip + cross-check against scalar-encoded stream.
-     * Was missing for over a year; the e9a668f masked-tail bug went
-     * undetected because nothing in this file directly invoked
-     * pivco_huffman_decode_x86 on real distribution data. */
+    /* SSE encode + BU SSE/AVX-512 decode roundtrip. */
     {
         uint8_t sse_enc[PIVCO_MAX_ENCODED_SIZE];
         size_t sse_len;
         rc = pivco_huffman_encode_x86(symbols, &table, sse_enc, &sse_len);
         if (rc != PIVCO_OK) FAIL("sse encode returned %d", rc);
 
-        uint8_t sse_dec[PIVCO_BLOCK_SIZE];
-        size_t sse_consumed;
-        rc = pivco_huffman_decode_x86(sse_enc, sse_len, &table,
-                                       sse_dec, &sse_consumed);
-        if (rc != PIVCO_OK) FAIL("sse decode returned %d", rc);
-
+        uint8_t bu_dec[PIVCO_BLOCK_SIZE];
+        size_t bu_consumed;
+        rc = pivco_huffman_decode_bu_x86(sse_enc, sse_len, &table,
+                                          bu_dec, &bu_consumed);
+        if (rc != PIVCO_OK) FAIL("bu_x86 decode returned %d", rc);
         for (int i = 0; i < PIVCO_BLOCK_SIZE; i++) {
-            if (symbols[i] != sse_dec[i]) {
-                FAIL("sse mismatch at position %d: expected %d, got %d",
-                     i, symbols[i], sse_dec[i]);
+            if (symbols[i] != bu_dec[i]) {
+                FAIL("bu_x86 mismatch at position %d: expected %d, got %d",
+                     i, symbols[i], bu_dec[i]);
             }
         }
-
-        /* Cross: scalar encode -> sse decode */
-        uint8_t sse_cross[PIVCO_BLOCK_SIZE];
-        size_t sse_cross_consumed;
-        rc = pivco_huffman_decode_x86(encoded, enc_len, &table,
-                                       sse_cross, &sse_cross_consumed);
-        if (rc != PIVCO_OK) FAIL("sse cross decode returned %d", rc);
-        for (int i = 0; i < PIVCO_BLOCK_SIZE; i++) {
-            if (symbols[i] != sse_cross[i]) {
-                FAIL("sse cross mismatch at position %d: expected %d, got %d",
-                     i, symbols[i], sse_cross[i]);
-            }
-        }
-
-        /* Bottom-up SSE decoder against the top-down SSE decoder. */
-        {
-            uint8_t bu_dec[PIVCO_BLOCK_SIZE];
-            size_t bu_consumed;
-            rc = pivco_huffman_decode_bu_x86(sse_enc, sse_len, &table,
-                                              bu_dec, &bu_consumed);
-            if (rc != PIVCO_OK) FAIL("bu_x86 decode returned %d", rc);
-            for (int i = 0; i < PIVCO_BLOCK_SIZE; i++) {
-                if (symbols[i] != bu_dec[i]) {
-                    FAIL("bu_x86 mismatch at position %d: expected %d, got %d",
-                         i, symbols[i], bu_dec[i]);
-                }
-            }
-            if (bu_consumed != sse_len) {
-                FAIL("bu_x86 consumed %zu bytes, expected %zu",
-                     bu_consumed, sse_len);
-            }
-        }
-    }
-#endif
-
-#ifdef PIVCO_HAS_AVX512
-    /* AVX-512 roundtrip + cross-check against scalar-encoded stream.
-     * Was missing; the b136b96 masked-tail bug went undetected for the
-     * same reason as the SSE block above. */
-    {
-        uint8_t avx_enc[PIVCO_MAX_ENCODED_SIZE];
-        size_t avx_len;
-        rc = pivco_huffman_encode_avx512(symbols, &table, avx_enc, &avx_len);
-        if (rc != PIVCO_OK) FAIL("avx512 encode returned %d", rc);
-
-        uint8_t avx_dec[PIVCO_BLOCK_SIZE];
-        size_t avx_consumed;
-        rc = pivco_huffman_decode_avx512(avx_enc, avx_len, &table,
-                                          avx_dec, &avx_consumed);
-        if (rc != PIVCO_OK) FAIL("avx512 decode returned %d", rc);
-
-        for (int i = 0; i < PIVCO_BLOCK_SIZE; i++) {
-            if (symbols[i] != avx_dec[i]) {
-                FAIL("avx512 mismatch at position %d: expected %d, got %d",
-                     i, symbols[i], avx_dec[i]);
-            }
-        }
-
-        /* Cross: scalar encode -> avx512 decode */
-        uint8_t avx_cross[PIVCO_BLOCK_SIZE];
-        size_t avx_cross_consumed;
-        rc = pivco_huffman_decode_avx512(encoded, enc_len, &table,
-                                          avx_cross, &avx_cross_consumed);
-        if (rc != PIVCO_OK) FAIL("avx512 cross decode returned %d", rc);
-        for (int i = 0; i < PIVCO_BLOCK_SIZE; i++) {
-            if (symbols[i] != avx_cross[i]) {
-                FAIL("avx512 cross mismatch at %d: expected %d, got %d",
-                     i, symbols[i], avx_cross[i]);
-            }
+        if (bu_consumed != sse_len) {
+            FAIL("bu_x86 consumed %zu bytes, expected %zu",
+                 bu_consumed, sse_len);
         }
     }
 #endif

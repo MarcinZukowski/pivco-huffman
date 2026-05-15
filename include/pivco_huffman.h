@@ -248,11 +248,7 @@ int pivco_huffman_encode_neon(const uint8_t *symbols,
                               const pivco_huffman_table_t *table,
                               uint8_t *out, size_t *out_len);
 
-int pivco_huffman_decode_neon(const uint8_t *in, size_t in_len,
-                              const pivco_huffman_table_t *table,
-                              uint8_t *symbols, size_t *consumed);
-
-/* Experimental: bottom-up tree_merge decode (NEON). */
+/* Bottom-up tree_merge decode (NEON). */
 int pivco_huffman_decode_bu_neon(const uint8_t *in, size_t in_len,
                                   const pivco_huffman_table_t *table,
                                   uint8_t *symbols, size_t *consumed);
@@ -263,11 +259,7 @@ int pivco_huffman_encode_x86(const uint8_t *symbols,
                               const pivco_huffman_table_t *table,
                               uint8_t *out, size_t *out_len);
 
-int pivco_huffman_decode_x86(const uint8_t *in, size_t in_len,
-                              const pivco_huffman_table_t *table,
-                              uint8_t *symbols, size_t *consumed);
-
-/* Experimental: bottom-up tree_merge decode (x86 SSE4.1 / AVX-512 VBMI2). */
+/* Bottom-up tree_merge decode (x86 SSE4.1 / AVX-512 VBMI2). */
 int pivco_huffman_decode_bu_x86(const uint8_t *in, size_t in_len,
                                  const pivco_huffman_table_t *table,
                                  uint8_t *symbols, size_t *consumed);
@@ -297,11 +289,14 @@ int pivco_huffman_decode_sve(const uint8_t *in, size_t in_len,
 int pivco_huffman_encode_avx512(const uint8_t *symbols,
                                  const pivco_huffman_table_t *table,
                                  uint8_t *out, size_t *out_len);
-
-int pivco_huffman_decode_avx512(const uint8_t *in, size_t in_len,
-                                 const pivco_huffman_table_t *table,
-                                 uint8_t *symbols, size_t *consumed);
 #endif
+
+/* Top-down (TD) decode entry points have been retired (2026-05-14).
+ * BU is the production decoder on every platform.  TD implementations
+ * still live in the legacy .c files as now-unreachable static functions;
+ * step 3.8 of the unify-framework refactor retires them along with the
+ * legacy .c files when codec.c takes over the encode/decode entries.
+ * See extras/legacy_td/README.md for the git-archaeology pointer. */
 
 /* ---------- Traditional Huffman encode/decode (for comparison) ---------- */
 

@@ -569,21 +569,10 @@ if(BUILD_BENCH)
 
     if(TARGET_ARCH STREQUAL "arm64" OR TARGET_ARCH STREQUAL "aarch64")
         add_executable(pivco_bench_coalesce extras/bench_coalesce.c)
-
-        add_executable(pivco_bench_bu_decoder
-            extras/bench_bu_decoder.c
-            bench/bench_distributions.c
-        )
-        target_link_libraries(pivco_bench_bu_decoder pivco_huffman m)
     endif()
-
-    if(TARGET_ARCH STREQUAL "x86_64" OR TARGET_ARCH STREQUAL "amd64")
-        add_executable(pivco_bench_bu_decoder_x86
-            extras/bench_bu_decoder_x86.c
-            bench/bench_distributions.c
-        )
-        target_link_libraries(pivco_bench_bu_decoder_x86 pivco_huffman m)
-    endif()
+    # bench_bu_decoder{,_x86} retired with the TD decoder (2026-05-14) --
+    # they existed to A/B BU against TD; BU has been the production
+    # decoder for weeks.
 
     add_executable(pivco_bench_multicore
         extras/bench_multicore.c
