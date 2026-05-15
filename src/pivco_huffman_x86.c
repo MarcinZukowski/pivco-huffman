@@ -17,42 +17,14 @@
  * shuffle that packs selected uint16_t elements to the front.
  * pshufb (_mm_shuffle_epi8) is the x86 equivalent of NEON TBL.
  */
-/* Combined shuffle table: [256][32] where bytes 0-15 are the shuffle
-   for mask (right) and bytes 16-31 are for ~mask (left).
-   Loaded as two aligned 16-byte loads from contiguous memory. */
-static uint8_t compress_tab[256][32] __attribute__((aligned(32)));
-static uint8_t compress_popcnt[256] __attribute__((aligned(64)));
-static int     compress_table_ready = 0;
+/* SIMD compress shuffle table + init function: storage and constructor
+ * live in pivco_huffman_x86_tables.{c,h} so codec.c (compiled per-
+ * backend) can share the same runtime tables.  See the header for the
+ * (mask -> shuf, popcount) layout. */
+#include "pivco_huffman_x86_tables.h"
 
-static void init_compress_table(void)
-{
-    if (compress_table_ready) return;
-    for (int mask = 0; mask < 256; mask++) {
-        int out_r = 0;
-        for (int i = 0; i < 8; i++) {
-            if (mask & (1 << i)) {
-                compress_tab[mask][out_r * 2]     = (uint8_t)(i * 2);
-                compress_tab[mask][out_r * 2 + 1] = (uint8_t)(i * 2 + 1);
-                out_r++;
-            }
-        }
-        compress_popcnt[mask] = (uint8_t)out_r;
-        for (int j = out_r * 2; j < 16; j++)
-            compress_tab[mask][j] = 0x80;
-
-        int out_l = 0;
-        for (int i = 0; i < 8; i++) {
-            if (!(mask & (1 << i))) {
-                compress_tab[mask][16 + out_l * 2]     = (uint8_t)(i * 2);
-                compress_tab[mask][16 + out_l * 2 + 1] = (uint8_t)(i * 2 + 1);
-                out_l++;
-            }
-        }
-        for (int j = out_l * 2; j < 16; j++)
-            compress_tab[mask][16 + j] = 0x80;
-    }
-    compress_table_ready = 1;
-}
+/* Local alias to keep the existing call sites short. */
+static inline void init_compress_table(void) { init_compress_table_x86(); }
 
 /* Partition 8 uint16_t by an 8-bit mask using SSE4.1 pshufb.
    bit=1 → right_out, bit=0 → left_out.

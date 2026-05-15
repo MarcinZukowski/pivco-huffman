@@ -98,28 +98,10 @@ static inline int popcount_K_right_x86(const uint8_t *bm, int nbytes, int K) {
     return K_right;
 }
 
-/* ---------- expand_tab: per-mask-byte shuffle pattern ---------- */
-static uint8_t expand_tab[256][8] __attribute__((aligned(32)));
-static uint8_t expand_popcnt[256]  __attribute__((aligned(64)));
-static int expand_table_ready = 0;
-
-static void init_expand_table_x86(void) {
-    if (expand_table_ready) return;
-    for (int m = 0; m < 256; m++) {
-        int n_zeros = 0, n_ones = 0;
-        for (int k = 0; k < 8; k++) {
-            if (m & (1 << k)) {
-                expand_tab[m][k] = (uint8_t)(8 + n_ones);
-                n_ones++;
-            } else {
-                expand_tab[m][k] = (uint8_t)n_zeros;
-                n_zeros++;
-            }
-        }
-        expand_popcnt[m] = (uint8_t)n_ones;
-    }
-    expand_table_ready = 1;
-}
+/* expand_tab + expand_popcnt + init_expand_table_x86 storage and
+ * constructor live in pivco_huffman_x86_tables.{c,h} so codec.c-x86
+ * shares the same runtime tables. */
+#include "pivco_huffman_x86_tables.h"
 
 /* ---------- SSE 8-byte tree_merge ---------- */
 static inline void tree_merge(const uint8_t *bm, int K,
