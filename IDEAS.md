@@ -106,56 +106,80 @@ the only option below ~0.60.
   ratio cost that matters for small bitmaps.  Need to measure.
 
 
-## Oodle's newlz_arrays_huff — partially integrated 2026-05-15
+## Oodle's newlz_arrays_huff — integrated with ARM ASM kernels, 2026-05-15
 
-**Status: integrated as a C-only reference baseline; ASM hookup
-is the open follow-up.**
+**Status: integrated.**  ph optionally links against OodleUE via
+`ext/oodle` symlink.  M4 numbers (1440 B / pmaj=0.80, huff6 +
+ARM ASM):
 
-ph now optionally links against OodleUE when the user provides
-`ext/oodle` as a symlink (see `extras/bench_oodle_wrapper.h` for
-setup) and `extras/bench_fse_xy_micro.c` grows an "oodle" decode
-+ encode column gated on `PIVCO_HAS_OODLE`.  Initial M4 numbers
-(1440 B / pmaj=0.80):
+  - Oodle huff6 (ASM)  =  1399 MB/s
+  - Oodle huff6 (C)    =  1034 MB/s     ← +35% from ASM
+  - FSE x10y4          =  2286 MB/s
+  - huf0 huf4X2        =  2445 MB/s
 
-  - Oodle decode  =  1034 MB/s  (newlz_get_array_huff, huff3
-                                  variant — tuner picked it over
-                                  huff6 because lambda=0 biases
-                                  to size, and huff3's header
-                                  is smaller)
-  - FSE x16y2     =  2372 MB/s
-  - huf0 huf4X2   =  2457 MB/s
+And at 2880 B / pmaj=0.80:
 
-Surprising that Oodle is the slowest of the three — until you
-look at the OodleUE build: **the .a64.S ARM kernels and .nas
-x86 NASM kernels are NOT compiled into liboodle-data-static.a**.
-The CMake just picks up .cpp files via `s_add_dir`.  So the
-"oodle" column measures Oodle's portable-C fallback path, NOT
-the 1.3-1.5 cyc/sym shipping perf ryg quotes (which requires
-`NEWLZ_ARM64_HUFF_ASM` define + linking the .a64.S kernels).
+  - Oodle huff6 (ASM)  =  **1953 MB/s**  ← +59% from ASM
+  - Oodle huff6 (C)    =  1231 MB/s
+  - FSE x10y4          =  2279 MB/s
+  - huf0 huf4X2        =  2234 MB/s
 
-Open follow-up: patch OodleUE's build (or hook into ours) to:
+The 2880 number lands right in ryg's 1.3-1.5 cyc/sym ship target
+(at M4's ~3 GHz boost, 1953 MB/s ≈ 1.54 cyc/sym).  Confirms the
+quote.  At smaller sizes Oodle trails because each
+`newlz_get_array_huff` call re-reads the table header (no
+`_usingDTable` variant exists in Oodle's public API), while ph's
+FSE and huf0 timers use pre-built tables.
 
-  1. `enable_language(ASM)` for `.a64.S` (Apple/ARM hosts) and
-     NASM for `.nas` (Intel/AMD hosts).
-  2. Compile and link the relevant kernels: `newlz_huff3.a64.S`,
-     `newlz_huff6.a64.S`, plus the `_cortex_a78` / `_cortex_a57`
-     variants for the platforms we care about.
-  3. Add `-DNEWLZ_ARM64_HUFF_ASM=1` (or the x86 equivalent) so
-     `newlz_arrays_huff.cpp`'s ASM-dispatch paths fire.
-  4. Re-run the bench; expect Oodle to jump 2-3× to its actual
-     shipping number.
+### Why Oodle huff6 still trails FSE x10y4 and huf4X2 on M4
 
-Then-other open items:
+ILP per loop iter:
 
-  - Force huff6 (vs huff3) by setting lambda > 0 to penalise
-    huff3's slower decode — without ASM that test mostly measures
-    the C fallback so it's parked until ASM is wired.
-  - Encode is currently slower for Oodle than for huf0 because
-    `newLZ_put_array_huff` rebuilds the histogram + table inside
-    the timed call.  ph's huf0 encode uses pre-built CTable
-    (apples-to-apples with FSE).  Could factor Oodle's encode the
-    same way but it needs more API surface than the public
-    `newLZ_put_array_huff`.
+  - Oodle huff6   = 6 streams × 1 sym/lookup = 6 syms/iter
+  - huf0  huf4X2  = 4 streams × 2 sym/lookup = 8 syms/iter
+  - FSE x10y4     = 10 cursors × 4 unroll    = 40 syms/loop body
+                   (effective ILP closer to 10-12 from cursor count)
+
+Both huf4X2's "2 syms per table lookup" trick and FSE's 10
+cursors expose more independent work per iteration than Oodle's
+6 streams.  To beat them, Oodle would need huff12 or a huff6X2
+variant, neither of which exists in its wire format.
+
+### What landed
+
+1. **`extras/bench_oodle_wrapper.cpp`** — C++ wrapper that
+   exposes C-callable `oodle_huff_encode` / `oodle_huff_decode`.
+   Uses `newLZ_put_array_huff` (tuner) with lambda=1.0 and
+   `entropy_flags = NEWLZ_ARRAY_FLAG_ALLOW_HUFF6` (bit 0) — the
+   latter is critical, the tuner returns huff3 unconditionally
+   without it.
+2. **`extras/bench_fse_xy_micro.c`** — gated `oodle` decode +
+   encode column on `PIVCO_HAS_OODLE`.
+3. **`CMakeLists.txt`** — auto-detects `ext/oodle/build-out/ar/
+   liboodle-data-static.a` and enables the column.
+4. **`ext/oodle/build/data/Build.cmake`** (patched user's OodleUE
+   clone, NOT in our repo) — added `enable_language(ASM)`,
+   `s_add_file_force` for `newlz_huff{3,6}_wide.a64.S` +
+   `enchuff3c.a64.S` + `histo.a64.S`, plus
+   `-D__RADMACARM64__` for Apple targets and
+   `-DNEWLZ_ARM64_HUFF_ASM=1` to flip the .cpp dispatch.
+
+### Open follow-ups
+
+- **x86 ASM kernels** — for c6a / c8a / c8i need NASM-built
+  `.nas` files (`newlz_huff{3,6}_x64_generic.nas`,
+  `_bmi2.nas`, `_zen2.nas`) plus `-DNEWLZ_X64GENERIC_HUFF_ASM`.
+  Currently c6a/c8a/c8i Oodle measurements would be C-only.
+- **Linux ARM (c8g Graviton 4)** — `.a64.S` should build on
+  Linux too, but Mach-O vs ELF differ in symbol mangle; need to
+  verify on EC2.  The Apple-specific `__RADMACARM64__` define
+  is only applied on `APPLE` targets in our patch.
+- **Encode comparison** — `oodle_huff_encode` includes histogram
+  + table build inside the timed call; ph's huf0 encode uses
+  pre-built CTable (apples-to-apples with FSE).  To make Oodle
+  encode comparable we'd need to call lower-level
+  `newLZ_put_array_histo` directly.  Currently in the
+  pre-builds, that comparison is unfair to Oodle.
 
 EULA review (2026-05-15): pulled the Unreal EULA text from
 web.archive.org since unrealengine.com 403s anonymous fetches.

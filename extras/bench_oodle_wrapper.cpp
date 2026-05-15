@@ -49,15 +49,21 @@ int oodle_huff_encode(const unsigned char *src, size_t n,
     unsigned char arena_buf[131072];
     rrArenaAllocator arena(arena_buf, sizeof(arena_buf), /*allowFallback=*/false);
 
-    /* Bias toward size: lambda=0 → J-cost = comp_len, time term
-     * drops out.  pJ initialised to a giant value so Huffman wins
-     * against any raw-bytes baseline. */
+    /* lambda biases the tuner's J-cost between size (smaller =
+     * win-on-size) and decode time (bigger = win-on-speed).  At
+     * lambda=0 the tuner always picks huff3 because its table
+     * header is smaller than huff6's; with lambda=1000 the
+     * faster huff6 decode wins the J-cost comparison and fires
+     * for cells where huff6 actually applies (from_len >= 256). */
+    /* NEWLZ_ARRAY_FLAG_ALLOW_HUFF6 (bit 0) lets the tuner consider
+     * huff6.  Without this flag huff6 is permanently disabled and
+     * the tuner always picks huff3. */
     float    pJ           = 1e30f;
     uint32_t huff_type    = 0;
     int      level        = 8;             /* high compression level */
-    float    lambda       = 0.0f;
+    float    lambda       = 1.0f;
     float    deadline_t   = 1e30f;
-    uint32_t entropy_flags = 0;
+    uint32_t entropy_flags = 1;  /* NEWLZ_ARRAY_FLAG_ALLOW_HUFF6 */
 
     SINTa comp_len = newLZ_put_array_huff(
         dst, dst + dst_cap,

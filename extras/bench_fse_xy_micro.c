@@ -873,11 +873,13 @@ int main(int argc, char **argv)
            "FSE compression.\n");
 #ifdef PIVCO_HAS_OODLE
     printf("\nOodle column = Oodle 2.9.16's newlz_get_array_huff "
-           "C path.  Note: OodleUE's CMake does not\n"
-           "                 wire in the .a64.S / .nas ASM "
-           "kernels, so this is the portable-C fallback,\n"
-           "                 NOT the 1.3-1.5 cyc/sym shipping "
-           "perf ryg quotes.  Treat as a baseline.\n");
+           "with ASM kernels.  Tuner picks huff6 (6-stream\n"
+           "                 ARM ASM kernel from "
+           "newlz_huff6_wide.a64.S, scheduled for Apple M1).\n"
+           "                 Note: each call re-reads the "
+           "table header (no _usingDTable variant exposed);\n"
+           "                 FSE and huf0 columns use pre-built "
+           "tables so the comparison is slightly unfair to Oodle.\n");
 #endif
     fflush(stdout);
 
