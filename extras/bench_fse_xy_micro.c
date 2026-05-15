@@ -39,6 +39,9 @@
 #define HUF_STATIC_LINKING_ONLY
 #include "huf.h"
 #include "hist.h"
+#ifdef PIVCO_HAS_OODLE
+#include "bench_oodle_wrapper.h"
+#endif
 
 #include <stdint.h>
 #include <stdio.h>
@@ -710,6 +713,109 @@ static double time_huf_encode_min(huf_enc_fn_t fn,
 }
 
 
+#ifdef PIVCO_HAS_OODLE
+/* ============================================================
+ *  Oodle reference path (gated on PIVCO_HAS_OODLE).
+ *
+ *  Single decode column ("oh3" or "oh6" depending on which
+ *  variant the tuner picked) and single encode column ("ohC").
+ *  Note: Oodle's newlz_get_array_huff includes table-header read
+ *  per call (no _usingDTable variant exported).  For FSE / huff0
+ *  we factored that cost out; for Oodle we accept it — matches
+ *  the shipping shape and the header is small relative to body.
+ * ============================================================ */
+
+static uint8_t g_oodle_buf[16384];
+static int     g_oodle_total;
+static int     g_oodle_huff_type;
+static int     g_oodle_ok;
+
+static int oodle_setup(const uint8_t *src, size_t n)
+{
+    g_oodle_huff_type = 0;
+    g_oodle_total = oodle_huff_encode(src, n,
+                                       g_oodle_buf, sizeof(g_oodle_buf),
+                                       &g_oodle_huff_type);
+    if (g_oodle_total <= 0 || g_oodle_total > (int)n) {
+        g_oodle_ok = 0; return 0;
+    }
+    g_oodle_ok = 1;
+    return 1;
+}
+
+static size_t oodle_dec(uint8_t *dec, size_t dec_cap)
+{
+    int r = oodle_huff_decode(g_oodle_buf, (size_t)g_oodle_total,
+                               dec, dec_cap, g_oodle_huff_type);
+    return r > 0 ? (size_t)r : 0;
+}
+
+static size_t oodle_enc(const uint8_t *src, size_t n,
+                         uint8_t *dst, size_t cap)
+{
+    int huff_type = 0;
+    int r = oodle_huff_encode(src, n, dst, cap, &huff_type);
+    return r > 0 ? (size_t)r : 0;
+}
+
+static double time_oodle_decode_min(uint8_t *dec, size_t bytes,
+                                      int iters, const uint8_t *expect_src,
+                                      double pmaj_for_msg)
+{
+    for (int w = 0; w < 256; w++) (void)oodle_dec(dec, bytes);
+    double best_mbps = 0.0;
+    for (int b = 0; b < N_BATCHES; b++) {
+        volatile uint8_t sink = 0;
+        double t0 = now_ns();
+        for (int i = 0; i < iters; i++) {
+            (void)oodle_dec(dec, bytes);
+            sink ^= dec[0] ^ dec[bytes/2];
+        }
+        double t1 = now_ns();
+        (void)sink;
+        if (memcmp(expect_src, dec, bytes) != 0) {
+            fprintf(stderr, "OODLE DECODE MISMATCH mid-timing: "
+                    "size=%zu pmaj=%.2f batch=%d\n",
+                    bytes, pmaj_for_msg, b);
+            exit(2);
+        }
+        double mbps = 1000.0 * ((double)bytes * (double)iters) / (t1 - t0);
+        if (mbps > best_mbps) best_mbps = mbps;
+    }
+    return best_mbps;
+}
+
+static double time_oodle_encode_min(const uint8_t *src, size_t bytes,
+                                      uint8_t *scratch, size_t scratch_cap,
+                                      int iters, double pmaj_for_msg)
+{
+    for (int w = 0; w < 64; w++) (void)oodle_enc(src, bytes, scratch, scratch_cap);
+    double best_mbps = 0.0;
+    for (int b = 0; b < N_BATCHES; b++) {
+        volatile size_t sink = 0;
+        double t0 = now_ns();
+        for (int i = 0; i < iters; i++)
+            sink ^= oodle_enc(src, bytes, scratch, scratch_cap);
+        double t1 = now_ns();
+        (void)sink;
+        size_t last_len = oodle_enc(src, bytes, scratch, scratch_cap);
+        if ((int)last_len != g_oodle_total ||
+            memcmp(g_oodle_buf, scratch, last_len) != 0) {
+            fprintf(stderr, "OODLE ENCODE MISMATCH mid-timing: "
+                    "size=%zu pmaj=%.2f batch=%d "
+                    "(expected len=%d got len=%zu)\n",
+                    bytes, pmaj_for_msg, b,
+                    g_oodle_total, last_len);
+            exit(2);
+        }
+        double mbps = 1000.0 * ((double)bytes * (double)iters) / (t1 - t0);
+        if (mbps > best_mbps) best_mbps = mbps;
+    }
+    return best_mbps;
+}
+#endif  /* PIVCO_HAS_OODLE */
+
+
 int main(int argc, char **argv)
 {
     int iters = 50000;
@@ -765,6 +871,14 @@ int main(int argc, char **argv)
            "symbol probability (each bit drawn IID).\n");
     printf("high pmaj = more zeros = skewed bitmap = tighter "
            "FSE compression.\n");
+#ifdef PIVCO_HAS_OODLE
+    printf("\nOodle column = Oodle 2.9.16's newlz_get_array_huff "
+           "C path.  Note: OodleUE's CMake does not\n"
+           "                 wire in the .a64.S / .nas ASM "
+           "kernels, so this is the portable-C fallback,\n"
+           "                 NOT the 1.3-1.5 cyc/sym shipping "
+           "perf ryg quotes.  Treat as a baseline.\n");
+#endif
     fflush(stdout);
 
     double enc_mbps[16][8];          /* [cell][xi] */
@@ -774,6 +888,13 @@ int main(int argc, char **argv)
     double huf_enc_mbps[16][2];      /* [cell][hufC1, hufC4] */
     double huf_dec_mbps[16][3];      /* [cell][1X1, 4X1, 4X2] */
     int    huf_ok_mat[16] = {0};
+#ifdef PIVCO_HAS_OODLE
+    /* Oodle reference (1 encode + 1 decode column; tuner picks
+     * huff3 vs huff6 internally, label reflects choice per cell). */
+    double oodle_enc_mbps[16];
+    double oodle_dec_mbps[16];
+    int    oodle_type_mat[16] = {0}; /* OODLE_HUFF_TYPE_HUFF{3,6} or 0 */
+#endif
 
     for (int ci = 0; ci < n_cells; ci++) {
         size_t bytes = cells[ci].size;
@@ -892,6 +1013,31 @@ int main(int argc, char **argv)
                                                        "hufC4", p);
         }
 
+#ifdef PIVCO_HAS_OODLE
+        /* Oodle reference path: setup, sanity, time. */
+        if (oodle_setup(src, bytes)) {
+            oodle_type_mat[ci] = g_oodle_huff_type;
+            memset(dec, 0xCC, bytes);
+            if (oodle_dec(dec, bytes) == 0 ||
+                memcmp(src, dec, bytes) != 0) {
+                fprintf(stderr, "OODLE SANITY MISMATCH size=%zu p=%.2f\n",
+                        bytes, p);
+                free_tables();
+                return 1;
+            }
+            oodle_dec_mbps[ci] = time_oodle_decode_min(dec, bytes, iters, src, p);
+            uint8_t oodle_scratch[16384];
+            oodle_enc_mbps[ci] = time_oodle_encode_min(src, bytes,
+                                                       oodle_scratch,
+                                                       sizeof(oodle_scratch),
+                                                       iters, p);
+        } else {
+            oodle_type_mat[ci] = 0;
+            oodle_enc_mbps[ci] = -1.0;
+            oodle_dec_mbps[ci] = -1.0;
+        }
+#endif
+
         free_tables();
     }
 
@@ -903,9 +1049,15 @@ int main(int argc, char **argv)
         printf(" %6s", lbl);
     }
     printf("  %6s %6s", "hufC1", "hufC4");
+#ifdef PIVCO_HAS_OODLE
+    printf("  %6s", "oodle");
+#endif
     printf("\n%5s %5s-+", "-----", "----");
     for (int xi = 0; xi < n_x; xi++) printf("-------");
     printf("---------------");
+#ifdef PIVCO_HAS_OODLE
+    printf("--------");
+#endif
     printf("\n");
     for (int ci = 0; ci < n_cells; ci++) {
         printf("%5zu %5.2f |", cells[ci].size, cells[ci].p_major);
@@ -918,6 +1070,11 @@ int main(int argc, char **argv)
             if (huf_enc_mbps[ci][j] < 0) printf(" %6s", "  -  ");
             else printf(" %6.1f", huf_enc_mbps[ci][j]);
         }
+#ifdef PIVCO_HAS_OODLE
+        printf(" ");
+        if (oodle_enc_mbps[ci] < 0) printf(" %6s", "  -  ");
+        else printf(" %6.1f", oodle_enc_mbps[ci]);
+#endif
         printf("\n");
     }
 
@@ -930,12 +1087,18 @@ int main(int argc, char **argv)
         printf(" %6s", cfgs[c].name);
     }
     printf("  %6s %6s %6s", "huf1X1", "huf4X1", "huf4X2");
+#ifdef PIVCO_HAS_OODLE
+    printf("  %6s", "oodle");
+#endif
     printf("\n%5s %5s-+", "-----", "----");
     for (size_t c = 0; c < N_CFGS; c++) {
         if (c > 0 && (c % 3) == 0) printf("-");
         printf("-------");
     }
     printf("-----------------------");
+#ifdef PIVCO_HAS_OODLE
+    printf("--------");
+#endif
     printf("\n");
     for (int ci = 0; ci < n_cells; ci++) {
         printf("%5zu %5.2f |", cells[ci].size, cells[ci].p_major);
@@ -949,8 +1112,27 @@ int main(int argc, char **argv)
             if (huf_dec_mbps[ci][j] < 0) printf(" %6s", "  -  ");
             else printf(" %6.1f", huf_dec_mbps[ci][j]);
         }
+#ifdef PIVCO_HAS_OODLE
+        printf(" ");
+        if (oodle_dec_mbps[ci] < 0) printf(" %6s", "  -  ");
+        else printf(" %6.1f", oodle_dec_mbps[ci]);
+#endif
         printf("\n");
     }
+#ifdef PIVCO_HAS_OODLE
+    /* Show which Oodle variant the tuner picked per cell. */
+    printf("\nOodle huff variant per cell (tuner pick):\n");
+    for (int ci = 0; ci < n_cells; ci++) {
+        const char *lbl;
+        switch (oodle_type_mat[ci]) {
+            case OODLE_HUFF_TYPE_HUFF3: lbl = "huff3 (3-stream)"; break;
+            case OODLE_HUFF_TYPE_HUFF6: lbl = "huff6 (6-stream)"; break;
+            default: lbl = "(declined)"; break;
+        }
+        printf("  size=%4zu pmaj=%.2f -> %s\n",
+                cells[ci].size, cells[ci].p_major, lbl);
+    }
+#endif
 
     return 0;
 }

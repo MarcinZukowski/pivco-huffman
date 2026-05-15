@@ -640,11 +640,49 @@ if(BUILD_BENCH)
         # "FSE cursor-count + unroll experiment").  Hand-rolled FSE
         # encoder + decoders varying x and y; doesn't touch the codec
         # wire format or runtime API.
-        add_executable(pivco_fse_xy_micro
-            extras/bench_fse_xy_micro.c
-        )
-        target_link_libraries(pivco_fse_xy_micro pivco_huffman huf0 m)
-        target_include_directories(pivco_fse_xy_micro PRIVATE src ext/fse/lib)
+
+        # Optional Oodle reference comparison.  Auto-enables iff the
+        # user has symlinked ext/oodle -> a built OodleUE clone.
+        # See extras/bench_oodle_wrapper.h for setup instructions.
+        set(OODLE_ROOT "${CMAKE_SOURCE_DIR}/ext/oodle/Engine/Source/Runtime/OodleDataCompression/Sdks/2.9.16")
+        set(OODLE_STATIC_LIB "${CMAKE_SOURCE_DIR}/ext/oodle/build-out/ar/liboodle-data-static.a")
+        if(EXISTS "${OODLE_ROOT}/src/oodle2/core/newlz_arrays_huff.h"
+           AND EXISTS "${OODLE_STATIC_LIB}")
+            set(OODLE_DETECTED ON)
+            message(STATUS "Oodle detected at ext/oodle - enabling pivco_fse_xy_micro Oodle reference columns")
+        else()
+            set(OODLE_DETECTED OFF)
+            message(STATUS "Oodle not detected at ext/oodle - pivco_fse_xy_micro will skip Oodle reference columns")
+        endif()
+
+        if(OODLE_DETECTED)
+            add_executable(pivco_fse_xy_micro
+                extras/bench_fse_xy_micro.c
+                extras/bench_oodle_wrapper.cpp
+            )
+            target_link_libraries(pivco_fse_xy_micro pivco_huffman huf0 m
+                "${OODLE_STATIC_LIB}")
+            target_include_directories(pivco_fse_xy_micro PRIVATE
+                src ext/fse/lib
+                "${OODLE_ROOT}/src/oodle2/core"
+                "${OODLE_ROOT}/src/oodle2/core/public"
+                "${OODLE_ROOT}/src/oodle2/base"
+                "${OODLE_ROOT}/include")
+            target_compile_definitions(pivco_fse_xy_micro PRIVATE PIVCO_HAS_OODLE=1)
+            # Oodle headers require OODLE_IMPORT_LIB when consuming
+            # the built static lib (matches OODLE_BUILDING_LIB used
+            # to build it).
+            set_source_files_properties(extras/bench_oodle_wrapper.cpp
+                PROPERTIES COMPILE_DEFINITIONS OODLE_IMPORT_LIB)
+            set_source_files_properties(extras/bench_oodle_wrapper.cpp
+                PROPERTIES COMPILE_FLAGS "-std=c++20 -w")
+        else()
+            add_executable(pivco_fse_xy_micro
+                extras/bench_fse_xy_micro.c
+            )
+            target_link_libraries(pivco_fse_xy_micro pivco_huffman huf0 m)
+            target_include_directories(pivco_fse_xy_micro PRIVATE src ext/fse/lib)
+        endif()
     endif()
 endif()
 

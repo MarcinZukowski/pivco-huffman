@@ -106,7 +106,77 @@ the only option below ~0.60.
   ratio cost that matters for small bitmaps.  Need to measure.
 
 
-## Oodle's newlz_arrays_huff — semi-high priority follow-up
+## Oodle's newlz_arrays_huff — partially integrated 2026-05-15
+
+**Status: integrated as a C-only reference baseline; ASM hookup
+is the open follow-up.**
+
+ph now optionally links against OodleUE when the user provides
+`ext/oodle` as a symlink (see `extras/bench_oodle_wrapper.h` for
+setup) and `extras/bench_fse_xy_micro.c` grows an "oodle" decode
++ encode column gated on `PIVCO_HAS_OODLE`.  Initial M4 numbers
+(1440 B / pmaj=0.80):
+
+  - Oodle decode  =  1034 MB/s  (newlz_get_array_huff, huff3
+                                  variant — tuner picked it over
+                                  huff6 because lambda=0 biases
+                                  to size, and huff3's header
+                                  is smaller)
+  - FSE x16y2     =  2372 MB/s
+  - huf0 huf4X2   =  2457 MB/s
+
+Surprising that Oodle is the slowest of the three — until you
+look at the OodleUE build: **the .a64.S ARM kernels and .nas
+x86 NASM kernels are NOT compiled into liboodle-data-static.a**.
+The CMake just picks up .cpp files via `s_add_dir`.  So the
+"oodle" column measures Oodle's portable-C fallback path, NOT
+the 1.3-1.5 cyc/sym shipping perf ryg quotes (which requires
+`NEWLZ_ARM64_HUFF_ASM` define + linking the .a64.S kernels).
+
+Open follow-up: patch OodleUE's build (or hook into ours) to:
+
+  1. `enable_language(ASM)` for `.a64.S` (Apple/ARM hosts) and
+     NASM for `.nas` (Intel/AMD hosts).
+  2. Compile and link the relevant kernels: `newlz_huff3.a64.S`,
+     `newlz_huff6.a64.S`, plus the `_cortex_a78` / `_cortex_a57`
+     variants for the platforms we care about.
+  3. Add `-DNEWLZ_ARM64_HUFF_ASM=1` (or the x86 equivalent) so
+     `newlz_arrays_huff.cpp`'s ASM-dispatch paths fire.
+  4. Re-run the bench; expect Oodle to jump 2-3× to its actual
+     shipping number.
+
+Then-other open items:
+
+  - Force huff6 (vs huff3) by setting lambda > 0 to penalise
+    huff3's slower decode — without ASM that test mostly measures
+    the C fallback so it's parked until ASM is wired.
+  - Encode is currently slower for Oodle than for huf0 because
+    `newLZ_put_array_huff` rebuilds the histogram + table inside
+    the timed call.  ph's huf0 encode uses pre-built CTable
+    (apples-to-apples with FSE).  Could factor Oodle's encode the
+    same way but it needs more API surface than the public
+    `newLZ_put_array_huff`.
+
+EULA review (2026-05-15): pulled the Unreal EULA text from
+web.archive.org since unrealengine.com 403s anonymous fetches.
+No clauses on benchmarking, comparative testing, or publishing
+performance numbers.  Section 1 grants broad "private use however
+you want" rights; Restrictions section enumerates things like
+don't-rent / don't-misappropriate / don't-back-patent-claims but
+no benchmark or publication clauses.  Distribution rules apply
+to redistributing Engine Code/Tools — we don't, so they don't
+constrain us.  Third-Party Software clause acknowledges Oodle is
+under its own additional terms; `ozip --help` confirms "use of
+Oodle requires an Oodle license" — but private use for research
+appears fine.  ryg himself publishes Oodle perf numbers
+regularly.  Net: building / benchmarking / publishing comparative
+decode numbers is OK; vendoring Oodle source into ph's git tree
+is NOT (recipients would need own UE licenses).  Hence the
+symlink-as-clone pattern in `ext/oodle`.
+
+---
+
+### Original entry (kept for reference):
 
 **Status: open, semi-high priority.**  Worth a real engagement now
 that we have a stable codec to compare against.
