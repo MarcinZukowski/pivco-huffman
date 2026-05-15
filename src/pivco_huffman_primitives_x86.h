@@ -805,6 +805,7 @@ static inline void pack_dN_x86(uint8_t *out, const uint16_t *codes_la,
     int simd_n = i > n ? n : i;
     PROF_COUNT_ONLY(PROF_ENC_FLAT_SIMD_ELEMS, simd_n);
     PROF_COUNT_ONLY(PROF_ENC_FLAT_TAIL_ELEMS, n - simd_n);
+    (void)simd_n;  /* unused when PIVCO_PROF=0 (PROF_COUNT_ONLY expands away) */
 
     if (i >= n) return;
 

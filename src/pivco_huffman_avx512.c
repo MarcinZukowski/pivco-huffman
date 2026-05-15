@@ -723,6 +723,24 @@ static void encode_node_avx512(const pivco_huffman_table_t *table,
         *out_ptr += KR_HEADER_BYTES;
     }
 
+    /* FSE marker byte (v0.2 wire format).  Always 0 here since this
+     * legacy avx512 encoder never attempts FSE coding; codec.c's
+     * BU decoder always reads one marker byte per non-flat internal
+     * node regardless.  This brings AVX-512 wire format into line
+     * with scalar / NEON / x86 (all routed through codec.c after
+     * Phase 4.3).  Phase 5 retires this encoder entirely.
+     *
+     * Sidebar: this byte was missing from x86 + AVX-512 encoders
+     * relative to scalar+NEON until the codec cutover (see
+     * pivco_huffman_wire.h comment).  Cross-backend decode would
+     * miscount the stream by one byte per node and segfault on the
+     * flat-decode path -- which is precisely what surfaced when
+     * codec_x86 BU decode was wired in on c8i but encode still
+     * came through this legacy file. */
+    uint8_t *marker_slot = *out_ptr;
+    *marker_slot = 0;
+    *out_ptr += 1;
+
     /* Bitmap + partition.  Stride 32 codes / iter:
      * - vpsllw(code_vec, depth) + vpmovw2m   -- 32-bit mask in one shot
      * - write the 32-bit mask to bm[j >> 3..j>>3 + 4)

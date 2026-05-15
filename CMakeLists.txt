@@ -162,8 +162,6 @@ elseif(TARGET_ARCH STREQUAL "x86_64" OR TARGET_ARCH STREQUAL "amd64")
         message(STATUS "x86_64 detected — enabling AVX-512 VBMI2 + AVX2 + SSE4.1")
         list(APPEND PIVCO_SOURCES
             src/pivco_huffman_avx512.c
-            src/pivco_huffman_x86.c
-            src/pivco_huffman_bu_x86.c
             src/pivco_huffman_x86_tables.c)
         add_compile_definitions(PIVCO_HAS_AVX512=1 PIVCO_HAS_AVX2=1 PIVCO_HAS_SSE4=1)
         add_compile_options(-mavx512f -mavx512bw -mavx512vl -mavx512vbmi -mavx512vbmi2
@@ -172,16 +170,12 @@ elseif(TARGET_ARCH STREQUAL "x86_64" OR TARGET_ARCH STREQUAL "amd64")
     elseif(COMPILER_HAS_AVX2 AND CPU_HAS_AVX2 AND NOT CPU_HAS_AVX2 STREQUAL "0")
         message(STATUS "x86_64 detected — enabling AVX2 + BMI2 + SSE4.1")
         list(APPEND PIVCO_SOURCES
-            src/pivco_huffman_x86.c
-            src/pivco_huffman_bu_x86.c
             src/pivco_huffman_x86_tables.c)
         add_compile_definitions(PIVCO_HAS_AVX2=1 PIVCO_HAS_SSE4=1)
         add_compile_options(-mavx2 -mbmi2 -msse4.1 -mpopcnt)
     else()
         message(STATUS "x86_64 detected — enabling SSE4.1 (+ POPCNT)")
         list(APPEND PIVCO_SOURCES
-            src/pivco_huffman_x86.c
-            src/pivco_huffman_bu_x86.c
             src/pivco_huffman_x86_tables.c)
         add_compile_definitions(PIVCO_HAS_SSE4=1)
         add_compile_options(-msse4.1 -mpopcnt)
@@ -199,10 +193,10 @@ endif()
 # scalar default on every non-arm64 host).
 #
 # Scalar is always built.  NEON is built on aarch64 hosts (Phase 3
-# cutover landed 2026-05-14, replacing the legacy
-# pivco_huffman_neon.c + pivco_huffman_bu_neon.c).  x86 and AVX-512
-# still build from their legacy .c files until Phase 4 and Phase 5
-# of the unify-framework refactor land.
+# cutover landed 2026-05-14).  x86 is built on x86_64 hosts with
+# SSE4.1 or better (Phase 4.3 cutover landed 2026-05-14, replacing
+# the legacy pivco_huffman_x86.c + pivco_huffman_bu_x86.c).  AVX-512
+# still builds from its legacy .c file until Phase 5.
 add_library(pivco_codec_scalar OBJECT src/pivco_huffman_codec.c)
 target_compile_definitions(pivco_codec_scalar PRIVATE PIVCO_BACKEND_SCALAR=1)
 target_include_directories(pivco_codec_scalar PRIVATE include)
@@ -211,6 +205,17 @@ if(TARGET_ARCH STREQUAL "arm64" OR TARGET_ARCH STREQUAL "aarch64")
     add_library(pivco_codec_neon OBJECT src/pivco_huffman_codec.c)
     target_compile_definitions(pivco_codec_neon PRIVATE PIVCO_BACKEND_NEON=1)
     target_include_directories(pivco_codec_neon PRIVATE include)
+endif()
+
+if(TARGET_ARCH STREQUAL "x86_64" OR TARGET_ARCH STREQUAL "amd64")
+    # All x86 tiers (SSE-only / AVX2 / AVX-512 VBMI2) build the same
+    # pivco_codec_x86 object lib.  primitives_x86.h gates AVX2 and
+    # AVX-512 fast paths internally via PIVCO_HAS_AVX2 / __AVX512VBMI2__,
+    # so a single OBJECT lib serves all three -- we don't fork into
+    # separate codec_x86_sse / codec_x86_avx2 / codec_x86_avx512.
+    add_library(pivco_codec_x86 OBJECT src/pivco_huffman_codec.c)
+    target_compile_definitions(pivco_codec_x86 PRIVATE PIVCO_BACKEND_X86=1)
+    target_include_directories(pivco_codec_x86 PRIVATE include)
 endif()
 
 # huff0/FSE library (for baseline comparison)
@@ -255,13 +260,15 @@ else()
 endif()
 
 # Library — backend-agnostic sources plus the per-backend codec objects.
-# The scalar codec is always linked.  The NEON codec is linked on aarch64
-# hosts only (the codec_neon OBJECT library is only defined there); x86
-# and AVX-512 still come from their legacy .c files via PIVCO_SOURCES
-# until Phase 4 / Phase 5 of the unify-framework refactor.
+# The scalar codec is always linked.  NEON is linked on aarch64 hosts;
+# x86 (one OBJECT lib serving SSE / AVX2 / AVX-512 VBMI2 via internal
+# gating) is linked on x86_64 hosts.  AVX-512 still comes from its
+# legacy .c file via PIVCO_SOURCES until Phase 5 lands.
 set(PIVCO_CODEC_OBJECTS $<TARGET_OBJECTS:pivco_codec_scalar>)
 if(TARGET_ARCH STREQUAL "arm64" OR TARGET_ARCH STREQUAL "aarch64")
     list(APPEND PIVCO_CODEC_OBJECTS $<TARGET_OBJECTS:pivco_codec_neon>)
+elseif(TARGET_ARCH STREQUAL "x86_64" OR TARGET_ARCH STREQUAL "amd64")
+    list(APPEND PIVCO_CODEC_OBJECTS $<TARGET_OBJECTS:pivco_codec_x86>)
 endif()
 add_library(pivco_huffman
     ${PIVCO_SOURCES}
