@@ -390,6 +390,18 @@ if(BUILD_BENCH)
     )
     target_link_libraries(pivco_flat_subtree_stats pivco_huffman m)
 
+    # Per-dataset entropy + FSE-per-internal-node breakdown.  Validates
+    # theories about how much of the compression benefit comes from
+    # which nodes / which entropy-coding strategy.
+    if(PIVCO_FSE)
+        add_executable(pivco_entropy_breakdown
+            extras/bench_entropy_breakdown.c
+            bench/bench_distributions.c
+        )
+        target_link_libraries(pivco_entropy_breakdown pivco_huffman m)
+        target_include_directories(pivco_entropy_breakdown PRIVATE ext/fse/lib)
+    endif()
+
     # Offline TANS-routing ratio bound: real files (per-block) or
     # MAIN bench distributions (per-histogram).
     add_executable(pivco_tans_bound
