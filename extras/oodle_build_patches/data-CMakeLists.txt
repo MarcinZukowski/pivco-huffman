@@ -1,0 +1,15 @@
+# Enable ASM languages once at the parent scope so add_library()
+# calls in subdirs can include .a64.S (ASM) and .nas (ASM_NASM)
+# files.  Patched 2026-05-15 for pivco-huffman ASM kernel hookup.
+#
+# CMake's ASM_NASM auto-detects only .asm/.nasm extensions, so we
+# also register .nas (the extension Oodle's NASM kernels use).
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "arm64|aarch64")
+    enable_language(ASM)
+elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64)$")
+    enable_language(ASM_NASM)
+    list(APPEND CMAKE_ASM_NASM_SOURCE_FILE_EXTENSIONS nas)
+endif()
+
+add_subdirectory(static)
+add_subdirectory(shared)

@@ -173,22 +173,70 @@ variant, neither of which exists in its wire format.
    `-D__RADMACARM64__` for Apple targets and
    `-DNEWLZ_ARM64_HUFF_ASM=1` to flip the .cpp dispatch.
 
+### Cross-platform sweep — done 2026-05-15
+
+Wired x86 NASM kernels (after also handling: Linux unzip's CRLF
+preservation breaking git-apply, smake's silent `.nas`-drop, NASM
+choking on inherited `-march`) and re-ran all 4 EC2 hosts with
+proper ASM kernels.  Decode MB/s at 1440 B / pmaj=0.80, with the
+"oodle" column reading the ASM kernel via `newlz_get_array_huff`
+(huff6 forced via `entropy_flags = NEWLZ_ARRAY_FLAG_ALLOW_HUFF6`):
+
+| host  | uarch                    | FSE shipping (x2y2) | best FSE (x*y)    | huf0 huf4X2 | Oodle huff6 (ASM) |
+|-------|--------------------------|---------------------|-------------------|-------------|--------------------|
+| M4    | Apple M4 Max             |  874                | x10y4 = **2300**  | 2361        | **1458**           |
+| c8a   | EPYC 9R45 (Zen 5/Turin)  | 1019                | x8y4  = **1917**  | **2729**    | 1279               |
+| c8i   | Xeon Granite Rapids 6975 |  555                | x10y4 = 1558      | 1548        | 853                |
+| c8g   | AWS Graviton 4           |  543                | x10y1 = **1266**  | **1573**    | 731                |
+| c6a   | EPYC 7R13 (Zen 3/Milan)  |  660                | x4y1  = **1172**  | **1319**    | 750                |
+
+And at 2880 B / pmaj=0.80 (largest cell, less table-read
+amortization noise):
+
+| host  | best FSE x*y    | huf0 huf4X2 | Oodle huff6 (ASM) |
+|-------|-----------------|-------------|--------------------|
+| M4    | x10y4 = 2287    | 2236        | **2014**           |
+| c8a   | x10y4 = 1903    | 2701        | 1397               |
+| c8i   | x10y4 = 1594    | 1591        | 924                |
+| c8g   | x10y1 = 1273    | 1573        | 825                |
+| c6a   | x4y1  = 1178    | 1275        | 964                |
+
+**The Oodle ASM number on c8a is the most striking** — huf4X2
+beats Oodle's own huff6 ASM by 2.0× on Zen 5.  Most of that is
+huf4X2's `2 syms/lookup` advantage that Oodle's huff6 doesn't
+have (only 1 sym/lookup, but 6 streams instead of 4).  Note also
+the gap is wider at 1440 than 2880 — Oodle's per-call table-read
+overhead matters more at small sizes (FSE/huf0 use pre-built
+tables).
+
+Cross-platform takeaways:
+
+- **FSE x*y closes most of the gap to the fastest huf path** on
+  M4, c8i, c8g; on c8a (Zen 5) huf4X2 has a real ~40% lead.
+- **Oodle's huff6 ASM is the slowest of the three** on every
+  host except M4 (where it lands ~70% of FSE/huf0) — confirming
+  that the "wide streams + simple table" tradeoff is dominated
+  by huf0's X2 trick on this workload (small bitmaps).
+- **c6a (Zen 3) is the narrowest core** — caps everyone at
+  ~1200 MB/s.  Older OOO width can't take advantage of >4
+  cursors / streams.
+
 ### Open follow-ups
 
-- **x86 ASM kernels** — for c6a / c8a / c8i need NASM-built
-  `.nas` files (`newlz_huff{3,6}_x64_generic.nas`,
-  `_bmi2.nas`, `_zen2.nas`) plus `-DNEWLZ_X64GENERIC_HUFF_ASM`.
-  Currently c6a/c8a/c8i Oodle measurements would be C-only.
-- **Linux ARM (c8g Graviton 4)** — `.a64.S` should build on
-  Linux too, but Mach-O vs ELF differ in symbol mangle; need to
-  verify on EC2.  The Apple-specific `__RADMACARM64__` define
-  is only applied on `APPLE` targets in our patch.
 - **Encode comparison** — `oodle_huff_encode` includes histogram
   + table build inside the timed call; ph's huf0 encode uses
   pre-built CTable (apples-to-apples with FSE).  To make Oodle
   encode comparable we'd need to call lower-level
   `newLZ_put_array_histo` directly.  Currently in the
   pre-builds, that comparison is unfair to Oodle.
+- **Variant tuning per uarch** — we picked `_wide.a64.S` for
+  ARM64 (M1-scheduled).  Worth testing `_cortex_a78.a64.S` on
+  Graviton 4 (Neoverse V2 ≈ A78), might give a few percent.
+- **Avoid the table-read-per-call disadvantage** — Oodle has no
+  `_usingDTable` public API, but `newLZ_prep_hufftab` is
+  exported.  Could cache the prepped `KrakenHuffTab` outside the
+  timed loop to factor out per-call header parsing.  Would close
+  some of the gap to huf0_X2 at small sizes.
 
 EULA review (2026-05-15): pulled the Unreal EULA text from
 web.archive.org since unrealengine.com 403s anonymous fetches.
