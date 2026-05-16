@@ -1,5 +1,14 @@
 # PIVCO-Huffman Decode Ideas
 
+> **Prior art note:** the bitmap-per-Huffman-node wire format
+> matches the Huffman-shaped wavelet tree (Grossi-Gupta-Vitter
+> SODA 2003, Mäkinen-Navarro); SIMD partition primitives match
+> Kaneta SPIRE 2018 + Dinklage et al. DCC 2023.  Both are
+> strictly top-down construction; PIVCO's novelty stays in
+> bulk-decode-as-codec, the BU `tree_merge` direction, the
+> flat-subtree fast path, per-node FSE, and the empirical
+> positioning.  Full notes in [`WAVELET_TREES.md`](WAVELET_TREES.md).
+
 ## FSE wide-cursor decoder — ph+FSE angle is now plausible, 2026-05-15
 
 **Status: high-priority research direction; replaces the discarded

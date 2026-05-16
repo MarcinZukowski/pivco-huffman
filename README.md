@@ -389,6 +389,33 @@ decoders. Key findings:
   PIVCO's 1.4x on skewed data with a realistic workload appears
   to be a novel result for a single-core CPU Huffman decoder.
 
+### Relationship to wavelet trees
+
+The bitmap-per-Huffman-internal-node wire format PIVCO uses is
+structurally identical to a **Huffman-shaped wavelet tree**:
+Grossi-Gupta-Vitter (SODA 2003) and Mäkinen-Navarro (the Huffman
+shape).  The SIMD partition primitives (TBL/pshufb/vpcompress) are
+also published — Kaneta (SPIRE 2018) and Dinklage-Fischer-Kurpicz-
+Tarnowski (DCC 2023, AVX-512) — for wavelet-tree *construction*.
+Both prior-art families are strictly top-down and frame the
+representation as a rank/select **index** for substring queries
+(FM-index / r-index), not as a stream codec.
+
+PIVCO's contributions, after this survey, are: (a) framing the
+representation as a bulk stream codec, (b) SIMD bulk *decode* —
+in particular the bottom-up `tree_merge` direction not seen in any
+WT paper, (c) the flat-subtree fast path (maximal `D ≥ 2` flat
+subtrees → one `N·D`-bit packed region + `code_to_sym` lookup),
+(d) per-node FSE on the bitmap, (e) empirical positioning against
+huf0 / zstd / brotli / FSE on real distributions across Apple M4 /
+Graviton 4 / Xeon Granite Rapids / Zen 3 / Zen 5.
+
+Dinklage et al. report wavelet-tree *construction* throughput at
+~100 MB/s of input on i9-11900KF AVX-512 for English text.  No
+published bulk-decode bytes/sec exists for this representation —
+that regime appears to be open.  Full prior-art notes in
+[`WAVELET_TREES.md`](WAVELET_TREES.md).
+
 ## Test Datasets
 
 29 distributions, split into 19 synthetic (parametric/historical) and
