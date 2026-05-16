@@ -93,6 +93,11 @@ typedef struct {
     int    top1_depth;
     int    n_internal;
     uint64_t xs_state;
+    /* Flat-subtree accounting (D ≥ 2 maximal subtrees with all
+     * leaves at the same depth from the subtree root). */
+    double flat_raw_bits;        /* Σ n_subtree · D — what ph emits today */
+    double flat_entropy_bits;    /* Σ n_subtree · H_conditional — floor */
+    int    n_flat_subtrees;
 } stats_t;
 
 static uint64_t xs_next(stats_t *s)
@@ -102,8 +107,38 @@ static uint64_t xs_next(stats_t *s)
     return (s->xs_state = v);
 }
 
+/* Returns the depth (from this node) at which all leaves sit if the
+ * subtree rooted here is flat, or -1 otherwise.  A leaf returns 0. */
+static int subtree_flat_depth(const pivco_huffman_table_t *t, int16_t node)
+{
+    const pivco_tree_node_t *n = &t->tree[node];
+    if (n->symbol >= 0) return 0;
+    int ld = subtree_flat_depth(t, n->left);
+    if (ld < 0) return -1;
+    int rd = subtree_flat_depth(t, n->right);
+    if (rd < 0 || rd != ld) return -1;
+    return ld + 1;
+}
+
+/* Collect leaf frequencies (in source-order) into `out`, returning
+ * count of leaves filled. */
+static int collect_leaf_freqs(const pivco_huffman_table_t *t, int16_t node,
+                                const uint64_t *freq, uint64_t *out, int cap)
+{
+    const pivco_tree_node_t *n = &t->tree[node];
+    if (n->symbol >= 0) {
+        if (cap <= 0) return 0;
+        out[0] = freq[n->symbol];
+        return 1;
+    }
+    int got = collect_leaf_freqs(t, n->left, freq, out, cap);
+    got += collect_leaf_freqs(t, n->right, freq, out + got, cap - got);
+    return got;
+}
+
 /* Walk the tree returning total subtree count.  Accumulates FSE
- * measurements into `s`. */
+ * measurements into `s`.  Detects maximal flat subtrees (D ≥ 2)
+ * and accounts them separately into s->flat_*. */
 static uint64_t walk(const pivco_huffman_table_t *t, int16_t node, int depth,
                      const uint64_t *freq, stats_t *s,
                      uint8_t *bitmap_buf, uint8_t *expand_buf,
@@ -111,6 +146,35 @@ static uint64_t walk(const pivco_huffman_table_t *t, int16_t node, int depth,
 {
     const pivco_tree_node_t *n = &t->tree[node];
     if (n->symbol >= 0) return freq[n->symbol];
+
+    /* Maximal-flat check.  `subtree_flat_depth` returns D if this
+     * subtree is flat; we treat D ≥ 2 as the ph fast-path trigger.
+     * Caller has already verified the parent wasn't flat-enough
+     * (otherwise we wouldn't have descended here). */
+    int flat_d = subtree_flat_depth(t, node);
+    if (flat_d >= 2) {
+        /* Collect leaf freqs to compute the local entropy. */
+        uint64_t leaf_freqs[1 << 16];  /* depth up to 16 = 65536 leaves */
+        int n_leaves = collect_leaf_freqs(t, node, freq, leaf_freqs,
+                                            (int)(sizeof(leaf_freqs) / sizeof(leaf_freqs[0])));
+        uint64_t sum = 0;
+        for (int i = 0; i < n_leaves; i++) sum += leaf_freqs[i];
+        double H_cond = 0.0;
+        if (sum > 0) {
+            for (int i = 0; i < n_leaves; i++) {
+                if (leaf_freqs[i] == 0) continue;
+                double p = (double)leaf_freqs[i] / (double)sum;
+                H_cond -= p * log2(p);
+            }
+        }
+        s->n_flat_subtrees++;
+        s->flat_raw_bits     += (double)sum * (double)flat_d;
+        s->flat_entropy_bits += (double)sum * H_cond;
+        /* Return without recursing — flat subtrees are accounted as
+         * a single unit; we don't double-count the internal nodes
+         * inside them in the regular per-node sums. */
+        return sum;
+    }
 
     uint64_t left  = walk(t, n->left,  depth + 1, freq, s,
                           bitmap_buf, expand_buf, scratch, scratch_cap);
@@ -154,14 +218,16 @@ static uint64_t walk(const pivco_huffman_table_t *t, int16_t node, int depth,
 }
 
 static void print_row(const char *name, int N, double H, double huf,
-                       double fse_byte_bpB, double fse_bit_bpB,
-                       double top1_bpB, int top1_depth, int n_internal,
-                       int is_main)
+                       double fse_byte_bpB,
+                       double top1_bpB, int top1_depth,
+                       double flat_today_bpB, double flat_floor_bpB,
+                       int n_flat, int is_main)
 {
     char marker = is_main ? '*' : ' ';
-    printf("%c %-22s %6d  %5.3f  %5.3f   %5.3f   %5.3f   %5.3f  %3d   (%d nodes)\n",
-            marker, name, N, H, huf, fse_byte_bpB, fse_bit_bpB,
-            top1_bpB, top1_depth, n_internal);
+    printf("%c %-22s %6d  %5.3f  %5.3f  %5.3f  %5.3f  %3d  %5.3f  %5.3f  %3d\n",
+            marker, name, N, H, huf, fse_byte_bpB,
+            top1_bpB, top1_depth,
+            flat_today_bpB, flat_floor_bpB, n_flat);
 }
 
 int main(int argc, char **argv)
@@ -177,18 +243,28 @@ int main(int argc, char **argv)
     printf("Per-dataset entropy + FSE-per-node breakdown (N = %d B "
             "synthetic IID sample, seed=1).\n", BLK);
     printf("All bits/byte values normalised to bits per source byte.\n");
-    printf("  H        = byte entropy = Σ p · −log2 p\n");
-    printf("  huf      = weighted Huffman avg code length\n");
-    printf("  fse_byte = Σ FSE(bitmap bytes) per internal node, bits / N\n");
-    printf("  fse_bit  = Σ FSE(expanded bits, 1 byte/bit) per node, bits / N\n");
-    printf("  top1_b   = max single-node bits saved per source byte\n");
-    printf("             = max[ n_node · (1 − H_node) ] / N\n");
-    printf("  top1_d   = depth of that top-1 node (root = 0)\n");
+    printf("  H          = byte entropy = Σ p · −log2 p\n");
+    printf("  huf        = weighted Huffman avg code length\n");
+    printf("  fse_byte   = Σ FSE(bitmap bytes) for non-flat internal nodes,\n");
+    printf("               bits / N.  (Excludes nodes inside flat subtrees.)\n");
+    printf("  top1_b     = max single-node bits saved per source byte\n");
+    printf("               = max[ n_node · (1 − H_node) ] / N\n");
+    printf("  top1_d     = depth of that top-1 node (root = 0)\n");
+    printf("  flat_today = bits / source byte emitted by ph's flat-subtree\n");
+    printf("               fast path today (= Σ n_subtree · D / N, where\n");
+    printf("               D is the flat-subtree depth, raw bits / symbol).\n");
+    printf("  flat_floor = entropy floor for those same flat-subtree bits\n");
+    printf("               = Σ n_subtree · H_conditional_local / N.\n");
+    printf("               (flat_today − flat_floor) is what we'd save by\n");
+    printf("               FSE-ing the flat regions instead of raw-emitting.\n");
+    printf("  n_flat     = number of maximal flat subtrees (D ≥ 2).\n");
     printf("  * marks MAIN distributions.\n\n");
 
-    printf("  %-22s     N       H    huf  fse_byte fse_bit  top1_b  top1_d\n",
+    printf("  %-22s     N       H    huf  fseB    top1   top1  flat_  flat_  n\n",
             "dataset");
-    printf("  %-22s  ------  -----  -----  -------  -------  ------  -----\n",
+    printf("  %-22s                                _byte    _b     _d  today  floor flat\n",
+            "");
+    printf("  %-22s  ------  -----  -----  -----  -----  ----  -----  -----  ---\n",
             "----------------------");
 
     for (int d = 0; d < n_dist; d++) {
@@ -253,13 +329,15 @@ int main(int argc, char **argv)
         walk(table, table->tree_root, 0, hist, &s,
               bitmap_buf, expand_buf, scratch, sizeof(scratch));
 
-        double fse_byte_bpB = s.total_fse_byte_bits / (double)BLK;
-        double fse_bit_bpB  = s.total_fse_bit_bits  / (double)BLK;
-        double top1_bpB     = s.top1_saved_bits     / (double)BLK;
+        double fse_byte_bpB  = s.total_fse_byte_bits  / (double)BLK;
+        double top1_bpB      = s.top1_saved_bits      / (double)BLK;
+        double flat_today_bpB = s.flat_raw_bits       / (double)BLK;
+        double flat_floor_bpB = s.flat_entropy_bits   / (double)BLK;
 
-        print_row(name, BLK, H, huf_total_bits, fse_byte_bpB, fse_bit_bpB,
-                   top1_bpB, s.top1_depth, s.n_internal,
-                   bench_dist_is_main(d));
+        print_row(name, BLK, H, huf_total_bits, fse_byte_bpB,
+                   top1_bpB, s.top1_depth,
+                   flat_today_bpB, flat_floor_bpB,
+                   s.n_flat_subtrees, bench_dist_is_main(d));
     }
 
     return 0;
