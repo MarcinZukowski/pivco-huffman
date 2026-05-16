@@ -1,6 +1,6 @@
 /* extras/bench_coalesce.c — store-coalescing experiments for partition_8.
  *
- * Three variants tested, all losers on M4.  See COALESCE.md at the
+ * Three variants tested, all losers on M4.  See docs/COALESCE.md at the
  * project root for the full investigation log.  This file is the
  * working code for the experiments.
  *

@@ -107,6 +107,12 @@ five phases ending 2026-05-14; before that, each backend had its own
 - `README.md` — benchmark results, analysis, primary project doc
 - `KERNELS.md` — step-by-step NEON kernel walkthroughs (worked examples per intrinsic)
 - `IDEAS.md` — full optimization-ideas log (shipped / discarded / open)
-- `COALESCE.md` — partition store-coalescing investigation log
-- `PREFIX_RADIX.md` — historical design record of the prefix-radix path
+- `docs/COALESCE.md` — partition store-coalescing investigation log
+- `docs/PREFIX_RADIX.md` — historical design record of the prefix-radix path
+- `docs/WAVELET_TREES.md` — prior-art notes on Huffman-shaped wavelet trees
+- `docs/FSE-V0.md` — per-node FSE design + the quarter-powers-of-two table schedule
+- `docs/TANS-INVESTIGATION.md` — TANS routing-cost bound + flat-carve-out tax analysis
+- `docs/BITPACKING.md` — FastLanes / per-D layout investigation
+- `docs/FUSION.md` — leaf-fusion design and per-platform write-up
+- `docs/IDEAS-codex.md`, `docs/IDEAS-gemini.md`, `docs/PIVCO-HUFFMAN-PROGRAM.md` — side notes / external-LLM idea dumps
 - `results/` — timestamped + sha'd full-sweep captures

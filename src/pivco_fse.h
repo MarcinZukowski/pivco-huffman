@@ -1,5 +1,5 @@
 /* Thin wrapper around Yann Collet's FSE library for pivco-huffman's
- * per-node partition-bitmap compression path.  See FSE-V0.md.
+ * per-node partition-bitmap compression path.  See docs/FSE-V0.md.
  *
  * Owns 25 pre-built CTable + DTable globals (one per quarter-power-
  * of-two frequent-bit probability), populated lazily on first use

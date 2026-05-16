@@ -383,7 +383,7 @@ static void bench_vext_throughput(int reps)
 /* Store-coalescing prototypes (per-iter switch / per-iter TBL / 4-iter
  * macro-block) lived here briefly; all three lost to baseline on M4
  * (38–78% slower).  They're moved to extras/bench_coalesce.c with a
- * full discussion in COALESCE.md.  Keeping only the throughput probes
+ * full discussion in docs/COALESCE.md.  Keeping only the throughput probes
  * and store-port topology probe here. */
 #if 0
 /* 4-iter macro-block coalesce with lookahead.
@@ -1773,7 +1773,7 @@ int main(void)
 
     /* Coalesce-store partition prototypes were tested here; all three
      * lost to baseline on M4.  Code moved to extras/bench_coalesce.c
-     * with the full investigation in COALESCE.md. */
+     * with the full investigation in docs/COALESCE.md. */
 
     /* Memset */
     t0 = now_sec();

@@ -110,7 +110,7 @@ set(PIVCO_SOURCES
 
 # FSE entropy coder (Yann Collet, vendored in ext/fse).  Used for
 # per-internal-node bitmap compression on skewed partitions -- see
-# FSE-V0.md.  Sources are plain C with no SIMD deps; build-on/off via
+# docs/FSE-V0.md.  Sources are plain C with no SIMD deps; build-on/off via
 # the PIVCO_FSE option (default ON; OFF only for ratio-no-fse compare).
 option(PIVCO_FSE "Build the FSE entropy-coder integration" ON)
 if(PIVCO_FSE)

@@ -273,7 +273,7 @@ int pivco_huffman_decode_bu_x86(const uint8_t *in, size_t in_len,
  * (alongside its bench_prefix_profile.c and pivco_huffman_neon_common.h).
  * BU on the standard 2-way wire format beats it on all 29 distributions
  * across all 7 EC2 test hosts; no production caller remained.  See
- * PREFIX_RADIX.md for the historical design record. */
+ * docs/PREFIX_RADIX.md for the historical design record. */
 
 #ifdef PIVCO_HAS_SVE
 int pivco_huffman_encode_sve(const uint8_t *symbols,

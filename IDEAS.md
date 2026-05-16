@@ -7,7 +7,7 @@
 > strictly top-down construction; PIVCO's novelty stays in
 > bulk-decode-as-codec, the BU `tree_merge` direction, the
 > flat-subtree fast path, per-node FSE, and the empirical
-> positioning.  Full notes in [`WAVELET_TREES.md`](WAVELET_TREES.md).
+> positioning.  Full notes in [`docs/WAVELET_TREES.md`](docs/WAVELET_TREES.md).
 
 ## FSE wide-cursor decoder — ph+FSE angle is now plausible, 2026-05-15
 
@@ -503,7 +503,7 @@ it from code lengths alone), so the split decision sees no skew.
    bit per flat-candidate node: split or don't.  Roughly 30-60
    bits/block.  Less general but minimum-bytes.
 
-**Expected ratio impact (from `TANS-INVESTIGATION.md` flat-carve-out tax):**
+**Expected ratio impact (from `docs/TANS-INVESTIGATION.md` flat-carve-out tax):**
 
 - chinese_text: ~1.7 pp recoverable
 - html_wiki: ~2.2 pp
@@ -1189,7 +1189,7 @@ Two angles, neither obvious:
    Same effective throughput as 2x unroll.
 
 3. **Pack 4 streams in parallel** (FastLanes-style).  Would be a
-   format change.  See BITPACKING.md.
+   format change.  See docs/BITPACKING.md.
 
 Lower priority than enc_init; partition is already SIMD'd.
 
@@ -1276,7 +1276,7 @@ Kept here as reference for future revisits.**
   __m512i holds 4 / 16 parallel "streams" of packed bits, one per
   lane.  Avoids horizontal reduction entirely — but the wire format is
   totally incompatible with our LSB-first sequential layout.  Adopting
-  it means a format change we already evaluated in `BITPACKING.md`
+  it means a format change we already evaluated in `docs/BITPACKING.md`
   (~5-6% net gain on M4, not worth it).
 
 simdcomp's per-b kernel pattern (SSE, b=3):
@@ -1457,7 +1457,7 @@ The full-tree flat case (`min_len == max_len`) had a shipped fast path
 in `pivco_huffman_decode_neon_prefix` before this work — the format
 stored `M` packed bits per element and decode was a single
 `code_to_sym[prefix]` lookup.  Won 2.47× on uniform and 1.18-1.24× on
-sparse_* (§3 of PREFIX_RADIX.md).
+sparse_* (§3 of docs/PREFIX_RADIX.md).
 
 **The generalisation was a *format change*, not a decode-only
 optimisation**: when the encoder detects that a specific internal node's
@@ -2098,7 +2098,7 @@ only when a full 16-byte chunk is ready, halving the store rate.
 Six NEON variants + three AVX-512 variants tested
 ([extras/bench_coalesce.c](extras/bench_coalesce.c) /
 [extras/bench_coalesce_avx512.c](extras/bench_coalesce_avx512.c),
-full investigation in [COALESCE.md](COALESCE.md)).  Best result per
+full investigation in [docs/COALESCE.md](docs/COALESCE.md)).  Best result per
 platform:
 
 | Platform | Best variant | Ratio vs baseline |
@@ -2128,7 +2128,7 @@ non-trivial SIMD work added to enable store reduction immediately
 re-balances the bottleneck.  Untested: Zen 3 SSE4.1 (would need a
 new port; expected to lose given the cross-platform pattern).
 
-See [COALESCE.md](COALESCE.md) for the full investigation.
+See [docs/COALESCE.md](docs/COALESCE.md) for the full investigation.
 
 ## ~~SSE root both-leaves vectorisation~~ — SHIPPED
 
@@ -2877,7 +2877,7 @@ the marginal EV is low.
 ## FastLanes-style bitpacking — investigated, not shipped, still on the table
 
 **Status (2026-04-27): investigated.  Full write-up in
-[`BITPACKING.md`](BITPACKING.md).**
+[`docs/BITPACKING.md`](docs/BITPACKING.md).**
 
 Three layouts compared in `extras/bench_unpack_dN.c` and
 `extras/bench_unpack_fl_layout.c`:
@@ -2917,7 +2917,7 @@ that platform's flat-subtree throughput).
 real text.  Costs: encoder rewrite (transpose bit-packing), 4 backends
 × 2 unpack styles (FL bulk + natural-layout tail for inner subtrees
 of size not a multiple of FL block), version bookkeeping.  See
-BITPACKING.md "Suggestions" for cost-ordered alternatives, including
+docs/BITPACKING.md "Suggestions" for cost-ordered alternatives, including
 the bigger fish — partition kernel (40% of prose_pride) and per-leaf
 scatter (18%) — that FL-layout doesn't touch.
 
@@ -3022,7 +3022,7 @@ The store-forward-stall pathology on Neoverse-V2 (stale `flat_d5/6`
 text below in this file) is fully resolved.  The D=3 throughput
 on G4 is *also* uint16x8-bound at ~7-8 GB/s, which is the natural
 ceiling for that layout — improving past it requires the FL-layout
-work tracked in BITPACKING.md (~30 GB/s on G4 in microbench).
+work tracked in docs/BITPACKING.md (~30 GB/s on G4 in microbench).
 
 ## ~~Graviton 4 NEON D=5/D=6 unpack — SIMD path still broken~~ (historical)
 
@@ -3435,6 +3435,6 @@ certainty:
    - Keep `bench/bench_multi_stage_stats.c` and
      `extras/bench_flat_subtree_stats.c` (they read tree structure, not
      the retired backend).
-   - Keep `PREFIX_RADIX.md` as historical record (already banner'd as
+   - Keep `docs/PREFIX_RADIX.md` as historical record (already banner'd as
      superseded).
    - Update README.md / CLAUDE.md to reflect deletion.

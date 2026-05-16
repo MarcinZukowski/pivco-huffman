@@ -33,7 +33,7 @@
  *
  * The thresholds match the NEON encoder's settings so the wire format
  * is byte-identical across backends: same skew threshold, same per-
- * codeword cost gate, same minimum bitmap size.  See FSE-V0.md for the
+ * codeword cost gate, same minimum bitmap size.  See docs/FSE-V0.md for the
  * derivation of each value.  Overridable at build time via -D... . */
 #ifndef PIVCO_FSE_MIN_THRESHOLD
 #define PIVCO_FSE_MIN_THRESHOLD 0.625
@@ -132,7 +132,7 @@ static inline void codec_maybe_fse_attempt(uint8_t *marker_slot,
         g_pivco_fse_commit[0]++;     /* slot 0 = attempted, rejected */
         return;
     }
-    /* Per-codeword commit gate (see FSE-V0.md):
+    /* Per-codeword commit gate (see docs/FSE-V0.md):
      *   raw: every codeword through this node costs (depth + 1) bits
      *   fse: (depth + (fse_len + 2 wire-prefix) * 8 / n) bits
      * Commit iff (depth + fse_frac) <= MIN_RATIO * (depth + 1). */
