@@ -546,14 +546,14 @@ static unsigned char g_huf_wksp[HUF_WORKSPACE_SIZE];
  * HUF_optimalTableLog internally for small inputs), so the body
  * bytes are NOT guaranteed to equal HUF_compress*X_usingCTable's
  * output — we capture that separately for encode-timing verify. */
-static uint8_t g_huf1X_buf[16384];
-static uint8_t g_huf4X_buf[16384];
+static uint8_t g_huf1X_buf[131072];
+static uint8_t g_huf4X_buf[131072];
 static size_t  g_huf1X_total, g_huf4X_total;
 static size_t  g_huf1X_hdr,   g_huf4X_hdr;
 /* g_huf*X_uct_buf: reference output of HUF_compress*X_usingCTable
  * (no header), used to verify the encode-timing loop's output. */
-static uint8_t g_huf1X_uct_buf[16384];
-static uint8_t g_huf4X_uct_buf[16384];
+static uint8_t g_huf1X_uct_buf[131072];
+static uint8_t g_huf4X_uct_buf[131072];
 static size_t  g_huf1X_uct_total, g_huf4X_uct_total;
 
 /* Returns 1 on success, 0 if huf0 declined (incompressible / single-
@@ -611,26 +611,30 @@ static int huf_setup(const uint8_t *src, size_t n)
     return 1;
 }
 
+/* Decode wrappers.  Use the _DCtx_wksp family which reads the
+ * table header from the payload + builds the DTable + decodes -
+ * matches what zstd does at runtime per call.  This makes the
+ * huf0 column apples-to-apples with the Oodle column (both
+ * include per-call table setup); FSE is steady-state because
+ * ph's actual FSE usage picks from 12 pre-built static tables
+ * via a 1-byte table-id and doesn't build per call. */
 static size_t huf_dec_1X1(uint8_t *dec, size_t dec_cap)
 {
-    return HUF_decompress1X1_usingDTable(dec, dec_cap,
-                                          g_huf1X_buf + g_huf1X_hdr,
-                                          g_huf1X_total - g_huf1X_hdr,
-                                          g_huf_dt_x1);
+    return HUF_decompress1X1_DCtx_wksp(g_huf_dt_x1, dec, dec_cap,
+                                        g_huf1X_buf, g_huf1X_total,
+                                        g_huf_wksp, sizeof(g_huf_wksp));
 }
 static size_t huf_dec_4X1(uint8_t *dec, size_t dec_cap)
 {
-    return HUF_decompress4X1_usingDTable(dec, dec_cap,
-                                          g_huf4X_buf + g_huf4X_hdr,
-                                          g_huf4X_total - g_huf4X_hdr,
-                                          g_huf_dt_x1);
+    return HUF_decompress4X1_DCtx_wksp(g_huf_dt_x1, dec, dec_cap,
+                                        g_huf4X_buf, g_huf4X_total,
+                                        g_huf_wksp, sizeof(g_huf_wksp));
 }
 static size_t huf_dec_4X2(uint8_t *dec, size_t dec_cap)
 {
-    return HUF_decompress4X2_usingDTable(dec, dec_cap,
-                                          g_huf4X_buf + g_huf4X_hdr,
-                                          g_huf4X_total - g_huf4X_hdr,
-                                          g_huf_dt_x2);
+    return HUF_decompress4X2_DCtx_wksp(g_huf_dt_x2, dec, dec_cap,
+                                        g_huf4X_buf, g_huf4X_total,
+                                        g_huf_wksp, sizeof(g_huf_wksp));
 }
 
 /* Encode timing uses the pre-built CTable — matches FSE's
@@ -725,7 +729,7 @@ static double time_huf_encode_min(huf_enc_fn_t fn,
  *  the shipping shape and the header is small relative to body.
  * ============================================================ */
 
-static uint8_t g_oodle_buf[16384];
+static uint8_t g_oodle_buf[131072];
 static int     g_oodle_total;
 static int     g_oodle_huff_type;
 static int     g_oodle_ok;
@@ -834,8 +838,18 @@ int main(int argc, char **argv)
      * bench prints "-" for those columns.  48/96 stay (skip x=10
      * only) because they're useful small-size data points. */
     static const struct { size_t size; double p_major; } cells[] = {
-        /* Size sweep at pmaj=0.80 (one axis at a time).  2880 added
-         * to see when ILP scaling flattens at large sizes. */
+        /* Size sweep at pmaj=0.80 (one axis at a time).  Sizes are
+         * multiples of LCM(2,4,6,8,10,12,16)=240 so every x value
+         * divides cleanly.  Small sizes (48/96) skip x=10.
+         *
+         * Larger cells (4080+) added to amortize per-call table-
+         * read overhead - Oodle's newlz_get_array_huff re-reads
+         * the table header every call (no _usingDTable equivalent
+         * in the public API), so at small sizes the comparison is
+         * unfair to it.  At >= 16320 B the setup is well-amortized
+         * and Oodle should approach its ~1.3-1.5 cyc/sym shipping
+         * asymptote (ryg's quote).  See IDEAS.md "Oodle's
+         * newlz_arrays_huff" entry. */
         {   48, 0.80 },
         {   96, 0.80 },
         {  240, 0.80 },
@@ -843,6 +857,11 @@ int main(int argc, char **argv)
         {  960, 0.80 },
         { 1440, 0.80 },
         { 2880, 0.80 },
+        { 4080, 0.80 },    /* ~ 4 KB */
+        { 8160, 0.80 },    /* ~ 8 KB */
+        {16320, 0.80 },    /* ~16 KB */
+        {32640, 0.80 },    /* ~32 KB */
+        {65280, 0.80 },    /* ~64 KB */
         /* Skew sweep at size=960 (size held fixed).  pmaj=0.50 is
          * the lowest table threshold (uniform-ish bitmap). */
         {  960, 0.50 },
@@ -856,11 +875,11 @@ int main(int argc, char **argv)
     /* Per-x encode results: indexed by xi in [0..n_x). */
     const int x_values[] = {2, 4, 6, 8, 10, 12, 16};
     const int n_x = sizeof(x_values)/sizeof(x_values[0]);
-    uint8_t enc_buf[7][16384];
+    uint8_t enc_buf[7][131072];
     size_t  enc_len[7];
 
-    uint8_t src[8192];
-    uint8_t dec[8192];
+    uint8_t src[131072];
+    uint8_t dec[131072];
 
     printf("FSE x[2,4,6,8,10,12,16] × y[1,2,4] microbench, "
            "min of %d batches × %d iters/batch per cell\n",
@@ -871,31 +890,36 @@ int main(int argc, char **argv)
            "symbol probability (each bit drawn IID).\n");
     printf("high pmaj = more zeros = skewed bitmap = tighter "
            "FSE compression.\n");
+    printf("Per-call cost model:\n");
+    printf("  FSE columns - steady-state (pre-built DTable).  Matches\n");
+    printf("                ph's real usage: 12 static tables picked\n");
+    printf("                at runtime by 1-byte table-id from the wire.\n");
+    printf("  huf0 columns - FULL per-call (HUF_decompress*X*_DCtx_wksp:\n");
+    printf("                 reads table header + builds DTable + decodes).\n");
+    printf("                 Matches what zstd does at runtime per call.\n");
 #ifdef PIVCO_HAS_OODLE
-    printf("\nOodle column = Oodle 2.9.16's newlz_get_array_huff "
-           "with ASM kernels.  Tuner picks huff6 (6-stream\n"
-           "                 ARM ASM kernel from "
-           "newlz_huff6_wide.a64.S, scheduled for Apple M1).\n"
-           "                 Note: each call re-reads the "
-           "table header (no _usingDTable variant exposed);\n"
-           "                 FSE and huf0 columns use pre-built "
-           "tables so the comparison is slightly unfair to Oodle.\n");
+    printf("  Oodle column - FULL per-call (newlz_get_array_huff:\n");
+    printf("                 reads table header + builds tab + decodes).\n");
+    printf("                 No _usingDTable variant in Oodle's public API.\n");
+    printf("                 Tuner picks huff6 (6-stream).  ASM kernels\n");
+    printf("                 wired in via OodleUE patches in\n");
+    printf("                 extras/oodle_build_patches/.\n");
 #endif
     fflush(stdout);
 
-    double enc_mbps[16][8];          /* [cell][xi] */
-    double dec_mbps[16][32];         /* [cell][cfg_index] */
-    int    x_ok_mat[16][8] = {{0}};  /* [cell][xi] */
+    double enc_mbps[24][8];          /* [cell][xi] */
+    double dec_mbps[24][32];         /* [cell][cfg_index] */
+    int    x_ok_mat[24][8] = {{0}};  /* [cell][xi] */
     /* huff0 reference (2 encode + 3 decode columns). */
-    double huf_enc_mbps[16][2];      /* [cell][hufC1, hufC4] */
-    double huf_dec_mbps[16][3];      /* [cell][1X1, 4X1, 4X2] */
-    int    huf_ok_mat[16] = {0};
+    double huf_enc_mbps[24][2];      /* [cell][hufC1, hufC4] */
+    double huf_dec_mbps[24][3];      /* [cell][1X1, 4X1, 4X2] */
+    int    huf_ok_mat[24] = {0};
 #ifdef PIVCO_HAS_OODLE
     /* Oodle reference (1 encode + 1 decode column; tuner picks
      * huff3 vs huff6 internally, label reflects choice per cell). */
-    double oodle_enc_mbps[16];
-    double oodle_dec_mbps[16];
-    int    oodle_type_mat[16] = {0}; /* OODLE_HUFF_TYPE_HUFF{3,6} or 0 */
+    double oodle_enc_mbps[24];
+    double oodle_dec_mbps[24];
+    int    oodle_type_mat[24] = {0}; /* OODLE_HUFF_TYPE_HUFF{3,6} or 0 */
 #endif
 
     for (int ci = 0; ci < n_cells; ci++) {
@@ -940,7 +964,7 @@ int main(int argc, char **argv)
         /* Time encode (min of N batches, with per-batch verify). */
         for (int xi = 0; xi < n_x; xi++) {
             if (!x_ok_mat[ci][xi]) { enc_mbps[ci][xi] = -1.0; continue; }
-            uint8_t enc_scratch[16384];
+            uint8_t enc_scratch[131072];
             enc_mbps[ci][xi] = time_encode_min(x_values[xi], src, bytes,
                                                 enc_scratch, sizeof(enc_scratch),
                                                 g_ct, iters,
@@ -1000,7 +1024,7 @@ int main(int argc, char **argv)
 
             /* Verify reference is HUF_compress*X_usingCTable output
              * with our pre-built CTable (captured in setup). */
-            uint8_t huf_scratch[16384];
+            uint8_t huf_scratch[131072];
             huf_enc_mbps[ci][0] = time_huf_encode_min(huf_enc_1X, src, bytes,
                                                        huf_scratch, sizeof(huf_scratch),
                                                        iters,
@@ -1028,7 +1052,7 @@ int main(int argc, char **argv)
                 return 1;
             }
             oodle_dec_mbps[ci] = time_oodle_decode_min(dec, bytes, iters, src, p);
-            uint8_t oodle_scratch[16384];
+            uint8_t oodle_scratch[131072];
             oodle_enc_mbps[ci] = time_oodle_encode_min(src, bytes,
                                                        oodle_scratch,
                                                        sizeof(oodle_scratch),
