@@ -1,11 +1,10 @@
 # PIVCO-Huffman NEON Kernel Walkthroughs
 
 Step-by-step traces of the SIMD micro-kernels that consume most of
-PIVCO-Huffman's decode time on Apple M4 (per the
-[xctrace profile](README.md#profiling)).  Each kernel section shows:
+PIVCO-Huffman's decode time on Apple M4.  Each kernel section shows:
 
 - the source code (verbatim from
-  [`src/pivco_huffman_neon.c`](src/pivco_huffman_neon.c) /
+  [`src/pivco_huffman_primitives_neon.h`](src/pivco_huffman_primitives_neon.h) /
   [`src/pivco_huffman_neon_flat.h`](src/pivco_huffman_neon_flat.h)),
 - a worked example with concrete byte values,
 - the contents of every NEON register at each step.
@@ -13,27 +12,194 @@ PIVCO-Huffman's decode time on Apple M4 (per the
 Register contents are shown as `[a, b, c, ...]` with values in hex.
 "`--`" marks a don't-care lane (written but never read).
 
-The five kernels covered:
+Since the 2026-05-14 unify-framework refactor, every backend's
+primitives live in one header (`primitives_<backend>.h`) and the
+tree walk + wire-format I/O is shared across backends in
+`src/pivco_huffman_codec.c`.  Production decode is bottom-up (BU)
+via `tree_merge` since the 2026-05-12 K_right wire format
+(`5828ddb`); the top-down (TD) walk on the same partition primitive
+is now an encode-side concern.
 
-| Kernel                 | Profile share | Why it's interesting                                                |
-|------------------------|--------------:|---------------------------------------------------------------------|
-| `partition_8`          |        37.9 % | The 2-way partition core — TBL + popcount-driven split              |
-| `flat_d2_unpack`       |         3.9 % | Simplest D-bit unpacker — 4 bytes → 16 codes via 1 TBL + 1 shift    |
-| `flat_d3_unpack`       |         4.1 % | First cross-byte case — works in `uint16` lanes                     |
-| `flat_d4_unpack`       |       (~3 %)  | Clean even-D case — 8 bytes → 16 codes via dup + half-byte shift    |
-| `scatter_both_leaves`  |         9.9 % | Both-leaves stage fusion — bit-test + blend, no unpack step         |
+The kernels covered below — chosen to exercise the four hot inner
+loops of the production BU decoder plus the encode-side TD
+counterpart:
 
-D=5 and D=6 unpacks follow the same `uint16`-lane pattern as D=3 with
-bigger byte counts; see notes at the end.
+| Kernel                  | Direction | Why it's interesting                                                       |
+|-------------------------|-----------|----------------------------------------------------------------------------|
+| `tree_merge_neon`       | BU decode | The 2-way merge inner kernel — TBL gather from two child buffers per bitmap byte.  Production hot path.  V4 strategy: 16-byte L/R loads + pre-shifted shuffle, single vqtbl2 for the second iter. |
+| `merge_both_const_neon` | BU decode | Both-children-are-leaves fast path — bit-test + xor-blend, no TBL, no unpack.  Same mechanism as the D=1 leaf of the flat-subtree path. |
+| `flat_d2_unpack`        | flat path | Simplest D-bit unpacker — 4 bytes → 16 codes via 1 TBL + 1 shift.   |
+| `flat_d3_unpack`        | flat path | First cross-byte case — works in `uint16` lanes.                    |
+| `flat_d4_unpack`        | flat path | Clean even-D case — 8 bytes → 16 codes via dup + half-byte shift.   |
+| `partition_8`           | TD/encode | The 2-way SIMD partition split — TBL + popcount-driven compress.  Used by the encoder and the (retired) TD decoder. |
+
+D=5 and D=6 unpacks follow the same `uint16`-lane pattern as D=3
+with more byte counts; see notes at the end.  Cross-backend
+equivalents:
+
+| NEON kernel                | x86 SSE4.1 / AVX2                | AVX-512 VBMI2                              |
+|----------------------------|----------------------------------|--------------------------------------------|
+| `tree_merge_neon`          | `tree_merge_x86` (pshufb stride 16) | `tree_merge_avx512` (`vpexpandb` 64B chunks) |
+| `merge_both_const_neon`    | `merge_both_const_x86`           | `merge_both_const_avx512` (`mask_blend_epi8` 32B) |
+| `flat_dN_unpack`           | scalar D=2/3/5/6, SSE D=4 only   | `vpermexvar_epi8` D ≤ 6                    |
+| `partition_8` (TD)         | pshufb + compress_tab            | `vpcompressw` 32 × uint16 in one instr.   |
 
 ---
 
-## 1. `partition_8` — 2-way SIMD partition
+## 1. `tree_merge_neon` — BU 2-way merge (production decode kernel)
+
+> Given an N-bit bitmap and two child output buffers `left[lc..]` and
+> `right[rc..]`, produce the parent output buffer `out[0..K)` by
+> picking from `right` when the bit is 1 and `left` when it's 0.
+> Cursors `lc`, `rc` advance per chunk by the popcount of the bitmap
+> byte(s) just consumed.  This is the **inverse of `partition_8`**
+> applied at every internal node during BU decode.
+>
+> Two iterations are unrolled per loop: iter 0 uses a baseline shuf
+> against a `vcombine`-built 16-byte source register holding both
+> child halves; iter 1 uses a precomputed pre-shifted shuf (one of
+> 8 variants indexed by iter-0's `n_right`) over the original
+> 32-byte `(L_full, R_full)` pair via `vqtbl2`, saving the second
+> `vcombine` and one popcount.  This V4 strategy lands ~13–15% gain
+> on M4 over the simpler one-iter-per-loop body.
+
+### Source
+
+```c
+static inline void tree_merge_neon(const uint8_t *bm, int K,
+                                     const uint8_t *left,
+                                     const uint8_t *right,
+                                     uint8_t *out)
+{
+    int lc = 0, rc = 0;
+    int j = 0;
+    for (; j + 16 <= K; j += 16) {
+        uint8x16_t L_full = vld1q_u8(left  + lc);
+        uint8x16_t R_full = vld1q_u8(right + rc);
+
+        /* Iter 0: vqtbl1 on the low halves with baseline shuf. */
+        uint8_t m0 = bm[j >> 3];
+        uint8x16_t both0 = vcombine_u8(vget_low_u8(L_full),
+                                        vget_low_u8(R_full));
+        uint8x8_t  shuf0 = vld1_u8(expand_tab[m0]);
+        uint8x8_t  o0    = vqtbl1_u8(both0, shuf0);
+        vst1_u8(out + j, o0);
+        int nr0 = expand_popcnt[m0];
+
+        /* Iter 1: vqtbl2 over (L_full, R_full) with pre-shifted shuf. */
+        uint8_t m1 = bm[(j >> 3) + 1];
+        uint8x16x2_t src = {{ L_full, R_full }};
+        uint8x8_t shuf1  = vld1_u8(expand_tab_pre[nr0][m1]);
+        uint8x8_t o1     = vqtbl2_u8(src, shuf1);
+        vst1_u8(out + j + 8, o1);
+        int nr1 = expand_popcnt[m1];
+
+        rc += nr0 + nr1;
+        lc += (16 - nr0 - nr1);
+    }
+    /* + scalar tails for K & 15 leftovers */
+}
+```
+
+### Worked example (one 8-elem iter)
+
+```
+left   = [A0, A1, A2, A3, --, --, --, --]   (4 valid bytes from left child)
+right  = [B0, B1, B2, B3, --, --, --, --]   (4 valid bytes from right child)
+bm[0]  = 0b 01101001 = 0x69
+```
+
+`expand_tab[0x69]` is precomputed at table-build time so that for
+each lane k of the output, the byte holds the source index in the
+`(L|R)` combined register:
+
+```
+                         k=0  k=1  k=2  k=3  k=4  k=5  k=6  k=7
+bm[0] bit               1    0    0    1    0    1    1    0
+src                     R    L    L    R    L    R    R    L
+expand_tab[0x69]    = [ 08,  00,  01,  09,  02,  0A,  0B,  03 ]
+                        ^^   ^^   ^^   ^^   ^^   ^^   ^^   ^^
+                        B0   A0   A1   B1   A2   B2   B3   A3
+                        (R bytes live in lanes 8..15 of the
+                         vcombine'd register; L in lanes 0..7)
+```
+
+### Step-by-step
+
+**Step 1: 16-byte child loads** (we'll only use the low 8 of each
+on this iteration, but the high 8 stay in register for iter 1)
+
+```c
+uint8x16_t L_full = vld1q_u8(left  + lc);   /* lc starts at 0 */
+uint8x16_t R_full = vld1q_u8(right + rc);
+```
+
+```
+L_full = [A0, A1, A2, A3, ??, ??, ??, ??, ??, ??, ??, ??, ??, ??, ??, ??]
+R_full = [B0, B1, B2, B3, ??, ??, ??, ??, ??, ??, ??, ??, ??, ??, ??, ??]
+```
+
+**Step 2: build the 16-byte `both0` register from the low halves**
+
+```c
+uint8x16_t both0 = vcombine_u8(vget_low_u8(L_full),
+                                vget_low_u8(R_full));
+```
+
+```
+both0 = [A0, A1, A2, A3, ??, ??, ??, ??, B0, B1, B2, B3, ??, ??, ??, ??]
+         \---- low 8 = L -----------/  \---- high 8 = R ----------/
+```
+
+**Step 3: TBL with the precomputed shuffle**
+
+```c
+uint8x8_t shuf0 = vld1_u8(expand_tab[0x69]);  /* = [08,00,01,09,02,0A,0B,03] */
+uint8x8_t o0    = vqtbl1_u8(both0, shuf0);
+```
+
+```
+o0 = [B0, A0, A1, B1, A2, B2, B3, A3]
+```
+
+The output is in tree-order (bitmap bit 0 routes to lane 0, bit 1
+to lane 1, …).  Each output byte was selected from `both0[index]`
+where the index encodes both the side (high/low) and the position
+within the side's contiguous run.
+
+**Step 4: store, compute popcount, advance cursors**
+
+```c
+vst1_u8(out + j, o0);
+int nr0 = expand_popcnt[0x69];   /* = 4 */
+/* iter 1 follows; after both iters: */
+rc += nr0 + nr1;
+lc += (16 - nr0 - nr1);
+```
+
+### What makes this fast
+
+- **One vqtbl1 per 8 output bytes** instead of 8 conditional copies.
+- **Precomputed popcount in `expand_popcnt[]`** — no `cnt` in the hot path.
+- **The V4 trick** (16-byte L/R loads + precomputed `(nr0, m1)` shuf
+  table) lets iter 1 reuse `L_full`/`R_full` via `vqtbl2` over the
+  original 32 bytes, avoiding a second `vcombine` and folding the
+  pre-shifting of `expand_tab[m1]` into a table lookup.  Lands the
+  ~13–15% M4 gain over the simpler V1 baseline.
+- **Store-port bound on M4**, same as `partition_8`: the per-elem
+  cost (0.06 ns/elem at ~15 GB/s) is held by the two `vst1_u8`s.
+
+---
+
+## 2. `partition_8` — TD 2-way SIMD partition (encode-side)
 
 > Splits 8 input `uint16_t` indices into two output groups based on
 > an 8-bit mask: bit=1 → `right_out`, bit=0 → `left_out`, **preserving
-> original order within each side**.  This is the inner kernel of the
-> recursive tree-walk.
+> original order within each side**.  This was the inner kernel of
+> the retired top-down decoder; in the current codebase it's an
+> **encode-side** primitive (the encoder still walks TD to build
+> bitmaps), retained here as the textbook worked example of the
+> partition direction.
 
 ### Source
 
@@ -162,7 +328,7 @@ are *written* but never *read*.
 
 ---
 
-## 2. `flat_d2_unpack` — unpack 16 × 2-bit codes
+## 3. `flat_d2_unpack` — unpack 16 × 2-bit codes
 
 > Reads 4 packed bytes (= 32 bits = 16 × 2-bit codes) and returns the
 > 16 codes as a `uint8x16_t`, one byte per code, value in {0, 1, 2, 3}.
@@ -283,7 +449,7 @@ result = [00,01,02,03, 03,02,01,00, 00,00,03,03, 03,03,00,00]
 
 ---
 
-## 3. `flat_d3_unpack` — unpack 8 × 3-bit codes (cross-byte)
+## 4. `flat_d3_unpack` — unpack 8 × 3-bit codes (cross-byte)
 
 > 3-bit codes don't divide a byte cleanly.  3 bytes = 24 bits = 8 codes,
 > and **5 of those 8 codes cross a byte boundary** (code 0 starts at bit
@@ -452,7 +618,7 @@ D=2's (3.9 %) despite the higher per-iteration cost.
 
 ---
 
-## 4. `flat_d4_unpack` — unpack 16 × 4-bit codes (clean)
+## 5. `flat_d4_unpack` — unpack 16 × 4-bit codes (clean)
 
 > 4-bit codes pack 2 to a byte with no cross-byte boundary.  Cleanest of
 > the unpacks: 8 input bytes → 16 output codes via dup + half-byte shift.
@@ -560,32 +726,40 @@ result = [00,01, 02,03, 04,05, 06,07, 08,09, 0A,0B, 0C,0D, 0E,0F]
 
 ---
 
-## 5. `scatter_both_leaves` — both children are leaves
+## 6. `merge_both_const_neon` — both children are leaves (BU fast path)
 
-> Stage fusion: when both children of a tree node are leaves
-> (sym0 if bit=0, sym1 if bit=1), skip the partition entirely.  For
-> each input index, emit `sym0` or `sym1` directly based on the
-> bitmap.  No unpack, no recursion.  ~10 % of decode time on
-> `prose_pride`.
+> When both children of a tree node are leaves
+> (`sym0` if bit=0, `sym1` if bit=1), skip the recursion entirely.
+> For each output position `j` in the parent's K-byte buffer, emit
+> `sym0` or `sym1` directly based on bitmap bit `j`.  No unpack, no
+> child buffers, no recursion.  The BU equivalent of TD's
+> `scatter_both_leaves`; output is now **sequential** (writing to
+> `out[0..K)` not an indexed scatter), which makes this 2-3× faster
+> than the old TD scatter version.
+>
+> Same mechanism as the D=1 leaf of the flat-subtree path: one bit
+> per element, 2-entry inline `syms[]` lookup, sequential output.
 
 ### Source (16-elem unrolled loop body)
 
 ```c
-uint8x8_t vsym0  = vdup_n_u8(sym0);
-uint8x8_t vdelta = vdup_n_u8(sym0 ^ sym1);
-static const uint8_t bit_pos_tab[8] = {1,2,4,8,16,32,64,128};
-uint8x8_t vbit_pos = vld1_u8(bit_pos_tab);
+static inline void merge_both_const_neon(const uint8_t *bm, int K,
+                                           uint8_t left_sym, uint8_t right_sym,
+                                           uint8_t *out)
+{
+    uint8x8_t vleft  = vdup_n_u8(left_sym);
+    uint8x8_t vdelta = vdup_n_u8(left_sym ^ right_sym);
+    static const uint8_t bit_pos_tab[8] = {1,2,4,8,16,32,64,128};
+    uint8x8_t vbits = vld1_u8(bit_pos_tab);
 
-for (; j + 16 <= n; j += 16) {
-    uint8x8_t bits0 = vtst_u8(vdup_n_u8(bm[j >> 3]), vbit_pos);
-    uint8x8_t vals0 = veor_u8(vsym0, vand_u8(vdelta, bits0));
-    uint8x8_t bits1 = vtst_u8(vdup_n_u8(bm[(j >> 3) + 1]), vbit_pos);
-    uint8x8_t vals1 = veor_u8(vsym0, vand_u8(vdelta, bits1));
-    uint16x8_t i0 = vld1q_u16(indices + j);
-    uint16x8_t i1 = vld1q_u16(indices + j + 8);
-    symbols[vgetq_lane_u16(i0, 0)] = vget_lane_u8(vals0, 0);
-    symbols[vgetq_lane_u16(i0, 1)] = vget_lane_u8(vals0, 1);
-    /* ... 14 more lane stores for i0[2..7] and i1[0..7] ... */
+    int j = 0;
+    for (; j + 16 <= K; j += 16) {
+        uint8x8_t bits0 = vtst_u8(vdup_n_u8(bm[j >> 3]),       vbits);
+        uint8x8_t bits1 = vtst_u8(vdup_n_u8(bm[(j >> 3) + 1]), vbits);
+        vst1_u8(out + j,     veor_u8(vleft, vand_u8(vdelta, bits0)));
+        vst1_u8(out + j + 8, veor_u8(vleft, vand_u8(vdelta, bits1)));
+    }
+    /* + 8-elem and scalar tails */
 }
 ```
 
@@ -602,10 +776,10 @@ bm[0] = 0b 11010010 = 0xD2          → bits:  bit 0 = 0 → 'A'
                                               bit 6 = 1 → 'B'
                                               bit 7 = 1 → 'B'
 
-indices = [100, 101, 102, 103, 104, 105, 106, 107]
+out (parent's output buffer, sequential)
 ```
 
-**Expected:** writes `A, B, A, A, B, A, B, B` to `symbols[100..107]`.
+**Expected:** writes `A, B, A, A, B, A, B, B` to `out[0..7]`.
 
 ### Step-by-step
 
@@ -658,27 +832,30 @@ veor_u8(vsym0, ...)     = [41, 42, 41, 41, 42, 41, 42, 42]
                         =  A   B   A   A   B   A   B   B    ✓
 ```
 
-**Step 4: indexed scalar stores**
+**Step 4: sequential store**
 
 ```c
-uint16x8_t idx = vld1q_u16(indices + j);    /* = [100, 101, ..., 107] */
-symbols[vgetq_lane_u16(idx, 0)] = vget_lane_u8(vals, 0);  /* symbols[100] = A */
-symbols[vgetq_lane_u16(idx, 1)] = vget_lane_u8(vals, 1);  /* symbols[101] = B */
-/* ... 6 more lane-extract + scalar-store pairs ... */
+vst1_u8(out + j, vals0);  /* writes out[0..7] = A,B,A,A,B,A,B,B */
 ```
 
-This is the **scatter floor** that bounds many other rows in the
-[Key Compute Primitives](README.md#cross-platform-primitive-costs)
-table: ~0.14–0.18 ns/elem on M4, ~0.66 on Graviton 4 / Zen 3.
+In the 16-elem unrolled loop body, the second iter computes `vals1`
+from `bm[(j>>3)+1]` and stores to `out + j + 8` — same shape.
+Output is **sequential** (one `vst1_u8` per 8 bytes), not indexed —
+this is the BU advantage over the retired TD path where the
+equivalent `scatter_both_leaves` had to do 8 indexed scalar stores.
 
 ### What makes this fast
 
-- **No unpack, no recursion** — 8 codes processed with 3 NEON ops
-  (test + and + xor) plus 8 scalar lane stores.
-- **`vtst` + `veor`-blend** is faster than a `vbsl` (bit-select) here
-  because we already had `delta` precomputed.  Saves one register.
-- **The scalar lane-store tail dominates the cost** at the per-element
-  level — same store-port-bound pattern as `partition_8`'s output stores.
+- **No unpack, no recursion** — K codes processed with 4 NEON ops per
+  16 bytes (2 × `vtst` + 2 × `vand`/`veor`) plus 2 sequential stores.
+- **`vtst` + `veor`-blend** is faster than `vbsl` (bit-select) because
+  `vdelta = sym0 ^ sym1` is precomputed once and reused.  Saves one
+  register and one instruction per chunk.
+- **Sequential `vst1_u8` stores** — the BU output is a contiguous
+  K-byte buffer, so the store-port pressure that bounds `partition_8`'s
+  indexed scatter is absent.  Per-elem cost ~0.02 ns/elem on M4
+  (`both_leaves_vst1` row in the Key Compute Primitives table) —
+  ~3× cheaper than the equivalent `scatter_both_leaves` floor.
 
 ---
 
@@ -699,26 +876,35 @@ each is ~10 lines and reads exactly like `flat_d3_unpack` with
 different shuffle / shift constants.
 
 The downstream c2s lookup is what changes: D=2/D=3/D=4 use
-`vqtbl1q_u8` (16-byte c2s table); D=5 uses `vqtbl2_u8` (32-byte = 2
-registers); D=6 uses `vqtbl4_u8` (64-byte = 4 registers).  On
+`vqtbl1q_u8` (16-byte c2s table); D=5 uses `vqtbl2q_u8` (32-byte =
+2 registers); D=6 uses `vqtbl4q_u8` (64-byte = 4 registers).  On
 Graviton 4's Neoverse-V2 the multi-register TBL is markedly slower
-than M4's — see the [Key Compute Primitives](README.md) D=5/D=6 rows
+than M4's — empirically motivating the `PIVCO_NEON_FAST_MULTI_TBL=0`
+build gate on non-Apple hosts.  See the [Key Compute
+Primitives](README.md#cross-platform-primitive-costs) D=5/D=6 rows
 and IDEAS.md "Graviton 4 NEON D=5/D=6 regression" for the gating.
+D=7 / D≥8 fall through to the scalar `NEON_FLAT_UNPACK_SWITCH`
+tail on every NEON host.
 
 ---
 
 ## Reading the assembly
 
 The kernels above all compile to ~10–20 ARM64 instructions with
-`-O2`.  To see the actual machine code:
+`-O2`.  Since the unify-framework refactor (2026-05-14), the
+top-level decoder is `pivco_huffman_decode_neon_impl` (built from
+`pivco_huffman_codec.c` with `-DPIVCO_BACKEND_NEON`) and the
+primitives (`tree_merge_neon`, `merge_both_const_neon`,
+`flat_decode_to_buffer_neon`, …) are static-inline helpers inlined
+into it.  To see the actual machine code:
 
 ```sh
 otool -tvV ./build/pivco_huffman_profile_english | \
-    awk '/^_decode_node_neon:/,/^_[a-zA-Z]/' | head -80
+    awk '/^_pivco_huffman_decode_neon_impl:/,/^_[a-zA-Z]/' | head -200
 ```
 
-Or for any specific function (`partition_8`, `flat_d2_unpack`, …),
-grep on the symbol name.  The xctrace profile (see
-[`extras/profile_m4.sh`](extras/profile_m4.sh)) maps each retired-IP
-sample back to source lines so you can see which instructions are
-actually retiring under timer fires.
+Look for inlined helpers by source-line rather than symbol — the
+primitives don't generally emit their own labels.  The xctrace
+profile (see [`extras/profile_m4.sh`](extras/profile_m4.sh)) maps
+each retired-IP sample back to source lines so you can see which
+instructions are actually retiring under timer fires.
