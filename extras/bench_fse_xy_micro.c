@@ -77,6 +77,43 @@ static void free_tables(void)
 
 
 /* ============================================================
+ *  FSE "full per-call setup" measurement.
+ *
+ *  ph's actual FSE usage avoids per-call setup: 12 static tables
+ *  are loaded once at process start and picked by a 1-byte table
+ *  id from the wire.  The FSE x*y decode columns measure that
+ *  steady-state cost (pre-built DTable).
+ *
+ *  But to compare apples-to-apples with huf0/Oodle (which both
+ *  read the table header + build DTable per call), we also time
+ *  what FSE would cost if it had to do per-call setup.  That work
+ *  is: FSE_readNCount (parse the counts header) + FSE_buildDTable
+ *  (build the lookup table).  Per cell we serialize the chosen
+ *  pivco_fse_norm[t_id] to a header bytes buffer via FSE_write
+ *  NCount, then time read+build per call.  The result is per-call
+ *  setup time in nanoseconds; printed in the decode table as the
+ *  "su_ns" column so the reader can compute the "full per call"
+ *  FSE throughput as 1 / (su_ns/1e9 + bytes/steady_mbps).
+ * ============================================================ */
+static unsigned char g_fse_header[1024];
+static size_t        g_fse_header_size;
+
+static int fse_setup_header(double p_major)
+{
+    int t_id = pivco_fse_select_table(p_major);
+    if (t_id < 1) { g_fse_header_size = 0; return 0; }
+    size_t r = FSE_writeNCount(g_fse_header, sizeof(g_fse_header),
+                                pivco_fse_norm[t_id],
+                                PIVCO_FSE_MAX_SYMBOL,
+                                PIVCO_FSE_TABLE_LOG);
+    if (FSE_isError(r)) { g_fse_header_size = 0; return 0; }
+    g_fse_header_size = r;
+    return 1;
+}
+/* time_fse_setup_ns_per_call defined later (after now_ns + N_BATCHES). */
+
+
+/* ============================================================
  *  Generic x-cursor encoder.
  *
  *  Layout convention (mirrors FSE's reference x=2 encoder
@@ -453,6 +490,39 @@ static double now_ns(void) {
  * (encode timer).  Catches any drift mid-run.  On any mismatch we
  * print a diagnostic and exit nonzero. */
 #define N_BATCHES 5
+
+/* Time the cost of doing FSE table setup per call (FSE_readNCount
+ * + FSE_buildDTable from the cell's pre-serialized header).  Returns
+ * nanoseconds per call.  Used to derive "FSE full-per-call" rates
+ * apples-to-apples with huf0/Oodle, which both pay this cost per
+ * call.  ph's actual FSE usage avoids it entirely. */
+static double time_fse_setup_ns_per_call(int iters)
+{
+    short norm[256];
+    unsigned ms, tl;
+    FSE_DTable *dt = FSE_createDTable(PIVCO_FSE_TABLE_LOG);
+    for (int w = 0; w < 256; w++) {
+        ms = 255;
+        (void)FSE_readNCount(norm, &ms, &tl, g_fse_header, g_fse_header_size);
+        (void)FSE_buildDTable(dt, norm, ms, tl);
+    }
+    double best_ns = 1e18;
+    for (int b = 0; b < N_BATCHES; b++) {
+        volatile size_t sink = 0;
+        double t0 = now_ns();
+        for (int i = 0; i < iters; i++) {
+            ms = 255;
+            sink ^= FSE_readNCount(norm, &ms, &tl, g_fse_header, g_fse_header_size);
+            sink ^= FSE_buildDTable(dt, norm, ms, tl);
+        }
+        double t1 = now_ns();
+        (void)sink;
+        double ns_per_call = (t1 - t0) / (double)iters;
+        if (ns_per_call < best_ns) best_ns = ns_per_call;
+    }
+    FSE_freeDTable(dt);
+    return best_ns;
+}
 
 static double time_decode_min(decode_fn_t fn, const void *enc, size_t enc_l,
                                uint8_t *dec, size_t bytes,
@@ -894,6 +964,10 @@ int main(int argc, char **argv)
     printf("  FSE columns - steady-state (pre-built DTable).  Matches\n");
     printf("                ph's real usage: 12 static tables picked\n");
     printf("                at runtime by 1-byte table-id from the wire.\n");
+    printf("  su_ns       - FSE per-call setup cost in ns (FSE_readNCount\n");
+    printf("                + FSE_buildDTable).  Add to derive 'FSE full\n");
+    printf("                per-call' MB/s for any x*y as:\n");
+    printf("                bytes / (su_ns + bytes * 1000/steady_mbps).\n");
     printf("  huf0 columns - FULL per-call (HUF_decompress*X*_DCtx_wksp:\n");
     printf("                 reads table header + builds DTable + decodes).\n");
     printf("                 Matches what zstd does at runtime per call.\n");
@@ -914,6 +988,10 @@ int main(int argc, char **argv)
     double huf_enc_mbps[24][2];      /* [cell][hufC1, hufC4] */
     double huf_dec_mbps[24][3];      /* [cell][1X1, 4X1, 4X2] */
     int    huf_ok_mat[24] = {0};
+    /* FSE per-call setup cost (FSE_readNCount + FSE_buildDTable);
+     * ph's actual usage avoids this via pre-built static tables,
+     * but it's shown here for apples-to-apples vs huf0/Oodle. */
+    double fse_setup_ns[24];
 #ifdef PIVCO_HAS_OODLE
     /* Oodle reference (1 encode + 1 decode column; tuner picks
      * huff3 vs huff6 internally, label reflects choice per cell). */
@@ -926,12 +1004,18 @@ int main(int argc, char **argv)
         size_t bytes = cells[ci].size;
         double p = cells[ci].p_major;
         build_tables_for_p(p);
+        fse_setup_ns[ci] = -1.0;
         if (!g_ct) {
             for (int xi = 0; xi < n_x; xi++) enc_mbps[ci][xi] = -1.0;
             for (size_t k = 0; k < N_CFGS; k++) dec_mbps[ci][k] = -1.0;
             continue;
         }
         if (bytes > sizeof(src)) { free_tables(); continue; }
+        /* Time the per-call FSE setup cost (read header + build
+         * DTable).  Same number used by every x*y config. */
+        if (fse_setup_header(p)) {
+            fse_setup_ns[ci] = time_fse_setup_ns_per_call(iters);
+        }
         fill_pmajor(src, bytes, p);
 
         /* Encode each x; sanity-check by decoding back with x*y=1. */
@@ -1112,6 +1196,12 @@ int main(int argc, char **argv)
         if (c > 0 && (c % 3) == 0) printf(" ");
         printf(" %6s", cfgs[c].name);
     }
+    /* su_ns = FSE per-call setup cost in ns.  Reader can compute
+     * "FSE full per-call" MB/s for any x*y as:
+     *     1 / (su_ns/1e9 + bytes/steady_mbps/1e3)  (in GB/s)
+     * Equivalently:
+     *     bytes / (su_ns + bytes * 1000/steady_mbps)  (MB/s) */
+    printf("  %6s", " su_ns");
     printf("  %6s %6s %6s", "huf1X1", "huf4X1", "huf4X2");
 #ifdef PIVCO_HAS_OODLE
     printf("  %6s", "oodle");
@@ -1121,6 +1211,7 @@ int main(int argc, char **argv)
         if (c > 0 && (c % 3) == 0) printf("-");
         printf("-------");
     }
+    printf("--------");
     printf("-----------------------");
 #ifdef PIVCO_HAS_OODLE
     printf("--------");
@@ -1133,6 +1224,8 @@ int main(int argc, char **argv)
             if (dec_mbps[ci][k] < 0) printf(" %6s", "  -  ");
             else printf(" %6.1f", dec_mbps[ci][k]);
         }
+        if (fse_setup_ns[ci] < 0) printf("  %6s", "  -  ");
+        else printf("  %6.0f", fse_setup_ns[ci]);
         printf(" ");
         for (int j = 0; j < 3; j++) {
             if (huf_dec_mbps[ci][j] < 0) printf(" %6s", "  -  ");
