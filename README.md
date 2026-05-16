@@ -313,10 +313,15 @@ vector lengths (e.g. Fujitsu A64FX).
    distributions (proba80, calgary_pic) at the cost of ~3-4× decode
    speed on the FSE-firing nodes specifically.  The decode-speed
    tradeoff isn't right yet for "default" status; see
-   [`IDEAS.md`](IDEAS.md) "FSE x2 / x4 parallel-stream wrapper" for
-   the planned ILP-based remediation.  The benchmark tables and
-   per-platform commentary below use `--no-fse` to reflect the
-   default-recommended path.
+   [`IDEAS.md`](IDEAS.md) "FSE wide-cursor decoder" (2026-05-15) for
+   the current research direction — the microbench in
+   `extras/bench_fse_xy_micro.c` shows that FSE's stock x=2-state
+   shape is 2.5-3× off the actual primitive limit; swapping to
+   x=8..16 cursors closes most of the per-node decode-speed gap to
+   huf0_x2 on wide-OoO cores (M4, Granite Rapids) and roughly halves
+   it on Zen and Graviton.  The benchmark tables and per-platform
+   commentary below use `--no-fse` to reflect the default-recommended
+   path on the *current* (x=2) per-node FSE shape.
 
 For step-by-step traces of the hot SIMD kernels (NEON `partition_8`,
 `tree_merge`, `flat_dN_unpack`) with worked examples and register-
@@ -411,10 +416,24 @@ huf0 / zstd / brotli / FSE on real distributions across Apple M4 /
 Graviton 4 / Xeon Granite Rapids / Zen 3 / Zen 5.
 
 Dinklage et al. report wavelet-tree *construction* throughput at
-~100 MB/s of input on i9-11900KF AVX-512 for English text.  No
-published bulk-decode bytes/sec exists for this representation —
-that regime appears to be open.  Full prior-art notes in
-[`WAVELET_TREES.md`](WAVELET_TREES.md).
+~100 MB/s of input on i9-11900KF AVX-512 for the Huffman-shaped
+variant (their headline "1.4 Gbit/s tops" applies to the binary
+fixed-⌈lg σ⌉-code variant only, 2–3× faster than the Huffman-shaped
+shape because they don't have to filter just-ended codes per level).
+Decode is not measured anywhere in either paper.  No published
+bulk-decode bytes/sec exists for this representation — that regime
+appears to be open.
+
+Baruch, Klein & Shapira (DAM 2020) is the closest prior work on the
+decode side: a strictly top-down, scalar, per-node `rnk(v)` cache
+that exploits "rank on consecutive positions differs by ≤ 1" to
+avoid recomputing rank during a range query.  Reports ~50% full /
+~30% partial decode speedup vs the SDSL succinct-DS library; no
+SIMD, no comparison to huf0 / FSE / zstd.  Same "shared upper tree"
+insight pivco uses, but as scalar rank caching across t independent
+root-to-leaf walks rather than bulk SIMD over the whole bitmap.
+
+Full prior-art notes in [`docs/WAVELET_TREES.md`](docs/WAVELET_TREES.md).
 
 ## Test Datasets
 
@@ -499,11 +518,13 @@ Baselines include huf0 X1 (single-symbol lookup) and X2 (double-symbol
 lookup). "vs best" = best PIVCO / best of all other decoders.
 
 Per-host raw sweep files in [`results/`](results/) — most recent on
-the current code at the time of this README is
-[`results/SUMMARY-20260515-unify-all.md`](results/SUMMARY-20260515-unify-all.md)
-(after the 2026-05-14 unify-framework refactor; see also
-[`results/SUMMARY-20260514-unify-framework.md`](results/SUMMARY-20260514-unify-framework.md)
-for the MAIN-set sweep that validated the refactor).
+the current code at the time of this README are the post-unify-framework
+sweeps: [`SUMMARY-20260515-unify-all-nofse.md`](results/SUMMARY-20260515-unify-all-nofse.md)
+(the default-recommended `--no-fse` configuration used in the tables
+below) and [`SUMMARY-20260515-unify-all-fseon.md`](results/SUMMARY-20260515-unify-all-fseon.md)
+(FSE-on for ratio/speed comparison).  See also
+[`SUMMARY-20260514-unify-framework.md`](results/SUMMARY-20260514-unify-framework.md)
+for the MAIN-set sweep that validated the refactor.
 
 ### Apple M4 Max (NEON, 128KB L1D, block 8192)
 
@@ -1104,29 +1125,29 @@ memset.
 
 ### Where PIVCO Still Loses
 
-**Real-world prose / markup outside Apple silicon** — the headline
-gap exposed by the 2026-04-25 mega sweep.  On Xeon AVX-512 PIVCO
-loses 0.90–0.97× to huf0_x2 on `prose_pride` / `html_wiki` /
-`json_api`; on Graviton 4 those drop to 0.63–0.78×; on Zen 3 SSE4.1
-to 0.44–0.55×.  These are deep-tree (max_len 13–15), high-entropy
-(4.5–5.5 b/B), wide-alphabet (85–200 distinct) workloads — the
-exact case where huf0_x2's two-symbol-per-table-lookup dominates.
+After the K_right wire format (2026-05-12), the flat-aware tree
+restructurer, and the Graviton-4 D=5/D=6 gate, the historical loss
+clusters on M4 / Xeon / Graviton 4 have all crossed to wins.  The
+remaining sub-1× rows live on **Zen 3 SSE/AVX2** for three
+deep-real-text distributions: `html_wiki` 0.95×, `json_api` 0.94×,
+`log_apache` 0.94×.
 
-**Graviton 4 / Zen 3 synthetic moderate-entropy** (`proba14`,
-`zipfian`, `bell_s10`) at 0.46–0.85×.  Same root cause as the real-
-text losses — both uarchs have weaker per-cycle partition throughput
-than M4 (NEON `tbl` slower on Neoverse-V2) or Xeon (no
-`vpcompressw`-class primitive on SSE4.1).  D=5/D=6 NEON paths fall
-through to scalar on Graviton 4
-([cee2366bb2372cd173e1900db0b5ea99f4c0c65b](../)).
+These three share the same shape: max_len 15, alphabet 85–200,
+entropy ~5.3–5.5 b/B — i.e. exactly the case where huf0_x2's
+two-symbol-per-table-lookup is most valuable.  On Zen 3 the SSE/AVX2
+partition primitive (pshufb + compress_tab) costs ~0.20 ns/elem,
+~3× M4's NEON partition and ~5× Xeon's `vpcompressw`; combined with
+no D=5/D=6 SIMD unpack and a 32 KB L1D that the compress_tab eats
+~25% of, the per-partition tax is what huf0_x2 wins on.
 
-**Remediation plan** for the real-text gap on Graviton 4 / Zen 3:
-the existing IDEAS.md "Zen 3 hybrid block decoder" entry — gate per
-table on flat-subtree coverage, fall back to huf0_x2 below a
-threshold (e.g., D=2 coverage < 30% AND max_len > 10).  This would
-give up PIVCO's marginal moderate-entropy wins for huf0_x2's
-strength on those distributions.  Apple silicon and Xeon AVX-512
-would stay on PIVCO unconditionally.
+These losses are within 6% of parity, framed as data rather than
+"things to fix" — ph is a research vehicle for what SIMD Huffman
+decoding can do at the algorithmic edge, not a tool people will
+compress with.  The natural remediation, if it ever matters, is the
+existing IDEAS.md "Zen 3 hybrid block decoder" entry: gate per
+table on flat-subtree coverage and fall back to huf0_x2 below a
+threshold (e.g. D=2 coverage < 30% AND max_len > 10).  Other
+backends (NEON, AVX-512) would stay on PIVCO unconditionally.
 
 ### The Core Tradeoff
 
@@ -1148,19 +1169,29 @@ block size.
 
 ### SIMD Width Scaling
 
-PIVCO's inner loop (TBL-based partition) processes 8 × uint16_t indices
-per NEON instruction. Wider SIMD would directly improve throughput:
+PIVCO's inner loop scales directly with SIMD primitive width:
 
-- **AVX2** (256-bit): 16 indices per partition → ~2x current
-- **AVX-512**: `vpcompressw` does the partition in ONE instruction —
-  no shuffle table needed. Plus `vpscatterd` for leaf writes.
-- **SVE/SVE2** (256-512 bit): similar gains with scalable vectors
+- **NEON 128-bit** (M4, Graviton 4): 8 × uint16_t per `vqtbl1q_u8`
+  partition.  Shipped.
+- **SSE4.1+AVX2 128/256-bit** (Zen 3): same 8-wide partition via
+  pshufb + compress_tab; `pblendvb` widens `merge_both_const` to
+  32-byte.  Shipped.
+- **AVX-512 VBMI2 512-bit** (Xeon Granite Rapids / Zen 4+):
+  `vpcompressw` partitions 32 × uint16_t in ONE instruction, no
+  shuffle table.  `vpexpandb` does the BU `tree_merge` 64 bytes per
+  iteration.  Shipped — peak `partition` cost is 0.04 ns/elem
+  (24 GB/s), 4-5× faster than Zen 3's SSE path.
+- **SVE/SVE2** (Graviton 4 at 128-bit): `svcompact` only handles
+  4 × uint32 at this width, requiring widen/narrow — slower than
+  NEON TBL.  Disabled.  Would help at 256-bit+ vector lengths (e.g.
+  Fujitsu A64FX 512-bit).
 
-Traditional Huffman gains nothing from wider SIMD — it's 4 independent
-scalar dependency chains regardless of vector width. PIVCO's advantage
-scales directly with SIMD capabilities, suggesting that on AVX-512
-hardware the crossover point would shift further toward uniform
-distributions.
+Cross-platform numbers are now in the per-host tables above; the
+qualitative picture: peak `vs huf0_x2` ratios scale Xeon > M4 ≈
+Graviton 4 > Zen 3, tracking primitive width (and `vpcompressw`
+availability).  Traditional Huffman gains nothing from wider SIMD —
+it's 4 independent scalar dependency chains regardless of vector
+width.
 
 ## Ideas That Can Make Things Faster
 
@@ -1168,7 +1199,7 @@ The canonical, full-detail log of optimization ideas (shipped, in
 flight, discarded, deferred, with cycle-level analysis) lives in
 [`IDEAS.md`](IDEAS.md).  The store-coalescing investigation
 (prototyped on M4 / Graviton 4 / Xeon AVX-512, all losing) has its
-own write-up in [`COALESCE.md`](COALESCE.md).
+own write-up in [`docs/COALESCE.md`](docs/COALESCE.md).
 
 This section is a summary.
 
@@ -1276,9 +1307,8 @@ This section is a summary.
   `min_len < max_len`, a separate prefix-radix partition approach.
   Non-flat case remained slower than `pivco_n` (~1.2–2.0× on M4);
   superseded by the flat-subtree path above for practical purposes.
-  Still compiled on NEON as the `pivco_p` benchmark column for
-  research comparison.  Full writeup:
-  [`PREFIX_RADIX.md`](PREFIX_RADIX.md).
+  Retired 2026-05-14 — moved to `extras/pivco_huffman_neon_prefix.c`.
+  Full writeup: [`docs/PREFIX_RADIX.md`](docs/PREFIX_RADIX.md).
 - **Combined shuffle table [256][32]**: Stores both right (mask) and
   left (~mask) shuffle patterns contiguously, enabling `ldp q0, q1` on
   ARM (one load-pair vs two separate loads). 5-9% improvement across
@@ -1400,14 +1430,14 @@ This section is a summary.
   scalar loops — classic radix-sort bottlenecks that need SIMD
   treatment (parallel histograms for phase 2, TBL-based K-way partition
   for phase 4) to break even.  Detailed profile data, diagnosis, and
-  optimisation path in [`PREFIX_RADIX.md`](PREFIX_RADIX.md) §5+§6.
+  optimisation path in [`docs/PREFIX_RADIX.md`](docs/PREFIX_RADIX.md) §5+§6.
 - **Nested (multi-stage) prefix-radix**: At each internal node during
   decode, use `M_local = local_min` of that subtree.  An analysis in
   `bench/bench_multi_stage_stats.c` shows this fires on a meaningful
   fraction of elements in several distributions — notably zipfian
   (70% of elements land in subtree bins with local_min ≥ 2 after a
   top-level M=3 radix).  Would stack on top of single-stage once
-  that's in.  See [`PREFIX_RADIX.md`](PREFIX_RADIX.md) §4.
+  that's in.  See [`docs/PREFIX_RADIX.md`](docs/PREFIX_RADIX.md) §4.
 - **SVE at 256-bit+**: Untested. `svcompact` on wider SVE (e.g. A64FX
   at 512-bit) would handle 16+ uint32 per instruction, potentially
   matching AVX-512 performance.
@@ -1436,15 +1466,31 @@ This section is a summary.
 ```sh
 git clone --depth 1 https://github.com/cyan4973/FiniteStateEntropy.git ext/fse
 git clone --depth 1 https://github.com/rygorous/ryg_rans.git ext/ryg_rans
+git clone --depth 1 https://github.com/google/brotli.git ext/brotli  # optional, extras/bench_brotli
 cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES=arm64
 cmake --build build
 ./build/pivco_huffman_tests        # run tests
 ./build/pivco_huffman_bench        # run benchmarks (default 100 repeats)
 ./build/pivco_huffman_bench 10     # quick run (10 repeats)
 ./build/pivco_huffman_bench 200    # thorough run (200 repeats)
+./build/pivco_huffman_bench --no-fse    # default-recommended config
+./build/pivco_huffman_bench --tdbu      # only pivco_n + pivco_bu (TD/BU compare)
 ```
 
 Custom block size:
 ```sh
 cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_FLAGS="-DPIVCO_BLOCK_SIZE=16384"
 ```
+
+### Interactive tree visualization
+
+[`figures/tree_viz.html`](figures/tree_viz.html) is a self-contained
+HTML/JS explorer for Huffman trees with the flat-subtree fast path
+overlaid.  Loads the 29 bench distributions from
+[`figures/tree_viz_data.js`](figures/tree_viz_data.js) (regenerated
+by `./build/pivco_dump_distributions > figures/tree_viz_data.js`),
+accepts file/text uploads, and lets you toggle flat-subtree
+detection, click flat-roots to (un)flatten for what-if analysis on
+ops/leaf and chain-rule entropy totals, and scrub a max-code-length
+slider.  Open the file directly in a browser — no build server
+required.
