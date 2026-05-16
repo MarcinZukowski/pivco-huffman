@@ -402,6 +402,14 @@ if(BUILD_BENCH)
         target_include_directories(pivco_entropy_breakdown PRIVATE ext/fse/lib)
     endif()
 
+    # Dump distribution histograms as a JS-loadable data file for the
+    # figures/tree_viz.html visualization.
+    add_executable(pivco_dump_distributions
+        extras/dump_distributions.c
+        bench/bench_distributions.c
+    )
+    target_link_libraries(pivco_dump_distributions pivco_huffman m)
+
     # Offline TANS-routing ratio bound: real files (per-block) or
     # MAIN bench distributions (per-histogram).
     add_executable(pivco_tans_bound

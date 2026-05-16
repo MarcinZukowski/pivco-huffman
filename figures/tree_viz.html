@@ -1,0 +1,1615 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>PIVCO Huffman Tree Viz</title>
+<style>
+* { box-sizing: border-box; }
+html, body {
+    height: 100%;
+    margin: 0;
+    font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    color: #222;
+    background: #fafafa;
+}
+header {
+    padding: 8px 12px;
+    background: #fff;
+    border-bottom: 1px solid #ddd;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 14px;
+    position: sticky;
+    top: 0;
+    z-index: 10;
+}
+header h1 {
+    margin: 0;
+    font-size: 14px;
+    font-weight: 600;
+}
+header label, header select, header input[type="file"] {
+    font-size: 13px;
+}
+header select { padding: 2px 6px; }
+header .toggle { display: flex; align-items: center; gap: 4px; }
+main {
+    display: grid;
+    grid-template-columns: 1fr 360px;
+    gap: 10px;
+    padding: 10px;
+}
+#tree-pane {
+    background: #fff;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    overflow: hidden;
+    min-height: 70vh;
+}
+#tree-svg { display: block; cursor: grab; }
+#tree-svg:active { cursor: grabbing; }
+#tree-svg .link { fill: none; stroke: #bbb; stroke-width: 1px; }
+#tree-svg .node-leaf rect {
+    stroke: #888;
+    stroke-width: 0.5px;
+}
+#tree-svg .node-internal circle {
+    fill: #fff;
+    stroke: #555;
+    stroke-width: 1px;
+}
+#tree-svg .node-leaf text {
+    font: 9px monospace;
+    text-anchor: middle;
+    dominant-baseline: middle;
+    pointer-events: none;
+}
+#tree-svg .node-leaf .leaf-char {
+    font-size: 10px;
+    font-weight: 600;
+}
+#tree-svg .node-leaf .leaf-freq {
+    font-size: 7px;
+    fill: #666;
+}
+#tree-svg .flat-box {
+    fill: #22c55e;             /* green, opacity set per-element by D */
+    stroke: #d97706;
+    stroke-dasharray: 3 2;
+    stroke-width: 1.5px;
+    pointer-events: none;
+}
+#tree-svg .pair-box {
+    fill: #22c55e;
+    stroke: #94a3b8;
+    stroke-dasharray: 2 2;
+    stroke-width: 1px;
+    pointer-events: none;
+}
+#tree-svg .flat-label {
+    font: 10px monospace;
+    font-weight: 600;
+    fill: #b45309;
+    pointer-events: none;
+}
+#tree-svg .pair-label {
+    font: 9px monospace;
+    fill: #64748b;
+    pointer-events: none;
+}
+#tree-svg .skew-bar { stroke: #444; stroke-width: 0.3px; }
+#stats-pane {
+    background: #fff;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    padding: 10px 12px;
+    overflow-y: auto;
+    max-height: calc(100vh - 80px);
+}
+#stats-pane h2 {
+    margin: 0 0 6px 0;
+    font-size: 13px;
+    font-weight: 600;
+    color: #444;
+}
+#stats-pane h3 {
+    margin: 14px 0 4px;
+    font-size: 12px;
+    font-weight: 600;
+    color: #666;
+}
+.summary-grid {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 2px 12px;
+    font-size: 12px;
+}
+.summary-grid b { font-weight: 500; color: #555; }
+.summary-grid span { font-family: monospace; text-align: right; }
+table.node-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 11px;
+    font-family: monospace;
+}
+table.node-table th, table.node-table td {
+    padding: 2px 4px;
+    text-align: right;
+    border-bottom: 1px solid #eee;
+}
+table.node-table th { background: #f4f4f4; font-weight: 600; }
+table.node-table tr:hover { background: #fff8e1; cursor: pointer; }
+table.node-table tr.in-flat { color: #b45309; }
+.tooltip {
+    position: absolute;
+    pointer-events: none;
+    background: #222;
+    color: #fff;
+    padding: 6px 8px;
+    border-radius: 4px;
+    font: 11px/1.3 monospace;
+    white-space: pre;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.25);
+    opacity: 0;
+    transition: opacity 90ms;
+    z-index: 100;
+    max-width: 320px;
+}
+.tooltip.visible { opacity: 1; }
+.muted { color: #888; font-size: 11px; }
+.dim { color: #aaa; }
+</style>
+</head>
+<body>
+
+<header>
+    <h1>PIVCO-Huffman tree viz</h1>
+    <label>Dataset:
+        <select id="dataset-select"></select>
+    </label>
+    <label>or file: <input type="file" id="file-input"></label>
+    <label>or text: <input type="text" id="text-input" size="24"
+        placeholder="type or paste text"></label>
+    <button id="text-build" type="button">build</button>
+    <label class="toggle">
+        <input type="checkbox" id="ph-opt" checked>
+        ph-optimize
+    </label>
+    <label class="toggle">
+        <input type="checkbox" id="show-flat" checked>
+        flat-subtrees
+    </label>
+    <label class="toggle">
+        <input type="checkbox" id="condense-flat">
+        condense
+    </label>
+    <label class="toggle" title="Max Huffman code length (length-limited)">
+        max-len
+        <span id="max-len-min" class="dim" style="font:10px monospace">1</span>
+        <input type="range" id="max-len" min="1" max="20" value="11"
+            style="width:96px">
+        <span id="max-len-max" class="dim" style="font:10px monospace">20</span>
+        <span id="max-len-val" style="font-family:monospace; width:14px; display:inline-block">11</span>
+    </label>
+    <button id="reset-view" type="button" title="Reset pan/zoom">reset view</button>
+    <span id="status" class="muted"></span>
+</header>
+
+<main>
+    <div id="tree-pane">
+        <svg id="tree-svg" width="100%" height="100%"></svg>
+    </div>
+    <aside id="stats-pane">
+        <h2>Summary</h2>
+        <div id="summary"></div>
+        <h3>Top internal nodes by bits saved</h3>
+        <table class="node-table" id="top-nodes-table">
+            <thead><tr>
+                <th>#</th><th>depth</th><th title="% of source bytes that pass through this node">% src</th>
+                <th>p_left</th><th>H</th>
+                <th title="total bits saved at this node (1 − H) × n">saved</th>
+                <th title="bits saved per source byte (whole tree). Sums across all nodes to total bits saved.">/byte</th>
+                <th>flat?</th>
+            </tr></thead>
+            <tbody></tbody>
+        </table>
+        <p class="muted" style="margin-top:14px">
+            Hover over a node for full stats.  Click a row in the table to
+            jump to that node.  Drag to pan, scroll to zoom.
+        </p>
+    </aside>
+</main>
+
+<div class="tooltip" id="tooltip"></div>
+
+<script src="tree_viz_data.js"></script>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<script>
+// ============================================================
+//  Huffman build + code assignment
+// ============================================================
+
+/* Min-heap keyed by .freq, breaking ties by .insertOrder for
+ * deterministic tree shape.  Stores any object that has .freq. */
+class MinHeap {
+    constructor() { this.a = []; this.ord = 0; }
+    push(x) {
+        x._ord = this.ord++;
+        this.a.push(x);
+        this._up(this.a.length - 1);
+    }
+    pop() {
+        if (this.a.length === 0) return null;
+        const top = this.a[0];
+        const last = this.a.pop();
+        if (this.a.length) {
+            this.a[0] = last;
+            this._down(0);
+        }
+        return top;
+    }
+    size() { return this.a.length; }
+    _less(i, j) {
+        const A = this.a[i], B = this.a[j];
+        if (A.freq !== B.freq) return A.freq < B.freq;
+        return A._ord < B._ord;
+    }
+    _up(i) {
+        while (i > 0) {
+            const p = (i - 1) >> 1;
+            if (!this._less(i, p)) break;
+            [this.a[i], this.a[p]] = [this.a[p], this.a[i]];
+            i = p;
+        }
+    }
+    _down(i) {
+        const n = this.a.length;
+        while (true) {
+            const l = 2 * i + 1, r = 2 * i + 2;
+            let m = i;
+            if (l < n && this._less(l, m)) m = l;
+            if (r < n && this._less(r, m)) m = r;
+            if (m === i) break;
+            [this.a[i], this.a[m]] = [this.a[m], this.a[i]];
+            i = m;
+        }
+    }
+}
+
+/* Build a Huffman tree from a 256-entry frequency array.  Returns
+ * an array `lengths[0..255]` of code-length-per-symbol (0 = unused).
+ * Length-limited to `maxLen` bits via the limitCodeLengths post-pass.
+ */
+function buildHuffmanLengths(freqs, maxLen) {
+    if (!maxLen) maxLen = 16;
+    const heap = new MinHeap();
+    let n_used = 0;
+    for (let i = 0; i < 256; i++) {
+        if (freqs[i] > 0) {
+            heap.push({ freq: freqs[i], symbol: i, left: null, right: null });
+            n_used++;
+        }
+    }
+    if (n_used === 0) return new Array(256).fill(0);
+    if (n_used === 1) {
+        const lens = new Array(256).fill(0);
+        const sole = heap.pop();
+        lens[sole.symbol] = 1;
+        return lens;
+    }
+    while (heap.size() > 1) {
+        const a = heap.pop(), b = heap.pop();
+        heap.push({
+            freq: a.freq + b.freq,
+            symbol: -1, left: a, right: b,
+        });
+    }
+    const root = heap.pop();
+    const lens = new Array(256).fill(0);
+    function walk(node, d) {
+        if (node.symbol >= 0) {
+            lens[node.symbol] = d || 1;   // depth 0 happens only with 1 symbol
+            return;
+        }
+        walk(node.left, d + 1);
+        walk(node.right, d + 1);
+    }
+    walk(root, 0);
+    limitCodeLengths(lens, maxLen);
+    return lens;
+}
+
+/* Length-limiter using scaled-integer Kraft accounting.  After
+ * clamping any over-long codes to maxLen we may end up with Kraft
+ * sum > 1 (too many codes for the available code space).  Fix by
+ * iteratively bumping the longest "unmaxed" code's length up by
+ * 1 — minimal Kraft change per bump.  Then if Kraft < 1 we can
+ * shorten codes to fill the space (cosmetic, but keeps the tree
+ * canonical). */
+function limitCodeLengths(lens, maxLen) {
+    const target = 1 << maxLen;
+    /* Step 1: clamp. */
+    for (let i = 0; i < lens.length; i++)
+        if (lens[i] > maxLen) lens[i] = maxLen;
+    /* Step 2: Kraft accounting (integer). */
+    let kraft = 0;
+    for (let i = 0; i < lens.length; i++)
+        if (lens[i] > 0) kraft += (1 << (maxLen - lens[i]));
+    /* Step 3: reduce until kraft <= target.  Bump longest L < maxLen. */
+    while (kraft > target) {
+        let bestSym = -1, bestL = 0;
+        for (let i = 0; i < lens.length; i++) {
+            if (lens[i] > 0 && lens[i] < maxLen && lens[i] > bestL) {
+                bestL = lens[i]; bestSym = i;
+            }
+        }
+        if (bestSym < 0) break;
+        lens[bestSym]++;
+        kraft -= (1 << (maxLen - bestL - 1));
+    }
+    /* Step 4: tighten - while kraft < target, shorten the longest. */
+    while (kraft < target) {
+        let bestSym = -1, bestL = 0;
+        for (let i = 0; i < lens.length; i++) {
+            if (lens[i] > bestL) { bestL = lens[i]; bestSym = i; }
+        }
+        if (bestSym < 0 || bestL <= 1) break;
+        const gain = 1 << (maxLen - bestL);
+        if (kraft + gain > target) break;
+        lens[bestSym]--;
+        kraft += gain;
+    }
+}
+
+/* Textbook canonical Huffman code assignment.  Sort symbols by
+ * (length asc, symbol asc), assign codes left-to-right. */
+function assignCanonicalCodes(lens) {
+    const out = [];
+    for (let s = 0; s < 256; s++) {
+        if (lens[s] > 0) out.push({ symbol: s, len: lens[s], code: 0 });
+    }
+    out.sort((a, b) => a.len - b.len || a.symbol - b.symbol);
+    let code = 0, prevLen = 0;
+    for (const o of out) {
+        if (o.len > prevLen) code <<= (o.len - prevLen);
+        o.code = code;
+        code++;
+        prevLen = o.len;
+    }
+    return out;
+}
+
+/* ph's flat-aware code assignment.  Same code lengths as canonical
+ * but rearranged so that same-length symbols cluster into D-flat
+ * subtrees, exploiting count_L's binary decomposition.  See
+ * src/huffman_table.c "Flat-aware code assignment" comment. */
+function assignPhFlatCodes(lens, freqs) {
+    // Per-length, gather symbols sorted by freq desc (ties: smaller sym).
+    const max_len = lens.reduce((m, x) => Math.max(m, x), 0);
+    const perLen = []; // perLen[L] = array of {symbol, freq}
+    for (let L = 0; L <= max_len; L++) perLen[L] = [];
+    for (let s = 0; s < 256; s++) {
+        if (lens[s] > 0) perLen[lens[s]].push({ symbol: s, freq: freqs[s] });
+    }
+    for (let L = 1; L <= max_len; L++) {
+        perLen[L].sort((a, b) => b.freq - a.freq || a.symbol - b.symbol);
+    }
+    // Decompose each count_L by binary representation into chunks.
+    // chunk: {L, bit, depth, n, items: [{symbol,freq}...]}
+    const chunks = [];
+    for (let L = 1; L <= max_len; L++) {
+        let cur = 0;
+        const arr = perLen[L];
+        const c = arr.length;
+        for (let bit = 16; bit >= 0; bit--) {
+            if (c & (1 << bit)) {
+                const n = 1 << bit;
+                let depth;
+                if (bit >= 2) depth = L - bit;
+                else if (bit === 1) depth = L - 1;
+                else depth = L;
+                chunks.push({ L, bit, depth, n,
+                              items: arr.slice(cur, cur + n) });
+                cur += n;
+            }
+        }
+    }
+    // Sort chunks by depth asc (stable).
+    chunks.sort((a, b) => a.depth - b.depth);
+    // Canonical-assign codes per chunk.
+    const out = [];
+    let code = 0, prevDepth = 0;
+    for (const ch of chunks) {
+        if (ch.depth > prevDepth) code <<= (ch.depth - prevDepth);
+        for (let i = 0; i < ch.n; i++) {
+            const it = ch.items[i];
+            out.push({
+                symbol: it.symbol,
+                len: ch.L,
+                code: (code << ch.bit) | i,
+            });
+        }
+        code++;
+        prevDepth = ch.depth;
+    }
+    return out;
+}
+
+// ============================================================
+//  Tree construction + annotation
+// ============================================================
+
+/* Build a tree object from a list of {symbol, code, len, freq}.
+ * Tree node: { symbol, freq, depth, left, right, id }. */
+function buildTree(symbols, freqs) {
+    let nextId = 0;
+    const root = { symbol: -1, depth: 0, freq: 0, left: null, right: null,
+                    id: nextId++ };
+    for (const s of symbols) {
+        let cur = root;
+        for (let i = s.len - 1; i >= 0; i--) {
+            const bit = (s.code >> i) & 1;
+            const dir = bit === 0 ? 'left' : 'right';
+            if (!cur[dir]) {
+                cur[dir] = { symbol: -1, depth: cur.depth + 1, freq: 0,
+                             left: null, right: null, id: nextId++,
+                             parent: cur };
+            }
+            cur = cur[dir];
+        }
+        cur.symbol = s.symbol;
+        cur.freq = freqs[s.symbol];
+    }
+    return root;
+}
+
+/* Post-order walk: compute subtreeCount, leftCount/rightCount,
+ * p_left, H(p_left), bitsSavedPerSymbol = (1 - H), totalBitsSaved
+ * = n_node * (1 - H).  Pre-order: prefix string and entropyPrefix
+ * (Σ H over ancestors). */
+function annotateTree(root) {
+    function pre(n, prefix, entropyPrefix) {
+        if (!n) return;
+        n.prefix = prefix;
+        n.entropyPrefix = entropyPrefix;
+        if (n.symbol >= 0) return;
+        // post-order fields are filled in `post`; do this after we know p_left
+    }
+    function post(n) {
+        if (!n) return { count: 0, leaves: 0 };
+        if (n.symbol >= 0) {
+            n.subtreeCount = n.freq;
+            n.numLeaves = 1;
+            return { count: n.freq, leaves: 1 };
+        }
+        const l = post(n.left), r = post(n.right);
+        n.leftCount = l.count;
+        n.rightCount = r.count;
+        n.subtreeCount = l.count + r.count;
+        n.numLeaves = l.leaves + r.leaves;
+        if (n.subtreeCount > 0) {
+            n.pLeft = l.count / n.subtreeCount;
+            n.bitEntropy = h_binary(n.pLeft);
+            n.bitsSavedTotal = n.subtreeCount * (1 - n.bitEntropy);
+        } else {
+            n.pLeft = 0; n.bitEntropy = 0; n.bitsSavedTotal = 0;
+        }
+        return { count: n.subtreeCount, leaves: n.numLeaves };
+    }
+    post(root);
+    /* Second walk now that pLeft is known: prefix + entropy_prefix. */
+    function pre2(n, prefix, entropyPrefix) {
+        if (!n) return;
+        n.prefix = prefix;
+        n.entropyPrefix = entropyPrefix;
+        if (n.symbol >= 0) return;
+        pre2(n.left,  prefix + '0', entropyPrefix + n.bitEntropy);
+        pre2(n.right, prefix + '1', entropyPrefix + n.bitEntropy);
+    }
+    pre2(root, '', 0);
+}
+
+/* After detectFlatSubtrees: annotate each leaf with `opsToLeaf` =
+ * number of tree-walk operations the decoder does to reach it.
+ *   - without flat opt: ops = depth (one per internal node on the
+ *     path).
+ *   - with flat opt: if the leaf is inside a maximal flat subtree
+ *     rooted at depth d_root with D levels, the flat-region lookup
+ *     replaces D level-walks with 1.  So ops = d_root + 1.
+ *   - otherwise ops = depth.
+ *
+ * Then post-order over every internal node n:
+ *   - n.opsAvgSubtree    = mean opsToLeaf over leaves below n (each leaf 1×)
+ *   - n.opsWeightedSubtree = freq-weighted avg ops over the subtree
+ *                            (per source byte passing through n) */
+function annotateLeafOps(root, useFlat) {
+    function walk(n, inFlatFromDepth) {
+        if (!n) return;
+        if (n.symbol >= 0) {
+            n.opsToLeaf = (useFlat && inFlatFromDepth >= 0)
+                ? inFlatFromDepth + 1
+                : n.depth;
+            return;
+        }
+        let childInFlat = inFlatFromDepth;
+        if (useFlat && n.flatD && childInFlat < 0) childInFlat = n.depth;
+        walk(n.left,  childInFlat);
+        walk(n.right, childInFlat);
+    }
+    walk(root, -1);
+    /* Post-order aggregation per internal node. */
+    function agg(n) {
+        if (!n) return { sumOps: 0, sumWOps: 0, nLeaves: 0 };
+        if (n.symbol >= 0) {
+            return {
+                sumOps: n.opsToLeaf,
+                sumWOps: n.opsToLeaf * n.freq,
+                nLeaves: 1,
+            };
+        }
+        const l = agg(n.left), r = agg(n.right);
+        const sumOps  = l.sumOps  + r.sumOps;
+        const sumWOps = l.sumWOps + r.sumWOps;
+        const nLeaves = l.nLeaves + r.nLeaves;
+        n.opsAvgSubtree = nLeaves > 0 ? sumOps / nLeaves : 0;
+        n.opsWeightedSubtree = (n.subtreeCount > 0)
+            ? sumWOps / n.subtreeCount : 0;
+        return { sumOps, sumWOps, nLeaves };
+    }
+    agg(root);
+}
+
+function h_binary(p) {
+    if (p <= 0 || p >= 1) return 0;
+    return -p * Math.log2(p) - (1 - p) * Math.log2(1 - p);
+}
+
+/* Returns the subtree's flat depth (all leaves at same depth from
+ * here) or -1 if not flat.  Leaves return 0. */
+function subtreeFlatDepth(n) {
+    if (!n) return -1;
+    if (n.symbol >= 0) return 0;
+    const ld = subtreeFlatDepth(n.left);
+    if (ld < 0) return -1;
+    const rd = subtreeFlatDepth(n.right);
+    if (rd < 0 || rd !== ld) return -1;
+    return ld + 1;
+}
+
+/* Annotate every node with:
+ *   n.flatD          : >0 iff this node is currently being treated as a
+ *                       flat-subtree root (no override + subtree is
+ *                       D≥2 flat).  This is the EFFECTIVE flat state.
+ *   n.flatCandidate  : true iff the subtree at this node is D≥2 flat
+ *                       (regardless of override).  These are the
+ *                       "flattenable" nodes the user can click — even
+ *                       if currently unflattened-via-override.
+ *   n.naturalFlatD   : the D of the subtree if flat (or 0).
+ *   n.inFlat         : ancestor is currently a flat-root.
+ *
+ * The override _flatOverride.get(id) === 'unflatten' tells the
+ * detector "don't treat this node as a flat-root, recurse into it
+ * so its children can themselves become flat-roots."  Visibility
+ * still depends on the effective flat state of ancestors. */
+function detectFlatSubtrees(root) {
+    function walk(n, inFlat) {
+        if (!n) return;
+        n.inFlat = inFlat;
+        n.flatD = 0;
+        n.flatCandidate = false;
+        n.naturalFlatD = 0;
+        if (n.symbol < 0) {
+            const d = subtreeFlatDepth(n);
+            if (d >= 2) {
+                n.flatCandidate = true;
+                n.naturalFlatD = d;
+                if (!inFlat) {
+                    const overridden = _flatOverride.get(n.id) === 'unflatten';
+                    if (!overridden) {
+                        n.flatD = d;
+                        inFlat = true;
+                    }
+                }
+            }
+        }
+        walk(n.left, inFlat);
+        walk(n.right, inFlat);
+    }
+    walk(root, false);
+}
+
+/* Collect all internal nodes into an array. */
+function collectInternals(root) {
+    const out = [];
+    function walk(n) {
+        if (!n || n.symbol >= 0) return;
+        out.push(n);
+        walk(n.left); walk(n.right);
+    }
+    walk(root);
+    return out;
+}
+
+// ============================================================
+//  Rendering
+// ============================================================
+
+/* Color scale: green at p=0.5 (balanced), red by p<=0.25 or p>=0.75.
+ * Most internal nodes (non-root, non-leaf) won't exceed 75% skew so
+ * the scale stays informative. */
+const skewColor = p => {
+    if (p == null) return '#999';
+    const skew = Math.abs(p - 0.5);   // 0 (balanced) .. 0.5 (one-sided)
+    const norm = Math.min(1, skew / 0.25);   // 0 at 50/50, 1 at 75/25+
+    const hue = 120 * (1 - norm);   // 120 (green) .. 0 (red)
+    return `hsl(${hue}, 70%, 45%)`;
+};
+
+const tooltipEl = document.getElementById('tooltip');
+
+function showTooltip(html, evt) {
+    tooltipEl.innerHTML = html;
+    tooltipEl.classList.add('visible');
+    const rect = tooltipEl.getBoundingClientRect();
+    const pad = 14;
+    let x = evt.clientX + pad;
+    let y = evt.clientY + pad;
+    if (x + rect.width > window.innerWidth - 8)
+        x = evt.clientX - rect.width - pad;
+    if (y + rect.height > window.innerHeight - 8)
+        y = evt.clientY - rect.height - pad;
+    tooltipEl.style.left = x + 'px';
+    tooltipEl.style.top  = y + 'px';
+}
+function hideTooltip() { tooltipEl.classList.remove('visible'); }
+
+function fmtChar(b) {
+    if (b >= 32 && b <= 126) {
+        const c = String.fromCharCode(b);
+        if (c === '"' || c === '<' || c === '>' || c === '&') return '·';
+        return c;
+    }
+    return '·';
+}
+
+function nodeTooltipHtml(n, totalN) {
+    if (n.symbol >= 0) {
+        const pct = (100 * n.freq / totalN).toFixed(2);
+        const ch = fmtChar(n.symbol);
+        /* For a leaf, "ops-byte (weighted)" is just opsToLeaf since
+         * there's only one symbol in this subtree.  Still showing it
+         * for consistency. */
+        return `leaf  sym=${n.symbol} '${ch}'  0x${n.symbol.toString(16).padStart(2, '0')}\n` +
+               `depth=${n.depth}\n` +
+               `freq=${n.freq}  (${pct}% of source)\n` +
+               `code=${n.code != null ? n.code.toString(2).padStart(n.codeLen, '0') : '?'}\n` +
+               `ops to decode  : ${n.opsToLeaf}\n` +
+               `ops/byte (wgt) : ${n.opsToLeaf}.000  (single leaf)`;
+    }
+    const sharePct = (100 * n.subtreeCount / totalN).toFixed(2);
+    const pL = (100 * n.pLeft).toFixed(1);
+    const pR = (100 * (1 - n.pLeft)).toFixed(1);
+    const Hb = n.bitEntropy.toFixed(3);
+    const savedTotal = n.bitsSavedTotal.toFixed(0);
+    const savedPerByte = (n.bitsSavedTotal / totalN).toFixed(4);
+    const prefix = n.prefix || '(root)';
+    const savedPerTok = n.subtreeCount > 0
+        ? (n.bitsSavedTotal / n.subtreeCount).toFixed(3) : '0.000';
+    const opsAvg = (n.opsAvgSubtree || 0).toFixed(2);
+    const opsW   = (n.opsWeightedSubtree || 0).toFixed(3);
+    let s = `internal  depth=${n.depth}\n` +
+            `prefix    : '${prefix}'  (len=${n.depth})\n` +
+            `H-prefix  : ${n.entropyPrefix.toFixed(3)} bits  (Σ H over ancestors)\n` +
+            `subtree n : ${n.subtreeCount}  (${sharePct}% of source)\n` +
+            `leaves    : ${n.numLeaves}\n` +
+            `left  : ${n.leftCount.toString().padStart(7)}  (${pL}%)\n` +
+            `right : ${n.rightCount.toString().padStart(7)}  (${pR}%)\n` +
+            `H(p)  : ${Hb} bits\n` +
+            `bits saved : ${savedTotal} bits total\n` +
+            `             ${savedPerByte} per source byte\n` +
+            `             ${savedPerTok} per token passing here\n` +
+            `subtree ops to decode (avg / leaf)   : ${opsAvg}\n` +
+            `subtree ops/byte (freq-weighted)     : ${opsW}`;
+    if (n.flatD) {
+        s += `\n** flat-subtree root, D=${n.flatD}  (click to unflatten) **`;
+    } else if (n.flatCandidate) {
+        s += `\n** unflattened (natural D=${n.naturalFlatD}, click to re-flatten) **`;
+    } else if (n.inFlat) {
+        s += `\n   (inside a flat subtree)`;
+    }
+    return s;
+}
+
+let svg, gWorld, zoom, currentTree, currentMeta;
+let _nodeById = new Map();
+/* Per-flat-subtree-root *analysis* override.  An "unflatten" entry
+ * means "treat this node as a regular internal node, not a flat
+ * region, in detectFlatSubtrees and all downstream stats".  When a
+ * node is unflattened, its descendants may themselves become new
+ * (smaller) flat-roots if they satisfy D≥2.
+ *
+ * This is conceptually different from the visual "condense" toggle:
+ *   - unflatten = "don't treat as flat for analysis" (affects
+ *     stats: ops/leaf, tree-level Σ H, bits-saved, etc.)
+ *   - condense  = "draw flat regions as one box instead of full
+ *     subtree" (visual only, doesn't change stats)
+ *
+ * Cleared on dataset / toggle changes. */
+let _flatOverride = new Map();
+
+function initSvg() {
+    svg = d3.select('#tree-svg');
+    svg.selectAll('*').remove();
+    gWorld = svg.append('g');
+    zoom = d3.zoom()
+        .scaleExtent([0.1, 10])
+        .on('zoom', e => gWorld.attr('transform', e.transform));
+    svg.call(zoom).on('dblclick.zoom', null);
+}
+
+function renderTree(rootNode, meta) {
+    currentTree = rootNode;
+    currentMeta = meta;
+    /* Index nodes by id for table-hover lookups. */
+    _nodeById.clear();
+    function indexAll(n) {
+        if (!n) return;
+        _nodeById.set(n.id, n);
+        if (n.symbol < 0) { indexAll(n.left); indexAll(n.right); }
+    }
+    indexAll(rootNode);
+
+    const pane = document.getElementById('tree-pane');
+    const W = pane.clientWidth;
+    const H = pane.clientHeight;
+    svg.attr('viewBox', `0 0 ${W} ${H}`);
+
+    /* If a flat-root is folded (per the global "condense" toggle,
+     * possibly overridden by user clicks via _flatOverride), the
+     * hierarchy stops there — its descendants become "virtual
+     * leaves" replaced by a condensed-info box. */
+    const condenseDefault = !!meta.condenseFlat;
+    function isFoldedNode(n) {
+        if (!n.flatD) return false;
+        const explicit = _flatOverride.get(n.id);
+        if (explicit !== undefined) return explicit;
+        return condenseDefault;
+    }
+    /* Clear stale per-node _condensed tags before re-deriving. */
+    function clearCondensed(n) {
+        if (!n) return;
+        n._condensed = false;
+        if (n.symbol < 0) { clearCondensed(n.left); clearCondensed(n.right); }
+    }
+    clearCondensed(rootNode);
+
+    const root = d3.hierarchy(rootNode, n => {
+        if (n.symbol >= 0) return null;
+        if (isFoldedNode(n)) {
+            n._condensed = true;
+            return null;
+        }
+        const ch = [];
+        if (n.left) ch.push(n.left);
+        if (n.right) ch.push(n.right);
+        return ch.length ? ch : null;
+    });
+    /* For the "any folded somewhere?" check below. */
+    const condense = root.descendants().some(n => n.data._condensed);
+
+    // Compute max depth to size the tree.
+    let maxDepth = 0;
+    root.each(n => { if (n.depth > maxDepth) maxDepth = n.depth; });
+
+    /* Each visible "leaf slot" in d3's layout is one unit wide.
+     * Condensed nodes (pruned flat subtrees) need a much wider box
+     * (BOX_W) so they claim CONDENSED_SLOTS leaf-slots' worth via
+     * the separation function below.  Without this, condensed
+     * boxes overlap each other and the rest of the tree. */
+    const CONDENSED_SLOTS = 3;
+    const leaves = root.leaves();
+    const condensedLeafCount = leaves.filter(n => n.data._condensed).length;
+    const realLeafCount = leaves.length - condensedLeafCount;
+    const effectiveSlots = realLeafCount + condensedLeafCount * CONDENSED_SLOTS;
+    const slotSize = Math.max(12, Math.min(36, (W - 60) / Math.max(1, effectiveSlots)));
+    /* Backwards-compat name used below for sizing leaf rects + skew bars. */
+    const leafSize = slotSize;
+    const treeH = Math.max(180, 60 * (maxDepth + 1));
+
+    const layout = d3.tree()
+        .size([effectiveSlots * slotSize, treeH])
+        .separation((a, b) => {
+            const aw = (a.data && a.data._condensed) ? CONDENSED_SLOTS : 1;
+            const bw = (b.data && b.data._condensed) ? CONDENSED_SLOTS : 1;
+            return (aw + bw) / 2;
+        });
+    layout(root);
+
+    // Shift root to origin then add padding so it fits.
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    root.each(n => {
+        if (n.x < minX) minX = n.x;
+        if (n.x > maxX) maxX = n.x;
+        if (n.y < minY) minY = n.y;
+        if (n.y > maxY) maxY = n.y;
+    });
+    const padX = 30, padY = 30;
+    root.each(n => { n.x -= minX - padX; n.y -= minY - padY; });
+
+    const totalN = meta.totalN;
+
+    gWorld.selectAll('*').remove();
+
+    // Links (rendered as straight diagonals).
+    const linkGen = d3.linkVertical().x(d => d.x).y(d => d.y);
+    gWorld.selectAll('path.link')
+        .data(root.links())
+        .enter().append('path')
+            .attr('class', 'link')
+            .attr('d', linkGen);
+
+    // Flat-subtree boxes (D >= 2, dashed orange) and pair boxes
+    // (D = 1, two sibling leaves; lighter gray).  Drawn before
+    // nodes so nodes overlay them.  Skipped when "condense" is on
+    // because we draw the condensed-info box instead (further down).
+    if (meta.showFlat && !condense) {
+        const flatRoots = root.descendants().filter(n => n.data.flatD);
+        // Find D=1 "pair" internal nodes: both children are leaves,
+        // and this node is NOT inside a flat subtree (those are
+        // already covered by the dashed-orange box).
+        const pairRoots = root.descendants().filter(n => {
+            const d = n.data;
+            if (d.symbol >= 0) return false;          // leaf
+            if (d.flatD) return false;                // already a flat root
+            if (d.inFlat) return false;               // inside a flat subtree
+            if (!d.left || !d.right) return false;
+            return d.left.symbol >= 0 && d.right.symbol >= 0;
+        });
+
+        // Subtle green fill, scaled by D: D=1 → 5% opacity (almost
+         // transparent, just a hint), D=8 → 30% opacity (clearly
+         // visible).  Linear between.  Mirrors the depth-coding in
+         // extras/figures/tree-*.svg.
+        function fillOpacityForD(D) {
+            const clamped = Math.max(1, Math.min(8, D));
+            return 0.05 + (clamped - 1) * (0.25 - 0.05) / 7.0;
+        }
+
+        function drawBox(cls, n, marginX, marginY, rx, D) {
+            let bx0 = Infinity, bx1 = -Infinity,
+                by0 = Infinity, by1 = -Infinity;
+            n.descendants().forEach(d => {
+                if (d.x < bx0) bx0 = d.x;
+                if (d.x > bx1) bx1 = d.x;
+                if (d.y < by0) by0 = d.y;
+                if (d.y > by1) by1 = d.y;
+            });
+            return gWorld.append('rect')
+                .attr('class', cls)
+                .attr('x', bx0 - marginX).attr('y', by0 - marginY)
+                .attr('width',  bx1 - bx0 + 2 * marginX)
+                .attr('height', by1 - by0 + 2 * marginY)
+                .attr('rx', rx)
+                .attr('fill-opacity', fillOpacityForD(D));
+        }
+
+        // D label goes UNDER the leaves so it's clearly attached
+        // to the subtree, not floating near the parent.
+        function placeDLabel(n, cls, text) {
+            let by1 = -Infinity, mx0 = Infinity, mx1 = -Infinity;
+            n.descendants().forEach(d => {
+                if (d.y > by1) by1 = d.y;
+                if (d.x < mx0) mx0 = d.x;
+                if (d.x > mx1) mx1 = d.x;
+            });
+            gWorld.append('text')
+                .attr('class', cls)
+                .attr('x', (mx0 + mx1) / 2)
+                .attr('y', by1 + 22)
+                .attr('text-anchor', 'middle')
+                .text(text);
+        }
+
+        // Pair boxes first (drawn behind flat boxes for layering).
+        pairRoots.forEach(n => {
+            drawBox('pair-box', n, 6, 6, 3, 1);
+            placeDLabel(n, 'pair-label', 'D=1');
+        });
+
+        // Flat-subtree boxes (D >= 2)
+        flatRoots.forEach(n => {
+            drawBox('flat-box', n, 8, 8, 4, n.data.flatD);
+            placeDLabel(n, 'flat-label', `D=${n.data.flatD}`);
+        });
+    }
+
+    /* When condensing, draw a single info box for each flat root
+     * in place of its subtree.  Drawn after the flat boxes so it
+     * overlays on top, but before nodes/edges so the box surrounds
+     * the placeholder node visually. */
+    if (condense) {
+        const condensedNodes = root.descendants().filter(n => n.data._condensed);
+        const totalN = meta.totalN;
+        /* Match the layout: each condensed node has CONDENSED_SLOTS
+         * leaf-slots of width reserved, so make the box just shy of
+         * that to leave a small visual gap. */
+        const BOX_W = Math.max(70, slotSize * CONDENSED_SLOTS - 6);
+        const BOX_H = 38;
+        const condG = gWorld.selectAll('g.condensed-flat')
+            .data(condensedNodes)
+            .enter().append('g')
+                .attr('class', 'condensed-flat')
+                .attr('data-node-id', d => d.data.id)
+                .attr('transform', d => `translate(${d.x},${d.y + 28})`)
+                .style('cursor', 'pointer')
+                .on('mousemove', (e, d) => showTooltip(nodeTooltipHtml(d.data, totalN), e))
+                .on('mouseleave', hideTooltip)
+                .on('click', (e, d) => {
+                    e.stopPropagation();
+                    toggleFlatten(d.data.id);
+                });
+        condG.append('rect')
+            .attr('x', -BOX_W / 2).attr('y', -BOX_H / 2)
+            .attr('width', BOX_W).attr('height', BOX_H)
+            .attr('rx', 5)
+            .attr('fill', '#22c55e')
+            .attr('fill-opacity', d => 0.05 + (Math.min(8, d.data.flatD) - 1) * (0.25 - 0.05) / 7.0)
+            .attr('stroke', '#d97706')
+            .attr('stroke-dasharray', '3 2')
+            .attr('stroke-width', 1.5);
+        condG.append('text')
+            .attr('y', -4)
+            .attr('text-anchor', 'middle')
+            .style('font', '11px monospace')
+            .style('font-weight', 600)
+            .style('fill', '#b45309')
+            .text(d => `D=${d.data.flatD}, ${d.data.numLeaves} leaves`);
+        condG.append('text')
+            .attr('y', 11)
+            .attr('text-anchor', 'middle')
+            .style('font', '10px monospace')
+            .style('fill', '#444')
+            .text(d => {
+                const pct = (100 * d.data.subtreeCount / totalN).toFixed(1);
+                return `${d.data.subtreeCount} sym  ${pct}%`;
+            });
+    }
+
+    // Internal nodes: circle + skew bar (skip condensed ones — they're
+    // drawn as a single info box instead).
+    const internalNodes = root.descendants().filter(n =>
+        n.data.symbol < 0 && !n.data._condensed);
+    const intG = gWorld.selectAll('g.node-internal')
+        .data(internalNodes)
+        .enter().append('g')
+            .attr('class', 'node-internal')
+            .attr('data-node-id', d => d.data.id)
+            .attr('transform', d => `translate(${d.x},${d.y})`)
+            .on('mousemove', (e, d) => showTooltip(nodeTooltipHtml(d.data, totalN), e))
+            .on('mouseleave', hideTooltip);
+
+    /* "Flattenable" = the subtree at this node is D≥2 flat, so it's
+     * clickable (toggles flatten/unflatten).  Includes both nodes
+     * currently treated as flat-roots AND nodes currently
+     * unflattened-via-override (so the user can re-flatten).
+     * Visually: thick stroke for flattenable nodes (filled green
+     * if currently treated as flat). */
+    intG.append('circle')
+        .attr('r', d => d.data.flatCandidate ? 6 : 4)
+        .style('stroke-width', d => d.data.flatCandidate ? '2.5px' : '1px')
+        .style('fill', d => d.data.flatD ? '#bbf7d0' : '#fff')
+        .style('cursor', d => d.data.flatCandidate ? 'pointer' : 'default');
+    intG.filter(d => d.data.flatCandidate)
+        .on('click', (e, d) => {
+            e.stopPropagation();
+            toggleFlatten(d.data.id);
+        });
+
+    // Skew indicator.  Outer frame is white with a skew-colored
+    // border.  Inside we fill the HEAVY side of the split (the
+    // child that took the bigger share) with the skew color; the
+    // light side stays white.  The black tick sits at the split
+    // boundary (= p_left · BAR_W from the left edge).  So a heavy
+    // right child shows up as a wide colored bar on the right of
+    // the tick, light side empty on the left — and vice versa.
+    const BAR_W = Math.max(28, leafSize * 1.0);
+    const BAR_H = 7;
+    const BAR_Y = -16;
+    intG.append('rect')
+        .attr('x', -BAR_W / 2).attr('y', BAR_Y)
+        .attr('width', BAR_W).attr('height', BAR_H)
+        .attr('fill', '#fff')
+        .attr('stroke', d => skewColor(d.data.pLeft))
+        .attr('stroke-width', 1.5);
+    // Heavy-side fill.  When p_left ≥ 0.5 we paint the left half of
+    // the bar (edge → tick); when p_left < 0.5 we paint the right
+    // half (tick → edge).  Fills the FULL inner height (no top/bottom
+    // gap) so that at any zoom level there's no white sliver that
+    // gets aliased.  Outer rect stroke supplies the frame.
+    intG.append('rect')
+        .attr('x', d => d.data.pLeft >= 0.5
+                            ? -BAR_W / 2
+                            : -BAR_W / 2 + BAR_W * d.data.pLeft)
+        .attr('y', BAR_Y)
+        .attr('width', d => BAR_W *
+            (d.data.pLeft >= 0.5 ? d.data.pLeft : 1 - d.data.pLeft))
+        .attr('height', BAR_H)
+        .attr('fill', d => skewColor(d.data.pLeft))
+        .attr('pointer-events', 'none');
+    // 50% midpoint tick (faint gray) — reference for "balanced".
+    intG.append('line')
+        .attr('x1', 0).attr('x2', 0)
+        .attr('y1', BAR_Y).attr('y2', BAR_Y + BAR_H)
+        .attr('stroke', '#aaa').attr('stroke-width', 0.6)
+        .attr('pointer-events', 'none');
+    // Black cutoff line at the actual split (end of the fill).
+    intG.append('line')
+        .attr('x1', d => -BAR_W / 2 + BAR_W * d.data.pLeft)
+        .attr('x2', d => -BAR_W / 2 + BAR_W * d.data.pLeft)
+        .attr('y1', BAR_Y - 1).attr('y2', BAR_Y + BAR_H + 1)
+        .attr('stroke', '#000').attr('stroke-width', 1.4)
+        .attr('pointer-events', 'none');
+
+    // Leaves: small box with byte hex + printable char + freq
+    const leafNodes = root.descendants().filter(n => n.data.symbol >= 0);
+    const lg = gWorld.selectAll('g.node-leaf')
+        .data(leafNodes)
+        .enter().append('g')
+            .attr('class', 'node-leaf')
+            .attr('transform', d => `translate(${d.x},${d.y})`)
+            .on('mousemove', (e, d) => showTooltip(nodeTooltipHtml(d.data, totalN), e))
+            .on('mouseleave', hideTooltip);
+    const W2 = leafSize - 2, H2 = 18;
+    lg.append('rect')
+        .attr('x', -W2 / 2).attr('y', -H2 / 2)
+        .attr('width', W2).attr('height', H2)
+        .attr('rx', 2)
+        .attr('fill', d => {
+            // Color leaf by frequency rank (just for visual variety).
+            const p = d.data.freq / totalN;
+            const lit = Math.min(95, 60 + 35 * (1 - Math.min(1, p * 10)));
+            return `hsl(220, 30%, ${lit}%)`;
+        });
+    lg.append('text')
+        .attr('class', 'leaf-char')
+        .attr('y', -2)
+        .text(d => fmtChar(d.data.symbol));
+    lg.append('text')
+        .attr('class', 'leaf-freq')
+        .attr('y', 7)
+        .text(d => d.data.symbol.toString(16).padStart(2,'0'));
+
+    // Initial fit-to-pane
+    const bbox = gWorld.node().getBBox();
+    const scale = Math.min(
+        (W - 20) / Math.max(1, bbox.width),
+        (H - 20) / Math.max(1, bbox.height),
+        1.4
+    );
+    const tx = (W - bbox.width * scale) / 2 - bbox.x * scale;
+    const ty = (H - bbox.height * scale) / 2 - bbox.y * scale;
+    _fitTransform = d3.zoomIdentity.translate(tx, ty).scale(scale);
+    svg.call(zoom.transform, _fitTransform);
+}
+let _fitTransform = null;
+function resetView() {
+    if (_fitTransform) svg.call(zoom.transform, _fitTransform);
+}
+
+/* Click handler for a flattenable node (subtree is D≥2 flat).
+ *
+ * Two cases:
+ *   1. Node was already unflattened (override 'unflatten' set, not
+ *      currently treated as flat) → re-flatten just this one.
+ *   2. Node is currently treated as flat → unflatten it AND every
+ *      ancestor on the path to root (so the path stays "open"),
+ *      AND re-flatten every off-path sibling subtree (clear their
+ *      overrides so the auto-detector reflattens them).  This
+ *      gives "focus on a path through the tree" semantics: only
+ *      one branch from root is fully expanded, everything else
+ *      stays as compact as possible.
+ */
+function toggleFlatten(nodeId) {
+    const node = _nodeById.get(nodeId);
+    if (!node || !node.flatCandidate) return;
+
+    const isCurrentlyFlat = node.flatD > 0;
+    const wasUnflattened  = _flatOverride.get(nodeId) === 'unflatten';
+
+    /* Recursive helper used by both branches. */
+    function clearOverridesInSubtree(n) {
+        if (!n) return;
+        _flatOverride.delete(n.id);
+        if (n.symbol < 0) {
+            clearOverridesInSubtree(n.left);
+            clearOverridesInSubtree(n.right);
+        }
+    }
+
+    if (wasUnflattened && !isCurrentlyFlat) {
+        /* Re-flatten just this one node.  Also clear any stale
+         * overrides INSIDE its subtree — those are unobservable
+         * once this node is flat (subtree is absorbed), but they'd
+         * resurface unexpectedly the next time an ancestor is
+         * unflattened.  See the "click A, L, A, L → no-op" bug. */
+        _flatOverride.delete(nodeId);
+        clearOverridesInSubtree(node.left);
+        clearOverridesInSubtree(node.right);
+        refreshFromFreqs();
+        return;
+    }
+
+    /* Otherwise: unflatten this + ancestor chain.  We don't touch
+     * sibling subtrees — siblings without overrides will auto-flatten
+     * if they're structurally flat, and siblings the user explicitly
+     * unflattened earlier should stay unflattened (otherwise clicking
+     * B after A flattens A again, which is wrong). */
+    let cur = node;
+    while (cur) {
+        _flatOverride.set(cur.id, 'unflatten');
+        cur = cur.parent;
+    }
+    refreshFromFreqs();
+}
+
+// ============================================================
+//  Stats panel
+// ============================================================
+
+function renderStats(rootNode, meta) {
+    const totalN = meta.totalN;
+    const internals = collectInternals(rootNode);
+    // Compute aggregate stats
+    let totalEntropyBits = 0;
+    let totalHufBits = 0;
+    let totalBitsSaved = 0;
+    let nFlat = 0;
+    let flatRawBits = 0;
+    /* With flattening on (meta.showFlat), each flat region emits
+     * `n_subtree · D` raw bits and contributes ZERO savings -- the
+     * per-bitmap entropies of nodes inside it are absorbed.
+     * Without flattening, every internal node contributes its
+     * per-bitmap entropy + savings as before (chain rule sum = H).
+     *
+     * As a result, "tree-level Σ H" with flat ON =
+     *     Σ_non-flat n·H(p)  +  Σ_flat n·D
+     * which is the entropy lower bound on what ph would emit
+     * today (perfect FSE on non-flat bitmaps + raw N·D for flat
+     * regions).  Without flat ON it reduces to byte entropy H. */
+    function walkAgg(n) {
+        if (!n || n.symbol >= 0) return;
+        if (meta.showFlat && n.flatD) {
+            totalEntropyBits += n.subtreeCount * n.flatD;
+            nFlat++;
+            flatRawBits += n.subtreeCount * n.flatD;
+            /* Don't recurse - descendants are absorbed into the
+             * flat region for accounting purposes. */
+            return;
+        }
+        totalEntropyBits += n.subtreeCount * n.bitEntropy;
+        totalBitsSaved += n.bitsSavedTotal;
+        walkAgg(n.left); walkAgg(n.right);
+    }
+    walkAgg(rootNode);
+
+    // Huffman avg code length: sum over leaves of (freq/N) * depth
+    // Also: average / weighted operations per leaf (with flat opt
+    // collapsing D levels to 1 op).
+    let hufWeighted = 0;
+    let byteEntropy = 0;
+    let n_leaves = 0;
+    let opsSimpleSum = 0;          // Σ depth over leaves (per-leaf avg)
+    let opsFlatSimpleSum = 0;      // Σ opsToLeaf (effective with flat)
+    let opsWeightedSum = 0;        // Σ p · depth (= huf weighted)
+    let opsFlatWeightedSum = 0;    // Σ p · opsToLeaf
+    function walkLeaves(n) {
+        if (!n) return;
+        if (n.symbol >= 0) {
+            n_leaves++;
+            const p = n.freq / totalN;
+            opsSimpleSum     += n.depth;
+            opsFlatSimpleSum += (n.opsToLeaf != null) ? n.opsToLeaf : n.depth;
+            if (p > 0) {
+                hufWeighted += p * n.depth;
+                byteEntropy -= p * Math.log2(p);
+                opsWeightedSum     += p * n.depth;
+                opsFlatWeightedSum += p * ((n.opsToLeaf != null) ? n.opsToLeaf : n.depth);
+            }
+            return;
+        }
+        walkLeaves(n.left); walkLeaves(n.right);
+    }
+    walkLeaves(rootNode);
+
+    const summary = document.getElementById('summary');
+    summary.innerHTML = '';
+    const grid = document.createElement('div');
+    grid.className = 'summary-grid';
+    function addRow(k, v, tip) {
+        const a = document.createElement('b'); a.textContent = k;
+        const b = document.createElement('span'); b.textContent = v;
+        if (tip) {
+            a.title = tip;
+            b.title = tip;
+            a.style.borderBottom = '1px dotted #aaa';
+            a.style.cursor = 'help';
+        }
+        grid.appendChild(a); grid.appendChild(b);
+    }
+    /* longest actual code length used in the tree (post-limit). */
+    let longestCode = 0;
+    function findLongest(n) {
+        if (!n) return;
+        if (n.symbol >= 0) {
+            if (n.depth > longestCode) longestCode = n.depth;
+            return;
+        }
+        findLongest(n.left); findLongest(n.right);
+    }
+    findLongest(rootNode);
+
+    addRow('dataset', meta.name + (meta.isMain ? ' (MAIN)' : ''),
+        "Source distribution name.  '(scaled X→Y)' means input was short " +
+        "and we proportionally scaled to a standard 8K block for stable stats.");
+    addRow('N (source bytes)', totalN.toString(),
+        "Total symbol count.  8192 for built-in datasets and short inputs " +
+        "scaled up to a standard block.");
+    addRow('distinct symbols', n_leaves.toString(),
+        "Number of unique byte values with non-zero frequency.  " +
+        "Becomes the leaves of the Huffman tree.");
+    addRow('code length limit', meta.maxLen + ' bits  (slider)',
+        "Maximum Huffman code length allowed by the length-limiter.  " +
+        "The slider min is ⌈log₂(distinct symbols)⌉ (needed to address every leaf).");
+    addRow('longest code', longestCode + ' bits  (in tree)',
+        "Actual longest code length present in this tree.  ≤ the slider limit; " +
+        "often smaller if the distribution doesn't need the full range.");
+    addRow('byte entropy H', byteEntropy.toFixed(3) + ' bits/byte',
+        "Shannon entropy of the byte distribution: H = Σ p · −log₂ p.  " +
+        "Ideal lower bound on compressed size.");
+    addRow('Huffman avg len', hufWeighted.toFixed(3) + ' bits/byte',
+        "Weighted average Huffman code length: Σ p · code_len.  " +
+        "What plain Huffman achieves (always ≥ H, gap = redundancy).");
+    addRow('tree-level Σ H',
+        (totalEntropyBits / totalN).toFixed(3) + ' bits/byte' +
+        (meta.showFlat ? ' (entropy + raw flat)' : ' (≈ H, by chain rule)'),
+        "When flat-subtrees OFF: Σ over all internals of n·H(p) / N — " +
+        "equals byte entropy H exactly (chain rule).  When ON: flat " +
+        "regions are accounted as RAW (n·D bits), not entropy.  Result " +
+        "= entropy lower bound on what ph would emit today (perfect " +
+        "FSE on non-flat bitmaps + raw N·D for flat regions).  Click " +
+        "a flat-root (thick circle) to unflatten it and see the gap " +
+        "shrink.");
+    addRow('total bits saved', totalBitsSaved.toFixed(0) +
+            ' bits  (' + (totalBitsSaved / totalN).toFixed(4) + ' / source byte)',
+        "Σ over non-flat internal nodes of n_node · (1 − H(p_left)).  " +
+        "Total bits a perfect FSE per-bitmap coder would save vs raw " +
+        "1-bit-per-symbol-per-level.  Flat regions contribute zero " +
+        "savings here (ph emits them raw).");
+    addRow('# internal nodes', internals.length.toString(),
+        "Number of non-leaf nodes in the tree.  Each internal node is a " +
+        "left/right partition step at decode time.");
+    /* Operations / leaf — both simple (per-leaf avg, each leaf
+     * counted once) and frequency-weighted.  Without and with the
+     * flat-subtree fast path. */
+    const opsSimple   = n_leaves ? (opsSimpleSum     / n_leaves) : 0;
+    const opsSimpleF  = n_leaves ? (opsFlatSimpleSum / n_leaves) : 0;
+    const opsW        = opsWeightedSum;
+    const opsWF       = opsFlatWeightedSum;
+    addRow('ops/leaf (avg)',
+            opsSimple.toFixed(2) +
+            (meta.showFlat ? `  →  ${opsSimpleF.toFixed(2)} w/ flat` : ''),
+        "Average decode operations per distinct symbol (each leaf counted " +
+        "once).  '→ X w/ flat' shows the improvement from ph's flat-subtree " +
+        "fast path: a D-deep flat region costs 1 op instead of D.");
+    addRow('ops/byte (weighted)',
+            opsW.toFixed(3) +
+            (meta.showFlat ? `  →  ${opsWF.toFixed(3)} w/ flat` : ''),
+        "Frequency-weighted ops per source byte: Σ p_leaf · ops_to_decode.  " +
+        "The actual avg cost over a typical source.  '→ X w/ flat' shows " +
+        "savings from the flat-subtree fast path.");
+    if (meta.showFlat) {
+        const flatPct = totalN > 0 ? (100 * flatRawBits / (8 * totalN)).toFixed(1) : '-';
+        addRow('# maximal flat subtrees', nFlat.toString(),
+            "Number of maximal D≥2 flat subtrees in the tree.  ph emits " +
+            "each as one packed N·D-bit region instead of D bitmap levels.");
+        addRow('flat region bits (raw)', flatRawBits.toFixed(0) +
+                '  (' + (flatRawBits / totalN).toFixed(3) + ' / source byte)',
+            "Bits ph emits today across all flat regions: Σ n_subtree · D.  " +
+            "Raw (no entropy coding) because the leaves under a flat subtree " +
+            "are usually near-uniform.  Compare to flat-region entropy floor " +
+            "in extras/bench_entropy_breakdown to see the gap.");
+    }
+    addRow('mode', meta.phOpt ? 'ph-flat-aware' : 'textbook canonical',
+        "Code-assignment strategy.  'ph-flat-aware' clusters same-length " +
+        "symbols into power-of-2 chunks, creating larger flat subtrees " +
+        "(same compression ratio as canonical).  Toggle the 'ph-optimize' " +
+        "checkbox to compare.");
+    summary.appendChild(grid);
+
+    // Top internal nodes table
+    const tbody = document.querySelector('#top-nodes-table tbody');
+    tbody.innerHTML = '';
+    const sorted = internals.slice().sort((a, b) =>
+        b.bitsSavedTotal - a.bitsSavedTotal);
+    const topN = Math.min(15, sorted.length);
+    for (let i = 0; i < topN; i++) {
+        const n = sorted[i];
+        const tr = document.createElement('tr');
+        if (n.inFlat || n.flatD) tr.classList.add('in-flat');
+        tr.dataset.nodeId = n.id;
+        /* /byte: bits saved by this node, normalized over the WHOLE
+         * source.  Lets you compare nodes' aggregate impact even
+         * though they have different subtree sizes — and sum across
+         * the table approximates the total bits-saved. */
+        const sptok = totalN > 0
+            ? (n.bitsSavedTotal / totalN).toFixed(4) : '-';
+        const pctSrc = totalN > 0
+            ? (100 * n.subtreeCount / totalN).toFixed(1) + '%' : '-';
+        tr.innerHTML = `<td>${i + 1}</td><td>${n.depth}</td>` +
+            `<td>${pctSrc}</td>` +
+            `<td>${n.pLeft.toFixed(3)}</td>` +
+            `<td>${n.bitEntropy.toFixed(3)}</td>` +
+            `<td>${n.bitsSavedTotal.toFixed(0)}</td>` +
+            `<td>${sptok}</td>` +
+            `<td>${n.flatD ? `flat D=${n.flatD}` : (n.inFlat ? '∈flat' : '')}</td>`;
+        tbody.appendChild(tr);
+    }
+}
+
+// ============================================================
+//  Driver
+// ============================================================
+
+let _freqs = null;
+let _name = '(none)';
+let _isMain = false;
+let _totalN = 0;
+
+function refreshFromFreqs() {
+    if (!_freqs) return;
+    const phOpt = document.getElementById('ph-opt').checked;
+    const showFlat = document.getElementById('show-flat').checked;
+    const condenseFlat = document.getElementById('condense-flat').checked;
+    const maxLen = parseInt(document.getElementById('max-len').value, 10);
+    document.getElementById('max-len-val').textContent = maxLen;
+    const status = document.getElementById('status');
+    const t0 = performance.now();
+
+    const lens = buildHuffmanLengths(_freqs, maxLen);
+    const codes = phOpt ?
+        assignPhFlatCodes(lens, _freqs) :
+        assignCanonicalCodes(lens);
+    const tree = buildTree(codes, _freqs);
+    annotateTree(tree);
+    detectFlatSubtrees(tree);
+    annotateLeafOps(tree, showFlat);
+
+    // Stash codes per leaf for the tooltip
+    const codeBySym = new Map();
+    codes.forEach(c => codeBySym.set(c.symbol, c));
+    function walkLeaves(n) {
+        if (!n) return;
+        if (n.symbol >= 0) {
+            const c = codeBySym.get(n.symbol);
+            if (c) { n.code = c.code; n.codeLen = c.len; }
+            return;
+        }
+        walkLeaves(n.left); walkLeaves(n.right);
+    }
+    walkLeaves(tree);
+
+    const meta = {
+        name: _name, isMain: _isMain, totalN: _totalN,
+        phOpt, showFlat, condenseFlat, maxLen,
+    };
+    renderTree(tree, meta);
+    renderStats(tree, meta);
+
+    const dt = (performance.now() - t0).toFixed(0);
+    status.textContent = `built in ${dt} ms · ${codes.length} symbols`;
+}
+
+const STD_BLOCK = 8192;
+
+/* For short inputs (file or text < STD_BLOCK bytes), treat the
+ * frequencies as defining a distribution and scale up to a standard
+ * block.  Otherwise small subtree counts make bits-saved numbers
+ * round to 0.  Pre-built dataset distributions already come from
+ * 8192-byte samples so this is mostly a no-op for them. */
+function scaleFreqsToBlock(freqs) {
+    const total = freqs.reduce((s, x) => s + x, 0);
+    if (total === 0 || total >= STD_BLOCK) {
+        return { scaled: freqs, original: total, scaled_total: total, was_scaled: false };
+    }
+    const scale = STD_BLOCK / total;
+    const scaled = freqs.map(f => Math.round(f * scale));
+    /* Rounding drift correction so the total is exactly STD_BLOCK. */
+    let after = scaled.reduce((s, x) => s + x, 0);
+    if (after !== STD_BLOCK) {
+        const order = scaled.map((v, i) => [v, i])
+                            .filter(p => p[0] > 0)
+                            .sort((a, b) => b[0] - a[0]);
+        let drift = STD_BLOCK - after;
+        for (let i = 0; drift !== 0 && i < order.length; i++) {
+            const idx = order[i][1];
+            if (drift > 0) { scaled[idx]++; drift--; }
+            else if (scaled[idx] > 1) { scaled[idx]--; drift++; }
+        }
+    }
+    return { scaled, original: total, scaled_total: STD_BLOCK, was_scaled: true };
+}
+
+function setFreqs(freqs, name, isMain) {
+    _flatOverride.clear();
+    const sc = scaleFreqsToBlock(freqs);
+    _freqs = sc.scaled;
+    _totalN = sc.scaled_total;
+    _name = sc.was_scaled
+        ? `${name} (scaled ${sc.original}→${sc.scaled_total} for stats)`
+        : name;
+    _isMain = !!isMain;
+    /* The minimum valid max-code-length is ceil(log2(#symbols)) so
+     * the Huffman codes can address every distinct symbol.  Update
+     * the slider's min and clamp its current value if needed. */
+    const nSym = _freqs.filter(f => f > 0).length;
+    const minLen = Math.max(1, Math.ceil(Math.log2(Math.max(2, nSym))));
+    const slider = document.getElementById('max-len');
+    slider.min = minLen;
+    document.getElementById('max-len-min').textContent = minLen;
+    if (+slider.value < minLen) slider.value = minLen;
+    document.getElementById('max-len-val').textContent = slider.value;
+    refreshFromFreqs();
+}
+
+function populateDatasetSelect() {
+    const sel = document.getElementById('dataset-select');
+    sel.innerHTML = '';
+    const dists = window.PIVCO_DISTRIBUTIONS || [];
+    /* MAIN sorted alphabetically by name, then non-MAIN sorted
+     * alphabetically.  Result: calgary_pic shows up first (★). */
+    const main    = dists.filter(d =>  d.is_main).slice().sort((a,b) => a.name.localeCompare(b.name));
+    const nonMain = dists.filter(d => !d.is_main).slice().sort((a,b) => a.name.localeCompare(b.name));
+    const ordered = main.concat(nonMain);
+    ordered.forEach(d => {
+        const o = document.createElement('option');
+        o.value = d.name;
+        o.textContent = (d.is_main ? '★ ' : '   ') + d.name;
+        sel.appendChild(o);
+    });
+    sel.addEventListener('change', () => {
+        const d = (window.PIVCO_DISTRIBUTIONS || []).find(x => x.name === sel.value);
+        if (d) setFreqs(d.freq, d.name, d.is_main);
+    });
+    if (ordered.length > 0) {
+        const d = ordered[0];
+        setFreqs(d.freq, d.name, d.is_main);
+    }
+}
+
+function setupFileInput() {
+    document.getElementById('file-input').addEventListener('change', (e) => {
+        const f = e.target.files[0];
+        if (!f) return;
+        const reader = new FileReader();
+        reader.onload = ev => {
+            const buf = new Uint8Array(ev.target.result);
+            const freq = new Array(256).fill(0);
+            for (let i = 0; i < buf.length; i++) freq[buf[i]]++;
+            setFreqs(freq, `file:${f.name}`, false);
+        };
+        reader.readAsArrayBuffer(f);
+    });
+}
+
+function setupToggles() {
+    document.getElementById('ph-opt').addEventListener('change', () => {
+        _flatOverride.clear();
+        refreshFromFreqs();
+    });
+    document.getElementById('show-flat').addEventListener('change', () => {
+        _flatOverride.clear();
+        refreshFromFreqs();
+    });
+    document.getElementById('condense-flat').addEventListener('change', () => {
+        _flatOverride.clear();
+        refreshFromFreqs();
+    });
+    document.getElementById('max-len').addEventListener('input', () => {
+        _flatOverride.clear();
+        refreshFromFreqs();
+    });
+    document.getElementById('reset-view').addEventListener('click', resetView);
+}
+
+function setupTextInput() {
+    const txt = document.getElementById('text-input');
+    const btn = document.getElementById('text-build');
+    const build = () => {
+        const s = txt.value;
+        if (!s) return;
+        const bytes = new TextEncoder().encode(s);
+        const freq = new Array(256).fill(0);
+        for (let i = 0; i < bytes.length; i++) freq[bytes[i]]++;
+        setFreqs(freq, `text:${s.length < 30 ? s : s.slice(0, 27) + '…'}`, false);
+    };
+    btn.addEventListener('click', build);
+    txt.addEventListener('keydown', e => { if (e.key === 'Enter') build(); });
+}
+
+/* Hover over a row in the top-N table → temporarily highlight the
+ * corresponding internal node in the SVG. */
+let _highlightedNodeId = null;
+function highlightNode(nodeId) {
+    if (_highlightedNodeId != null) {
+        const old = gWorld.select(`g.node-internal[data-node-id="${_highlightedNodeId}"]`);
+        if (!old.empty()) {
+            /* Use .style() because the base CSS has `fill: #fff` for
+             * .node-internal circle and CSS selectors beat attribute
+             * defaults; inline style overrides them. */
+            old.select('circle')
+                .attr('r', 4)
+                .style('fill', null)
+                .style('stroke', null);
+        }
+    }
+    _highlightedNodeId = nodeId;
+    if (nodeId == null) return;
+    const sel = gWorld.select(`g.node-internal[data-node-id="${nodeId}"]`);
+    if (sel.empty()) return;
+    sel.select('circle')
+        .attr('r', 8)
+        .style('fill', '#e53935')        /* red fill */
+        .style('stroke', '#a31515');     /* darker red border */
+    /* Bring into view: pan if outside the visible area.  Get the
+     * node's screen-space position. */
+    const node = sel.datum();
+    const t = d3.zoomTransform(svg.node());
+    const sx = t.applyX(node.x), sy = t.applyY(node.y);
+    const pane = document.getElementById('tree-pane');
+    const W = pane.clientWidth, H = pane.clientHeight;
+    if (sx < 40 || sx > W - 40 || sy < 40 || sy > H - 40) {
+        const cx = W / 2, cy = H / 2;
+        const newT = d3.zoomIdentity.translate(cx - t.k * node.x,
+                                                cy - t.k * node.y).scale(t.k);
+        svg.transition().duration(220).call(zoom.transform, newT);
+    }
+}
+
+function setupTopTableHover() {
+    const tbody = document.querySelector('#top-nodes-table tbody');
+    tbody.addEventListener('mouseover', e => {
+        const tr = e.target.closest('tr');
+        if (!tr) return;
+        const id = tr.dataset.nodeId;
+        if (id == null) return;
+        highlightNode(+id);
+        const node = _nodeById.get(+id);
+        if (node) showTooltip(nodeTooltipHtml(node, _totalN), e);
+    });
+    tbody.addEventListener('mousemove', e => {
+        const tr = e.target.closest('tr');
+        if (!tr) return;
+        const id = tr.dataset.nodeId;
+        if (id == null) return;
+        const node = _nodeById.get(+id);
+        if (node) showTooltip(nodeTooltipHtml(node, _totalN), e);
+    });
+    tbody.addEventListener('mouseleave', () => { highlightNode(null); hideTooltip(); });
+}
+
+window.addEventListener('load', () => {
+    initSvg();
+    populateDatasetSelect();
+    setupFileInput();
+    setupTextInput();
+    setupToggles();
+    setupTopTableHover();
+});
+window.addEventListener('resize', () => {
+    if (currentTree) renderTree(currentTree, currentMeta);
+});
+</script>
+
+</body>
+</html>
