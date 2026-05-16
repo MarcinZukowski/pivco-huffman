@@ -221,6 +221,63 @@ Cross-platform takeaways:
   ~1200 MB/s.  Older OOO width can't take advantage of >4
   cursors / streams.
 
+### Apples-to-apples per-call costs — done 2026-05-15
+
+The initial cross-platform sweep was NOT apples-to-apples: FSE
+and huf0 used pre-built tables, while Oodle paid table-read per
+call (no `_usingDTable` in its public API).  Switched huf0 to
+`HUF_decompress*X*_DCtx_wksp` (full per-call), extended cells
+to 65 KB, and added a `su_ns` column showing FSE per-call setup
+(`FSE_readNCount` + `FSE_buildDTable`) so the reader can derive
+FSE-full as `bytes*1000 / (su_ns + bytes*1000/steady_mbps)`.
+
+Decode MB/s at 1440 B (ph's typical per-node bitmap regime):
+
+| host  | FSE steady | su_ns | FSE full | huf4X2 full | Oodle full |
+|-------|------------|-------|----------|-------------|------------|
+| M4    | **2549**   |  5772 |  227     |  439        | 1434       |
+| c6a   | **1180**   | 11296 |  115     |  227        |  743       |
+| c8a   | **1981**   |  5566 |  229     |  364        | 1270       |
+| c8g   | **1255**   |  9743 |  132     |  251        |  735       |
+| c8i   | **1567**   |  5124 |  238     |  274        |  846       |
+
+At 65 KB (Oodle in its asymptote):
+
+| host  | FSE steady | su_ns | FSE full | huf4X2 full | **Oodle full** |
+|-------|------------|-------|----------|-------------|----------------|
+| M4    | 2317       |  5673 | 1929     | 2068        | **3199**       |
+| c6a   | 1175       | 11229 |  978     | 1135        | **1444**       |
+| c8a   | 1998       |  5556 | 1708     | 2322        | **2760**       |
+| c8g   | 1271       |  9757 | 1068     | 1392        | **1798**       |
+| c8i   | 1588       |  5121 | 1412     | 1393        | **2044**       |
+
+Takeaways:
+
+- **ph's pre-built FSE tables are the headline architectural
+  feature.**  The 1-byte table-id wire-format choice (vs an
+  inline counts header) saves 5-11 µs per-call setup, which is
+  worth 2-5x throughput at 1440 B compared to *any* per-call
+  alternative — including Oodle huff6 with ASM kernels.
+- **FSE per-call setup is the slowest of the three** (5-11 µs vs
+  huf0's ~3 µs vs Oodle's ~0.5 µs).  `FSE_buildDTable` from
+  compact counts is more work than huf0's table-build, mostly
+  because the FSE state-transition table is bigger and the build
+  is more intricate.
+- **Crossover at ~16 KB**: above this, Oodle's amortized ASM
+  kernel beats FSE's static-table advantage.  At 65 KB Oodle
+  wins on every host by 17-38%.
+- **ph's wire-format choice (static FSE table set) wasn't a
+  convenience hack — it's a real architectural win** for the
+  per-node-bitmap workload.
+
+This validates the project's framing more than I'd realized:
+the bitmap-per-node representation isn't just a wavelet-tree-
+shaped novelty; the static-table FSE coding scheme is what
+makes the small-bitmap regime tractable.
+
+Results: `results/fse_xy_full-{m4,c6a,c8a,c8g,c8i}-20260515-bb1e4da.txt`
+plus `*-allhosts-*.txt` consolidated view.
+
 ### Open follow-ups
 
 - **Encode comparison** — `oodle_huff_encode` includes histogram
