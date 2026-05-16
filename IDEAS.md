@@ -580,6 +580,54 @@ small decode-speed win.  Per-block un-flatten on top of it is the
 right route to the chinese_text / html_wiki / bell_s10 ratio
 recovery that motivated this work in the first place.
 
+## If flat-subtree splitting never pays off, drop full by-frequency tier ordering — open (2026-05-16)
+
+**Status: contingent simplification.  Only act if flat-split is
+shelved permanently.**
+
+The encoder's "Flat-aware Huffman tree restructurer" in
+`src/huffman_table.c:475` sorts within-tier symbols by real
+frequency descending (ties by symbol asc) so the highest-freq
+symbols of each code-length L land in the largest-D flat chunk for
+that tier.  Today the decoder rebuilds its table from synthetic
+frequencies (`freq_syn[s] = 2^(max_len - len[s])`, uniform within a
+tier), so the encoder's real-freq ordering only survives the
+round-trip when it agrees with the synthetic ordering — which means
+the deep ordering is degenerate (tied within a tier, broken by
+symbol value).
+
+The only feature that would actually need full real-frequency
+within-tier ordering is **entropy-skew flat-subtree splitting**
+(approach 1 in the section above): split a flat candidate if its
+top-half vs bottom-half real-frequency sums are skewed past some
+threshold.  Without per-tier real-freq ordering shared with the
+decoder, the encoder and decoder don't agree on which leaves are
+"top half" vs "bottom half," so splitting can't reproduce.
+
+If flat-split never finds a useful real-world case (the 2026-05-13
+prototype with synth-freq-driven splits made ratio WORSE on every
+dataset; per-block real-freq splits are still untried but the
+chinese_text/html_wiki/bell_s10 motivation is the only known
+high-value target), we can simplify the encoder by:
+
+  - Dropping the freq-sort step entirely; sort within-tier by
+    symbol asc (matches what the decoder reconstructs anyway).
+  - Removing the `sf_t flat_items[]` array and the insertion-sort
+    inner loop in `build_table`.
+  - The chunk-decomposition + canonical-code-assignment logic
+    stays — that's what makes flat chunks possible at all.
+
+**Risk:** there's a small chance the freq-ordering happens to
+benefit some other decode path (e.g., putting high-freq symbols at
+predictable positions in the c2s table).  Bench before/after
+on the standard sweep — should be a no-op on ratio (synth-freq
+already controls round-trip), and likely a no-op on decode speed
+(c2s is a 256-entry LUT, position within doesn't matter).
+
+**Trigger condition:** decision pending the per-block real-freq
+unflatten experiment.  If THAT also fails to beat baseline, this
+becomes the cleanup.
+
 ## SSE flat_decode_direct_x86 is mostly scalar for D in {2,3,5,6} — open (2026-05-13)
 
 **Status: known perf gap, not yet measured but mechanically obvious.**
