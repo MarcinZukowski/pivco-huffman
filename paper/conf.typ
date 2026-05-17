@@ -1,0 +1,34 @@
+// Bind format flags at module scope.  Don't wrap these in [..] content
+// blocks: `#let` inside a content block is scoped to that block, and
+// the outer references later in the file would always see the initial
+// `false`.  That was the bug that broke style.css injection.
+#let _html = sys.inputs.at("target", default: none) == "html"
+#let _pdf  = not _html
+#let _fmt  = if _html { "html" } else { "pdf" }
+
+// Inline the stylesheet into the HTML.  Typst places <style> in <body>
+// rather than <head>, but browsers happily apply it globally — no
+// post-processing needed.
+#if _html {
+  html.elem("style", read("style.css"))
+}
+
+#if _pdf {
+  set page(paper: "a4", margin: 2cm, columns: 1)
+  set page(numbering: "1")
+}
+
+#set text(font: "New Computer Modern", size: 11pt)
+#set par(justify: true)
+
+#show heading.where(level: 1): smallcaps
+#show heading.where(level: 1): set text(
+  size: 16pt
+)
+#show heading.where(level: 2): set text(
+  size: 12pt
+)
+
+#show title: set text(size: 17pt)
+#show title: set align(center)
+
