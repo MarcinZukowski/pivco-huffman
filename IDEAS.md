@@ -115,6 +115,94 @@ the only option below ~0.60.
   ratio cost that matters for small bitmaps.  Need to measure.
 
 
+## Golomb/Rice for skewed bitmaps — research direction, 2026-05-16
+
+**Status: open / research direction.  Microbench not yet written.**
+
+Per-node skewed bitmaps are exactly the regime Golomb/Rice was built
+for.  Run-length encode the minority-bit positions: run lengths
+between minority bits are geometrically distributed with parameter
+`1−p_majority`, and Golomb-M with `M ≈ ⌈−1/log₂(1−p)⌉` is near-optimal
+on that distribution.  For PIVCO's current FSE-on gate (`p ≥ 0.625`)
+optimal M ∈ {2..8}.
+
+### Why this is interesting NOW
+
+The 2026-05-15 FSE-wide-cursor microbench (see entry above) showed
+that FSE's stock x=2 state-machine costs 2.5–3× too much per-node vs
+huf0_x2's two-symbol-per-lookup decode, and that x=8..16 cursors are
+needed to close the gap.  Even with x=8 we pay table-init cost and
+the cursor-flush byte-overhead (12 bytes/node at typical ph bitmap
+sizes).
+
+Golomb decode has zero of those problems:
+  - **No state machine.**  Decode is `lzcnt` (unary run length) + a
+    fixed `log₂(M)`-bit remainder read.  Both constant-latency on
+    every modern ISA (NEON `clz`, x86 `lzcnt`, AVX-512 `vplzcntq`).
+  - **No table init / no per-node state.**  Just an `M` value
+    (3–4 bits/node header or derived from `K_right/N`).
+  - **No serial state dependency.**  Adjacent runs decode independent
+    of each other — straightforward to wide-cursor SIMD.
+
+### Compression cost vs FSE
+
+Golomb is integer-quantized to a fixed `M` (Rice = power-of-2 M),
+while FSE/tANS lands within ~0.01 bits/symbol of binary entropy.
+Expected gap:
+  - p ≥ 0.85 (high skew): both within ~0.5% of entropy; Golomb-Rice
+    typically ≤ 1% off FSE.
+  - p ∈ [0.625, 0.85] (PIVCO's gated range): Golomb-Rice loses
+    1–4% of bits/node vs FSE.  Small absolute cost because FSE only
+    fires on a fraction of internal nodes per block.
+  - Below p = 0.5 (impossible in our setup since we flip to encode
+    the minority side): N/A.
+
+### Decode-speed expectation
+
+Hand-wave estimate: a SIMD Golomb decoder reading 8–16 runs per
+iteration via lzcnt + `bzhi`-style mask extract should land at
+~0.5–1× the cost of partition_8 on M4 (the partition primitive is
+the closest analogue: bit-stream-driven sequential write).  That's
+4–8× faster than FSE-x2 on the per-node decode primitive, and
+1.5–2× faster than FSE-x8.
+
+### Open questions for a microbench
+
+1. **Per-node M selection.** Per-node 3-bit header (transmit M ∈
+   {1..8} explicitly) vs implicit from `K_right/N` at build time?
+   The former adds 3 bits/firing-node (negligible); the latter
+   removes the choice but accepts tail-distribution suboptimality.
+2. **Pathological cases.**  Bitmap with zero minority bits → infinite
+   run length.  Cap at bitmap size + emit a length terminator, or
+   degrade to raw at very high p.
+3. **Wire format integration.**  Natural extension of the existing
+   FSE marker byte: `0` = raw, `1` = Golomb, `2` = FSE.  Two-tier
+   dispatch lets Golomb handle the speed-biased end of the skew
+   distribution while FSE stays for the wide-skew tail where
+   compression matters more than decode speed.
+4. **Encode complexity.**  Variable-length encode is harder to
+   vectorize than decode (no native compress-write-to-stream primitive
+   on most ISAs).  Encode is one-shot per file though, so probably
+   fine scalar.
+
+### Prior art
+
+Rice coding is used in JPEG-LS, FLAC, ZFP, and many residual-coding
+contexts.  The PIVCO twist would be applying it as a per-Huffman-node
+binary-bitmap codec alongside FSE.  Not aware of any prior work that
+does this for wavelet-tree-shaped data.
+
+### Trigger to start work
+
+After (or alongside) the FSE wide-cursor microbench: same fixture
+generator, just add a `golomb_decode_xy(M, ...)` variant under
+`extras/bench_fse_xy_micro.c`.  Compare per-call cost on the same
+skewed test vectors at the same bitmap sizes.  If Golomb-x4 lands at
+or below FSE-x8 cost on M4 / Granite Rapids / Zen, ship it as the
+default speed-biased entropy coder and keep FSE for the
+wide-compression-bias path.
+
+
 ## Oodle's newlz_arrays_huff — integrated with ARM ASM kernels, 2026-05-15
 
 **Status: integrated.**  ph optionally links against OodleUE via
