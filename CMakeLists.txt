@@ -703,6 +703,14 @@ if(BUILD_BENCH)
             target_link_libraries(pivco_fse_xy_micro pivco_huffman huf0 m)
             target_include_directories(pivco_fse_xy_micro PRIVATE src ext/fse/lib)
         endif()
+
+        # Rice (Golomb power-of-2 M) vs fast-FSE microbench.
+        # See extras/bench_golomb.c header for the design.
+        add_executable(pivco_bench_golomb
+            extras/bench_golomb.c
+        )
+        target_link_libraries(pivco_bench_golomb pivco_huffman m)
+        target_include_directories(pivco_bench_golomb PRIVATE src ext/fse/lib)
     endif()
 endif()
 
