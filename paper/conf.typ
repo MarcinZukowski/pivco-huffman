@@ -21,14 +21,28 @@
 #set text(font: "New Computer Modern", size: 11pt)
 #set par(justify: true)
 
-#show heading.where(level: 1): smallcaps
-#show heading.where(level: 1): set text(
-  size: 16pt
-)
-#show heading.where(level: 2): set text(
-  size: 12pt
-)
+#let htmlonly(body) = {
+  if _html {
+    html.elem("div", attrs: (class: "htmlonly"), body)
+  }
+}
 
-#show title: set text(size: 17pt)
-#show title: set align(center)
-
+#let setup(body) = {
+  show title: set text(size: 17pt)
+  show title: set align(center)
+  show heading.where(level: 1): smallcaps
+  show heading.where(level: 1): set text(
+    size: 16pt
+  )
+  show heading.where(level: 2): set text(
+    size: 12pt
+  )
+  show raw.where(block: true): it => block(
+    fill: rgb("#ece6d3"),
+    inset: 10pt,
+    radius: 4pt,
+    width: 100%,
+    it
+  )
+  body
+}

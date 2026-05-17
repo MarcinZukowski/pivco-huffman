@@ -21,7 +21,7 @@ body {
                  "Georgia", "Times New Roman", serif;
     font-size: 17px;
     line-height: 1.55;
-    max-width: 780px;
+    max-width: 900px;
     margin: 3em auto;
     padding: 0 1.6em 5em;
     color: #1d1d1f;
@@ -158,6 +158,17 @@ pre code {
     padding: 0;
     font-size: 0.9em;
 }
+
+/* ---------- Marcin's musings ---------- */
+
+.htmlonly {
+      background: #cfc;
+      padding: 0.6em 1em;
+      border-radius: 5px;
+      margin: 0.8em 0;
+      border-left: 5px solid black;     /* optional accent — looks nice */
+}
+
 
 /* ---------- Lists ---------- */
 

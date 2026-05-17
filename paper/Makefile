@@ -15,7 +15,13 @@
 
 TYPST  ?= typst
 SRC    := ph.typ
-INCS   := conf.typ
+INCS   := conf.typ \
+	intro.typ \
+	sideways.typ \
+	updown.typ \
+	enc.typ \
+	ans.typ \
+	related.typ
 STYLE  := style.css
 OUT    := out
 PDF    := $(OUT)/ph.pdf
@@ -34,7 +40,7 @@ $(PDF): $(SRC) $(INCS) | $(OUT)
 
 html: $(HTML)
 $(HTML): $(SRC) $(INCS) $(STYLE) | $(OUT)
-	$(TYPST) compile -f html --features html --input target=html $(SRC) $(HTML)
+	$(TYPST) compile --creation-timestamp $$(date +%s) -f html --features html --input target=html $(SRC) $(HTML)
 
 watch: | $(OUT)
 	$(TYPST) watch $(SRC) $(PDF)

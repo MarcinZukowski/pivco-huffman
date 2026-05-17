@@ -1,18 +1,21 @@
-#import "conf.typ": _html, _pdf, _fmt   // brings the format flags in scope
-#include "conf.typ"                      // runs the side effects (style
-                                         // injection, page setup, show rules)
+// import variables, functions
+#import "conf.typ": _html, _pdf, _fmt, htmlonly, setup
+// run the side effects (style injection, page setup, show rules)
+#include "conf.typ"
 
-#set document(
-  title: [PivCo Huffman]
-)
+#show: setup
+
+#set document( title: [PivCo-Huffman] )
 
 #title()
-
+#set align(center)
 #text(size: 12pt, weight: "bold")[
   Marcin Zukowski
     \
  ]
-// ]
+#text(size: 10pt)[
+  _v.0.1, built on #datetime.today().display()_
+]
 
 #set align(left)
 
@@ -23,21 +26,40 @@ Blablalbasd
 
 #set heading(numbering: "1.")
 
+#htmlonly[
+This document is mostly a verbatim copy of the arXiv paper.
+
+However, in boxes like this you'll see some additional thoughts that might not be fitting
+a scientific paper.
+
+Oh well, maybe one day reviewers will have a sense of humor...
+]
+
+#let PH="PivCo-Huffman"
+
 #include "intro.typ"
 #include "sideways.typ"
 #include "updown.typ"
 #include "enc.typ"
 #include "ans.typ"
+#include "related.typ"
 
-= Related work <related>
 
-== Huffman encoding
+= Conclusions
 
-== ANS/FSE
+== Contributions
+In this paper
 
-== Wavelet trees <wt>
+== Open questions
+While interesting and possibly promising, PivCo-Huffman still has some problems and exposes mutiple improvemet opportunitiues.
 
-= AI disclosure
+- getting a performant implementation in languages that do not expose SIMD is very hard
+- due to its nature, it doesn't work well for very small dataset
+- Huffman encoding is rarely applied by itself, so integrating it with an actual compression library (like @lz4) is an interesting option
+- further improvements of compute primitives are surely possible
+- porting  #PH to GPUs and possibly FPGAs is a natural next step
+
+== AI disclosure
 
 Anthropic Claude was used extensively
 during development of this project, in areas
@@ -46,6 +68,8 @@ It also contributed many small ideas and improvements,
 especially around SIMD code.
 At the same time, Author declares that the vast majority of the ideas and concepts here are human-invented.
 
-= Summary
+== Acknowledgments
 
+Author would like to thank Fabian Giesen for his help with Oodle.
 
+#bibliography("refs.bib")

@@ -1,0 +1,788 @@
+% PIVCO-Huffman bibliography (BibTeX).
+%
+% Organised by topic.  Each entry has a `note = {...}` field that
+% explains *why* it's relevant to this project — what idea / data
+% point / negative result it contributed.  This is the working
+% reading-list for the paper draft; cite into the manuscript via
+% `@key` (Typst Hayagriva accepts BibTeX directly via
+% `#bibliography("refs.bib")`).
+%
+% Conventions:
+%   - citekeys: firstauthor + 4-digit year + suffix-if-needed.
+%   - URLs preferred over DOIs when both exist (DOIs often paywalled).
+%   - `% [USED FOR: ...]` lines mark project artefacts that drew on
+%     the source directly (a doc, an idea, a benchmark, a kernel).
+
+% ============================================================
+%  1. Foundational Huffman coding
+% ============================================================
+
+@article{huff,
+  author    = {Huffman, David A.},
+  title     = {A Method for the Construction of Minimum-Redundancy Codes},
+  journal   = {Proceedings of the IRE},
+  volume    = {40},
+  number    = {9},
+  pages     = {1098--1101},
+  year      = {1952},
+  note      = {The original paper.  Every Huffman codec — including
+              ph — descends from this.}
+}
+
+@article{schwartz1964canonical,
+  author    = {Schwartz, Eugene S. and Kallick, Bruce},
+  title     = {Generating a canonical prefix encoding},
+  journal   = {Communications of the ACM},
+  volume    = {7},
+  number    = {3},
+  pages     = {166--169},
+  year      = {1964},
+  note      = {Canonical-code assignment — same code lengths, codes
+              numbered in (length asc, symbol asc) order.  ph's
+              "byte asc" within-tier ordering reproduces exactly
+              this; "freq desc" is the ph-flat-aware deviation.}
+}
+
+@article{moffat,
+  author    = {Moffat, Alistair and Turpin, Andrew},
+  title     = {On the Implementation of Minimum Redundancy Prefix
+              Codes},
+  journal   = {IEEE Transactions on Communications},
+  volume    = {45},
+  number    = {10},
+  pages     = {1200--1207},
+  year      = {1997},
+  note      = {Foundational practical-Huffman paper.  Lays out
+              canonical-code construction, table-driven decoding,
+              the (length asc, symbol asc) ordering, and the
+              first-code-per-length / base-offset arrays every
+              modern Huffman decoder still uses.  Predates SIMD
+              and predates the multi-stream ILP trick (huf0)
+              by decades but is the conceptual baseline ph
+              measures against.}
+}
+
+% ============================================================
+%  2. ANS / arithmetic / range coding (the entropy coders ph rides
+%     on for per-node bitmap compression)
+% ============================================================
+
+@misc{dudaans,
+  author    = {Duda, Jarek},
+  title     = {Asymmetric numeral systems: entropy coding combining
+              speed of {Huffman} coding with compression rate of
+              arithmetic coding},
+  year      = {2014},
+  eprint    = {1311.2540},
+  archivePrefix = {arXiv},
+  url       = {https://arxiv.org/abs/1311.2540},
+  note      = {The ANS paper that started the modern table-based
+              entropy-coding wave.  FSE (Collet), rANS (Giesen),
+              and tANS in zstd all derive from this.}
+}
+
+@article{arithmetic,
+  author    = {Witten, Ian H. and Neal, Radford M. and Cleary,
+              John G.},
+  title     = {Arithmetic coding for data compression},
+  journal   = {Communications of the ACM},
+  volume    = {30},
+  number    = {6},
+  pages     = {520--540},
+  year      = {1987},
+  note      = {The canonical practical arithmetic-coding paper —
+              "the WNC paper".  Lays out the integer-arithmetic
+              renormalisation scheme everything since uses
+              (range/CABAC/MQ are direct descendants).  Cited as
+              the entropy-coding gold standard (within ε of binary
+              entropy) but with the fatal-for-ph property that
+              decode is strictly serial — each bit's range
+              refinement depends on the previous.  Section D of
+              the IDEAS-survey "Other high-skew bitmap compression
+              schemes" rules it out for that reason.}
+}
+
+@misc{giesen2014interleaved,
+  author    = {Giesen, Fabian},
+  title     = {Interleaved entropy coders},
+  year      = {2014},
+  eprint    = {1402.3392},
+  archivePrefix = {arXiv},
+  url       = {https://arxiv.org/abs/1402.3392},
+  note      = {ryg's foundational note on interleaving multiple
+              independent entropy-coder cursors over a single
+              bitstream to hide per-symbol decode latency on
+              superscalar OoO cores.  Same idea huf0's 4-stream
+              decoder uses and the same idea extras/bench_fse_xy_micro.c
+              generalises to x=2..16 cursors over FSE.
+              % [USED FOR: IDEAS.md "FSE wide-cursor decoder",
+              %            extras/bench_fse_xy_micro.c,
+              %            extras/bench_golomb.c (FSE x=8 path)]}
+}
+
+@misc{collet2025fse,
+  author    = {Collet, Yann},
+  title     = {FiniteStateEntropy: a {C} library for {tANS} entropy
+              coding (used in zstd's huf0 path)},
+  howpublished = {\url{https://github.com/cyan4973/FiniteStateEntropy}},
+  year      = {2025},
+  note      = {ph vendors this at ext/fse/ for the per-node skewed-
+              bitmap path.  bench_fse_xy_micro.c benchmarks both
+              the stock x=2 decoder and our hand-rolled x=8 wide-
+              cursor variant against it.
+              % [USED FOR: src/pivco_fse.c, docs/FSE-V0.md,
+              %            extras/bench_fse_xy_micro.c,
+              %            extras/bench_golomb.c]}
+}
+
+@misc{giesen2014alias,
+  author    = {Giesen, Fabian},
+  title     = {From the archives: alias {Huffman} coding},
+  howpublished = {\url{https://fgiesen.wordpress.com/2014/12/09/from-the-archives-alias-huffman-coding/}},
+  year      = {2014},
+  note      = {Alias-method Huffman: unified decode table sized by
+              symbol count instead of code length, branch-free per
+              symbol.  Mentioned in the README prior-art survey;
+              tested at 200--440 M/s on M4, slower than huf0.}
+}
+
+@misc{giesen2021oodle,
+  author    = {Giesen, Fabian},
+  title     = {Entropy coding in {Oodle Data}: {Huffman} coding},
+  howpublished = {\url{https://fgiesen.wordpress.com/2021/08/30/entropy-coding-in-oodle-data-huffman-coding/}},
+  year      = {2021},
+  note      = {ryg's writeup of Oodle's Huffman wire format and
+              tuner.  Explains why huff6 (6-stream) is the right
+              shape for modern x86 ILP.}
+}
+
+@misc{giesen2023oodle,
+  author    = {Giesen, Fabian},
+  title     = {Entropy decoding in {Oodle Data}: {x86-64} 6-stream
+              {Huffman} decoders},
+  howpublished = {\url{https://fgiesen.wordpress.com/2023/10/29/entropy-decoding-in-oodle-data-x86-64-6-stream-huffman-decoders/}},
+  year      = {2023},
+  note      = {Detailed x86 ASM walkthrough of Oodle's 6-stream
+              decoders.  Quoted ~1.3--1.5 cycles/symbol asymptote
+              motivated the apples-to-apples FSE wide-cursor goal
+              in extras/bench_fse_xy_micro.c.
+              % [USED FOR: IDEAS.md "FSE wide-cursor decoder"]}
+}
+
+@misc{ryg-rans,
+  author    = {Giesen, Fabian},
+  title     = {ryg\_rans: rANS implementations and writeups},
+  howpublished = {\url{https://github.com/rygorous/ryg_rans}},
+  year      = {2025},
+  note      = {Vendored at ext/ryg_rans/.  Used as a rANS baseline
+              in the README headline comparison table.}
+}
+
+% ============================================================
+%  3. Wavelet trees — the prior art for the bitmap-per-Huffman-node
+%     representation ph uses (extensively discussed in
+%     docs/WAVELET_TREES.md)
+% ============================================================
+
+@inproceedings{grossi2003wt,
+  author    = {Grossi, Roberto and Gupta, Ankur and Vitter, Jeffrey Scott},
+  title     = {High-order entropy-compressed text indexes},
+  booktitle = {Proc. {SODA} 2003},
+  pages     = {841--850},
+  year      = {2003},
+  publisher = {SIAM},
+  note      = {The original wavelet tree.  ph's bitmap-per-internal-
+              node wire format is structurally identical, but
+              applied as a stream codec instead of as a rank/select
+              index.
+              % [USED FOR: docs/WAVELET_TREES.md, README "Prior Art"]}
+}
+
+@article{makinen2007wavelet,
+  author    = {M\"akinen, Veli and Navarro, Gonzalo},
+  title     = {Rank and select revisited and extended},
+  journal   = {Theoretical Computer Science},
+  volume    = {387},
+  number    = {3},
+  pages     = {332--347},
+  year      = {2007},
+  note      = {The Huffman-shaped wavelet tree variant: tree = the
+              Huffman tree, total stored bits = n·H_0.  Direct
+              prior art for ph's representation.}
+}
+
+@article{ferragina2009myriad,
+  author    = {Ferragina, Paolo and Giancarlo, Raffaele and Manzini, Giovanni},
+  title     = {The myriad virtues of {Wavelet Trees}},
+  journal   = {Information and Computation},
+  volume    = {207},
+  number    = {8},
+  pages     = {849--866},
+  year      = {2009},
+  note      = {Survey of wavelet-tree applications.  Useful for
+              "what problem class is this structure good for"
+              context.}
+}
+
+@article{navarro2014wavelet,
+  author    = {Navarro, Gonzalo},
+  title     = {Wavelet trees for all},
+  journal   = {Journal of Discrete Algorithms},
+  volume    = {25},
+  pages     = {2--20},
+  year      = {2014},
+  note      = {Modern survey of wavelet tree variants (binary,
+              multiary, balanced, Huffman-shaped, wavelet matrix).
+              Sets the vocabulary docs/WAVELET_TREES.md uses.}
+}
+
+@article{claude2015matrix,
+  author    = {Claude, Francisco and Navarro, Gonzalo and
+              Ord\'o\~nez Pereira, Alberto},
+  title     = {The wavelet matrix: An efficient wavelet tree for
+              large alphabets},
+  journal   = {Information Systems},
+  volume    = {47},
+  pages     = {15--32},
+  year      = {2015},
+  note      = {Alternative layout that avoids pointer overhead at
+              large σ.  Not what ph uses (binary alphabet σ=2 at
+              every node) but listed in prior art for completeness.}
+}
+
+@inproceedings{kaneta2018wt,
+  author    = {Kaneta, Yusaku},
+  title     = {Fast wavelet tree construction in practice},
+  booktitle = {Proc. {SPIRE} 2018},
+  pages     = {218--232},
+  year      = {2018},
+  publisher = {Springer},
+  note      = {First practical use of pshufb/pext for list-
+              splitting at each wavelet-tree node.  Same partition
+              primitive ph uses, in the same (top-down)
+              direction.  Source code not public — comparison via
+              Dinklage 2023's projection.}
+}
+
+@inproceedings{dinklage2023wt,
+  author    = {Dinklage, Patrick and Fischer, Johannes and
+              Kurpicz, Florian and Tarnowski, Jan-Philipp},
+  title     = {Bit-Parallel ({Compressed}) Wavelet Tree Construction},
+  booktitle = {Proc. {DCC} 2023},
+  year      = {2023},
+  url       = {https://www.kurpicz.org/assets/publications/dcc_2023.pdf},
+  note      = {AVX-512 extension of Kaneta 2018, including the
+              Huffman-shaped variant.  Explicitly documents the
+              vpcompressw-with-mask-from-bitmap trick ph's encoder
+              uses.  Reports ~100 MB/s construction throughput on
+              Rocket Lake — the only published bulk-throughput
+              number for this representation.  Notes
+              construction only, never measures decode (ph's
+              regime).
+              % [USED FOR: docs/WAVELET_TREES.md]}
+}
+
+@article{baruch2018accel,
+  author    = {Baruch, Gilad and Klein, Shmuel T. and Shapira, Dana},
+  title     = {Accelerated partial decoding in wavelet trees},
+  journal   = {Discrete Applied Mathematics},
+  volume    = {274},
+  pages     = {2--10},
+  year      = {2020},
+  url       = {https://www.sciencedirect.com/science/article/pii/S0166218X18303974},
+  note      = {Closest prior decode-side work.  Strictly top-down,
+              scalar, one source index at a time, with a per-node
+              rnk(v) cache to avoid recomputing rank between calls.
+              ~50\% full-decode / ~30\% partial-decode speedup vs
+              SDSL wt\_huff; no SIMD, no comparison to fast
+              Huffman codecs.  Same "shared upper tree" insight
+              ph exploits but realised as scalar caching across t
+              independent walks rather than bulk SIMD over the
+              whole bitmap.
+              % [USED FOR: docs/WAVELET_TREES.md]}
+}
+
+@inproceedings{grossi2012trie,
+  author    = {Grossi, Roberto and Ottaviano, Giuseppe},
+  title     = {The Wavelet Trie: maintaining an indexed sequence of
+              strings in compressed space},
+  booktitle = {Proc. {PODS} 2012},
+  year      = {2012},
+  note      = {Dynamic variant focused on indexed string sequences.
+              Tangential to ph's regime but appears in the
+              Wikipedia "Wavelet tree" page and warrants a
+              one-liner mention in Related Work.}
+}
+
+% ============================================================
+%  4. SIMD / parallel Huffman decode
+% ============================================================
+
+@misc{johnson2022sync,
+  author    = {Johnson, Dougall},
+  title     = {Parallelising {Huffman} decoding and {x86}
+              disassembly by synchronising non-self-synchronising
+              prefix codes},
+  howpublished = {\url{https://dougallj.wordpress.com/2022/07/30/parallelising-huffman-decoding-and-x86-disassembly-by-synchronising-non-self-synchronising-prefix-codes/}},
+  year      = {2022},
+  note      = {Split the bitstream at arbitrary points, find sync
+              by running n parallel decoders at consecutive
+              offsets (n = max code length).  ~25\% speedup on M1
+              for DEFLATE.  Orthogonal to ph: parallelises the same
+              serial bitstream rather than using a different format.}
+}
+
+@inproceedings{weissenberger2018gpu,
+  author    = {Weissenberger, Andr\'e and Schmidt, Bertil},
+  title     = {Massively parallel {Huffman} decoding on {GPUs}},
+  booktitle = {Proc. {ICPP} 2018},
+  year      = {2018},
+  url       = {https://github.com/weissenberger/gpuhd},
+  note      = {Huffman self-synchronisation for thousands of GPU
+              threads.  10×+ over CPU.  Not a CPU comparison but
+              cited as the GPU end of the design space.}
+}
+
+@article{rivera2023simdhuf,
+  author    = {(authors via DOI)},
+  title     = {{512-bit SIMD-vectorised Huffman encoding}},
+  journal   = {IEEE Transactions on Consumer Electronics},
+  year      = {2023},
+  url       = {https://dl.acm.org/doi/abs/10.1109/TCE.2023.3347229},
+  note      = {2.66× encoding speedup on NEON via SIMD.  Decoding
+              remains the harder problem — which is what ph
+              tackles.}
+}
+
+@misc{rivera-opthuf,
+  author    = {Rivera, Cody and others},
+  title     = {opthuffdec: Optimised {Huffman} decoder for {IPDPS} 2022},
+  howpublished = {\url{https://github.com/codyjrivera/ipdps22-opthuffdec}},
+  year      = {2022},
+  note      = {Reference Huffman decoder for IPDPS 2022; potential
+              CPU comparison point on x86.}
+}
+
+% ============================================================
+%  5. Bitmap / run-length compression (the alternatives to FSE
+%     surveyed in IDEAS.md "Other high-skew bitmap compression
+%     schemes" and benched against in extras/bench_golomb.c)
+% ============================================================
+
+@article{golomb1966,
+  author    = {Golomb, Solomon W.},
+  title     = {Run-length encodings},
+  journal   = {IEEE Transactions on Information Theory},
+  volume    = {12},
+  number    = {3},
+  pages     = {399--401},
+  year      = {1966},
+  note      = {Golomb codes: optimal for geometrically distributed
+              run lengths.  ph's Rice variant (M = 2^k) is the
+              power-of-2 case.
+              % [USED FOR: extras/bench_golomb.c,
+              %            IDEAS.md "Golomb/Rice for skewed bitmaps"]}
+}
+
+@techreport{rice1971,
+  author    = {Rice, Robert F.},
+  title     = {Some Practical Universal Noiseless Coding Techniques},
+  institution = {JPL, NASA},
+  number    = {JPL-79-22},
+  year      = {1979},
+  note      = {Rice's power-of-2 simplification of Golomb.  Decode
+              = lzcnt for unary + k-bit remainder.  Implemented in
+              extras/bench_golomb.c.}
+}
+
+@article{elias1975codes,
+  author    = {Elias, Peter},
+  title     = {Universal codeword sets and representations of the
+              integers},
+  journal   = {IEEE Transactions on Information Theory},
+  volume    = {21},
+  number    = {2},
+  pages     = {194--203},
+  year      = {1975},
+  note      = {Elias gamma/delta/omega.  Parameter-free integer
+              codes; mentioned in the IDEAS survey but worse than
+              Golomb for ph's geometric regime.}
+}
+
+@misc{lemire-ewah,
+  author    = {Lemire, Daniel and others},
+  title     = {{EWAHBoolArray}: Word-aligned compressed variant of
+              the {Java} BitSet class},
+  howpublished = {\url{https://github.com/lemire/EWAHBoolArray}},
+  year      = {2025},
+  note      = {Enhanced Word-Aligned Hybrid bitmap compression.
+              Vendored at ext/ewah/ and benched in
+              extras/bench_ewah_wrapper.cpp / bench_golomb.c —
+              measured as not competitive for ph's IID-random
+              partition bitmaps (expands by 1.6\% at moderate
+              skew because every 64-bit word ends up classified
+              as "literal").  Documented in IDEAS.md
+              "Other high-skew bitmap compression schemes".
+              % [USED FOR: extras/bench_ewah_wrapper.cpp,
+              %            results/bench_golomb_ewah-*.txt]}
+}
+
+@inproceedings{moffat2000interpolative,
+  author    = {Moffat, Alistair and Stuiver, Lang},
+  title     = {Binary interpolative coding for effective index
+              compression},
+  journal   = {Information Retrieval},
+  volume    = {3},
+  number    = {1},
+  pages     = {25--47},
+  year      = {2000},
+  note      = {Recursive median encoding — encode the median,
+              recurse on each half.  Mentioned in the IDEAS survey
+              as a candidate for clustered minorities; not built or
+              measured.}
+}
+
+@inproceedings{ottaviano2014pef,
+  author    = {Ottaviano, Giuseppe and Venturini, Rossano},
+  title     = {Partitioned {Elias-Fano} indexes},
+  booktitle = {Proc. {SIGIR} 2014},
+  year      = {2014},
+  note      = {Partitioned Elias-Fano for sorted-integer
+              compression with random access.  IDEAS survey
+              candidate for position-list at extreme skew (not yet
+              built or measured).}
+}
+
+@misc{lemire2017streamvbyte,
+  author    = {Lemire, Daniel},
+  title     = {Stream {VByte}: breaking new speed records for
+              integer compression},
+  howpublished = {\url{https://lemire.me/blog/2017/09/27/stream-vbyte-breaking-new-speed-records-for-integer-compression/}},
+  year      = {2017},
+  note      = {Stream VByte: a SIMD-friendly variant of VByte that
+              separates the per-integer length-control bytes from
+              the data bytes into two parallel streams.  Decode
+              becomes a control-byte lookup driving a pshufb /
+              vpermb gather — ~4 GB/s on x86 in Lemire's blog
+              numbers.  Directly relevant to the IDEAS-survey
+              "position-list + VByte deltas" candidate for ph's
+              very-high-skew bitmaps (p ≥ 0.95): naive VByte was
+              the assumed encoder; Stream VByte is what you'd
+              actually use for a fast SIMD decoder.  Full paper:
+              Lemire, Kurz, Rupp, "Stream VByte: Faster
+              byte-oriented integer compression," Information
+              Processing Letters 130 (2018) 1--6, arXiv:1709.08990.}
+}
+
+% ============================================================
+%  6. Hardware / SIMD references
+% ============================================================
+
+@misc{lemire2025vpcompressw,
+  author    = {Lemire, Daniel},
+  title     = {{AVX-512} gotcha: avoid compressing words to memory
+              with {AMD Zen-4} processors},
+  howpublished = {\url{https://lemire.me/blog/2025/02/14/avx-512-gotcha-avoid-compressing-words-to-memory-with-amd-zen-4-processors/}},
+  year      = {2025},
+  note      = {vpcompressw-to-memory is ~40× slower on Zen 4.  ph
+              uses the explicit register-then-store pattern; flagged
+              as a candidate for the c8a encoder regression in
+              IDEAS.md.}
+}
+
+@misc{mula2025pdep,
+  author    = {Mu{\l}a, Wojciech},
+  title     = {Notes on {SIMD} {PDEP}/{PEXT}},
+  howpublished = {\url{http://0x80.pl/notesen/2025-01-05-simd-pdep-pext.html}},
+  year      = {2025},
+  note      = {Wojciech Mula's notes on PDEP/PEXT — relevant to
+              the SIMD partition primitive ph uses on x86 (an
+              alternative to TBL-based partition).}
+}
+
+@misc{downs2020avx512,
+  author    = {Downs, Travis},
+  title     = {Ice Lake {AVX-512} downclocking},
+  howpublished = {\url{https://travisdowns.github.io/blog/2020/08/19/icl-avx512-freq.html}},
+  year      = {2020},
+  note      = {AVX-512 frequency-throttling on Ice Lake and
+              successors.  Cited in Dinklage 2023 for the
+              multi-thread scaling cap.  Same constraint applies
+              to ph encode on AVX-512 hosts.}
+}
+
+@misc{cloutier-vpmultishiftqb,
+  author    = {Cloutier, Felix},
+  title     = {x86 instruction reference: {VPMULTISHIFTQB}},
+  howpublished = {\url{https://www.felixcloutier.com/x86/vpmultishiftqb}},
+  year      = {2025},
+  note      = {The AVX-512 VBMI multi-shift instruction ph's
+              D-flat-decode kernels use for D in {2,3} unpacks on
+              AVX-512.}
+}
+
+@misc{wikichip-vbmi2,
+  author    = {{WikiChip}},
+  title     = {{AVX-512 VBMI2}: Vector Byte Manipulation
+              Instructions 2},
+  howpublished = {\url{https://en.wikichip.org/wiki/x86/avx512_vbmi2}},
+  year      = {2025},
+  note      = {VBMI2 reference (vpcompressw, vpexpandb).  The
+              primitives the ph AVX-512 partition + tree\_merge
+              paths depend on; gates VBMI2-host detection.}
+}
+
+% ============================================================
+%  7. Production codecs and reference benchmarks
+% ============================================================
+
+@misc{zstd,
+  author    = {Collet, Yann and others},
+  title     = {{zstd}: A real-time lossless data compression
+              library},
+  howpublished = {\url{https://github.com/cyan4973/FiniteStateEntropy}},
+  year      = {2025},
+  note      = {The huf0 path inside zstd is the main fast-CPU
+              Huffman comparison point in ph's bench tables.}
+}
+
+@misc{lz4,
+  author    = {Collet, Yann and others},
+  title     = {{LZ4}: Extremely Fast Compression algorithm},
+  howpublished = {\url{https://github.com/lz4/lz4}},
+  year      = {2025},
+  note      = {Yann Collet's earlier LZ-family codec, the
+              archetype of the modern "decode-speed-first"
+              compression design philosophy that zstd / huf0 / FSE
+              / ph all sit in.  Pure dictionary coder (no entropy
+              stage), so not a direct comparison point, but
+              culturally the predecessor that established the
+              "fast decode at a few GB/s, ratio is secondary" goal
+              ph also targets.}
+}
+
+@misc{brotli,
+  author    = {{Google}},
+  title     = {Brotli compression algorithm reference implementation},
+  howpublished = {\url{https://github.com/google/brotli}},
+  year      = {2025},
+  note      = {Cited as a high-ratio comparison point in
+              extras/bench_brotli.c.  Different design point —
+              static dictionary + sliding-window — but uses
+              Huffman internally.}
+}
+
+@misc{oodle,
+  author    = {{RAD Game Tools} (now {Epic})},
+  title     = {Oodle Data Compression Suite},
+  howpublished = {\url{https://www.unrealengine.com/eula/unreal}},
+  year      = {2025},
+  note      = {Proprietary state-of-the-art compression suite.
+              ph optionally links against the OodleUE open-source
+              port (github.com/WorkingRobot/OodleUE) for
+              apples-to-apples comparison.  See IDEAS.md "Oodle's
+              newlz\_arrays\_huff" entry.
+              % [USED FOR: extras/bench_oodle_wrapper.cpp]}
+}
+
+@misc{oodle-ue,
+  author    = {{WorkingRobot}},
+  title     = {{OodleUE}: open-source port of Oodle 2.9.16},
+  howpublished = {\url{https://github.com/WorkingRobot/OodleUE}},
+  year      = {2025},
+  note      = {The newlz\_arrays\_huff implementation ph links
+              against optionally.  Used in
+              bench\_fse\_xy\_micro.c for the Oodle reference
+              columns.}
+}
+
+@misc{turbobench,
+  author    = {Iliopoulos, Powturbo},
+  title     = {{TurboBench}: Compression Benchmark},
+  howpublished = {\url{https://github.com/powturbo/TurboBench}},
+  year      = {2025},
+  note      = {Established benchmark harness covering 100+
+              compressors.  Reference point for benchmark
+              methodology.}
+}
+
+@misc{intel-qpl-huffman,
+  author    = {{Intel Corporation}},
+  title     = {{Intel QPL}: Huffman-only mode},
+  howpublished = {\url{https://intel.github.io/qpl/documentation/dev_guide_docs/c_use_cases/c_huffman_only.html}},
+  year      = {2025},
+  note      = {Intel's Query Processing Library Huffman path —
+              uses IAA (in-memory accelerator) on Sapphire/Granite
+              Rapids.  Hardware Huffman comparison point.}
+}
+
+@misc{microsoft-directstorage,
+  author    = {{Microsoft}},
+  title     = {{DirectStorage}},
+  howpublished = {\url{https://github.com/microsoft/DirectStorage}},
+  year      = {2025},
+  note      = {GPU-decompression path for game assets.  Uses
+              gdeflate, which is Huffman + LZ.  Indirect
+              comparison; cited as a current
+              "high-throughput decompression" production target.}
+}
+
+@misc{nvcomp-gdeflate,
+  author    = {{NVIDIA}},
+  title     = {nvCOMP: gdeflate},
+  howpublished = {\url{https://docs.nvidia.com/cuda/nvcomp/gdeflate.html}},
+  year      = {2025},
+  note      = {GPU Huffman/LZ implementation.  Reference GPU
+              comparison for the "10×+ over CPU" headline number.}
+}
+
+@misc{ietf-gdeflate,
+  author    = {{IETF (Uralsky)}},
+  title     = {GDEFLATE: A High-Throughput Compression Format},
+  howpublished = {\url{https://www.ietf.org/archive/id/draft-uralsky-gdeflate-00.html}},
+  year      = {2024},
+  note      = {Spec for the gdeflate format used by NVIDIA / DirectStorage.}
+}
+
+@misc{brotlig,
+  author    = {{AMD GPUOpen}},
+  title     = {{BrotliG} SDK: {GPU} {Brotli} decoder},
+  howpublished = {\url{https://gpuopen.com/brotlig-sdk/}},
+  year      = {2025},
+  note      = {GPU Brotli — another data point for the GPU side
+              of the design space.}
+}
+
+@misc{libjxl,
+  author    = {{libjxl authors}},
+  title     = {libjxl: {JPEG XL} reference implementation},
+  howpublished = {\url{https://github.com/libjxl/libjxl}},
+  year      = {2025},
+  note      = {Modern image codec.  Uses Huffman/ANS internally;
+              not directly compared but listed because its
+              entropy-coder design pressures are similar.}
+}
+
+@misc{fpnge,
+  author    = {Veluca, Lorenzo},
+  title     = {{fpnge}: Fast PNG encoder},
+  howpublished = {\url{https://github.com/veluca93/fpnge}},
+  year      = {2024},
+  note      = {SIMD-optimised PNG/DEFLATE encoder.  Different
+              workload but useful prior art for the
+              "vectorise Huffman encoding" half of the problem.}
+}
+
+@misc{cusz,
+  author    = {{szcompressor team}},
+  title     = {{cuSZ}: A CUDA-based error-bounded lossy compressor},
+  howpublished = {\url{https://github.com/szcompressor/cuSZ}},
+  year      = {2025},
+  note      = {GPU compressor primarily targeted at scientific
+              data; cited as a representative of the
+              GPU-compression branch of the literature.}
+}
+
+@misc{genozip,
+  author    = {Lan, Divon},
+  title     = {{Genozip}: Universal genomic-file compressor},
+  howpublished = {\url{https://github.com/divonlan/genozip}},
+  year      = {2025},
+  note      = {Domain-specific genomic compressor — uses Huffman
+              for some streams.  Listed for completeness of the
+              Huffman-in-the-wild landscape.}
+}
+
+% ============================================================
+%  8. Adjacent / inspiration
+% ============================================================
+
+@phdthesis{zuk09,
+  author    = {Zukowski, Marcin},
+  title     = {Balancing Vectorized Query Execution with
+              Bandwidth-Optimized Storage},
+  school    = {University of Amsterdam},
+  year      = {2009},
+  url       = {https://pure.uva.nl/ws/files/942072/72163_thesis.pdf},
+  note      = {The vectorized-execution thesis from which ph
+              inherits its design philosophy.  The "process a block
+              of N values at a time, with the right SIMD primitive
+              for each operator" approach that VectorWise / Actian
+              Vector / DuckDB / etc. all build on is what ph
+              applies to Huffman decode.  "PIVCO" itself is the
+              "pivoted coding" framing this thesis introduced.}
+}
+
+@misc{alp,
+  author    = {Afroozeh, Azim and Boncz, Peter and others},
+  title     = {{ALP}: Adaptive Lossless floating-Point compression},
+  howpublished = {\url{https://github.com/cwida/ALP}},
+  year      = {2024},
+  note      = {Specialised lossless float compression from CWI.
+              Different problem but the same "pick the right
+              primitive per data shape" philosophy ph applies.}
+}
+
+@article{alp-paper,
+  author    = {Afroozeh, Azim and Boncz, Peter and others},
+  title     = {{ALP}: Adaptive Lossless floating-Point compression},
+  journal   = {Proc. VLDB},
+  volume    = {18},
+  year      = {2025},
+  url       = {https://www.vldb.org/pvldb/vol18/p4629-afroozeh.pdf},
+  note      = {ALP VLDB paper (companion to the GitHub repo).}
+}
+
+@inproceedings{laspias-adms2025,
+  author    = {{laspias} authors},
+  title     = {{LASPIAS}},
+  booktitle = {ADMS 2025},
+  year      = {2025},
+  url       = {https://db.cs.cmu.edu/papers/2025/laspias-adms2025.pdf},
+  note      = {Related-work pointer; database-system context.}
+}
+
+@article{simd-histogram,
+  author    = {(various)},
+  title     = {{SIMD} Vectorization of Histogram Functions},
+  url       = {https://www.academia.edu/89596689/SIMD_Vectorization_of_Histogram_Functions},
+  year      = {2020},
+  note      = {Reference for the vectorised histogram path inside
+              the encoder.}
+}
+
+@article{histogram-versatile,
+  author    = {(various)},
+  title     = {Versatile and scalable parallel histogram
+              construction},
+  url       = {https://www.researchgate.net/publication/266660552_Versatile_and_scalable_parallel_histogram_construction},
+  year      = {2014},
+  note      = {Background reference for parallel histogram
+              construction (encode-side prep step in ph).}
+}
+
+@misc{wikichip-vbmi,
+  author    = {{WikiChip}},
+  title     = {{AVX-512 VBMI}: Vector Byte Manipulation Instructions},
+  howpublished = {\url{https://en.wikichip.org/wiki/x86/avx512_vbmi}},
+  year      = {2025},
+  note      = {VBMI reference (vpermb).  Used for D=5/D=6 flat-
+              subtree unpacks in the AVX-512 backend.}
+}
+
+@misc{intel-fast-huffman,
+  author    = {{Intel Corporation}},
+  title     = {Fast computation of {Huffman} codes},
+  howpublished = {\url{https://www.intel.com/content/www/us/en/developer/articles/technical/fast-computation-of-huffman-codes.html}},
+  year      = {2025},
+  note      = {Intel's Huffman primer.  Useful as a tutorial
+              reference, not state-of-the-art.}
+}
+
+@article{pmc-huffman,
+  title     = {(see PMC8896640 in PMC for full title)},
+  url       = {https://pmc.ncbi.nlm.nih.gov/articles/PMC8896640/},
+  year      = {2022},
+  note      = {Cited from project notes — domain-specific
+              compression context.}
+}
