@@ -36,16 +36,37 @@ header .row-label {
     letter-spacing: 0.05em;
     min-width: 56px;
 }
-header h1 {
-    margin: 0;
-    font-size: 14px;
-    font-weight: 600;
+header h1.viz-title {
+    margin: 0 0 0 auto;        /* auto-margin-left pushes to the right */
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    padding: 3px 10px;
+    background: linear-gradient(135deg, #e0ecff 0%, #d9e6ff 100%);
+    color: #1a3d80;
+    border: 1px solid #b8c8e8;
+    border-radius: 5px;
+    box-shadow: 0 1px 2px rgba(26, 61, 128, 0.08);
+    white-space: nowrap;
 }
 header label, header select, header input[type="file"] {
     font-size: 13px;
 }
 header select { padding: 2px 6px; }
 header .toggle { display: flex; align-items: center; gap: 4px; }
+header .text-examples {
+    display: flex; align-items: center; gap: 8px;
+    font-size: 11px; color: #888;
+}
+header .text-example {
+    color: #2354a8;
+    text-decoration: none;
+    border-bottom: 1px dotted #88aadd;
+}
+header .text-example:hover {
+    color: #15356b;
+    border-bottom: 1px solid currentColor;
+}
 main {
     display: grid;
     grid-template-columns: 1fr 360px;
@@ -177,7 +198,7 @@ table.node-table tr.in-flat { color: #b45309; }
 
 <header>
     <div class="row">
-        <h1>PIVCO-Huffman tree viz</h1>
+        <span class="row-label">data</span>
         <label>Dataset:
             <select id="dataset-select"></select>
         </label>
@@ -185,7 +206,15 @@ table.node-table tr.in-flat { color: #b45309; }
         <label>or text: <input type="text" id="text-input" size="24"
             placeholder="type or paste text"></label>
         <button id="text-build" type="button">build</button>
+        <span class="text-examples">
+            try:
+            <a href="#" class="text-example" data-text="abracadabra">abracadabra</a>
+            <a href="#" class="text-example" data-text="coconut papaya">coconut papaya</a>
+            <a href="#" class="text-example" data-text="hello world">hello world</a>
+            <a href="#" class="text-example" data-text="foo bar xyzzy">foo bar xyzzy</a>
+        </span>
         <span id="status" class="muted"></span>
+        <h1 class="viz-title">PIVCO-Huffman tree viz</h1>
     </div>
     <div class="row">
         <span class="row-label">tree</span>
@@ -231,6 +260,18 @@ table.node-table tr.in-flat { color: #b45309; }
         <label class="toggle" title="Draw the per-node skew bar showing p_left / p_right split.">
             <input type="checkbox" id="show-skew" checked>
             show skew
+        </label>
+        <label class="toggle" title="Show the bit-prefix (path from root, 0=left/1=right) above each internal node.">
+            <input type="checkbox" id="show-bit-prefix">
+            internal prefix
+        </label>
+        <label class="toggle" title="Show the full Huffman code as a 0/1 string under each leaf.">
+            <input type="checkbox" id="show-leaf-code">
+            leaf code
+        </label>
+        <label class="toggle" title="Label each branch with the bit it represents (0 = left child, 1 = right child).">
+            <input type="checkbox" id="show-branch-bits">
+            branch 0/1
         </label>
         <button id="reset-view" type="button" title="Reset pan/zoom">reset view</button>
     </div>
@@ -925,6 +966,27 @@ function renderTree(rootNode, meta) {
             .attr('class', 'link')
             .attr('d', linkGen);
 
+    // Optional 0/1 labels on each branch (off by default).  Decide
+    // bit from target's bitPrefix last char (cheaper than re-walking).
+    if (meta.showBranchBits) {
+        gWorld.selectAll('text.branch-bit')
+            .data(root.links())
+            .enter().append('text')
+                .attr('class', 'branch-bit')
+                .attr('x', d => (d.source.x + d.target.x) / 2)
+                .attr('y', d => (d.source.y + d.target.y) / 2)
+                .attr('dx', d => (d.target.x < d.source.x ? -5 : 5))
+                .attr('text-anchor', 'middle')
+                .attr('font-family', 'monospace')
+                .attr('font-size', '10px')
+                .attr('fill', '#444')
+                .attr('pointer-events', 'none')
+                .text(d => {
+                    const p = d.target.data.bitPrefix;
+                    return p && p.length > 0 ? p[p.length - 1] : '';
+                });
+    }
+
     // Flat-subtree boxes (D >= 2, dashed orange) and pair boxes
     // (D = 1, two sibling leaves; lighter gray).  Drawn before
     // nodes so nodes overlay them.  Skipped when "condense" is on
@@ -1070,17 +1132,36 @@ function renderTree(rootNode, meta) {
      * currently treated as flat-roots AND nodes currently
      * unflattened-via-override (so the user can re-flatten).
      * Visually: thick stroke for flattenable nodes (filled green
-     * if currently treated as flat). */
+     * if currently treated as flat).
+     *
+     * Gated by meta.showFlat: when the user has flat-subtree analysis
+     * disabled, render every internal node as a plain circle — the
+     * "flattenable" status isn't meaningful in that mode. */
+    const flatActive = (d) => meta.showFlat && d.data.flatCandidate;
     intG.append('circle')
-        .attr('r', d => d.data.flatCandidate ? 6 : 4)
-        .style('stroke-width', d => d.data.flatCandidate ? '2.5px' : '1px')
-        .style('fill', d => d.data.flatD ? '#bbf7d0' : '#fff')
-        .style('cursor', d => d.data.flatCandidate ? 'pointer' : 'default');
-    intG.filter(d => d.data.flatCandidate)
+        .attr('r', d => flatActive(d) ? 6 : 4)
+        .style('stroke-width', d => flatActive(d) ? '2.5px' : '1px')
+        .style('fill', d => (meta.showFlat && d.data.flatD) ? '#bbf7d0' : '#fff')
+        .style('cursor', d => flatActive(d) ? 'pointer' : 'default');
+    intG.filter(flatActive)
         .on('click', (e, d) => {
             e.stopPropagation();
             toggleFlatten(d.data.id);
         });
+
+    /* Optional internal-node bit-prefix label (off by default).
+     * Placed above the circle / above the skew bar if it's shown. */
+    if (meta.showBitPrefix) {
+        intG.append('text')
+            .attr('class', 'bit-prefix')
+            .attr('y', meta.showSkew ? -26 : -10)
+            .attr('text-anchor', 'middle')
+            .attr('font-family', 'monospace')
+            .attr('font-size', '9px')
+            .attr('fill', '#1a3d80')
+            .attr('pointer-events', 'none')
+            .text(d => d.data.bitPrefix || '∅');
+    }
 
     // Skew indicator.  Outer frame is white with a skew-colored
     // border.  Inside we fill the HEAVY side of the split (the
@@ -1170,6 +1251,44 @@ function renderTree(rootNode, meta) {
             })
             .attr('stroke', '#666')
             .attr('stroke-width', 0.5);
+    }
+
+    /* Optional leaf-code label (off by default).  Placed below the
+     * leaf box / circle and rotated 90° so codes read top-down — keeps
+     * the horizontal slot width unaffected, which matters in dense
+     * trees where adjacent leaves are only a few px apart and even
+     * short codes would overlap horizontally.  bitPrefix is the path
+     * from root, which IS the canonical Huffman code for the leaf.
+     *
+     * Top-alignment trick: rotated text with text-anchor:start +
+     * dominant-baseline:text-before-edge puts the first character's
+     * top exactly at the translated y origin, so the code reads
+     * cleanly down from yOff without overlapping the leaf above. */
+    if (meta.showLeafCode) {
+        /* Render each bit on its own line via explicit <tspan> y
+         * positions — vastly more reliable than rotate(90) +
+         * dominant-baseline (baseline behaviour varies across
+         * browsers, especially for rotated text).  yOff places the
+         * first bit's baseline; subsequent bits step down by LINE_H. */
+        const yOff = meta.showLeafDetails ? 18 : 10;
+        const LINE_H = 9;
+        const codeText = lg.append('text')
+            .attr('class', 'leaf-code')
+            .attr('text-anchor', 'middle')
+            .attr('font-family', 'monospace')
+            .attr('font-size', '9px')
+            .attr('fill', '#1a3d80')
+            .attr('pointer-events', 'none');
+        codeText.each(function(d) {
+            const code = d.data.bitPrefix || '';
+            const sel = d3.select(this);
+            for (let i = 0; i < code.length; i++) {
+                sel.append('tspan')
+                    .attr('x', 0)
+                    .attr('y', yOff + i * LINE_H)
+                    .text(code[i]);
+            }
+        });
     }
 
     // Initial fit-to-pane
@@ -1466,6 +1585,9 @@ function refreshFromFreqs() {
     const noOverlap = document.getElementById('no-overlap').checked;
     const showLeafDetails = document.getElementById('show-leaf-details').checked;
     const showSkew = document.getElementById('show-skew').checked;
+    const showBitPrefix = document.getElementById('show-bit-prefix').checked;
+    const showLeafCode = document.getElementById('show-leaf-code').checked;
+    const showBranchBits = document.getElementById('show-branch-bits').checked;
     const keysSort = document.getElementById('keys-sort').value;
     const maxLen = parseInt(document.getElementById('max-len').value, 10);
     document.getElementById('max-len-val').textContent = maxLen;
@@ -1481,24 +1603,28 @@ function refreshFromFreqs() {
     detectFlatSubtrees(tree);
     annotateLeafOps(tree, showFlat);
 
-    // Stash codes per leaf for the tooltip
+    // Stash codes per leaf for the tooltip + bit-prefix per node for
+    // the optional "internal prefix" / "leaf code" view toggles.
     const codeBySym = new Map();
     codes.forEach(c => codeBySym.set(c.symbol, c));
-    function walkLeaves(n) {
+    function walkLeaves(n, prefix) {
         if (!n) return;
+        n.bitPrefix = prefix;
         if (n.symbol >= 0) {
             const c = codeBySym.get(n.symbol);
             if (c) { n.code = c.code; n.codeLen = c.len; }
             return;
         }
-        walkLeaves(n.left); walkLeaves(n.right);
+        walkLeaves(n.left,  prefix + '0');
+        walkLeaves(n.right, prefix + '1');
     }
-    walkLeaves(tree);
+    walkLeaves(tree, '');
 
     const meta = {
         name: _name, isMain: _isMain, totalN: _totalN,
         phOpt, showFlat, condenseFlat, noOverlap,
-        showLeafDetails, showSkew, keysSort, maxLen,
+        showLeafDetails, showSkew, showBitPrefix, showLeafCode,
+        showBranchBits, keysSort, maxLen,
     };
     renderTree(tree, meta);
     renderStats(tree, meta);
@@ -1621,6 +1747,15 @@ function setupToggles() {
     document.getElementById('show-skew').addEventListener('change', () => {
         refreshFromFreqs();
     });
+    document.getElementById('show-bit-prefix').addEventListener('change', () => {
+        refreshFromFreqs();
+    });
+    document.getElementById('show-leaf-code').addEventListener('change', () => {
+        refreshFromFreqs();
+    });
+    document.getElementById('show-branch-bits').addEventListener('change', () => {
+        refreshFromFreqs();
+    });
     document.getElementById('keys-sort').addEventListener('change', () => {
         _flatOverride.clear();
         refreshFromFreqs();
@@ -1645,6 +1780,14 @@ function setupTextInput() {
     };
     btn.addEventListener('click', build);
     txt.addEventListener('keydown', e => { if (e.key === 'Enter') build(); });
+    /* Example chips: clicking one fills the textbox and triggers build. */
+    document.querySelectorAll('a.text-example').forEach(el => {
+        el.addEventListener('click', (e) => {
+            e.preventDefault();
+            txt.value = el.dataset.text || '';
+            build();
+        });
+    });
 }
 
 /* Hover over a row in the top-N table → temporarily highlight the
