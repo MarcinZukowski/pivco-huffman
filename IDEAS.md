@@ -381,6 +381,21 @@ ph v2) has a structured starting point and doesn't have to
 re-derive the option space.
 
 
+## LZ4 + ph — speed bench on LZ4 output worth doing — open, 2026-05-17
+
+**Status: ratio measured (docs/FSE-V0.md §"LZ4-compressed data is
+NOT proba80-like"), decode-speed NOT yet measured.**
+
+zstd is structurally LZ4 + huf0 + FSE.  Substituting ph for huf0
+gives "zstd-like ratio with potentially 1.5-2× zstd decode."  We
+already know LZ4 *flattens* literal byte histograms (86-94% Huffman
+ratio band, no proba80-like extremes, FSE rarely fires), so the
+compression side is uninteresting — but the *decode-speed* question
+on LZ4 residuals is open and easy to probe with the existing
+`pivco_huffman_bench --file <lz4-output>` CLI on the standard
+dataset set.  Cheap first pass before any LZ4-integration work.
+
+
 ## Oodle's newlz_arrays_huff — integrated with ARM ASM kernels, 2026-05-15
 
 **Status: integrated.**  ph optionally links against OodleUE via
