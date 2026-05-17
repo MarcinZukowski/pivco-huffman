@@ -202,6 +202,165 @@ or below FSE-x8 cost on M4 / Granite Rapids / Zen, ship it as the
 default speed-biased entropy coder and keep FSE for the
 wide-compression-bias path.
 
+### 2026-05-16 update: first Rice vs fast-FSE microbench landed
+
+`extras/bench_golomb.c` (with `pivco_bench_golomb` CMake target)
+runs the comparison on 1024 B bitmaps across p ∈ {0.50, 0.55, ...,
+0.95, 0.99}.  Full sweep saved to
+`results/bench_golomb-m4-20260516-1951-*.txt`.  Headline on M4:
+
+  - Compression ratio: Rice and FSE x=8 within 1-3 bytes of each
+    other across the gated FSE range (p ∈ [0.625, 0.95]).  At
+    **p=0.99 Rice wins 74 B vs FSE's 99 B (25% smaller)** because
+    pivco's FSE static tables don't extrapolate past ~0.94 skew.
+  - Decode speed (FSE x=8 ≈ 2 GB/s flat across the range):
+    -   p ≤ 0.65:  Rice 110-170 MB/s  (~13× slower than FSE)
+    -   p = 0.85:  Rice 360 MB/s      (~5.5× slower)
+    -   p = 0.95:  Rice 970 MB/s      (~2× slower)
+    -   **p = 0.99:  Rice 6.3 GB/s    (3.2× FASTER than FSE)**
+  - Encode speed: FSE x=8 wins everywhere (1800 vs 80-140 MB/s);
+    Rice encoder is bit-by-bit scalar.  Encode isn't ph's hot path.
+
+The crossover is around p≈0.97.  **Resolution**: Rice as a *general*
+FSE replacement doesn't work — at moderate skew (FSE's actual gated
+range) it's substantially slower.  Rice as a **specialized tier for
+very-high-skew nodes (p > 0.95)** is a real win — bigger compression
+AND faster decode.  Confirms the two-tier dispatch concept from the
+original entry (FSE marker byte: 0=raw, 1=Rice, 2=FSE).
+
+The Rice decoder bench-implementation is the basic 64-bit-window
+lzcnt-per-code one; a SIMD wide-cursor Rice decoder (parallel lzcnt
++ vpcompressw) could shift the crossover lower.  Not yet built.
+
+Note: FSE x=8 in the bench uses `FSE_decodeSymbol` (safe) rather than
+`Fast` — at p≥0.95 the encoded stream is so small that the mid-round
+reload between decodes 4 and 5 can return without refilling enough
+bits; Fast doesn't mask, decoder state goes out of DTable bounds, and
+the next decode SEGVs.  Safe costs ~3-8% per decode but is correct
+across the full sweep.  Documented in bench_golomb.c source.
+
+
+## Other high-skew bitmap compression schemes — survey, 2026-05-16
+
+**Status: research survey.  Not yet implemented or benched.  Likely
+out of scope for the paper — future-work pointer.**
+
+Beyond Rice (above) and FSE (current default), several other
+schemes are tuned for highly-skewed binary bitmaps.  Organized by
+approach with focus on the ph regime (bulk SIMD decode, per-node
+bitmaps of 100-1024 bytes, p_major ∈ [0.5, 0.99]):
+
+### A. Other run-length / integer codes
+
+- **Standard Golomb (non-power-of-2 M):** marginally tighter
+  compression than Rice (~0.05 bits/symbol better at typical p)
+  via truncated-binary remainder.  Decode cost: one extra branch
+  per code.  No speed advantage over Rice.
+- **Exp-Golomb (Exponential Golomb):** hybrid of Rice + Elias
+  gamma — the unary part encodes a bit-count, then that many bits
+  of the actual value.  **Parameter-free**: eliminates the
+  per-node `k` byte Rice needs.  ~1-2% looser than tuned Rice at
+  any single p but no parameter to transmit.  Used in H.264/H.265
+  for residual coding.
+- **Elias gamma / delta / omega:** universal codes for integers,
+  no parameter.  Worse than Golomb in the ph regime — assume
+  Zipf-ish distributions, not geometric.
+- **Levenshtein code:** theoretical optimum for unknown
+  distributions; basically academic curiosity here.
+
+### B. Position-based encodings (skip runs, store WHERE)
+
+- **Sorted positions + VByte deltas:** store minority-bit
+  positions as deltas, each in 7-bit-byte VByte chunks.  Decode is
+  byte-stream parse + cumulative sum + scatter — naturally SIMD-
+  friendly (vpcompressw on AVX-512, TBL on NEON).  **Wins big at
+  very high skew (few minority bits), loses at moderate skew (many
+  minorities make byte-aligned overhead expensive).**  Used in
+  Lucene / Tantivy / many inverted-index systems.  Probably the
+  closest competitor to Rice for the p > 0.95 tier.
+- **Partitioned Elias-Fano (PEF):** near-optimal for sorted-integer
+  compression with random-access support.  Used in
+  Lucene / SearchIndex for posting lists.  More complex decoder
+  than VByte but tighter compression.  Probably overkill for ph's
+  bulk-decode case (no random access needed).
+- **Interpolative coding (Moffat-Stuiver, 2000):** recursive median
+  encoding — encode the median, recurse on each half.  Very tight
+  on clustered binary data; can beat Rice/PEF when minorities
+  cluster.  Decode is tree-recursive (moderate speed, no obvious
+  SIMD).
+
+### C. Word-aligned hybrids (chunked bitmap, per-chunk encoding)
+
+- **WAH (Word-Aligned Hybrid):** 31-bit words, each is either a
+  "literal" (real bits) or a "fill" (run of all-0 / all-1 words
+  with length).  Decode = scan + a couple branches per word —
+  extremely fast.  Common in column stores and bitmap indexes
+  (FastBit / Druid).
+- **EWAH (Enhanced WAH):** WAH with a third word type holding
+  both literal bits AND a fill count — denser headers, used in
+  Druid / Hive / Lucene.
+- **Concise / PLWAH / CompAx:** other WAH variants.
+- **Roaring bitmaps:** chunked hybrid where each 16-bit-prefix
+  chunk picks the best encoding among {sorted positions, raw
+  bitmap, run-length list}.  Standard in modern OLAP databases
+  (Druid / ClickHouse / Pinot / Lucene / Solr).  Highly tuned for
+  set-operation queries; for pure bulk-decode it's not obviously
+  better than a single uniform scheme.
+
+### D. Arithmetic / range coding
+
+- **Binary arithmetic coding (CABAC / MQ / range coder):** gets
+  within ε of binary entropy for any p, parameter-free, can adapt
+  per-symbol.  **Decode is strictly serial** — each bit's range
+  refinement depends on the previous bit's state.  Hideous fit
+  for SIMD bulk decode.  Used in H.264/H.265 (CABAC) and JPEG2000
+  (MQ-coder) where serial decode is acceptable.  **Ruled out for
+  ph** — same fundamental serial-dependency issue as FSE x=1 but
+  worse.
+
+### E. Domain-specific tricks
+
+- **Raw-position list at extreme skew:** for p ≥ 0.99 (so few
+  minority bits per bitmap), just store the minority-bit positions
+  as raw 16-bit ints — no entropy coding at all.  At a 1024 B
+  bitmap (8192 bits) and p=0.99, that's ~80 positions × 2 bytes =
+  160 B; comparable to or better than Rice's 74 B.  Trivial decode.
+  Worth measuring vs Rice at the extreme tail.
+- **Hierarchical bitmap:** index a tree over the bitmap, each node
+  marked "all-zero / all-one / mixed".  Saves bits when whole
+  regions are constant.  Conceptually similar to ph's existing
+  flat-subtree path applied to the bitmaps themselves.
+
+### Practical short-list for ph (if anyone picks this up)
+
+Given the 2026-05-16 Rice bench showed FSE wins at moderate skew and
+Rice/position-list wins at extreme skew, the cleanest **complementary**
+options worth a microbench:
+
+1. **Position-list + VByte deltas** at p ≥ 0.95: same regime where
+   Rice already wins, but potentially even better SIMD-decode speed.
+   Direct comparison to the Rice numbers in
+   `results/bench_golomb-*.txt` would settle it.
+2. **EWAH** at moderate skew (p ∈ [0.7, 0.9]): word-aligned
+   literal/run hybrid that often matches FSE compression with much
+   simpler decode (per-word constant vs passthrough).
+3. **Exp-Golomb** as a parameter-free replacement for Rice:
+   eliminates the per-node `k` header byte.
+
+A multi-tier dispatch via the FSE marker byte (`0=raw, 1=Rice or
+Exp-Golomb, 2=position-list, 3=FSE`, optionally `4=EWAH`) maps
+cleanly onto these.
+
+### Why this is future work, not paper material
+
+Each of these adds 50-200 lines of encoder + decoder + tests + a
+wire-format version bump.  The Rice→FSE→raw 3-tier already in the
+codec is a clean enough story for the v1 paper.  Surveying every
+alternative encoding would dilute the algorithmic-Huffman-decoder
+focus of the paper.  This entry exists so a future contributor (or
+ph v2) has a structured starting point and doesn't have to
+re-derive the option space.
+
 
 ## Oodle's newlz_arrays_huff — integrated with ARM ASM kernels, 2026-05-15
 
