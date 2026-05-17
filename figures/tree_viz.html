@@ -13,16 +13,28 @@ html, body {
     background: #fafafa;
 }
 header {
-    padding: 8px 12px;
+    padding: 6px 12px;
     background: #fff;
     border-bottom: 1px solid #ddd;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    position: sticky;
+    top: 0;
+    z-index: 10;
+}
+header .row {
     display: flex;
     flex-wrap: wrap;
     align-items: center;
     gap: 14px;
-    position: sticky;
-    top: 0;
-    z-index: 10;
+}
+header .row-label {
+    color: #888;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    min-width: 56px;
 }
 header h1 {
     margin: 0;
@@ -164,36 +176,64 @@ table.node-table tr.in-flat { color: #b45309; }
 <body>
 
 <header>
-    <h1>PIVCO-Huffman tree viz</h1>
-    <label>Dataset:
-        <select id="dataset-select"></select>
-    </label>
-    <label>or file: <input type="file" id="file-input"></label>
-    <label>or text: <input type="text" id="text-input" size="24"
-        placeholder="type or paste text"></label>
-    <button id="text-build" type="button">build</button>
-    <label class="toggle">
-        <input type="checkbox" id="ph-opt" checked>
-        ph-optimize
-    </label>
-    <label class="toggle">
-        <input type="checkbox" id="show-flat" checked>
-        flat-subtrees
-    </label>
-    <label class="toggle">
-        <input type="checkbox" id="condense-flat">
-        condense
-    </label>
-    <label class="toggle" title="Max Huffman code length (length-limited)">
-        max-len
-        <span id="max-len-min" class="dim" style="font:10px monospace">1</span>
-        <input type="range" id="max-len" min="1" max="20" value="11"
-            style="width:96px">
-        <span id="max-len-max" class="dim" style="font:10px monospace">20</span>
-        <span id="max-len-val" style="font-family:monospace; width:14px; display:inline-block">11</span>
-    </label>
-    <button id="reset-view" type="button" title="Reset pan/zoom">reset view</button>
-    <span id="status" class="muted"></span>
+    <div class="row">
+        <h1>PIVCO-Huffman tree viz</h1>
+        <label>Dataset:
+            <select id="dataset-select"></select>
+        </label>
+        <label>or file: <input type="file" id="file-input"></label>
+        <label>or text: <input type="text" id="text-input" size="24"
+            placeholder="type or paste text"></label>
+        <button id="text-build" type="button">build</button>
+        <span id="status" class="muted"></span>
+    </div>
+    <div class="row">
+        <span class="row-label">tree</span>
+        <label class="toggle">
+            <input type="checkbox" id="ph-opt" checked>
+            ph-optimize
+        </label>
+        <label class="toggle">
+            <input type="checkbox" id="show-flat" checked>
+            flat-subtrees
+        </label>
+        <label class="toggle" title="Within-tier ordering of leaves when building the flat-aware tree. Affects which symbols land in the deepest D-flat chunk per length tier. 'byte asc' is the textbook canonical order (no frequency-based reorder).">
+            keys:
+            <select id="keys-sort">
+                <option value="freq_desc" selected>freq desc</option>
+                <option value="freq_asc">freq asc</option>
+                <option value="unsorted">byte asc</option>
+            </select>
+        </label>
+        <label class="toggle" title="Max Huffman code length (length-limited)">
+            max-len
+            <span id="max-len-min" class="dim" style="font:10px monospace">1</span>
+            <input type="range" id="max-len" min="1" max="20" value="11"
+                style="width:96px">
+            <span id="max-len-max" class="dim" style="font:10px monospace">20</span>
+            <span id="max-len-val" style="font-family:monospace; width:14px; display:inline-block">11</span>
+        </label>
+    </div>
+    <div class="row">
+        <span class="row-label">view</span>
+        <label class="toggle">
+            <input type="checkbox" id="condense-flat">
+            fold subtrees
+        </label>
+        <label class="toggle" title="Force minimum slot width per leaf so neighbouring subtrees / flat-region boxes can't overlap (tree may extend past the pane — zoom/pan to navigate)">
+            <input type="checkbox" id="no-overlap">
+            no overlap
+        </label>
+        <label class="toggle" title="Draw leaf boxes with character + hex byte. Off = tiny circles only.">
+            <input type="checkbox" id="show-leaf-details" checked>
+            show leaf details
+        </label>
+        <label class="toggle" title="Draw the per-node skew bar showing p_left / p_right split.">
+            <input type="checkbox" id="show-skew" checked>
+            show skew
+        </label>
+        <button id="reset-view" type="button" title="Reset pan/zoom">reset view</button>
+    </div>
 </header>
 
 <main>
@@ -384,16 +424,22 @@ function assignCanonicalCodes(lens) {
  * but rearranged so that same-length symbols cluster into D-flat
  * subtrees, exploiting count_L's binary decomposition.  See
  * src/huffman_table.c "Flat-aware code assignment" comment. */
-function assignPhFlatCodes(lens, freqs) {
-    // Per-length, gather symbols sorted by freq desc (ties: smaller sym).
+function assignPhFlatCodes(lens, freqs, keysSort) {
+    // Per-length, gather symbols sorted per keysSort (default: freq desc).
+    // 'unsorted' falls back to symbol value asc (textbook canonical).
     const max_len = lens.reduce((m, x) => Math.max(m, x), 0);
     const perLen = []; // perLen[L] = array of {symbol, freq}
     for (let L = 0; L <= max_len; L++) perLen[L] = [];
     for (let s = 0; s < 256; s++) {
         if (lens[s] > 0) perLen[lens[s]].push({ symbol: s, freq: freqs[s] });
     }
+    const cmp = keysSort === 'freq_asc'
+        ? ((a, b) => a.freq - b.freq || a.symbol - b.symbol)
+        : keysSort === 'unsorted'
+        ? ((a, b) => a.symbol - b.symbol)
+        : ((a, b) => b.freq - a.freq || a.symbol - b.symbol);  // freq_desc (default)
     for (let L = 1; L <= max_len; L++) {
-        perLen[L].sort((a, b) => b.freq - a.freq || a.symbol - b.symbol);
+        perLen[L].sort(cmp);
     }
     // Decompose each count_L by binary representation into chunks.
     // chunk: {L, bit, depth, n, items: [{symbol,freq}...]}
@@ -812,12 +858,39 @@ function renderTree(rootNode, meta) {
     const condensedLeafCount = leaves.filter(n => n.data._condensed).length;
     const realLeafCount = leaves.length - condensedLeafCount;
     const effectiveSlots = realLeafCount + condensedLeafCount * CONDENSED_SLOTS;
-    const slotSize = Math.max(12, Math.min(36, (W - 60) / Math.max(1, effectiveSlots)));
+    /* Slot-size bounds depend on whether leaves are drawn as full
+     * char/hex boxes (need text room: 12..36 px) or as tiny circles
+     * (denser layout possible: 6..18 px).  With "no overlap" on,
+     * pin every leaf slot to a generous fixed width so dense trees
+     * don't squish below the upper clamp — the tree may extend past
+     * the visible pane and zoom/pan handles it. */
+    const detailed = !!meta.showLeafDetails;
+    const SLOT_MIN = detailed ? 12 : 6;
+    const SLOT_MAX = detailed ? 36 : 18;
+    const NO_OVERLAP_SLOT_W = detailed ? 32 : 14;
+    const slotSize = meta.noOverlap
+        ? NO_OVERLAP_SLOT_W
+        : Math.max(SLOT_MIN,
+                   Math.min(SLOT_MAX, (W - 60) / Math.max(1, effectiveSlots)));
     /* Backwards-compat name used below for sizing leaf rects + skew bars. */
     const leafSize = slotSize;
-    const treeH = Math.max(180, 60 * (maxDepth + 1));
+    /* Per-level vertical spacing: 60 px is right when leaves are
+     * boxes (need room for char + hex + skew bar above the parent
+     * circle).  Halve it when leaves are tiny circles so deep trees
+     * fit. */
+    const levelH = detailed ? 60 : 30;
+    const treeH = Math.max(120, levelH * (maxDepth + 1));
 
-    const layout = d3.tree()
+    /* In "no overlap" mode use d3.cluster so every leaf gets its own
+     * exclusive x-column (positions are i * slotSize for i = leaf
+     * rank in DFS order), independent of subtree depth.  Default mode
+     * stays on d3.tree (Reingold-Tilford), which compacts deeper
+     * neighbouring subtrees and can let their leaves share x-ranges
+     * — the source of the overlap the user reported.  After cluster
+     * runs we override y to depth-based positioning: cluster pins
+     * every leaf to the bottom row, but we want nodes at their actual
+     * tree depth (same y-policy as d3.tree). */
+    const layout = (meta.noOverlap ? d3.cluster() : d3.tree())
         .size([effectiveSlots * slotSize, treeH])
         .separation((a, b) => {
             const aw = (a.data && a.data._condensed) ? CONDENSED_SLOTS : 1;
@@ -825,6 +898,9 @@ function renderTree(rootNode, meta) {
             return (aw + bw) / 2;
         });
     layout(root);
+    if (meta.noOverlap) {
+        root.each(n => { n.y = n.depth * levelH; });
+    }
 
     // Shift root to origin then add padding so it fits.
     let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
@@ -1013,9 +1089,11 @@ function renderTree(rootNode, meta) {
     // boundary (= p_left · BAR_W from the left edge).  So a heavy
     // right child shows up as a wide colored bar on the right of
     // the tick, light side empty on the left — and vice versa.
+    // Gated by meta.showSkew so users can collapse busy trees.
     const BAR_W = Math.max(28, leafSize * 1.0);
     const BAR_H = 7;
     const BAR_Y = -16;
+    if (meta.showSkew) {
     intG.append('rect')
         .attr('x', -BAR_W / 2).attr('y', BAR_Y)
         .attr('width', BAR_W).attr('height', BAR_H)
@@ -1050,8 +1128,10 @@ function renderTree(rootNode, meta) {
         .attr('y1', BAR_Y - 1).attr('y2', BAR_Y + BAR_H + 1)
         .attr('stroke', '#000').attr('stroke-width', 1.4)
         .attr('pointer-events', 'none');
+    }  // end if (meta.showSkew)
 
-    // Leaves: small box with byte hex + printable char + freq
+    // Leaves: full box (char + hex byte) when meta.showLeafDetails,
+    // otherwise tiny circle only.
     const leafNodes = root.descendants().filter(n => n.data.symbol >= 0);
     const lg = gWorld.selectAll('g.node-leaf')
         .data(leafNodes)
@@ -1060,25 +1140,37 @@ function renderTree(rootNode, meta) {
             .attr('transform', d => `translate(${d.x},${d.y})`)
             .on('mousemove', (e, d) => showTooltip(nodeTooltipHtml(d.data, totalN), e))
             .on('mouseleave', hideTooltip);
-    const W2 = leafSize - 2, H2 = 18;
-    lg.append('rect')
-        .attr('x', -W2 / 2).attr('y', -H2 / 2)
-        .attr('width', W2).attr('height', H2)
-        .attr('rx', 2)
-        .attr('fill', d => {
-            // Color leaf by frequency rank (just for visual variety).
-            const p = d.data.freq / totalN;
-            const lit = Math.min(95, 60 + 35 * (1 - Math.min(1, p * 10)));
-            return `hsl(220, 30%, ${lit}%)`;
-        });
-    lg.append('text')
-        .attr('class', 'leaf-char')
-        .attr('y', -2)
-        .text(d => fmtChar(d.data.symbol));
-    lg.append('text')
-        .attr('class', 'leaf-freq')
-        .attr('y', 7)
-        .text(d => d.data.symbol.toString(16).padStart(2,'0'));
+    if (meta.showLeafDetails) {
+        const W2 = leafSize - 2, H2 = 18;
+        lg.append('rect')
+            .attr('x', -W2 / 2).attr('y', -H2 / 2)
+            .attr('width', W2).attr('height', H2)
+            .attr('rx', 2)
+            .attr('fill', d => {
+                // Color leaf by frequency rank (just for visual variety).
+                const p = d.data.freq / totalN;
+                const lit = Math.min(95, 60 + 35 * (1 - Math.min(1, p * 10)));
+                return `hsl(220, 30%, ${lit}%)`;
+            });
+        lg.append('text')
+            .attr('class', 'leaf-char')
+            .attr('y', -2)
+            .text(d => fmtChar(d.data.symbol));
+        lg.append('text')
+            .attr('class', 'leaf-freq')
+            .attr('y', 7)
+            .text(d => d.data.symbol.toString(16).padStart(2,'0'));
+    } else {
+        lg.append('circle')
+            .attr('r', 3)
+            .attr('fill', d => {
+                const p = d.data.freq / totalN;
+                const lit = Math.min(85, 50 + 30 * (1 - Math.min(1, p * 10)));
+                return `hsl(220, 40%, ${lit}%)`;
+            })
+            .attr('stroke', '#666')
+            .attr('stroke-width', 0.5);
+    }
 
     // Initial fit-to-pane
     const bbox = gWorld.node().getBBox();
@@ -1371,6 +1463,10 @@ function refreshFromFreqs() {
     const phOpt = document.getElementById('ph-opt').checked;
     const showFlat = document.getElementById('show-flat').checked;
     const condenseFlat = document.getElementById('condense-flat').checked;
+    const noOverlap = document.getElementById('no-overlap').checked;
+    const showLeafDetails = document.getElementById('show-leaf-details').checked;
+    const showSkew = document.getElementById('show-skew').checked;
+    const keysSort = document.getElementById('keys-sort').value;
     const maxLen = parseInt(document.getElementById('max-len').value, 10);
     document.getElementById('max-len-val').textContent = maxLen;
     const status = document.getElementById('status');
@@ -1378,7 +1474,7 @@ function refreshFromFreqs() {
 
     const lens = buildHuffmanLengths(_freqs, maxLen);
     const codes = phOpt ?
-        assignPhFlatCodes(lens, _freqs) :
+        assignPhFlatCodes(lens, _freqs, keysSort) :
         assignCanonicalCodes(lens);
     const tree = buildTree(codes, _freqs);
     annotateTree(tree);
@@ -1401,7 +1497,8 @@ function refreshFromFreqs() {
 
     const meta = {
         name: _name, isMain: _isMain, totalN: _totalN,
-        phOpt, showFlat, condenseFlat, maxLen,
+        phOpt, showFlat, condenseFlat, noOverlap,
+        showLeafDetails, showSkew, keysSort, maxLen,
     };
     renderTree(tree, meta);
     renderStats(tree, meta);
@@ -1512,6 +1609,19 @@ function setupToggles() {
         refreshFromFreqs();
     });
     document.getElementById('condense-flat').addEventListener('change', () => {
+        _flatOverride.clear();
+        refreshFromFreqs();
+    });
+    document.getElementById('no-overlap').addEventListener('change', () => {
+        refreshFromFreqs();
+    });
+    document.getElementById('show-leaf-details').addEventListener('change', () => {
+        refreshFromFreqs();
+    });
+    document.getElementById('show-skew').addEventListener('change', () => {
+        refreshFromFreqs();
+    });
+    document.getElementById('keys-sort').addEventListener('change', () => {
         _flatOverride.clear();
         refreshFromFreqs();
     });
