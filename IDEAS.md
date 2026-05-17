@@ -341,15 +341,34 @@ options worth a microbench:
    Rice already wins, but potentially even better SIMD-decode speed.
    Direct comparison to the Rice numbers in
    `results/bench_golomb-*.txt` would settle it.
-2. **EWAH** at moderate skew (p ∈ [0.7, 0.9]): word-aligned
+2. ~~**EWAH** at moderate skew (p ∈ [0.7, 0.9]): word-aligned
    literal/run hybrid that often matches FSE compression with much
-   simpler decode (per-word constant vs passthrough).
+   simpler decode (per-word constant vs passthrough).~~
+   **Measured 2026-05-16 — EWAH is the wrong tool for ph.**  See
+   `results/bench_golomb_ewah-m4-20260516-*.txt`.  Lemire's EWAH
+   (ext/ewah, github.com/lemire/EWAHBoolArray, uword=uint64_t)
+   *expands* the bitmap by 1.6% across p ∈ [0.5, 0.95] (1040 B vs
+   1024 B raw) and only manages ratio 0.617 at p=0.99 (vs Rice's
+   0.072 and FSE's 0.097 at the same point).  Decode speed is in
+   the 140-310 MB/s band at moderate skew, 1.1 GB/s at p=0.945,
+   4.2 GB/s at p=0.99 — slower than both Rice and FSE everywhere.
+   Root cause: EWAH is built for *clustered* minorities (posting
+   lists, bitmap indexes with localized 1-runs).  ph's per-node
+   partition bitmaps are produced by IID-ish Bernoulli sampling —
+   no clustering structure to exploit.  At p=0.50..0.90 every
+   64-bit word contains both 0s and 1s, so EWAH classifies them
+   all as "literal" words and pays a per-word header on top of the
+   original data.  EWAH would shine in a different workload
+   (compress real posting lists from a search index); it doesn't
+   match ph's regime.
 3. **Exp-Golomb** as a parameter-free replacement for Rice:
    eliminates the per-node `k` header byte.
 
 A multi-tier dispatch via the FSE marker byte (`0=raw, 1=Rice or
-Exp-Golomb, 2=position-list, 3=FSE`, optionally `4=EWAH`) maps
-cleanly onto these.
+Exp-Golomb, 2=position-list, 3=FSE`) maps cleanly onto the remaining
+viable options.  EWAH is dropped from the candidate list — it cost
+~250 lines of wrapper + the ext/ewah submodule to measure but lost
+on every axis we care about.
 
 ### Why this is future work, not paper material
 

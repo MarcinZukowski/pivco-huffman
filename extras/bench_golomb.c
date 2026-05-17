@@ -39,6 +39,18 @@
 #include <string.h>
 #include <time.h>
 
+/* Lemire's EWAH (Enhanced Word-Aligned Hybrid) — vendored at ext/ewah,
+ * wrapped via extras/bench_ewah_wrapper.cpp.  Built in when CMake
+ * detects ext/ewah; otherwise the EWAH columns just stay empty. */
+#ifdef PIVCO_HAS_EWAH
+extern size_t ewah_encode(const uint8_t *bm, size_t n_bits,
+                           int majority_bit,
+                           uint8_t *out, size_t out_cap);
+extern int    ewah_decode(const uint8_t *enc, size_t enc_len,
+                           uint8_t *bm_out, size_t n_bits,
+                           int majority_bit);
+#endif
+
 /* ============================================================
  *  Rice coding (Golomb with M = 2^k)
  * ============================================================ */
@@ -431,6 +443,7 @@ int main(int argc, char **argv)
     static uint8_t src[2048];
     static uint8_t rice_enc[8192];
     static uint8_t fse_enc[8192];
+    static uint8_t ewah_enc[8192];
     static uint8_t dec[2048];
 
     printf("# bench_golomb — Rice (Golomb-k, M=2^k) vs fast FSE (x=8)\n");
@@ -441,11 +454,23 @@ int main(int argc, char **argv)
     printf("# lower bound on encoded size.  ratio columns are encoded_bits / bitmap_bits.\n");
     printf("# Rice 'k' is auto-picked per p_major; column reports the chosen value.\n");
     printf("# FSE column: x=8 cursors, y=1 round — the fast-FSE wide-cursor variant.\n");
+#ifdef PIVCO_HAS_EWAH
+    printf("# EWAH column: Lemire's Enhanced Word-Aligned Hybrid (ext/ewah,\n");
+    printf("#   github.com/lemire/EWAHBoolArray), uword = uint64_t.\n");
+#endif
     printf("#\n");
-    printf("%5s %4s %7s | %3s %5s %5s %7s %7s | %3s %5s %5s %7s %7s\n",
+    printf("%5s %4s %7s | %3s %5s %5s %7s %7s | %3s %5s %5s %7s %7s"
+#ifdef PIVCO_HAS_EWAH
+           " | %5s %5s %7s %7s"
+#endif
+           "\n",
            "pmaj", "tid", "entropy",
            "k", "Rsz", "Rrat", "RencMB", "RdecMB",
-           "x", "Fsz", "Frat", "FencMB", "FdecMB");
+           "x", "Fsz", "Frat", "FencMB", "FdecMB"
+#ifdef PIVCO_HAS_EWAH
+           , "Esz", "Erat", "EencMB", "EdecMB"
+#endif
+           );
     fflush(stdout);
 
     for (int pi = 0; pi < n_p; pi++) {
@@ -556,20 +581,71 @@ int main(int argc, char **argv)
             }
         }
 
+        /* ---------- EWAH (Lemire's Enhanced Word-Aligned Hybrid) ---------- */
+#ifdef PIVCO_HAS_EWAH
+        size_t esz = 0;
+        double e_enc_best = 0.0, e_dec_best = 0.0;
+        double e_ratio = 0.0;
+
+        esz = ewah_encode(src, BYTES * 8, maj, ewah_enc, sizeof(ewah_enc));
+        if (esz > 0) {
+            memset(dec, 0xAA, BYTES);
+            if (ewah_decode(ewah_enc, esz, dec, BYTES * 8, maj) != 0
+                || memcmp(src, dec, BYTES) != 0) {
+                esz = 0;
+            }
+        }
+        if (esz > 0) {
+            e_ratio = (double)(esz * 8) / (double)(BYTES * 8);
+            for (int b = 0; b < N_BATCHES; b++) {
+                volatile size_t sink = 0;
+                double t0 = now_ns();
+                for (int i = 0; i < iters; i++)
+                    sink ^= ewah_encode(src, BYTES * 8, maj,
+                                         ewah_enc, sizeof(ewah_enc));
+                double t1 = now_ns();
+                (void)sink;
+                double mb = (double)BYTES * (double)iters / (t1 - t0) * 1e3;
+                if (mb > e_enc_best) e_enc_best = mb;
+            }
+            for (int b = 0; b < N_BATCHES; b++) {
+                volatile uint8_t sink = 0;
+                double t0 = now_ns();
+                for (int i = 0; i < iters; i++) {
+                    ewah_decode(ewah_enc, esz, dec, BYTES * 8, maj);
+                    sink ^= dec[0] ^ dec[BYTES - 1];
+                }
+                double t1 = now_ns();
+                (void)sink;
+                double mb = (double)BYTES * (double)iters / (t1 - t0) * 1e3;
+                if (mb > e_dec_best) e_dec_best = mb;
+            }
+        }
+#endif
+
         printf("%5.3f %4d %7.4f | %3d %5zu %5.3f %7.1f %7.1f | ",
                p_emp, g_tid, H,
                k, rsz, r_ratio, r_enc_best, r_dec_best);
         if (fsz > 0) {
-            printf("%3d %5zu %5.3f %7.1f %7.1f\n",
+            printf("%3d %5zu %5.3f %7.1f %7.1f",
                    x, fsz, f_ratio, f_enc_best, f_dec_best);
         } else {
-            printf("%3s %5s %5s %7s %7s  %s\n",
-                   "-", "-", "-", "-", "-", f_note);
+            printf("%3s %5s %5s %7s %7s",
+                   "-", "-", "-", "-", "-");
         }
+#ifdef PIVCO_HAS_EWAH
+        if (esz > 0) {
+            printf(" | %5zu %5.3f %7.1f %7.1f",
+                   esz, e_ratio, e_enc_best, e_dec_best);
+        } else {
+            printf(" | %5s %5s %7s %7s", "-", "-", "-", "-");
+        }
+#endif
+        printf("\n");
         fflush(stdout);
+        (void)f_note;
 
         free_tables();
     }
-
     return 0;
 }

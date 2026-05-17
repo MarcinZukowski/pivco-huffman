@@ -704,13 +704,36 @@ if(BUILD_BENCH)
             target_include_directories(pivco_fse_xy_micro PRIVATE src ext/fse/lib)
         endif()
 
-        # Rice (Golomb power-of-2 M) vs fast-FSE microbench.
-        # See extras/bench_golomb.c header for the design.
-        add_executable(pivco_bench_golomb
-            extras/bench_golomb.c
-        )
+        # Rice (Golomb power-of-2 M) vs fast-FSE vs Lemire's EWAH on
+        # skewed bitmaps.  See extras/bench_golomb.c header for the
+        # design.  EWAH support pulled in via a C++ wrapper around
+        # ext/ewah (header-only library); if ext/ewah isn't cloned the
+        # EWAH columns just stay empty in the output.
+        if(EXISTS ${CMAKE_SOURCE_DIR}/ext/ewah/include/ewah/ewah.h)
+            set(PIVCO_HAS_EWAH 1)
+            message(STATUS "EWAH detected at ext/ewah — pivco_bench_golomb will include EWAH column")
+        else()
+            set(PIVCO_HAS_EWAH 0)
+            message(STATUS "EWAH not detected at ext/ewah — pivco_bench_golomb will skip EWAH column")
+        endif()
+
+        if(PIVCO_HAS_EWAH)
+            add_executable(pivco_bench_golomb
+                extras/bench_golomb.c
+                extras/bench_ewah_wrapper.cpp
+            )
+            target_compile_definitions(pivco_bench_golomb PRIVATE PIVCO_HAS_EWAH=1)
+            target_include_directories(pivco_bench_golomb PRIVATE
+                src ext/fse/lib ext/ewah/include)
+            set_source_files_properties(extras/bench_ewah_wrapper.cpp
+                PROPERTIES COMPILE_FLAGS "-std=c++17 -w")
+        else()
+            add_executable(pivco_bench_golomb
+                extras/bench_golomb.c
+            )
+            target_include_directories(pivco_bench_golomb PRIVATE src ext/fse/lib)
+        endif()
         target_link_libraries(pivco_bench_golomb pivco_huffman m)
-        target_include_directories(pivco_bench_golomb PRIVATE src ext/fse/lib)
     endif()
 endif()
 
