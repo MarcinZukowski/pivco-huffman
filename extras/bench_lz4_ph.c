@@ -180,21 +180,54 @@ static const char *basename_of(const char *path) {
 typedef struct {
     size_t enc_size;     /* compressed bytes */
     double dec_mbps;     /* decode throughput in source-bytes / sec */
+    double enc_mbps;     /* encode throughput in source-bytes / sec */
     int    ok;
     const char *note;
 } bench_result_t;
 
+/* Encode iters per batch: kept small because HC level 9 + zstd level 9
+ * are slow (single-digit-MB/s class), and we only need 2-3 samples to
+ * pick min-of-batches. */
+#define ENC_ITERS 3
+
 /* ---------- LZ4 alone ---------- */
 
-static bench_result_t bench_lz4(const uint8_t *src, size_t src_len, int iters)
+/* Level convention to match the LZ4 CLI:
+ *   level 1   -> LZ4_compress_default       (fast greedy)
+ *   level >=3 -> LZ4_compress_HC(level)     (HC chain at given depth) */
+static int lz4_encode_at_level(const uint8_t *src, int src_len,
+                                uint8_t *dst, int dst_cap, int level)
+{
+    if (level <= 1) {
+        return LZ4_compress_default((const char *)src, (char *)dst,
+                                     src_len, dst_cap);
+    }
+    return LZ4_compress_HC((const char *)src, (char *)dst,
+                            src_len, dst_cap, level);
+}
+
+static bench_result_t bench_lz4_lvl(const uint8_t *src, size_t src_len,
+                                     int iters, int level)
 {
     bench_result_t r = {0};
     int cap = LZ4_compressBound((int)src_len);
     uint8_t *enc = (uint8_t *)malloc((size_t)cap);
-    int enc_size = LZ4_compress_HC((const char *)src, (char *)enc,
-                                    (int)src_len, cap, 9);
+    int enc_size = lz4_encode_at_level(src, (int)src_len, enc, cap, level);
     if (enc_size <= 0) { r.note = "LZ4 encode failed"; free(enc); return r; }
     r.enc_size = (size_t)enc_size;
+
+    /* Encode timing — re-encode into the same buffer each iter. */
+    double enc_best = 0.0;
+    for (int b = 0; b < N_BATCHES; b++) {
+        double t0 = now_ns();
+        for (int i = 0; i < ENC_ITERS; i++) {
+            lz4_encode_at_level(src, (int)src_len, enc, cap, level);
+        }
+        double t1 = now_ns();
+        double mb = (double)src_len * (double)ENC_ITERS / (t1 - t0) * 1e3;
+        if (mb > enc_best) enc_best = mb;
+    }
+    r.enc_mbps = enc_best;
 
     uint8_t *dec = (uint8_t *)malloc(src_len + 64);
     /* Warm up + sanity check. */
@@ -270,6 +303,24 @@ static bench_result_t bench_lz4_ph(const uint8_t *src, size_t src_len, int iters
         r.note = "LZ4 decode mismatch";
         free(lz4_enc); free(ph_enc); free(lz4_dec_buf); free(dec);
         return r;
+    }
+
+    /* Encode timing — LZ4 + ph stacked. */
+    {
+        double enc_best = 0.0;
+        for (int b = 0; b < N_BATCHES; b++) {
+            double t0 = now_ns();
+            for (int i = 0; i < ENC_ITERS; i++) {
+                LZ4_compress_HC((const char *)src, (char *)lz4_enc,
+                                 (int)src_len, cap, 9);
+                size_t s = ph_cap;
+                pivcohuf_compress(lz4_enc, (size_t)lz4_size, ph_enc, &s);
+            }
+            double t1 = now_ns();
+            double mb = (double)src_len * (double)ENC_ITERS / (t1 - t0) * 1e3;
+            if (mb > enc_best) enc_best = mb;
+        }
+        r.enc_mbps = enc_best;
     }
 
     double best = 0.0;
@@ -402,7 +453,7 @@ static bench_result_t bench_lz4_huf0(const uint8_t *src, size_t src_len, int ite
  *   [section 3]: u32 len + pivcohuf-compressed overflow
  */
 
-static bench_result_t bench_lz4_split_ph(const uint8_t *src, size_t src_len, int iters)
+static bench_result_t bench_lz4_split_ph_lvl(const uint8_t *src, size_t src_len, int iters, int lz4_level)
 {
     bench_result_t r = {0};
 
@@ -423,7 +474,7 @@ static bench_result_t bench_lz4_split_ph(const uint8_t *src, size_t src_len, int
     };
 
     int lz4_size = phsplit_LZ4_compress_HC_split(
-        (const char *)src, (int)src_len, throwaway, lz4_cap, 9, &split);
+        (const char *)src, (int)src_len, throwaway, lz4_cap, lz4_level, &split);
     if (lz4_size <= 0 || !split.ok) {
         r.note = "LZ4-split encode failed";
         free(throwaway); free(s_lit); free(s_tok); free(s_off); free(s_ovf);
@@ -525,6 +576,33 @@ static bench_result_t bench_lz4_split_ph(const uint8_t *src, size_t src_len, int
         pivcohuf_compress(s_ovf, split.ovf_pos, enc_ovf, &enc_ovf_size) != PIVCOHUF_OK) {
         r.note = "ph encode (split) failed";
         goto cleanup;
+    }
+
+    /* Encode timing — full pipeline: phsplit + 4× ph_compress. */
+    {
+        double enc_best = 0.0;
+        for (int b = 0; b < N_BATCHES; b++) {
+            double t0 = now_ns();
+            for (int i = 0; i < ENC_ITERS; i++) {
+                lz4_split_ctx_t rs = {
+                    .literals = s_lit, .lit_cap = src_len + 64,
+                    .tokens   = s_tok, .tok_cap = (size_t)lz4_cap,
+                    .offsets  = s_off, .off_cap = (size_t)lz4_cap,
+                    .overflow = s_ovf, .ovf_cap = (size_t)lz4_cap,
+                };
+                phsplit_LZ4_compress_HC_split(
+                    (const char *)src, (int)src_len, throwaway, lz4_cap, lz4_level, &rs);
+                size_t a = cap_lit, b2 = cap_tok, c = cap_off, d = cap_ovf;
+                pivcohuf_compress(s_lit, rs.lit_pos, enc_lit, &a);
+                pivcohuf_compress(s_tok, rs.tok_pos, enc_tok, &b2);
+                pivcohuf_compress(s_off, rs.off_pos, enc_off, &c);
+                pivcohuf_compress(s_ovf, rs.ovf_pos, enc_ovf, &d);
+            }
+            double t1 = now_ns();
+            double mb = (double)src_len * (double)ENC_ITERS / (t1 - t0) * 1e3;
+            if (mb > enc_best) enc_best = mb;
+        }
+        r.enc_mbps = enc_best;
     }
 
     /* Outer wire: 16 B header + 4× (4 B len + payload). */
@@ -641,7 +719,7 @@ cleanup:
  * answer "is the 4-stream LZ4 decoder itself competitive with
  * upstream LZ4_decompress_safe?". */
 
-static bench_result_t bench_lz4_split_raw(const uint8_t *src, size_t src_len, int iters)
+static bench_result_t bench_lz4_split_raw_lvl(const uint8_t *src, size_t src_len, int iters, int lz4_level)
 {
     bench_result_t r = {0};
     int lz4_cap = LZ4_compressBound((int)src_len);
@@ -658,11 +736,33 @@ static bench_result_t bench_lz4_split_raw(const uint8_t *src, size_t src_len, in
         .overflow = s_ovf, .ovf_cap = (size_t)lz4_cap,
     };
     int lz4_size = phsplit_LZ4_compress_HC_split(
-        (const char *)src, (int)src_len, throwaway, lz4_cap, 9, &split);
+        (const char *)src, (int)src_len, throwaway, lz4_cap, lz4_level, &split);
     if (lz4_size <= 0 || !split.ok) {
         r.note = "raw-split encode failed";
         free(throwaway); free(s_lit); free(s_tok); free(s_off); free(s_ovf);
         return r;
+    }
+
+    /* Encode timing — phsplit re-encode into the same 4-stream buffers. */
+    {
+        double enc_best = 0.0;
+        for (int b = 0; b < N_BATCHES; b++) {
+            double t0 = now_ns();
+            for (int i = 0; i < ENC_ITERS; i++) {
+                lz4_split_ctx_t rs = {
+                    .literals = s_lit, .lit_cap = src_len + 64,
+                    .tokens   = s_tok, .tok_cap = (size_t)lz4_cap,
+                    .offsets  = s_off, .off_cap = (size_t)lz4_cap,
+                    .overflow = s_ovf, .ovf_cap = (size_t)lz4_cap,
+                };
+                phsplit_LZ4_compress_HC_split(
+                    (const char *)src, (int)src_len, throwaway, lz4_cap, lz4_level, &rs);
+            }
+            double t1 = now_ns();
+            double mb = (double)src_len * (double)ENC_ITERS / (t1 - t0) * 1e3;
+            if (mb > enc_best) enc_best = mb;
+        }
+        r.enc_mbps = enc_best;
     }
 
     /* Wire = 16 B outer header + 4× (4 B len + raw section). */
@@ -771,6 +871,19 @@ static bench_result_t bench_zstd_lvl(const uint8_t *src, size_t src_len,
     }
     r.enc_size = enc_size;
 
+    /* Encode timing. */
+    double enc_best = 0.0;
+    for (int b = 0; b < N_BATCHES; b++) {
+        double t0 = now_ns();
+        for (int i = 0; i < ENC_ITERS; i++) {
+            ZSTD_compress(enc, cap, src, src_len, level);
+        }
+        double t1 = now_ns();
+        double mb = (double)src_len * (double)ENC_ITERS / (t1 - t0) * 1e3;
+        if (mb > enc_best) enc_best = mb;
+    }
+    r.enc_mbps = enc_best;
+
     uint8_t *dec = (uint8_t *)malloc(src_len + 64);
     size_t dsz = ZSTD_decompress(dec, src_len, enc, enc_size);
     if (ZSTD_isError(dsz) || dsz != src_len || memcmp(dec, src, src_len) != 0) {
@@ -847,17 +960,22 @@ int main(int argc, char **argv)
     printf("# Decode MB/s = source bytes / total decode time (incl. inner LZ4 stage).\n");
     printf("# min of %d batches × %d iters/batch.\n", N_BATCHES, iters);
     printf("#\n");
-    printf("%-22s  %10s | %8s %5s %7s | %8s %5s %7s | %8s %5s %7s | %8s %5s %7s | %8s %5s %7s | %8s %5s %7s | %8s %5s %7s | %8s %5s %7s | %8s %5s %7s\n",
+    printf("%-22s  %10s | %8s %5s %7s | %8s %5s %7s | %8s %5s %7s | %8s %5s %7s | %8s %5s %7s | %8s %5s %7s | %8s %5s %7s | %8s %5s %7s | %8s %5s %7s | %8s %5s %7s | %8s %5s %7s | %8s %5s %7s | %8s %5s %7s | %8s %5s %7s\n",
             "dataset", "raw",
-            "lz4 sz", "rat", "MB/s",
-            "lz4-r sz", "rat", "MB/s",
+            "lz4@1 sz", "rat", "MB/s",
+            "lz4@3 sz", "rat", "MB/s",
+            "lz4@9 sz", "rat", "MB/s",
+            "lzx@9 sz", "rat", "MB/s",
+            "lzx@1 sz", "rat", "MB/s",
             "+ph sz", "rat", "MB/s",
             "+huf sz", "rat", "MB/s",
             "zstd@9 sz", "rat", "MB/s",
             "zstd@3 sz", "rat", "MB/s",
             "zstd@1 sz", "rat", "MB/s",
-            "split sz", "rat", "MB/s",
-            "split-fse", "rat", "MB/s");
+            "lzxph@9", "rat", "MB/s",
+            "lzxph+fse", "rat", "MB/s",
+            "lzxph@1", "rat", "MB/s",
+            "lzxph@1+fse", "rat", "MB/s");
     printf("%-22s  %10s + %s\n", "", "",
             "------------------------------------------------------------------------"
             "------------------------------------------------------------------------"
@@ -875,16 +993,21 @@ int main(int argc, char **argv)
             continue;
         }
 
-        bench_result_t lz    = bench_lz4           (src, src_len, iters);
-        bench_result_t lzr   = bench_lz4_split_raw (src, src_len, iters);
+        bench_result_t lz1_  = bench_lz4_lvl       (src, src_len, iters, 1);
+        bench_result_t lz3_  = bench_lz4_lvl       (src, src_len, iters, 3);
+        bench_result_t lz    = bench_lz4_lvl       (src, src_len, iters, 9);
+        bench_result_t lzr   = bench_lz4_split_raw_lvl (src, src_len, iters, 9);
+        bench_result_t lzr1  = bench_lz4_split_raw_lvl (src, src_len, iters, 1);
 
         pivco_huffman_set_fse_enabled(0);
         bench_result_t lzp   = bench_lz4_ph        (src, src_len, iters);
         bench_result_t lzh   = bench_lz4_huf0      (src, src_len, iters);
-        bench_result_t lzsp  = bench_lz4_split_ph  (src, src_len, iters);
+        bench_result_t lzsp  = bench_lz4_split_ph_lvl(src, src_len, iters, 9);
+        bench_result_t lzsp1 = bench_lz4_split_ph_lvl(src, src_len, iters, 1);
 
         pivco_huffman_set_fse_enabled(1);
-        bench_result_t lzsp_fse = bench_lz4_split_ph(src, src_len, iters);
+        bench_result_t lzsp_fse  = bench_lz4_split_ph_lvl(src, src_len, iters, 9);
+        bench_result_t lzsp1_fse = bench_lz4_split_ph_lvl(src, src_len, iters, 1);
         pivco_huffman_set_fse_enabled(0);
 
         bench_result_t zs9   = bench_zstd_lvl      (src, src_len, iters, 9);
@@ -901,17 +1024,34 @@ int main(int argc, char **argv)
                                 (R).note ? (R).note : "-");                      \
         } while (0)
 
-        PRINT_COL(lz,       " | ");
-        PRINT_COL(lzr,      " | ");
-        PRINT_COL(lzp,      " | ");
-        PRINT_COL(lzh,      " | ");
-        PRINT_COL(zs9,      " | ");
-        PRINT_COL(zs3,      " | ");
-        PRINT_COL(zs1,      " | ");
-        PRINT_COL(lzsp,     " | ");
-        PRINT_COL(lzsp_fse, "\n");
+        PRINT_COL(lz1_,        " | ");
+        PRINT_COL(lz3_,        " | ");
+        PRINT_COL(lz,          " | ");
+        PRINT_COL(lzr,         " | ");
+        PRINT_COL(lzr1,        " | ");
+        PRINT_COL(lzp,         " | ");
+        PRINT_COL(lzh,         " | ");
+        PRINT_COL(zs9,         " | ");
+        PRINT_COL(zs3,         " | ");
+        PRINT_COL(zs1,         " | ");
+        PRINT_COL(lzsp,        " | ");
+        PRINT_COL(lzsp_fse,    " | ");
+        PRINT_COL(lzsp1,       " | ");
+        PRINT_COL(lzsp1_fse,   "\n");
 
         #undef PRINT_COL
+
+        /* Encode-rate continuation row. */
+        printf("%-22s  %10s   enc MB/s: lz4@1=%.0f lz4@3=%.0f lz4@9=%.0f "
+               "lzx@9=%.0f lzx@1=%.0f +ph=%.0f +huf=%.0f "
+               "zs9=%.0f zs3=%.0f zs1=%.0f "
+               "lzxph@9=%.0f lzxph@9+fse=%.0f lzxph@1=%.0f lzxph@1+fse=%.0f\n",
+               "", "",
+               lz1_.enc_mbps, lz3_.enc_mbps, lz.enc_mbps,
+               lzr.enc_mbps, lzr1.enc_mbps, lzp.enc_mbps, lzh.enc_mbps,
+               zs9.enc_mbps, zs3.enc_mbps, zs1.enc_mbps,
+               lzsp.enc_mbps, lzsp_fse.enc_mbps,
+               lzsp1.enc_mbps, lzsp1_fse.enc_mbps);
 
         fflush(stdout);
         free(src);
