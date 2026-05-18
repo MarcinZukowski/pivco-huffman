@@ -79,7 +79,12 @@ int lz4_split_decompress(const uint8_t *literals, size_t literals_len,
         if (off_p + 2 > offsets + offsets_len) return -3;
         uint16_t offset = (uint16_t)off_p[0] | ((uint16_t)off_p[1] << 8);
         off_p += 2;
-        if (offset == 0 || offset > (uint16_t)(out_p - out)) return -4;
+        /* Offset bounds check: must be in (0, output-so-far].  Note:
+         * `offset` is u16 (max 65535) but `out_p - out` can be much
+         * larger than 64 KB on long files — a naïve `(uint16_t)`
+         * cast truncates and produces false positives past the
+         * 64-KB boundary.  Compare in size_t. */
+        if (offset == 0 || (size_t)offset > (size_t)(out_p - out)) return -4;
 
         /* Decode match length (token lo-nibble + 4, plus overflow). */
         size_t match_len = (size_t)(token & 0xf);

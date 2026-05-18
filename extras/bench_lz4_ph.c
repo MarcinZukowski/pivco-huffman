@@ -443,6 +443,71 @@ static bench_result_t bench_lz4_split_ph(const uint8_t *src, size_t src_len, int
                 split.off_pos, split.ovf_pos);
     }
 
+    /* Strong sanity check: walk the standard LZ4 output buffer and
+     * produce the 4 streams the way bench_lz4_split.c does.  Compare
+     * byte-for-byte against what the modified encoder pushed.  Any
+     * mismatch tells us EXACTLY which stream is wrong and at which
+     * byte the encoder's side-channel diverges from the LZ4 it
+     * actually emitted. */
+    {
+        uint8_t *w_lit = (uint8_t *)malloc(src_len + 64);
+        uint8_t *w_tok = (uint8_t *)malloc((size_t)lz4_size);
+        uint8_t *w_off = (uint8_t *)malloc((size_t)lz4_size);
+        uint8_t *w_ovf = (uint8_t *)malloc((size_t)lz4_size);
+        size_t   w_lit_n = 0, w_tok_n = 0, w_off_n = 0, w_ovf_n = 0;
+        const uint8_t *p   = throwaway;
+        const uint8_t *end = throwaway + lz4_size;
+        while (p < end) {
+            uint8_t token = *p++;
+            w_tok[w_tok_n++] = token;
+            size_t lit_len = token >> 4;
+            if (lit_len == 15) {
+                while (p < end && *p == 255) { w_ovf[w_ovf_n++] = *p; lit_len += 255; p++; }
+                if (p < end) { w_ovf[w_ovf_n++] = *p; lit_len += *p++; }
+            }
+            if (lit_len > 0) {
+                if (p + lit_len > end) lit_len = end - p;
+                memcpy(w_lit + w_lit_n, p, lit_len);
+                w_lit_n += lit_len;
+                p       += lit_len;
+            }
+            if (p >= end) break;
+            w_off[w_off_n++] = *p++;
+            w_off[w_off_n++] = *p++;
+            size_t mat_len = token & 0xf;
+            if (mat_len == 15) {
+                while (p < end && *p == 255) { w_ovf[w_ovf_n++] = *p; mat_len += 255; p++; }
+                if (p < end) { w_ovf[w_ovf_n++] = *p; mat_len += *p++; }
+            }
+        }
+        int diff = 0;
+        if (w_lit_n != split.lit_pos) { fprintf(stderr, "  literals count differ: walker=%zu split=%zu\n", w_lit_n, split.lit_pos); diff = 1; }
+        if (w_tok_n != split.tok_pos) { fprintf(stderr, "  tokens count differ:   walker=%zu split=%zu\n", w_tok_n, split.tok_pos); diff = 1; }
+        if (w_off_n != split.off_pos) { fprintf(stderr, "  offsets count differ:  walker=%zu split=%zu\n", w_off_n, split.off_pos); diff = 1; }
+        if (w_ovf_n != split.ovf_pos) { fprintf(stderr, "  overflow count differ: walker=%zu split=%zu\n", w_ovf_n, split.ovf_pos); diff = 1; }
+        if (!diff && memcmp(w_lit, s_lit, w_lit_n) != 0) {
+            size_t i = 0; while (i < w_lit_n && w_lit[i] == s_lit[i]) i++;
+            fprintf(stderr, "  literals content differ at idx %zu/%zu (walker=0x%02x split=0x%02x)\n",
+                   i, w_lit_n, w_lit[i], s_lit[i]);
+        }
+        if (!diff && memcmp(w_tok, s_tok, w_tok_n) != 0) {
+            size_t i = 0; while (i < w_tok_n && w_tok[i] == s_tok[i]) i++;
+            fprintf(stderr, "  tokens content differ at idx %zu/%zu (walker=0x%02x split=0x%02x)\n",
+                   i, w_tok_n, w_tok[i], s_tok[i]);
+        }
+        if (!diff && memcmp(w_off, s_off, w_off_n) != 0) {
+            size_t i = 0; while (i < w_off_n && w_off[i] == s_off[i]) i++;
+            fprintf(stderr, "  offsets content differ at idx %zu/%zu (walker=0x%02x split=0x%02x)\n",
+                   i, w_off_n, w_off[i], s_off[i]);
+        }
+        if (!diff && memcmp(w_ovf, s_ovf, w_ovf_n) != 0) {
+            size_t i = 0; while (i < w_ovf_n && w_ovf[i] == s_ovf[i]) i++;
+            fprintf(stderr, "  overflow content differ at idx %zu/%zu (walker=0x%02x split=0x%02x)\n",
+                   i, w_ovf_n, w_ovf[i], s_ovf[i]);
+        }
+        free(w_lit); free(w_tok); free(w_off); free(w_ovf);
+    }
+
     /* ph-encode each section. */
     size_t cap_lit = pivcohuf_compress_bound(split.lit_pos + 1);
     size_t cap_tok = pivcohuf_compress_bound(split.tok_pos + 1);

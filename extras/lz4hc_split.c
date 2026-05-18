@@ -47,24 +47,15 @@
  * `g_lz4_split_ctx` pointer; when NULL, this is equivalent to upstream
  * LZ4HC (modulo the symbol prefix).
  *
- * STATUS (2026-05-17): WORK IN PROGRESS.  Stream byte-counts match the
- * expected totals (sum of stream sizes == LZ4 output size, and each
- * matches the bench_lz4_split walker output on the standard LZ4 stream)
- * — so the encoder pushes the RIGHT NUMBER of bytes per stream.  But
- * decode roundtrip currently diverges around the 64-KB OUTPUT boundary
- * for every input tested (cat-wiki.html, pride.txt, etc).  Divergence
- * is content/ordering, not byte-count.  Likely a subtle bug in either:
- *   (a) the order in which overflow bytes are pushed across sequences,
- *   (b) the trailing-literals patch at one of the 3 sites (line 877,
- *       line 1502, line ~2287), or
- *   (c) the custom decoder's lockstep advance across the 4 streams.
- *
- * The first successful run (an earlier patch revision) produced a
- * usable cat-wiki.html data point: 187 074 wire bytes (ratio 0.185)
- * with 6391 MB/s decode throughput — between LZ4+ph (0.197) and zstd
- * (0.159) on compression, and 2.2× zstd's decode speed.  That number
- * is the headline data point for the hypothesis even if the current
- * code can't reproduce it reliably.  TODO: track down the alignment bug.
+ * STATUS (2026-05-17): WORKING.  Roundtrip-verified on every MAIN
+ * dataset.  Encoder is a verbatim copy of upstream lz4hc.c with
+ * surgical lz4_split_push_* calls added at every op-write site
+ * (encodeSequence body + all 3 trailing-literals paths).  Byte-counts
+ * exactly match the bench_lz4_split walker output on the corresponding
+ * standard LZ4 stream.  The original bug ("decode mismatch at 64-KB
+ * boundary") was actually in the DECODER, not here — see
+ * lz4_split_decode.c for the (uint16_t) cast that truncated bounds
+ * checks past the 64-KB output boundary.
  * ========================================================================== */
 
 #include <stddef.h>
