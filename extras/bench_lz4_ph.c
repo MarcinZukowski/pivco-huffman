@@ -632,6 +632,130 @@ cleanup:
 }
 
 
+/* ---------- LZ4-split RAW (no entropy coding) ----------
+ *
+ * Isolates the cost of the 4-stream LZ4 path itself, separate from
+ * the 4 ph passes.  Encode: hacked LZ4 emits 4 streams; we just
+ * concatenate them with a tiny header.  Decode: lz4_split_decompress
+ * directly on the raw streams, no pivcohuf in the loop.  Lets us
+ * answer "is the 4-stream LZ4 decoder itself competitive with
+ * upstream LZ4_decompress_safe?". */
+
+static bench_result_t bench_lz4_split_raw(const uint8_t *src, size_t src_len, int iters)
+{
+    bench_result_t r = {0};
+    int lz4_cap = LZ4_compressBound((int)src_len);
+    uint8_t *throwaway = (uint8_t *)malloc((size_t)lz4_cap);
+    uint8_t *s_lit = (uint8_t *)malloc(src_len + 64);
+    uint8_t *s_tok = (uint8_t *)malloc((size_t)lz4_cap);
+    uint8_t *s_off = (uint8_t *)malloc((size_t)lz4_cap);
+    uint8_t *s_ovf = (uint8_t *)malloc((size_t)lz4_cap);
+
+    lz4_split_ctx_t split = {
+        .literals = s_lit, .lit_cap = src_len + 64,
+        .tokens   = s_tok, .tok_cap = (size_t)lz4_cap,
+        .offsets  = s_off, .off_cap = (size_t)lz4_cap,
+        .overflow = s_ovf, .ovf_cap = (size_t)lz4_cap,
+    };
+    int lz4_size = phsplit_LZ4_compress_HC_split(
+        (const char *)src, (int)src_len, throwaway, lz4_cap, 9, &split);
+    if (lz4_size <= 0 || !split.ok) {
+        r.note = "raw-split encode failed";
+        free(throwaway); free(s_lit); free(s_tok); free(s_off); free(s_ovf);
+        return r;
+    }
+
+    /* Wire = 16 B outer header + 4× (4 B len + raw section). */
+    size_t wire_size = 16 + 4 * 4 + split.lit_pos + split.tok_pos
+                                  + split.off_pos + split.ovf_pos;
+    uint8_t *wire = (uint8_t *)malloc(wire_size);
+    {
+        uint8_t *p = wire;
+        memcpy(p, "LSR\0", 4); p += 4;
+        p[0] = 1; p[1] = 0; p[2] = 0; p[3] = 0; p += 4;
+        p[0] = (uint8_t)(src_len & 0xff);
+        p[1] = (uint8_t)((src_len >> 8) & 0xff);
+        p[2] = (uint8_t)((src_len >> 16) & 0xff);
+        p[3] = (uint8_t)((src_len >> 24) & 0xff);
+        p[4] = 0; p[5] = 0; p[6] = 0; p[7] = 0;
+        p += 8;
+        #define WRITE_RAW(buf, sz)                                              \
+            do {                                                                \
+                p[0] = (uint8_t)((sz)       & 0xff);                            \
+                p[1] = (uint8_t)(((sz) >> 8) & 0xff);                           \
+                p[2] = (uint8_t)(((sz) >> 16)& 0xff);                           \
+                p[3] = (uint8_t)(((sz) >> 24)& 0xff);                           \
+                p += 4;                                                         \
+                memcpy(p, (buf), (sz));                                          \
+                p += (sz);                                                       \
+            } while (0)
+        WRITE_RAW(s_lit, split.lit_pos);
+        WRITE_RAW(s_tok, split.tok_pos);
+        WRITE_RAW(s_off, split.off_pos);
+        WRITE_RAW(s_ovf, split.ovf_pos);
+        #undef WRITE_RAW
+    }
+    r.enc_size = wire_size;
+
+    uint8_t *dec = (uint8_t *)malloc(src_len + 64);
+    /* Sanity check. */
+    {
+        const uint8_t *p = wire + 16;
+        size_t s_lit_size = (size_t)(p[0]|(p[1]<<8)|(p[2]<<16)|(p[3]<<24)); p += 4;
+        const uint8_t *p_lit = p; p += s_lit_size;
+        size_t s_tok_size = (size_t)(p[0]|(p[1]<<8)|(p[2]<<16)|(p[3]<<24)); p += 4;
+        const uint8_t *p_tok = p; p += s_tok_size;
+        size_t s_off_size = (size_t)(p[0]|(p[1]<<8)|(p[2]<<16)|(p[3]<<24)); p += 4;
+        const uint8_t *p_off = p; p += s_off_size;
+        size_t s_ovf_size = (size_t)(p[0]|(p[1]<<8)|(p[2]<<16)|(p[3]<<24)); p += 4;
+        const uint8_t *p_ovf = p;
+        int rc = lz4_split_decompress(p_lit, s_lit_size,
+                                       p_tok, s_tok_size,
+                                       p_off, s_off_size,
+                                       p_ovf, s_ovf_size,
+                                       dec, src_len);
+        if (rc != 0 || memcmp(dec, src, src_len) != 0) {
+            r.note = "raw-split roundtrip failed";
+            free(wire); free(dec);
+            free(throwaway); free(s_lit); free(s_tok); free(s_off); free(s_ovf);
+            return r;
+        }
+    }
+
+    double best = 0.0;
+    for (int b = 0; b < N_BATCHES; b++) {
+        volatile uint8_t sink = 0;
+        double t0 = now_ns();
+        for (int i = 0; i < iters; i++) {
+            const uint8_t *p = wire + 16;
+            size_t s_lit_size = (size_t)(p[0]|(p[1]<<8)|(p[2]<<16)|(p[3]<<24)); p += 4;
+            const uint8_t *p_lit = p; p += s_lit_size;
+            size_t s_tok_size = (size_t)(p[0]|(p[1]<<8)|(p[2]<<16)|(p[3]<<24)); p += 4;
+            const uint8_t *p_tok = p; p += s_tok_size;
+            size_t s_off_size = (size_t)(p[0]|(p[1]<<8)|(p[2]<<16)|(p[3]<<24)); p += 4;
+            const uint8_t *p_off = p; p += s_off_size;
+            size_t s_ovf_size = (size_t)(p[0]|(p[1]<<8)|(p[2]<<16)|(p[3]<<24)); p += 4;
+            const uint8_t *p_ovf = p;
+            lz4_split_decompress(p_lit, s_lit_size,
+                                  p_tok, s_tok_size,
+                                  p_off, s_off_size,
+                                  p_ovf, s_ovf_size,
+                                  dec, src_len);
+            sink ^= dec[0] ^ dec[src_len - 1];
+        }
+        double t1 = now_ns();
+        (void)sink;
+        double mb = (double)src_len * (double)iters / (t1 - t0) * 1e3;
+        if (mb > best) best = mb;
+    }
+    r.dec_mbps = best;
+    r.ok = 1;
+    free(wire); free(dec);
+    free(throwaway); free(s_lit); free(s_tok); free(s_off); free(s_ovf);
+    return r;
+}
+
+
 /* ---------- zstd reference (level 9 to match LZ4-HC level 9) ---------- */
 
 static bench_result_t bench_zstd(const uint8_t *src, size_t src_len, int iters)
@@ -720,19 +844,19 @@ int main(int argc, char **argv)
     printf("# Decode MB/s = source bytes / total decode time (incl. inner LZ4 stage).\n");
     printf("# min of %d batches × %d iters/batch.\n", N_BATCHES, iters);
     printf("#\n");
-    printf("%-22s  %10s | %8s %5s %7s | %8s %5s %7s | %8s %5s %7s | %8s %5s %7s | %8s %5s %7s\n",
+    printf("%-22s  %10s | %8s %5s %7s | %8s %5s %7s | %8s %5s %7s | %8s %5s %7s | %8s %5s %7s | %8s %5s %7s\n",
             "dataset", "raw",
             "lz4 sz", "rat", "MB/s",
+            "lz4-r sz", "rat", "MB/s",
             "+ph sz", "rat", "MB/s",
             "+huf sz", "rat", "MB/s",
             "zstd sz", "rat", "MB/s",
             "split sz", "rat", "MB/s");
     printf("%-22s  %10s + %s\n", "", "",
-            "----------------------------------------------------------------"
-            "----------------------------------------------------------------------");
-    printf("%-22s  %10s |   (split = real LZ4-HC fork emitting 4 streams "
-           "{literals, tokens, offsets, overflow}, each ph-encoded;\n"
-           "%-22s  %10s    custom 4-stream decoder, no LZ4 reconstruction)\n",
+            "------------------------------------------------------------------------"
+            "------------------------------------------------------------------------");
+    printf("%-22s  %10s |   lz4-r = LZ4-split RAW (4-stream encoder, custom decoder, NO entropy).\n"
+           "%-22s  %10s    split  = LZ4-split + per-stream ph (this column has the full hybrid).\n",
            "", "", "", "");
 
     for (int i = 0; i < n_paths; i++) {
@@ -743,17 +867,22 @@ int main(int argc, char **argv)
             continue;
         }
 
-        bench_result_t lz   = bench_lz4         (src, src_len, iters);
-        bench_result_t lzp  = bench_lz4_ph      (src, src_len, iters);
-        bench_result_t lzh  = bench_lz4_huf0    (src, src_len, iters);
-        bench_result_t zs   = bench_zstd        (src, src_len, iters);
-        bench_result_t lzsp = bench_lz4_split_ph(src, src_len, iters);
+        bench_result_t lz    = bench_lz4           (src, src_len, iters);
+        bench_result_t lzr   = bench_lz4_split_raw (src, src_len, iters);
+        bench_result_t lzp   = bench_lz4_ph        (src, src_len, iters);
+        bench_result_t lzh   = bench_lz4_huf0      (src, src_len, iters);
+        bench_result_t zs    = bench_zstd          (src, src_len, iters);
+        bench_result_t lzsp  = bench_lz4_split_ph  (src, src_len, iters);
 
         printf("%-22s  %10zu | ", basename_of(path), src_len);
 
         if (lz.ok)  printf("%8zu %5.3f %7.0f | ",
                             lz.enc_size,  (double)lz.enc_size  / src_len, lz.dec_mbps);
         else         printf("%8s %5s %7s | ", "-", "-", lz.note ? lz.note : "-");
+
+        if (lzr.ok) printf("%8zu %5.3f %7.0f | ",
+                            lzr.enc_size, (double)lzr.enc_size / src_len, lzr.dec_mbps);
+        else         printf("%8s %5s %7s | ", "-", "-", lzr.note ? lzr.note : "-");
 
         if (lzp.ok) printf("%8zu %5.3f %7.0f | ",
                             lzp.enc_size, (double)lzp.enc_size / src_len, lzp.dec_mbps);
