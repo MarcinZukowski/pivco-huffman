@@ -1,0 +1,174 @@
+# bench_lz4_split — LZ4 stream split + per-stream entropy/decode bench
+# LZ4 compression: HC level 9 (matches `lz4 -9`).
+# H0 = Shannon byte entropy (bits/byte).  HuffRatio = length-
+#   limited byte-Huffman ratio (PIVCO_MAX_CODE_LEN cap).
+# Decode MB/s = min of 5 batches × 200 iters/batch.
+#
+=== cat-wiki.html ===
+  raw=1008695  lz4=216277  sequences=46772  (lits=64577, hdrs=151700, sum=216277)
+  stream    |     size     H0  huf-rat  fse-rat | huf0 enc huf0 dec |   ph enc   ph dec
+  --------------------------------------------------------------------------------------------
+  full lz4  |   216277  7.158   0.8979   0.8969 |   194288    1444  |   200125    4622
+  literals  |    64577  5.967   0.7544   0.7502 |    48608    2011  |    49736    4510
+  headers   |   151700  6.989   0.8784   0.8760 |   133274    1463  |   137822    4646
+
+  hdr fields (n_seqs=46772).  enc-B = approximate bytes
+                              after byte-Huffman coding
+                              of this field's value stream.
+  field        |   n_vals    raw-B     H0  huf-rat  fse-rat |    enc-B
+  tokens       |    46772    46772  5.649   0.7169   0.7137 |    33531
+   lit_codes   |    46772    23386  2.166   0.2761   0.2712 |    12916
+   mat_codes   |    46772    23386  3.500   0.4403   0.4380 |    20595
+  off_lo       |    46772    46772  7.958   0.9980   incmpr |    46680
+  off_hi       |    46772    46772  6.237   0.7825   0.7855 |    36599
+  off_codes    |    46772    29233  3.577   0.4533   0.4477 |    21200
+
+  offset summary (46772 sequences):
+    raw 2-byte offsets .........................    93544 B
+    byte-Huffman on off_lo + off_hi ............    83279 B
+    zstd-style: Huffman(off_codes) + raw bias ..    82991 B (21200 codes + 61791 bias)
+
+=== pride.txt ===
+  raw=738046  lz4=303162  sequences=85588  (lits=45273, hdrs=257889, sum=303162)
+  stream    |     size     H0  huf-rat  fse-rat | huf0 enc huf0 dec |   ph enc   ph dec
+  --------------------------------------------------------------------------------------------
+  full lz4  |   303162  7.333   0.9199   0.9186 |   278983    1447  |   287848    3953
+  literals  |    45273  5.023   0.6320   0.6317 |    28657    2293  |    31419    6629
+  headers   |   257889  7.294   0.9154   0.9139 |   236143    1454  |   241513    3966
+
+  hdr fields (n_seqs=85588).  enc-B = approximate bytes
+                              after byte-Huffman coding
+                              of this field's value stream.
+  field        |   n_vals    raw-B     H0  huf-rat  fse-rat |    enc-B
+  tokens       |    85588    85588  4.799   0.6192   0.6076 |    52998
+   lit_codes   |    85588    42794  1.358   0.1904   0.1700 |    16298
+   mat_codes   |    85588    42794  3.456   0.4347   0.4322 |    37206
+  off_lo       |    85588    85588  7.998   1.0000   incmpr |    85588
+  off_hi       |    85588    85588  7.686   0.9643   0.9656 |    82530
+  off_codes    |    85588    53493  2.793   0.3530   0.3495 |    30213
+
+  offset summary (85588 sequences):
+    raw 2-byte offsets .........................   171176 B
+    byte-Huffman on off_lo + off_hi ............   168118 B
+    zstd-style: Huffman(off_codes) + raw bias ..   168250 B (30213 codes + 138037 bias)
+
+=== cat-image.jpg ===
+  raw=279603  lz4=269818  sequences=1710  (lits=263013, hdrs=6805, sum=269818)
+  stream    |     size     H0  huf-rat  fse-rat | huf0 enc huf0 dec |   ph enc   ph dec
+  --------------------------------------------------------------------------------------------
+  full lz4  |   269818  7.897   0.9910   0.9925 |   267380    1457  |   268909    4287
+  literals  |   263013  7.894   0.9907   0.9919 |        - incompressible |   269454    4059
+  headers   |     6805  6.788   0.8521   0.8905 |     5882    1145  |     7030    4655
+
+  hdr fields (n_seqs=1710).  enc-B = approximate bytes
+                              after byte-Huffman coding
+                              of this field's value stream.
+  field        |   n_vals    raw-B     H0  huf-rat  fse-rat |    enc-B
+  tokens       |     1710     1710  4.184   0.5270   0.6263 |      901
+   lit_codes   |     1710      855  2.750   0.3463   0.3538 |      592
+   mat_codes   |     1710      855  1.616   0.2166   0.2088 |      370
+  off_lo       |     1710     1710  7.783   0.9766   incmpr |     1670
+  off_hi       |     1710     1710  6.891   0.8648   0.9865 |     1479
+  off_codes    |     1710     1069  3.291   0.4183   0.4216 |      715
+
+  offset summary (1710 sequences):
+    raw 2-byte offsets .........................     3420 B
+    byte-Huffman on off_lo + off_hi ............     3149 B
+    zstd-style: Huffman(off_codes) + raw bias ..     3193 B (715 codes + 2478 bias)
+
+=== json_api.json ===
+  raw=526902  lz4=80211  sequences=13170  (lits=36063, hdrs=44148, sum=80211)
+  stream    |     size     H0  huf-rat  fse-rat | huf0 enc huf0 dec |   ph enc   ph dec
+  --------------------------------------------------------------------------------------------
+  full lz4  |    80211  7.083   0.8893   0.8899 |    71425    1424  |    73526    4856
+  literals  |    36063  5.854   0.7372   0.7360 |    26647    1847  |    30499    4827
+  headers   |    44148  7.020   0.8819   0.8845 |    39015    1414  |    43716    4315
+
+  hdr fields (n_seqs=13170).  enc-B = approximate bytes
+                              after byte-Huffman coding
+                              of this field's value stream.
+  field        |   n_vals    raw-B     H0  huf-rat  fse-rat |    enc-B
+  tokens       |    13170    13170  5.501   0.6981   0.7072 |     9194
+   lit_codes   |    13170     6585  2.387   0.3025   0.2998 |     3984
+   mat_codes   |    13170     6585  3.199   0.4036   0.4016 |     5315
+  off_lo       |    13170    13170  7.919   0.9928   incmpr |    13075
+  off_hi       |    13170    13170  6.303   0.7905   0.8075 |    10411
+  off_codes    |    13170     8232  3.378   0.4278   0.4241 |     5634
+
+  offset summary (13170 sequences):
+    raw 2-byte offsets .........................    26340 B
+    byte-Huffman on off_lo + off_hi ............    23486 B
+    zstd-style: Huffman(off_codes) + raw bias ..    23726 B (5634 codes + 18092 bias)
+
+=== chinese_text.txt ===
+  raw=494259  lz4=262548  sequences=61825  (lits=76364, hdrs=186184, sum=262548)
+  stream    |     size     H0  huf-rat  fse-rat | huf0 enc huf0 dec |   ph enc   ph dec
+  --------------------------------------------------------------------------------------------
+  full lz4  |   262548  7.454   0.9357   0.9341 |        - incompressible |   254840    4548
+  literals  |    76364  6.126   0.7803   0.7713 |    59136    1952  |    64134    5277
+  headers   |   186184  7.268   0.9118   0.9106 |   169846    1453  |   173030    3840
+
+  hdr fields (n_seqs=61825).  enc-B = approximate bytes
+                              after byte-Huffman coding
+                              of this field's value stream.
+  field        |   n_vals    raw-B     H0  huf-rat  fse-rat |    enc-B
+  tokens       |    61825    61825  5.101   0.6502   0.6454 |    40201
+   lit_codes   |    61825    30913  2.073   0.2629   0.2595 |    16256
+   mat_codes   |    61825    30913  3.046   0.3835   0.3811 |    23707
+  off_lo       |    61825    61825  7.995   1.0000   incmpr |    61825
+  off_hi       |    61825    61825  7.466   0.9364   0.9387 |    57891
+  off_codes    |    61825    38641  3.025   0.3810   0.3786 |    23556
+
+  offset summary (61825 sequences):
+    raw 2-byte offsets .........................   123650 B
+    byte-Huffman on off_lo + off_hi ............   119716 B
+    zstd-style: Huffman(off_codes) + raw bias ..   119765 B (23556 codes + 96209 bias)
+
+=== calgary_pic ===
+  raw=513216  lz4=66782  sequences=10250  (lits=31923, hdrs=34859, sum=66782)
+  stream    |     size     H0  huf-rat  fse-rat | huf0 enc huf0 dec |   ph enc   ph dec
+  --------------------------------------------------------------------------------------------
+  full lz4  |    66782  6.627   0.8323   0.8339 |    55672    1700  |    61711    4331
+  literals  |    31923  5.536   0.7010   0.7024 |    22369    2008  |    23181    5425
+  headers   |    34859  6.716   0.8430   0.8480 |    29472    1408  |    34703    4719
+
+  hdr fields (n_seqs=10250).  enc-B = approximate bytes
+                              after byte-Huffman coding
+                              of this field's value stream.
+  field        |   n_vals    raw-B     H0  huf-rat  fse-rat |    enc-B
+  tokens       |    10250    10250  5.982   0.7551   0.7721 |     7740
+   lit_codes   |    10250     5125  3.091   0.3894   0.3883 |     3991
+   mat_codes   |    10250     5125  2.960   0.3739   0.3722 |     3832
+  off_lo       |    10250    10250  6.261   0.7853   0.8122 |     8050
+  off_hi       |    10250    10250  5.615   0.7047   0.7257 |     7223
+  off_codes    |    10250     6407  3.198   0.4039   0.4020 |     4140
+
+  offset summary (10250 sequences):
+    raw 2-byte offsets .........................    20500 B
+    byte-Huffman on off_lo + off_hi ............    15273 B
+    zstd-style: Huffman(off_codes) + raw bias ..    17357 B (4140 codes + 13217 bias)
+
+=== gzip_random.gz ===
+  raw=180726  lz4=181356  sequences=80  (lits=180373, hdrs=983, sum=181356)
+  stream    |     size     H0  huf-rat  fse-rat | huf0 enc huf0 dec |   ph enc   ph dec
+  --------------------------------------------------------------------------------------------
+  full lz4  |   181356  7.997   1.0000   incmpr |        - incompressible |   189120    4461
+  literals  |   180373  7.998   1.0000   incmpr |        - incompressible |   188416    5588
+  headers   |      983  2.913   0.3779   0.6043 |      441     523  |     3035    3967
+
+  hdr fields (n_seqs=80).  enc-B = approximate bytes
+                              after byte-Huffman coding
+                              of this field's value stream.
+  field        |   n_vals    raw-B     H0  huf-rat  fse-rat |    enc-B
+  tokens       |       80       80  1.656   0.2219   0.6500 |       18
+   lit_codes   |       80       40  0.649   0.1531   0.2000 |       12
+   mat_codes   |       80       40  1.115   0.1703   0.2000 |       14
+  off_lo       |       80       80  5.808   0.7344   incmpr |       59
+  off_hi       |       80       80  4.923   0.6219   incmpr |       50
+  off_codes    |       80       50  3.322   0.4203   0.5500 |       34
+
+  offset summary (80 sequences):
+    raw 2-byte offsets .........................      160 B
+    byte-Huffman on off_lo + off_hi ............      109 B
+    zstd-style: Huffman(off_codes) + raw bias ..      137 B (34 codes + 103 bias)
+

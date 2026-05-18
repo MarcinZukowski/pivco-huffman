@@ -704,6 +704,25 @@ if(BUILD_BENCH)
             target_include_directories(pivco_fse_xy_micro PRIVATE src ext/fse/lib)
         endif()
 
+        # LZ4 output stream splitter + per-stream entropy / decode
+        # bench.  Links against system LZ4 (homebrew) for now;
+        # vendoring at ext/lz4 is a possible future step if we want
+        # this on CI hosts.
+        find_library(LZ4_LIB lz4 PATHS /opt/homebrew/lib /usr/local/lib)
+        find_path(LZ4_INC lz4.h PATHS /opt/homebrew/include /usr/local/include)
+        if(LZ4_LIB AND LZ4_INC)
+            message(STATUS "LZ4 detected at ${LZ4_LIB} — enabling pivco_bench_lz4_split")
+            add_executable(pivco_bench_lz4_split
+                extras/bench_lz4_split.c
+            )
+            target_link_libraries(pivco_bench_lz4_split pivco_huffman huf0 m
+                "${LZ4_LIB}")
+            target_include_directories(pivco_bench_lz4_split PRIVATE
+                src ext/fse/lib "${LZ4_INC}")
+        else()
+            message(STATUS "LZ4 not found — pivco_bench_lz4_split skipped")
+        endif()
+
         # Rice (Golomb power-of-2 M) vs fast-FSE vs Lemire's EWAH on
         # skewed bitmaps.  See extras/bench_golomb.c header for the
         # design.  EWAH support pulled in via a C++ wrapper around

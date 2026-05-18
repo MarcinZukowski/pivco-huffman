@@ -396,6 +396,162 @@ on LZ4 residuals is open and easy to probe with the existing
 dataset set.  Cheap first pass before any LZ4-integration work.
 
 
+## pivcohuf file-format redesign: block-structured + tiny-input optimisation — PARKED, 2026-05-17
+
+**Status: design parked — not implementing yet.**  Useful for v2 of
+the file format; current monolithic format (`src/pivcohuf_file.c`)
+keeps shipping until then.
+
+### Part 1: block-structured file format
+
+Today's `pivcohuf` codec builds one Huffman table over the entire
+input and serialises one stream.  For non-trivial files this means:
+load the whole file into memory, build one global histogram, encode
+the whole file in one pass.  Bad for streaming, large files, mixed-
+content data, parallel decode, and random access.
+
+Proposal: file = sequence of **independent blocks** with their own
+mini-header + Huffman table.  Default block size 4 MB (configurable
+via `-B`).
+
+Per-block overhead at various sizes (~220 B per-block header):
+
+| block size |  hdr overhead   |  table-build / decode cost |
+|-----------:|----------------:|---------------------------:|
+|    128 KB |          0.17%  |                       ~0.5% |
+|      1 MB |         0.021%  |                       ~0.1% |
+|      4 MB |         0.005%  |                      ~0.03% |
+|     16 MB |         0.001%  |                      ~0.01% |
+
+Everything ≥ 1 MB is in the noise; 4 MB recommended default (fits
+typical L2 caches: M4 has 8 MB L2 per core, Xeon Granite Rapids
+~2 MB, Zen 5 ~1 MB).  16 MB is fine too if global-table accuracy
+matters more than adaptivity.
+
+Sketch:
+
+```
+file header (~24 B):  magic + version + block_size_log2 + flags +
+                      total_uncompressed_size + n_blocks
+[optional index, n_blocks × 16 B]:  for random access
+per block:
+  mini-header  (~16 B): block_uncompressed + block_compressed + xxh32
+  table        (~200 B): code-length nibbles + within-tier ordering
+  body                  : existing ph 8 KB sub-block stream
+```
+
+Side benefits over the monolithic format:
+  - **Streaming**: peak memory becomes O(block_size) instead of
+    O(file_size).  Decode-while-read is trivial.
+  - **Parallel decode**: each block decodes independently; pin
+    one block per thread.  At 4 GB/s per core, 4 MB blocks scale
+    cleanly to 4-8 cores before memory bandwidth caps it.
+  - **Range queries**: with the block index, `pread()` + decompress
+    block N alone — useful for log files / append-only stores.
+  - **Crash recovery**: corrupt block doesn't poison the rest.
+  - **Per-block adaptivity**: mixed-content files (text + image
+    concatenations) compress better with local tables.
+
+Implementation surface in `src/pivcohuf_file.c`: chunked encode/
+decode loop, header restructure, optional block index, streaming I/O
+helpers (`pivcohuf_compress_stream(FILE*, FILE*, opts)`).  CLI:
+`pivcohuf c -B 4M input`.  ~300-400 lines net new.
+
+### Part 2: tiny-input header optimisation
+
+The 220-byte per-block table cost is a non-issue at 1 MB+ blocks,
+but it's painful at the file level when the WHOLE FILE is tiny.
+Today, a 7-byte input like `"foobar\n"` compresses to ~206 bytes
+because the static header + 128-byte code-length array + per-tier
+ordering bytes dwarf the actual encoded payload.
+
+Two cheap optimisations gated on alphabet size:
+
+**Sparse alphabet encoding** — when the alphabet is small, don't
+serialise lengths for all 256 symbols.  Pick the densest
+representation; cost includes the per-symbol length nibbles
+(4 bits each) for whichever symbols are present:
+
+  - **n < 31**: list of `n` × 8-bit symbol IDs + nibble-packed
+    lengths.  Cost: 1 + n + ⌈n/2⌉ B  (= 1 + 1.5n).
+  - **31 ≤ n < 192**: 32-byte presence bitmap + nibble-packed
+    lengths for present symbols.  Cost: 32 + ⌈n/2⌉ B
+    (= 32 + 0.5n).
+  - **n ≥ 192**: full 128-byte nibble array (256 × 4-bit lengths,
+    zero for absent symbols).  Cost: 128 B.
+
+Crossover points fall out of the equalities (n=31 between list and
+bitmap; n=192 between bitmap and full).  The sparse-list form
+covers most realistic short inputs (English prose σ ≈ 27, JSON
+σ ≈ 70-100, etc.); the bitmap form covers near-full-alphabet data;
+the full form takes over once the bitmap's gap-tracking overhead
+exceeds the cost of just listing every position.
+
+**Narrow code-length encoding** — once we know n_symbols, the
+maximum possible code length is `ceil(log2(n_symbols))` (for a
+balanced tree) up to PIVCO_MAX_CODE_LEN (currently 11).  Use the
+narrowest field that fits the actual max length:
+
+  - **max_len ≤ 3** (alphabet ≤ 8): 2 bits per length.
+  - **max_len ≤ 7** (alphabet ≤ 128): 3 bits per length.
+  - **max_len ≤ 15**: 4 bits per length (= current encoding).
+  - **max_len ≤ 31** (length-limited paper variants): 5 bits.
+
+Total length-storage cost: `n_symbols × bits_per_length`, rounded up
+to a byte.
+
+### Worked example: `"foobar\n"` (7 bytes)
+
+Distinct symbols: `f, o, o, b, a, r, \n` → 6 unique.  Frequencies:
+o=2, all others=1.  Huffman tree has max_len = 3 bits.
+
+Current format encoding cost:
+  - 26 B file header
+  - 8 B uncompressed_size
+  - 128 B full code-length array
+  - ~40 B within-tier ordering (multiple tiers, K_L = 2 small)
+  - ~3-5 B actual encoded payload
+  - **Total: ~205 B for 7 B input — 29× expansion.**
+
+Proposed encoding cost:
+  - ~8 B block header (block_uncompressed + block_compressed + maybe
+    xxh32; could drop the checksum for tiny blocks)
+  - 1 B "encoding mode" byte (alphabet form + length-width)
+  - 1 B n_symbols (= 6)
+  - 6 B sparse symbol list (`'\n', 'a', 'b', 'f', 'o', 'r'`)
+  - 6 × 2 bits = 2 B code lengths (`{3, 3, 3, 3, 1, 3}` — `o` is
+    the only 1-bit symbol)
+  - ~2 B encoded payload (7 symbols × ~2.4 bits avg / 8 ≈ 2.1 B)
+  - **Total: ~20 B for 7 B input — 3× expansion**, dominated by the
+    fixed-cost mini-header.
+
+Headline: tiny inputs go from "more header than data" to "header
+size proportional to log(alphabet)".  Real prose-like short inputs
+(<1 KB) likely shrink from ~250 B floor to ~30-60 B floor.
+
+### Why park?
+
+`pivcohuf` is an **internal experiment harness**, not a real-world
+compressor.  Byte-only Huffman without an LZ-style match stage is
+never going to ship as a general-purpose tool — it's strictly
+worse than zstd / LZ4 / brotli on every real workload.  Polishing
+its file format in isolation is secondary work.
+
+The block-structured format only becomes load-bearing when ph is
+plugged into a *combined* codec (LZ4 + ph, or some other LZ +
+entropy split — see the "LZ4 + ph" entry above).  At that point
+the block boundaries naturally line up with the LZ pass's window,
+the tiny-input gating matters because each LZ-block produces a
+small literal stream, and the streaming/parallel-decode benefits
+all land at once.
+
+So: do the block-structured format **as part of the LZ4+ph
+prototype**, not as a standalone refactor of `pivcohuf`.  This
+entry exists so when that prototype starts, the design decisions
+are already worked out and the small-input header gating goes in
+at the same wire-format bump rather than as a follow-up.
+
+
 ## Oodle's newlz_arrays_huff — integrated with ARM ASM kernels, 2026-05-15
 
 **Status: integrated.**  ph optionally links against OodleUE via
