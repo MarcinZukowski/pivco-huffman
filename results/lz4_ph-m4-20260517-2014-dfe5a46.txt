@@ -1,0 +1,43 @@
+  split decode mismatch at offset 65585/1008695  (src=0x20 dec=0x00)
+    src_len=1008695 lit_pos=64577 tok_pos=46773 off_pos=93544 ovf_pos=11383
+# bench_lz4_ph — stacked codec prototype
+# LZ4 = LZ4_compress_HC(level=9).  zstd = ZSTD_compress(level=9).
+# ph runs with --no-fse (byte-Huffman only).  huf0 chunks at 128 KB.
+# Decode MB/s = source bytes / total decode time (incl. inner LZ4 stage).
+# min of 5 batches × 50 iters/batch.
+#
+dataset                        raw |   lz4 sz   rat    MB/s |   +ph sz   rat    MB/s |  +huf sz   rat    MB/s |  zstd sz   rat    MB/s | split sz   rat    MB/s
+                                   + --------------------------------------------------------------------------------------------------------------------------------------
+                                   |   (split = real LZ4-HC fork emitting 4 streams {literals, tokens, offsets, overflow}, each ph-encoded;
+                                      custom 4-stream decoder, no LZ4 reconstruction)
+cat-wiki.html              1008695 |   216277 0.214    8687 |   198844 0.197    5434 |   194288 0.193    3954 |   160355 0.159    3073 |        -     - split decode mismatch
+  split decode mismatch at offset 65536/738046  (src=0x49 dec=0x00)
+    src_len=738046 lit_pos=45273 tok_pos=85589 off_pos=171176 ovf_pos=1124
+pride.txt                   738046 |   303162 0.411    4746 |   286496 0.388    2940 |   278983 0.378    2063 |   236998 0.321    1617 |        -     - split decode mismatch
+  split decode mismatch at offset 66230/279603  (src=0x13 dec=0x79)
+    src_len=279603 lit_pos=263013 tok_pos=1711 off_pos=3420 ovf_pos=1674
+cat-image.jpg               279603 |   269818 0.965   34863 |   269857 0.965    3092 |   267380 0.956    1426 |   269147 0.963   14794 |        -     - split decode mismatch
+  split decode mismatch at offset 67065/526902  (src=0x38 dec=0x13)
+    src_len=526902 lit_pos=36063 tok_pos=13171 off_pos=26340 ovf_pos=4637
+json_api.json               526902 |    80211 0.152   17107 |    73316 0.139    7380 |    71425 0.136    6022 |    58577 0.111    4985 |        -     - split decode mismatch
+  split decode mismatch at offset 65540/494259  (src=0xe5 dec=0x00)
+    src_len=494259 lit_pos=76364 tok_pos=61826 off_pos=123650 ovf_pos=708
+chinese_text.txt            494259 |   262548 0.531    4648 |   252103 0.510    2573 |   245802 0.497    1715 |   215101 0.435    1345 |        -     - split decode mismatch
+  split decode mismatch at offset 65682/513216  (src=0x00 dec=0x01)
+    src_len=513216 lit_pos=31923 tok_pos=10251 off_pos=20500 ovf_pos=4108
+calgary_pic                 513216 |    66782 0.130   21155 |    60178 0.117    7920 |    55672 0.108    7785 |    49956 0.097    4471 |        -     - split decode mismatch
+  split decode mismatch at offset 73355/180726  (src=0xd5 dec=0xe6)
+    src_len=180726 lit_pos=180373 tok_pos=81 off_pos=160 ovf_pos=742
+gzip_random.gz              180726 |   181356 1.003   46340 |   188755 1.044    2553 |   181356 1.003   26974 |   180741 1.000   71152 |        -     - split decode mismatch
+  split decode mismatch at offset 65542/368435  (src=0x77 dec=0x14)
+    src_len=368435 lit_pos=17335 tok_pos=22414 off_pos=44826 ovf_pos=4947
+source_c.c                  368435 |    89522 0.243    8119 |    81711 0.222    4000 |    80076 0.217    3403 |    70292 0.191    2527 |        -     - split decode mismatch
+  split decode mismatch at offset 65559/500000  (src=0x34 dec=0x00)
+    src_len=500000 lit_pos=19739 tok_pos=9928 off_pos=19854 ovf_pos=5904
+log_apache.log              500000 |    55425 0.111   22124 |    51667 0.103    8663 |    49887 0.100    8049 |    38341 0.077    6593 |        -     - split decode mismatch
+  split decode mismatch at offset 65541/500000  (src=0x41 dec=0x8c)
+    src_len=500000 lit_pos=23109 tok_pos=58951 off_pos=117900 ovf_pos=93
+dna_fasta.fa                500000 |   200053 0.400    4796 |   180951 0.362    2853 |   176587 0.353    2045 |   151846 0.304    1293 |        -     - split decode mismatch
+  split decode mismatch at offset 65539/500000  (src=0x2c dec=0x54)
+    src_len=500000 lit_pos=33262 tok_pos=40883 off_pos=81764 ovf_pos=4006
+csv_numeric.csv             500000 |   159915 0.320    6422 |   144045 0.288    3549 |   140350 0.281    2629 |   113324 0.227    1971 |        -     - split decode mismatch

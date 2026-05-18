@@ -710,6 +710,8 @@ if(BUILD_BENCH)
         # this on CI hosts.
         find_library(LZ4_LIB lz4 PATHS /opt/homebrew/lib /usr/local/lib)
         find_path(LZ4_INC lz4.h PATHS /opt/homebrew/include /usr/local/include)
+        find_library(ZSTD_LIB zstd PATHS /opt/homebrew/lib /usr/local/lib)
+        find_path(ZSTD_INC zstd.h PATHS /opt/homebrew/include /usr/local/include)
         if(LZ4_LIB AND LZ4_INC)
             message(STATUS "LZ4 detected at ${LZ4_LIB} — enabling pivco_bench_lz4_split")
             add_executable(pivco_bench_lz4_split
@@ -719,6 +721,31 @@ if(BUILD_BENCH)
                 "${LZ4_LIB}")
             target_include_directories(pivco_bench_lz4_split PRIVATE
                 src ext/fse/lib "${LZ4_INC}")
+
+            # LZ4 + ph stacked-codec prototype bench (LZ4 → ph round-trip,
+            # compared to LZ4 alone, LZ4+huf0, and zstd at the same level).
+            # Also includes the pivco "split" fork of lz4hc.c which emits
+            # 4 separate streams via a side channel; see extras/lz4hc_split.c.
+            if(ZSTD_LIB AND ZSTD_INC AND EXISTS ${CMAKE_SOURCE_DIR}/ext/lz4/lib/lz4hc.c)
+                message(STATUS "zstd + vendored LZ4 detected — enabling pivco_bench_lz4_ph")
+                add_executable(pivco_bench_lz4_ph
+                    extras/bench_lz4_ph.c
+                    extras/lz4hc_split.c
+                    extras/lz4_split_decode.c
+                    ext/lz4/lib/lz4.c
+                )
+                target_link_libraries(pivco_bench_lz4_ph pivco_huffman huf0 m
+                    "${LZ4_LIB}" "${ZSTD_LIB}")
+                target_include_directories(pivco_bench_lz4_ph PRIVATE
+                    src include ext/fse/lib ext/lz4/lib extras
+                    "${LZ4_INC}" "${ZSTD_INC}")
+                # Suppress -Wall noise from the upstream LZ4 source (~150
+                # warnings about implicit conversions etc.).
+                set_source_files_properties(extras/lz4hc_split.c ext/lz4/lib/lz4.c
+                    PROPERTIES COMPILE_FLAGS "-w")
+            else()
+                message(STATUS "zstd / vendored LZ4 not both present — pivco_bench_lz4_ph skipped")
+            endif()
         else()
             message(STATUS "LZ4 not found — pivco_bench_lz4_split skipped")
         endif()
