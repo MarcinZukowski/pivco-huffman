@@ -763,6 +763,27 @@ if(BUILD_BENCH)
             message(STATUS "LZ4 not found — pivco_bench_lz4_split skipped")
         endif()
 
+        # Metal compute primitive microbench (Apple only).  Measures GPU
+        # throughput of the ph tree-walk primitives — partition (encoder
+        # side) and tree_merge (BU decoder side) — vs the CPU NEON path.
+        # All GPU sources live under extras/gpu/ ; the .metal shader is
+        # loaded at runtime from a path relative to CWD (project root).
+        if(APPLE)
+            find_library(METAL_LIB Metal)
+            find_library(FOUNDATION_LIB Foundation)
+            if(METAL_LIB AND FOUNDATION_LIB)
+                message(STATUS "Metal framework detected — enabling pivco_bench_metal_partition")
+                add_executable(pivco_bench_metal_partition
+                    extras/gpu/bench_metal_partition.mm)
+                target_link_libraries(pivco_bench_metal_partition
+                    "${METAL_LIB}" "${FOUNDATION_LIB}")
+                set_source_files_properties(extras/gpu/bench_metal_partition.mm
+                    PROPERTIES COMPILE_FLAGS "-fobjc-arc")
+            else()
+                message(STATUS "Metal framework not found — pivco_bench_metal_partition skipped")
+            endif()
+        endif()
+
         # Rice (Golomb power-of-2 M) vs fast-FSE vs Lemire's EWAH on
         # skewed bitmaps.  See extras/bench_golomb.c header for the
         # design.  EWAH support pulled in via a C++ wrapper around
