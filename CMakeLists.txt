@@ -743,6 +743,19 @@ if(BUILD_BENCH)
                 # warnings about implicit conversions etc.).
                 set_source_files_properties(extras/lz4hc_split.c ext/lz4/lib/lz4.c
                     PROPERTIES COMPILE_FLAGS "-w")
+
+                # Correctness harness for the 4-stream encoder + decoder.
+                add_executable(pivco_fuzz_lz4_split
+                    extras/fuzz_lz4_split.c
+                    extras/lz4hc_split.c
+                    extras/lz4_split_decode.c
+                    ext/lz4/lib/lz4.c
+                )
+                target_link_libraries(pivco_fuzz_lz4_split m
+                    "${LZ4_LIB}")
+                target_include_directories(pivco_fuzz_lz4_split PRIVATE
+                    src include ext/lz4/lib extras
+                    "${LZ4_INC}")
             else()
                 message(STATUS "zstd / vendored LZ4 not both present — pivco_bench_lz4_ph skipped")
             endif()

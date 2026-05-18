@@ -758,12 +758,13 @@ static bench_result_t bench_lz4_split_raw(const uint8_t *src, size_t src_len, in
 
 /* ---------- zstd reference (level 9 to match LZ4-HC level 9) ---------- */
 
-static bench_result_t bench_zstd(const uint8_t *src, size_t src_len, int iters)
+static bench_result_t bench_zstd_lvl(const uint8_t *src, size_t src_len,
+                                      int iters, int level)
 {
     bench_result_t r = {0};
     size_t cap = ZSTD_compressBound(src_len);
     uint8_t *enc = (uint8_t *)malloc(cap);
-    size_t enc_size = ZSTD_compress(enc, cap, src, src_len, 9);
+    size_t enc_size = ZSTD_compress(enc, cap, src, src_len, level);
     if (ZSTD_isError(enc_size)) {
         r.note = "zstd encode failed";
         free(enc); return r;
@@ -834,30 +835,37 @@ int main(int argc, char **argv)
         n_paths = (int)(sizeof(DEFAULT_FILES) / sizeof(DEFAULT_FILES[0]));
     }
 
-    /* Disable ph FSE so we measure the same "byte-Huffman only"
-     * ph path the bench_lz4_split tool used. */
+    /* ph FSE toggled per-variant: split (Huffman-only, apples-to-apples
+     * with +ph/+huf columns) vs split-fse (FSE-enabled, the proper ph
+     * config for entropy coding skewed streams like offsets/overflow). */
     pivco_huffman_set_fse_enabled(0);
 
     printf("# bench_lz4_ph — stacked codec prototype\n");
-    printf("# LZ4 = LZ4_compress_HC(level=9).  zstd = ZSTD_compress(level=9).\n");
-    printf("# ph runs with --no-fse (byte-Huffman only).  huf0 chunks at 128 KB.\n");
+    printf("# LZ4 = LZ4_compress_HC(level=9).  zstd@N = ZSTD_compress(level=N).\n");
+    printf("# ph runs with --no-fse for +ph/split, with FSE on for split-fse.\n");
+    printf("# huf0 chunks at 128 KB.\n");
     printf("# Decode MB/s = source bytes / total decode time (incl. inner LZ4 stage).\n");
     printf("# min of %d batches × %d iters/batch.\n", N_BATCHES, iters);
     printf("#\n");
-    printf("%-22s  %10s | %8s %5s %7s | %8s %5s %7s | %8s %5s %7s | %8s %5s %7s | %8s %5s %7s | %8s %5s %7s\n",
+    printf("%-22s  %10s | %8s %5s %7s | %8s %5s %7s | %8s %5s %7s | %8s %5s %7s | %8s %5s %7s | %8s %5s %7s | %8s %5s %7s | %8s %5s %7s | %8s %5s %7s\n",
             "dataset", "raw",
             "lz4 sz", "rat", "MB/s",
             "lz4-r sz", "rat", "MB/s",
             "+ph sz", "rat", "MB/s",
             "+huf sz", "rat", "MB/s",
-            "zstd sz", "rat", "MB/s",
-            "split sz", "rat", "MB/s");
+            "zstd@9 sz", "rat", "MB/s",
+            "zstd@3 sz", "rat", "MB/s",
+            "zstd@1 sz", "rat", "MB/s",
+            "split sz", "rat", "MB/s",
+            "split-fse", "rat", "MB/s");
     printf("%-22s  %10s + %s\n", "", "",
             "------------------------------------------------------------------------"
+            "------------------------------------------------------------------------"
             "------------------------------------------------------------------------");
-    printf("%-22s  %10s |   lz4-r = LZ4-split RAW (4-stream encoder, custom decoder, NO entropy).\n"
-           "%-22s  %10s    split  = LZ4-split + per-stream ph (this column has the full hybrid).\n",
-           "", "", "", "");
+    printf("%-22s  %10s |   lz4-r    = LZ4-split RAW (4-stream encoder, custom decoder, NO entropy).\n"
+           "%-22s  %10s     split    = LZ4-split + per-stream ph (Huffman-only).\n"
+           "%-22s  %10s     split-fse= LZ4-split + per-stream ph with FSE enabled (proper entropy coding).\n",
+           "", "", "", "", "", "");
 
     for (int i = 0; i < n_paths; i++) {
         const char *path = paths[i];
@@ -869,36 +877,41 @@ int main(int argc, char **argv)
 
         bench_result_t lz    = bench_lz4           (src, src_len, iters);
         bench_result_t lzr   = bench_lz4_split_raw (src, src_len, iters);
+
+        pivco_huffman_set_fse_enabled(0);
         bench_result_t lzp   = bench_lz4_ph        (src, src_len, iters);
         bench_result_t lzh   = bench_lz4_huf0      (src, src_len, iters);
-        bench_result_t zs    = bench_zstd          (src, src_len, iters);
         bench_result_t lzsp  = bench_lz4_split_ph  (src, src_len, iters);
+
+        pivco_huffman_set_fse_enabled(1);
+        bench_result_t lzsp_fse = bench_lz4_split_ph(src, src_len, iters);
+        pivco_huffman_set_fse_enabled(0);
+
+        bench_result_t zs9   = bench_zstd_lvl      (src, src_len, iters, 9);
+        bench_result_t zs3   = bench_zstd_lvl      (src, src_len, iters, 3);
+        bench_result_t zs1   = bench_zstd_lvl      (src, src_len, iters, 1);
 
         printf("%-22s  %10zu | ", basename_of(path), src_len);
 
-        if (lz.ok)  printf("%8zu %5.3f %7.0f | ",
-                            lz.enc_size,  (double)lz.enc_size  / src_len, lz.dec_mbps);
-        else         printf("%8s %5s %7s | ", "-", "-", lz.note ? lz.note : "-");
+        #define PRINT_COL(R, term) do {                                         \
+            if ((R).ok) printf("%8zu %5.3f %7.0f" term,                          \
+                                (R).enc_size, (double)(R).enc_size / src_len,    \
+                                (R).dec_mbps);                                   \
+            else         printf("%8s %5s %7s" term, "-", "-",                    \
+                                (R).note ? (R).note : "-");                      \
+        } while (0)
 
-        if (lzr.ok) printf("%8zu %5.3f %7.0f | ",
-                            lzr.enc_size, (double)lzr.enc_size / src_len, lzr.dec_mbps);
-        else         printf("%8s %5s %7s | ", "-", "-", lzr.note ? lzr.note : "-");
+        PRINT_COL(lz,       " | ");
+        PRINT_COL(lzr,      " | ");
+        PRINT_COL(lzp,      " | ");
+        PRINT_COL(lzh,      " | ");
+        PRINT_COL(zs9,      " | ");
+        PRINT_COL(zs3,      " | ");
+        PRINT_COL(zs1,      " | ");
+        PRINT_COL(lzsp,     " | ");
+        PRINT_COL(lzsp_fse, "\n");
 
-        if (lzp.ok) printf("%8zu %5.3f %7.0f | ",
-                            lzp.enc_size, (double)lzp.enc_size / src_len, lzp.dec_mbps);
-        else         printf("%8s %5s %7s | ", "-", "-", lzp.note ? lzp.note : "-");
-
-        if (lzh.ok) printf("%8zu %5.3f %7.0f | ",
-                            lzh.enc_size, (double)lzh.enc_size / src_len, lzh.dec_mbps);
-        else         printf("%8s %5s %7s | ", "-", "-", lzh.note ? lzh.note : "-");
-
-        if (zs.ok)  printf("%8zu %5.3f %7.0f | ",
-                            zs.enc_size,  (double)zs.enc_size  / src_len, zs.dec_mbps);
-        else         printf("%8s %5s %7s | ", "-", "-", zs.note ? zs.note : "-");
-
-        if (lzsp.ok) printf("%8zu %5.3f %7.0f\n",
-                            lzsp.enc_size, (double)lzsp.enc_size / src_len, lzsp.dec_mbps);
-        else          printf("%8s %5s %7s\n", "-", "-", lzsp.note ? lzsp.note : "-");
+        #undef PRINT_COL
 
         fflush(stdout);
         free(src);

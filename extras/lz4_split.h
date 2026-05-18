@@ -49,6 +49,16 @@ int lz4_split_decompress(const uint8_t *literals, size_t literals_len,
                           const uint8_t *overflow, size_t overflow_len,
                           uint8_t *out, size_t out_size);
 
+/* Trust-mode decoder: identical primitives, but ZERO bounds checks on
+ * inputs.  Caller must guarantee the streams are well-formed and have
+ * ≥64 B trailing pad.  Used only for benchmark diagnostics — never
+ * call in production.  Returns 0 always. */
+int lz4_split_decompress_trust(const uint8_t *literals,
+                                const uint8_t *tokens, size_t tokens_len,
+                                const uint8_t *offsets,
+                                const uint8_t *overflow,
+                                uint8_t *out, size_t out_size);
+
 #ifdef __cplusplus
 }
 #endif
