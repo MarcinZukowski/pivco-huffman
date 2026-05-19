@@ -832,4 +832,20 @@ if(PYTHON3_EXECUTABLE)
         COMMENT "Generating HTML figures into figures/ from results/sweep_*.txt"
         VERBATIM
     )
+    # Paper-figure SVG capture pipeline.  Driven by paper/figures/fig.py
+    # which reads paper/figures/figures.json (the figure registry,
+    # tools + named figures + defaults) and invokes each figure's
+    # tool.cli to render an .svg.  The tree_viz tool's cli uses
+    # Playwright + headless Chromium; install once:
+    #     pip install playwright
+    #     playwright install chromium
+    # fig.py prints a clear error if Playwright is missing.
+    add_custom_target(figures-svg
+        COMMAND ${PYTHON3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/paper/figures/fig.py
+                svg --all
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+        COMMENT "Rendering paper figures (paper/figures/figures.json) → paper/figures/*.svg"
+        VERBATIM
+    )
 endif()

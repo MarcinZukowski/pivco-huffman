@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>fig-web — pivco figure redirector</title>
+<style>
+  body { font: 13px/1.4 system-ui, sans-serif; margin: 24px; }
+  #status { color: #444; }
+  .err   { color: #b91c1c; }
+  details { margin-top: 16px; }
+  code  { background: #f3f4f6; padding: 1px 4px; border-radius: 3px; }
+  ul    { line-height: 1.6; }
+</style>
+</head>
+<body>
+
+<h1>fig-web</h1>
+<p id="status">redirecting…</p>
+
+<details id="help">
+  <summary>usage</summary>
+  <p>Append <code>?name=&lt;figure&gt;</code> to the URL.  This page loads
+     <code>figures.json</code>, looks up the figure's tool, merges
+     tool defaults with figure params, and redirects to the tool's
+     HTML viewer with those params.</p>
+  <p>Available figures:</p>
+  <ul id="fig-list"></ul>
+</details>
+
+<script>
+/* fig-web.html lives at paper/figures/.  figures.json paths are
+ * project-root-relative, so we prepend "../../" to resolve them
+ * relative to this page. */
+const ROOT_PREFIX = '../../';
+
+const status = document.getElementById('status');
+const help   = document.getElementById('help');
+const list   = document.getElementById('fig-list');
+
+function setError(msg) {
+    status.textContent = msg;
+    status.classList.add('err');
+    help.open = true;
+}
+
+async function main() {
+    const q = new URLSearchParams(window.location.search);
+    const name = q.get('name');
+
+    let cfg;
+    try {
+        cfg = await (await fetch('figures.json')).json();
+    } catch (e) {
+        setError(`failed to load figures.json: ${e}`);
+        return;
+    }
+
+    /* Always populate the help list. */
+    const figs = cfg.figures || [];
+    for (const f of figs) {
+        if (!f.name) continue;
+        const li = document.createElement('li');
+        const a = document.createElement('a');
+        a.href = `?name=${encodeURIComponent(f.name)}`;
+        a.textContent = f.name;
+        const tool = document.createElement('span');
+        tool.style.color = '#888';
+        tool.textContent = ` — ${f.tool}`;
+        li.appendChild(a);
+        li.appendChild(tool);
+        list.appendChild(li);
+    }
+
+    if (!name) {
+        setError("no figure name specified (use ?name=<figure>)");
+        return;
+    }
+
+    const fig = figs.find(f => f.name === name);
+    if (!fig) {
+        setError(`unknown figure: ${name}`);
+        return;
+    }
+    const tool = (cfg.tools || {})[fig.tool];
+    if (!tool || !tool.web) {
+        setError(`tool ${fig.tool} has no web viewer in figures.json`);
+        return;
+    }
+
+    /* Merge tool.defaults <- figure.params (figure overrides win). */
+    const merged = Object.assign({}, tool.defaults || {}, fig.params || {});
+    const url = ROOT_PREFIX + tool.web + '?' + new URLSearchParams(merged);
+    status.textContent = `redirecting to ${tool.web}…`;
+    window.location.replace(url);
+}
+
+main();
+</script>
+
+</body>
+</html>

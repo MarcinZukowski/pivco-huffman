@@ -1,0 +1,42 @@
+{
+  "_comment": "tree_viz figure configurations for capture_tree_viz.py. Each entry is a filename-stem + tree_viz URL params dict. See figures/tree_viz.html for the full URL vocabulary.",
+  "figures": [
+    {
+      "name": "tree-coconut-papaya-canonical",
+      "params": {
+        "text":         "coconut papaya",
+        "ph-opt":       "0",
+        "show-flat":    "0",
+        "fold-subtrees":"0",
+        "splitting":    "0",
+        "no-overlap":   "1",
+        "title":        "coconut papaya — canonical Huffman"
+      }
+    },
+    {
+      "name": "tree-coconut-papaya-phopt",
+      "params": {
+        "text":         "coconut papaya",
+        "ph-opt":       "1",
+        "show-flat":    "1",
+        "fold-subtrees":"0",
+        "splitting":    "0",
+        "no-overlap":   "1",
+        "title":        "coconut papaya — ph-flat-aware"
+      }
+    },
+    {
+      "name": "tree-coconut-papaya-folded",
+      "params": {
+        "text":         "coconut papaya",
+        "ph-opt":       "1",
+        "show-flat":    "1",
+        "fold-subtrees":"1",
+        "splitting":    "0",
+        "no-overlap":   "1",
+        "title":        "coconut papaya — flat subtrees folded",
+        "labels":       "#symbols,H,ops/byte"
+      }
+    }
+  ]
+}
