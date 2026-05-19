@@ -890,29 +890,45 @@ function renderTree(rootNode, meta) {
     root.each(n => { if (n.depth > maxDepth) maxDepth = n.depth; });
 
     /* Each visible "leaf slot" in d3's layout is one unit wide.
-     * Condensed nodes (pruned flat subtrees) need a much wider box
-     * (BOX_W) so they claim CONDENSED_SLOTS leaf-slots' worth via
-     * the separation function below.  Without this, condensed
-     * boxes overlap each other and the rest of the tree. */
-    const CONDENSED_SLOTS = 3;
-    const leaves = root.leaves();
-    const condensedLeafCount = leaves.filter(n => n.data._condensed).length;
-    const realLeafCount = leaves.length - condensedLeafCount;
-    const effectiveSlots = realLeafCount + condensedLeafCount * CONDENSED_SLOTS;
-    /* Slot-size bounds depend on whether leaves are drawn as full
-     * char/hex boxes (need text room: 12..36 px) or as tiny circles
-     * (denser layout possible: 6..18 px).  With "no overlap" on,
-     * pin every leaf slot to a generous fixed width so dense trees
-     * don't squish below the upper clamp — the tree may extend past
-     * the visible pane and zoom/pan handles it. */
+     * Condensed nodes (pruned flat subtrees) render as a wider info
+     * box ("D=N, M leaves" + count line); the layout has to reserve
+     * that width via the separation function below or the boxes
+     * overlap each other.  CONDENSED_SLOTS is derived from slotSize
+     * so the box always fits — a static 3 worked for noOverlap +
+     * detailed (32 px slots → 90 px reservation) but underflowed for
+     * noOverlap + compact (14 px slots → 42 px reservation, ~28 px
+     * narrower than the 70-px box minimum) → heavy overlap. */
     const detailed = !!meta.showLeafDetails;
     const SLOT_MIN = detailed ? 12 : 6;
     const SLOT_MAX = detailed ? 36 : 18;
     const NO_OVERLAP_SLOT_W = detailed ? 32 : 14;
+    /* Condensed-box rendered dimensions (must match the rect drawn
+     * below).  COND_GAP keeps a small visual breathing room between
+     * adjacent boxes. */
+    const COND_BOX_MIN_W = 70;
+    const COND_GAP       = 6;
+
+    const leaves = root.leaves();
+    const condensedLeafCount = leaves.filter(n => n.data._condensed).length;
+    const realLeafCount = leaves.length - condensedLeafCount;
+
+    /* Pick slotSize first (independent of CONDENSED_SLOTS in
+     * noOverlap mode; for the dynamic Reingold-Tilford layout we
+     * estimate against the raw leaf count — under-counts space when
+     * many subtrees are condensed, but every non-degenerate case
+     * fits). */
     const slotSize = meta.noOverlap
         ? NO_OVERLAP_SLOT_W
         : Math.max(SLOT_MIN,
-                   Math.min(SLOT_MAX, (W - 60) / Math.max(1, effectiveSlots)));
+                   Math.min(SLOT_MAX,
+                            (W - 60) / Math.max(1, leaves.length)));
+    /* Derive CONDENSED_SLOTS so reservation >= rendered box + gap.
+     * Bottom-clamped at 3 to preserve the historical reservation
+     * when slotSize is large enough that 3 already fits. */
+    const CONDENSED_SLOTS = Math.max(
+        3, Math.ceil((COND_BOX_MIN_W + COND_GAP) / slotSize));
+    const effectiveSlots =
+        realLeafCount + condensedLeafCount * CONDENSED_SLOTS;
     /* Backwards-compat name used below for sizing leaf rects + skew bars. */
     const leafSize = slotSize;
     /* Per-level vertical spacing: 60 px is right when leaves are
