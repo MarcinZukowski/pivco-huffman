@@ -182,7 +182,7 @@ table.node-table tr.in-flat { color: #b45309; }
     padding: 6px 8px;
     border-radius: 4px;
     font: 11px/1.3 monospace;
-    white-space: pre;
+    white-space: pre-wrap;
     box-shadow: 0 2px 8px rgba(0,0,0,0.25);
     opacity: 0;
     transition: opacity 90ms;
@@ -253,6 +253,20 @@ table.node-table tr.in-flat { color: #b45309; }
             <input type="checkbox" id="no-overlap">
             no overlap
         </label>
+        <label class="toggle">
+            <input type="checkbox" id="splitting" checked>
+            splitting
+        </label>
+        <label class="toggle">
+            title:
+            <input type="text" id="title-input" size="18"
+                placeholder="(empty = no title)" autocomplete="off">
+        </label>
+        <label class="toggle">
+            labels:
+            <input type="text" id="show-labels" size="22"
+                placeholder="e.g. #symbols,H,ops/byte" autocomplete="off">
+        </label>
         <label class="toggle" title="Draw leaf boxes with character + hex byte. Off = tiny circles only.">
             <input type="checkbox" id="show-leaf-details" checked>
             show leaf details
@@ -273,7 +287,11 @@ table.node-table tr.in-flat { color: #b45309; }
             <input type="checkbox" id="show-branch-bits">
             branch 0/1
         </label>
-        <button id="reset-view" type="button" title="Reset pan/zoom">reset view</button>
+        <button id="reset-view" type="button">reset view</button>
+        <button id="reset-params" type="button">reset params</button>
+        <button id="download-svg" type="button">download SVG</button>
+        <input type="text" id="download-filename" size="22"
+               placeholder="" autocomplete="off">
     </div>
 </header>
 
@@ -1096,13 +1114,15 @@ function renderTree(rootNode, meta) {
                 .attr('class', 'condensed-flat')
                 .attr('data-node-id', d => d.data.id)
                 .attr('transform', d => `translate(${d.x},${d.y + 28})`)
-                .style('cursor', 'pointer')
+                .style('cursor', meta.showSplitting ? 'pointer' : 'default')
                 .on('mousemove', (e, d) => showTooltip(nodeTooltipHtml(d.data, totalN), e))
-                .on('mouseleave', hideTooltip)
-                .on('click', (e, d) => {
-                    e.stopPropagation();
-                    toggleFlatten(d.data.id);
-                });
+                .on('mouseleave', hideTooltip);
+        if (meta.showSplitting) {
+            condG.on('click', (e, d) => {
+                e.stopPropagation();
+                toggleFlatten(d.data.id);
+            });
+        }
         condG.append('rect')
             .attr('x', -BOX_W / 2).attr('y', -BOX_H / 2)
             .attr('width', BOX_W).attr('height', BOX_H)
@@ -1150,14 +1170,20 @@ function renderTree(rootNode, meta) {
      * Visually: thick stroke for flattenable nodes (filled green
      * if currently treated as flat).
      *
-     * Gated by meta.showFlat: when the user has flat-subtree analysis
-     * disabled, render every internal node as a plain circle — the
-     * "flattenable" status isn't meaningful in that mode. */
-    const flatActive = (d) => meta.showFlat && d.data.flatCandidate;
+     * Gated by meta.showFlat AND meta.showSplitting: showFlat=off
+     * makes flattenable status meaningless (every internal node is a
+     * plain circle); showSplitting=off disables the interactive
+     * affordance entirely (no thick stroke, no pointer cursor, no
+     * click handler) while leaving the green flat-indicator fill
+     * driven by showFlat. */
+    const flatActive = (d) =>
+        meta.showFlat && meta.showSplitting && d.data.flatCandidate;
     intG.append('circle')
         .attr('r', d => flatActive(d) ? 6 : 4)
         .style('stroke-width', d => flatActive(d) ? '2.5px' : '1px')
-        .style('fill', d => (meta.showFlat && d.data.flatD) ? '#bbf7d0' : '#fff')
+        .style('fill', d =>
+            (meta.showFlat && meta.showSplitting && d.data.flatD)
+                ? '#bbf7d0' : '#fff')
         .style('cursor', d => flatActive(d) ? 'pointer' : 'default');
     intG.filter(flatActive)
         .on('click', (e, d) => {
@@ -1307,7 +1333,66 @@ function renderTree(rootNode, meta) {
         });
     }
 
-    // Initial fit-to-pane
+    /* Title + labels overlay.  Placed in gWorld at positions relative
+     * to the tree's bounding box, so:
+     *   - the SVG export captures them in the right place (top-centre
+     *     for title, top-right for the labels column).
+     *   - they zoom/pan with the tree on screen, which is OK for
+     *     paper-figure use cases.
+     * Title sits one line above the labels so they don't overlap when
+     * both are wide. */
+    {
+        const treeBBox = gWorld.node().getBBox();
+        const hasTitle  = !!(meta.titleText && meta.titleText.length);
+        const labelKeys = meta.showLabels
+            ? meta.showLabels.split(',').map(s => s.trim()).filter(Boolean)
+            : [];
+        const hasLabels = labelKeys.length > 0 && meta.stats;
+        if (hasTitle || hasLabels) {
+            const titleSize = 14;
+            const labelSize = 11;
+            const labelLineH = 14;
+            const gapToTree = 8;
+            /* Stack: title (if any) on top, then labels below it.
+             * Position bottommost line at treeBBox.y - gapToTree. */
+            const bottomY = treeBBox.y - gapToTree;
+            const labelTopY = hasLabels
+                ? bottomY - (labelKeys.length - 1) * labelLineH
+                : bottomY;
+            const titleY = hasLabels
+                ? labelTopY - labelLineH
+                : bottomY;
+            if (hasTitle) {
+                gWorld.append('text')
+                    .attr('class', 'tree-title')
+                    .attr('x', treeBBox.x + treeBBox.width / 2)
+                    .attr('y', titleY)
+                    .attr('text-anchor', 'middle')
+                    .style('font', titleSize + 'px sans-serif')
+                    .style('font-weight', 600)
+                    .style('fill', '#222')
+                    .text(meta.titleText);
+            }
+            if (hasLabels) {
+                let y = labelTopY;
+                for (const key of labelKeys) {
+                    const fn = LABEL_VOCAB[key];
+                    const line = fn ? fn(meta.stats) : `${key}: ?`;
+                    gWorld.append('text')
+                        .attr('class', 'tree-label')
+                        .attr('x', treeBBox.x + treeBBox.width)
+                        .attr('y', y)
+                        .attr('text-anchor', 'end')
+                        .style('font', labelSize + 'px monospace')
+                        .style('fill', '#444')
+                        .text(line);
+                    y += labelLineH;
+                }
+            }
+        }
+    }
+
+    // Initial fit-to-pane: recompute bbox so overlay is included.
     const bbox = gWorld.node().getBBox();
     const scale = Math.min(
         (W - 20) / Math.max(1, bbox.width),
@@ -1384,34 +1469,22 @@ function toggleFlatten(nodeId) {
 //  Stats panel
 // ============================================================
 
-function renderStats(rootNode, meta) {
+/* Single source of truth for tree-level aggregates.  Called once per
+ * refresh; the result is consumed by both renderStats (the summary
+ * panel) and the optional title / top-right labels overlay drawn by
+ * renderTree. */
+function computeTreeStats(rootNode, meta) {
     const totalN = meta.totalN;
-    const internals = collectInternals(rootNode);
-    // Compute aggregate stats
     let totalEntropyBits = 0;
-    let totalHufBits = 0;
     let totalBitsSaved = 0;
     let nFlat = 0;
     let flatRawBits = 0;
-    /* With flattening on (meta.showFlat), each flat region emits
-     * `n_subtree · D` raw bits and contributes ZERO savings -- the
-     * per-bitmap entropies of nodes inside it are absorbed.
-     * Without flattening, every internal node contributes its
-     * per-bitmap entropy + savings as before (chain rule sum = H).
-     *
-     * As a result, "tree-level Σ H" with flat ON =
-     *     Σ_non-flat n·H(p)  +  Σ_flat n·D
-     * which is the entropy lower bound on what ph would emit
-     * today (perfect FSE on non-flat bitmaps + raw N·D for flat
-     * regions).  Without flat ON it reduces to byte entropy H. */
     function walkAgg(n) {
         if (!n || n.symbol >= 0) return;
         if (meta.showFlat && n.flatD) {
             totalEntropyBits += n.subtreeCount * n.flatD;
             nFlat++;
             flatRawBits += n.subtreeCount * n.flatD;
-            /* Don't recurse - descendants are absorbed into the
-             * flat region for accounting purposes. */
             return;
         }
         totalEntropyBits += n.subtreeCount * n.bitEntropy;
@@ -1420,20 +1493,17 @@ function renderStats(rootNode, meta) {
     }
     walkAgg(rootNode);
 
-    // Huffman avg code length: sum over leaves of (freq/N) * depth
-    // Also: average / weighted operations per leaf (with flat opt
-    // collapsing D levels to 1 op).
     let hufWeighted = 0;
     let byteEntropy = 0;
     let n_leaves = 0;
-    let opsSimpleSum = 0;          // Σ depth over leaves (per-leaf avg)
-    let opsFlatSimpleSum = 0;      // Σ opsToLeaf (effective with flat)
-    let opsWeightedSum = 0;        // Σ p · depth (= huf weighted)
-    let opsFlatWeightedSum = 0;    // Σ p · opsToLeaf
+    let longestCode = 0;
+    let opsSimpleSum = 0, opsFlatSimpleSum = 0;
+    let opsWeightedSum = 0, opsFlatWeightedSum = 0;
     function walkLeaves(n) {
         if (!n) return;
         if (n.symbol >= 0) {
             n_leaves++;
+            if (n.depth > longestCode) longestCode = n.depth;
             const p = n.freq / totalN;
             opsSimpleSum     += n.depth;
             opsFlatSimpleSum += (n.opsToLeaf != null) ? n.opsToLeaf : n.depth;
@@ -1448,6 +1518,53 @@ function renderStats(rootNode, meta) {
         walkLeaves(n.left); walkLeaves(n.right);
     }
     walkLeaves(rootNode);
+
+    return {
+        totalN, n_leaves, longestCode,
+        totalEntropyBits, totalBitsSaved, nFlat, flatRawBits,
+        hufWeighted, byteEntropy,
+        opsSimple:     n_leaves ? (opsSimpleSum     / n_leaves) : 0,
+        opsSimpleF:    n_leaves ? (opsFlatSimpleSum / n_leaves) : 0,
+        opsW:          opsWeightedSum,
+        opsWF:         opsFlatWeightedSum,
+    };
+}
+
+/* Vocabulary for the labels overlay.  Each entry: short key the user
+ * types (label-side of show-labels), how to render it as a one-line
+ * "name: value" string given the precomputed stats object. */
+const LABEL_VOCAB = {
+    'N':         (s) => `N: ${s.totalN}`,
+    '#symbols':  (s) => `#symbols: ${s.n_leaves}`,
+    'depth':     (s) => `depth: ${s.longestCode}`,
+    'H':         (s) => `H: ${s.byteEntropy.toFixed(3)} bpb`,
+    'huff':      (s) => `Huff: ${s.hufWeighted.toFixed(3)} bpb`,
+    'saved':     (s) => `saved: ${s.totalBitsSaved.toFixed(0)} bits`,
+    'ops/leaf':  (s) => `ops/leaf: ${s.opsSimple.toFixed(2)}` +
+                        (s.opsSimpleF !== s.opsSimple
+                            ? ` → ${s.opsSimpleF.toFixed(2)}` : ''),
+    'ops/byte':  (s) => `ops/byte: ${s.opsW.toFixed(3)}` +
+                        (s.opsWF !== s.opsW
+                            ? ` → ${s.opsWF.toFixed(3)}` : ''),
+    '#flat':     (s) => `#flat: ${s.nFlat}`,
+    'flat-bits': (s) => `flat-bits: ${(s.flatRawBits / s.totalN).toFixed(3)} bpb`,
+};
+
+function renderStats(rootNode, meta, stats) {
+    const internals = collectInternals(rootNode);
+    const totalN = stats.totalN;
+    const totalEntropyBits = stats.totalEntropyBits;
+    const totalBitsSaved   = stats.totalBitsSaved;
+    const nFlat            = stats.nFlat;
+    const flatRawBits      = stats.flatRawBits;
+    const hufWeighted      = stats.hufWeighted;
+    const byteEntropy      = stats.byteEntropy;
+    const n_leaves         = stats.n_leaves;
+    const longestCode      = stats.longestCode;
+    const opsSimple        = stats.opsSimple;
+    const opsSimpleF       = stats.opsSimpleF;
+    const opsW             = stats.opsW;
+    const opsWF            = stats.opsWF;
 
     const summary = document.getElementById('summary');
     summary.innerHTML = '';
@@ -1464,18 +1581,6 @@ function renderStats(rootNode, meta) {
         }
         grid.appendChild(a); grid.appendChild(b);
     }
-    /* longest actual code length used in the tree (post-limit). */
-    let longestCode = 0;
-    function findLongest(n) {
-        if (!n) return;
-        if (n.symbol >= 0) {
-            if (n.depth > longestCode) longestCode = n.depth;
-            return;
-        }
-        findLongest(n.left); findLongest(n.right);
-    }
-    findLongest(rootNode);
-
     addRow('dataset', meta.name + (meta.isMain ? ' (MAIN)' : ''),
         "Source distribution name.  '(scaled X→Y)' means input was short " +
         "and we proportionally scaled to a standard 8K block for stable stats.");
@@ -1519,10 +1624,6 @@ function renderStats(rootNode, meta) {
     /* Operations / leaf — both simple (per-leaf avg, each leaf
      * counted once) and frequency-weighted.  Without and with the
      * flat-subtree fast path. */
-    const opsSimple   = n_leaves ? (opsSimpleSum     / n_leaves) : 0;
-    const opsSimpleF  = n_leaves ? (opsFlatSimpleSum / n_leaves) : 0;
-    const opsW        = opsWeightedSum;
-    const opsWF       = opsFlatWeightedSum;
     addRow('ops/leaf (avg)',
             opsSimple.toFixed(2) +
             (meta.showFlat ? `  →  ${opsSimpleF.toFixed(2)} w/ flat` : ''),
@@ -1599,6 +1700,9 @@ function refreshFromFreqs() {
     const showFlat = document.getElementById('show-flat').checked;
     const condenseFlat = document.getElementById('condense-flat').checked;
     const noOverlap = document.getElementById('no-overlap').checked;
+    const showSplitting = document.getElementById('splitting').checked;
+    const titleText = document.getElementById('title-input').value;
+    const showLabels = document.getElementById('show-labels').value;
     const showLeafDetails = document.getElementById('show-leaf-details').checked;
     const showSkew = document.getElementById('show-skew').checked;
     const showBitPrefix = document.getElementById('show-bit-prefix').checked;
@@ -1638,15 +1742,22 @@ function refreshFromFreqs() {
 
     const meta = {
         name: _name, isMain: _isMain, totalN: _totalN,
-        phOpt, showFlat, condenseFlat, noOverlap,
+        phOpt, showFlat, condenseFlat, noOverlap, showSplitting,
+        titleText, showLabels,
         showLeafDetails, showSkew, showBitPrefix, showLeafCode,
         showBranchBits, keysSort, maxLen,
     };
+    /* Compute stats up-front so both renderTree (overlay) and
+     * renderStats (panel) read from the same numbers. */
+    meta.stats = computeTreeStats(tree, meta);
     renderTree(tree, meta);
-    renderStats(tree, meta);
+    renderStats(tree, meta, meta.stats);
 
     const dt = (performance.now() - t0).toFixed(0);
     status.textContent = `built in ${dt} ms · ${codes.length} symbols`;
+    /* Keep the filename placeholder in sync — it depends on the
+     * currently-selected data source and a couple of toggles. */
+    syncFilenamePlaceholder();
 }
 
 const STD_BLOCK = 8192;
@@ -1718,12 +1829,15 @@ function populateDatasetSelect() {
     });
     sel.addEventListener('change', () => {
         const d = (window.PIVCO_DISTRIBUTIONS || []).find(x => x.name === sel.value);
-        if (d) setFreqs(d.freq, d.name, d.is_main);
+        if (d) {
+            _dataSource = 'dataset';
+            setFreqs(d.freq, d.name, d.is_main);
+        }
+        updateUrlFromState();
     });
-    if (ordered.length > 0) {
-        const d = ordered[0];
-        setFreqs(d.freq, d.name, d.is_main);
-    }
+    /* Note: first-render is no longer triggered here.  loadInitialData()
+     * below picks dataset vs. text vs. URL-default after all controls
+     * have been initialised. */
 }
 
 function setupFileInput() {
@@ -1735,64 +1849,68 @@ function setupFileInput() {
             const buf = new Uint8Array(ev.target.result);
             const freq = new Array(256).fill(0);
             for (let i = 0; i < buf.length; i++) freq[buf[i]]++;
+            _dataSource = 'file';   /* file path isn't URL-capturable */
             setFreqs(freq, `file:${f.name}`, false);
+            updateUrlFromState();
         };
         reader.readAsArrayBuffer(f);
     });
 }
 
 function setupToggles() {
-    document.getElementById('ph-opt').addEventListener('change', () => {
-        _flatOverride.clear();
-        refreshFromFreqs();
-    });
-    document.getElementById('show-flat').addEventListener('change', () => {
-        _flatOverride.clear();
-        refreshFromFreqs();
-    });
-    document.getElementById('condense-flat').addEventListener('change', () => {
-        _flatOverride.clear();
-        refreshFromFreqs();
-    });
-    document.getElementById('no-overlap').addEventListener('change', () => {
-        refreshFromFreqs();
-    });
-    document.getElementById('show-leaf-details').addEventListener('change', () => {
-        refreshFromFreqs();
-    });
-    document.getElementById('show-skew').addEventListener('change', () => {
-        refreshFromFreqs();
-    });
-    document.getElementById('show-bit-prefix').addEventListener('change', () => {
-        refreshFromFreqs();
-    });
-    document.getElementById('show-leaf-code').addEventListener('change', () => {
-        refreshFromFreqs();
-    });
-    document.getElementById('show-branch-bits').addEventListener('change', () => {
-        refreshFromFreqs();
-    });
-    document.getElementById('keys-sort').addEventListener('change', () => {
-        _flatOverride.clear();
-        refreshFromFreqs();
-    });
-    document.getElementById('max-len').addEventListener('input', () => {
-        _flatOverride.clear();
-        refreshFromFreqs();
-    });
+    /* Every toggle change refreshes the render AND updates the URL bar
+     * so the visible permalink always reflects current state.  Toggles
+     * that affect flat-subtree state also need to clear the override
+     * set (otherwise per-node manual flatten toggles leak across
+     * unrelated control changes). */
+    const refreshAndUrl = () => { refreshFromFreqs(); updateUrlFromState(); };
+    const refreshClearAndUrl = () => {
+        _flatOverride.clear(); refreshFromFreqs(); updateUrlFromState();
+    };
+    document.getElementById('ph-opt').addEventListener('change', refreshClearAndUrl);
+    document.getElementById('show-flat').addEventListener('change', refreshClearAndUrl);
+    document.getElementById('condense-flat').addEventListener('change', refreshClearAndUrl);
+    document.getElementById('no-overlap').addEventListener('change', refreshAndUrl);
+    document.getElementById('splitting').addEventListener('change', refreshAndUrl);
+    document.getElementById('title-input').addEventListener('input', refreshAndUrl);
+    document.getElementById('show-labels').addEventListener('input', refreshAndUrl);
+    document.getElementById('show-leaf-details').addEventListener('change', refreshAndUrl);
+    document.getElementById('show-skew').addEventListener('change', refreshAndUrl);
+    document.getElementById('show-bit-prefix').addEventListener('change', refreshAndUrl);
+    document.getElementById('show-leaf-code').addEventListener('change', refreshAndUrl);
+    document.getElementById('show-branch-bits').addEventListener('change', refreshAndUrl);
+    document.getElementById('keys-sort').addEventListener('change', refreshClearAndUrl);
+    document.getElementById('max-len').addEventListener('input', refreshClearAndUrl);
     document.getElementById('reset-view').addEventListener('click', resetView);
+    document.getElementById('reset-params').addEventListener('click', resetParams);
+    /* Filename: if the user typed something, use it; else fall back to
+     * the placeholder (the auto-generated name).  Also keep the URL
+     * in sync when the user edits this field. */
+    const fnameEl = document.getElementById('download-filename');
+    fnameEl.addEventListener('input', updateUrlFromState);
+    document.getElementById('download-svg').addEventListener('click', () => {
+        const explicit = fnameEl.value.trim();
+        const fname = explicit || fnameEl.placeholder || 'tree.svg';
+        downloadCurrentSvg(fname);
+    });
+}
+
+function buildFromText(s) {
+    if (!s) return;
+    const bytes = new TextEncoder().encode(s);
+    const freq = new Array(256).fill(0);
+    for (let i = 0; i < bytes.length; i++) freq[bytes[i]]++;
+    setFreqs(freq, `text:${s.length < 30 ? s : s.slice(0, 27) + '…'}`, false);
 }
 
 function setupTextInput() {
     const txt = document.getElementById('text-input');
     const btn = document.getElementById('text-build');
     const build = () => {
-        const s = txt.value;
-        if (!s) return;
-        const bytes = new TextEncoder().encode(s);
-        const freq = new Array(256).fill(0);
-        for (let i = 0; i < bytes.length; i++) freq[bytes[i]]++;
-        setFreqs(freq, `text:${s.length < 30 ? s : s.slice(0, 27) + '…'}`, false);
+        if (!txt.value) return;
+        _dataSource = 'text';
+        buildFromText(txt.value);
+        updateUrlFromState();
     };
     btn.addEventListener('click', build);
     txt.addEventListener('keydown', e => { if (e.key === 'Enter') build(); });
@@ -1804,6 +1922,342 @@ function setupTextInput() {
             build();
         });
     });
+}
+
+// ============================================================
+//  URL-as-state — every control's value is mirrored in the URL
+//  search string, so links capture-and-restore the exact view.
+//  See README near top of file for the param vocabulary.
+// ============================================================
+
+/* Mapping: param-name ↔ DOM id ↔ encoding ↔ tooltip-doc.
+ * Centralised so apply (URL → UI), update (UI → URL), reset, and
+ * tooltip wiring all walk the same list. */
+const URL_PARAM_MAP = [
+    /* checkboxes: 1/0 in URL, .checked in DOM */
+    { kind: 'bool', param: 'ph-opt',         id: 'ph-opt',
+      desc: 'Order symbols by frequency-descending within each code-length tier (ph-flat-aware). Off = canonical (byte-ascending) order.',
+      values: '1 | 0' },
+    { kind: 'bool', param: 'show-flat',      id: 'show-flat',
+      desc: 'Highlight detected flat subtrees (uniform-depth, fast-path candidates).',
+      values: '1 | 0' },
+    { kind: 'bool', param: 'fold-subtrees',  id: 'condense-flat',
+      desc: 'Collapse each flat subtree into a single "D=N, M leaves" info box. Combine with no-overlap for clean layout.',
+      values: '1 | 0' },
+    { kind: 'bool', param: 'no-overlap',     id: 'no-overlap',
+      desc: 'Pin every leaf to a fixed-width slot so neighbouring subtrees and folded boxes cannot overlap. Tree may extend past the pane — zoom/pan to navigate.',
+      values: '1 | 0' },
+    { kind: 'bool', param: 'splitting',      id: 'splitting',
+      desc: 'Enable interactive tree splitting: flattenable nodes draw with a thick stroke and clicking toggles flatten/unflatten. Off = nodes are plain circles and clicks do nothing.',
+      values: '1 | 0' },
+    { kind: 'str',  param: 'title',          id: 'title-input',
+      desc: 'Optional title rendered centred above the tree. Leave empty to omit. Free text (no metric substitution).',
+      values: 'any string, URL-encoded' },
+    { kind: 'str',  param: 'labels',         id: 'show-labels',
+      desc: 'Comma-separated metric labels rendered as a column in the ' +
+            'top-right corner above the tree.<br><br>' +
+            'Available keys:<br>' +
+            '&nbsp;&nbsp;<b>N</b>          — total source bytes<br>' +
+            '&nbsp;&nbsp;<b>#symbols</b>   — distinct symbols (= tree leaves)<br>' +
+            '&nbsp;&nbsp;<b>depth</b>      — longest code length in bits<br>' +
+            '&nbsp;&nbsp;<b>H</b>          — byte entropy (bits/byte)<br>' +
+            '&nbsp;&nbsp;<b>huff</b>       — Huffman avg code length (bits/byte)<br>' +
+            '&nbsp;&nbsp;<b>saved</b>      — total bits saved by perfect FSE on bitmaps<br>' +
+            '&nbsp;&nbsp;<b>ops/leaf</b>   — avg decode ops per distinct symbol<br>' +
+            '&nbsp;&nbsp;<b>ops/byte</b>   — frequency-weighted decode ops per byte<br>' +
+            '&nbsp;&nbsp;<b>#flat</b>      — number of maximal flat subtrees (needs flat-subtrees)<br>' +
+            '&nbsp;&nbsp;<b>flat-bits</b>  — flat-region raw bits / source byte (needs flat-subtrees)',
+      values: 'comma-separated keys, e.g. #symbols,H,ops/byte' },
+    { kind: 'bool', param: 'leaf-details',   id: 'show-leaf-details',
+      desc: 'Draw each leaf as a char + hex byte box. Off = tiny circles only (denser layout).',
+      values: '1 | 0' },
+    { kind: 'bool', param: 'show-skew',      id: 'show-skew',
+      desc: 'Draw the per-node skew bar showing the p_left / p_right split at each internal node.',
+      values: '1 | 0' },
+    { kind: 'bool', param: 'show-prefix',    id: 'show-bit-prefix',
+      desc: 'Annotate each internal node with its bit-prefix (path from root, 0 = left, 1 = right).',
+      values: '1 | 0' },
+    { kind: 'bool', param: 'show-code',      id: 'show-leaf-code',
+      desc: 'Annotate each leaf with its full Huffman code as a 0/1 string.',
+      values: '1 | 0' },
+    { kind: 'bool', param: 'show-bits',      id: 'show-branch-bits',
+      desc: 'Label each branch with the bit it represents (0 = left child, 1 = right child).',
+      values: '1 | 0' },
+    /* selects + range: .value as a string */
+    { kind: 'str',  param: 'keys',           id: 'keys-sort',
+      desc: 'Within-tier ordering of leaves when building the flat-aware tree. Affects which symbols land in the deepest D-flat chunk per length tier.',
+      values: 'freq_desc | freq_asc | unsorted' },
+    { kind: 'str',  param: 'max-len',        id: 'max-len',
+      desc: 'Maximum Huffman code length (length-limited).',
+      values: 'integer 1..20' },
+    { kind: 'str',  param: 'filename',       id: 'download-filename',
+      desc: 'Output filename for the downloaded SVG. Leave empty to use the auto-generated name (shown as placeholder).',
+      values: 'string, e.g. tree.svg' },
+];
+
+/* Documentation for non-URL-MAP controls (data source + buttons). */
+const DATA_PARAM_DOCS = [
+    { id: 'dataset-select', param: 'dataset',
+      desc: 'Pre-built distribution to visualise (from tree_viz_data.js).',
+      values: 'one of the dataset names' },
+    { id: 'text-input',     param: 'text',
+      desc: 'Custom input string. Frequencies counted from its UTF-8 bytes. Press build (or Enter) to apply.',
+      values: 'any string, URL-encoded' },
+    { id: 'download-svg',   param: 'download',
+      desc: 'Download the current view as a standalone .svg file. Setting <b>download</b> in the URL also auto-triggers (works headless; regular browsers may block without a user gesture).',
+      values: 'filename, e.g. tree.svg' },
+];
+
+function parseUrlParams() {
+    return new URLSearchParams(window.location.search);
+}
+
+/* Apply URL → control values.  Called once at load, before data is
+ * picked, so the first render happens with URL-driven settings. */
+function applyUrlParamsToControls() {
+    const q = parseUrlParams();
+    for (const m of URL_PARAM_MAP) {
+        if (!q.has(m.param)) continue;
+        const el = document.getElementById(m.id);
+        if (!el) continue;
+        const v = q.get(m.param);
+        if (m.kind === 'bool') {
+            el.checked = (v === '1' || v === 'true');
+        } else {
+            el.value = v;
+        }
+    }
+}
+
+/* Reset every URL-managed control to its HTML-default state and
+ * trigger a re-render + URL-bar update.  Per-node flat-overrides are
+ * cleared too so the "show me the default flat detection" view is
+ * restored. */
+function resetParams() {
+    for (const m of URL_PARAM_MAP) {
+        const el = document.getElementById(m.id);
+        if (!el) continue;
+        if (m.kind === 'bool') {
+            el.checked = el.defaultChecked;
+        } else if (el.tagName === 'SELECT') {
+            /* Find the option marked default-selected in HTML. */
+            for (const o of el.options) {
+                if (o.defaultSelected) { el.value = o.value; break; }
+            }
+        } else {
+            el.value = el.defaultValue;
+        }
+    }
+    _flatOverride.clear();
+    refreshFromFreqs();
+    updateUrlFromState();
+    /* Filename input has no HTML default value other than '' — clear it
+     * so the placeholder (auto-generated name) shows. */
+    document.getElementById('download-filename').value = '';
+    syncFilenamePlaceholder();
+}
+
+/* Keep the filename input's placeholder in sync with the auto-generated
+ * default so users see what would be written if they leave it empty. */
+function syncFilenamePlaceholder() {
+    const el = document.getElementById('download-filename');
+    if (!el) return;
+    el.placeholder = defaultDownloadFilename();
+}
+
+/* Tooltip wiring: hover any control with documentation in URL_PARAM_MAP
+ * or DATA_PARAM_DOCS → show a rich tooltip with the description + the
+ * URL parameter name and possible values in bold at the bottom. */
+function tooltipHtmlFor(doc) {
+    return `${doc.desc}<br><br>URL: <b>${doc.param}=${doc.values}</b>`;
+}
+function setupControlTooltips() {
+    const all = URL_PARAM_MAP.concat(DATA_PARAM_DOCS);
+    for (const m of all) {
+        const el = document.getElementById(m.id);
+        if (!el) continue;
+        /* Attach to the wrapping <label> if present (covers checkbox +
+         * its text), else to the element itself. */
+        const target = el.closest('label') || el;
+        target.addEventListener('mousemove', (e) => showTooltip(tooltipHtmlFor(m), e));
+        target.addEventListener('mouseleave', hideTooltip);
+        /* Strip any pre-existing native title attribute so the browser
+         * doesn't double-show the truncated text version. */
+        target.removeAttribute('title');
+    }
+}
+
+/* Tracks which UI affordance produced the currently-displayed data,
+ * so updateUrlFromState() knows whether to write text=, dataset=, or
+ * neither (file-loaded data isn't capturable in a URL). */
+let _dataSource = 'dataset';   /* one of 'dataset' | 'text' | 'file' */
+
+// ============================================================
+//  SVG export — clone the current view, strip the zoom transform,
+//  embed the SVG-relevant CSS, set width/height/viewBox to the
+//  content bbox, then trigger a download.  Output is a standalone
+//  .svg file suitable for paper inclusion.
+// ============================================================
+
+/* Collect the page's CSS rules that target #tree-svg so the exported
+ * file renders the same standalone.  Walks document.styleSheets at
+ * runtime so we stay in sync with the source CSS without duplication. */
+function collectTreeSvgCss() {
+    const out = [];
+    for (const sheet of document.styleSheets) {
+        let rules;
+        try { rules = sheet.cssRules; } catch (e) { continue; }  /* CORS */
+        if (!rules) continue;
+        for (const rule of rules) {
+            if (!rule.selectorText) continue;
+            if (rule.selectorText.indexOf('#tree-svg') === -1) continue;
+            out.push(rule.cssText);
+        }
+    }
+    return out.join('\n');
+}
+
+function downloadCurrentSvg(filename) {
+    if (!filename) filename = 'tree.svg';
+    const orig = document.getElementById('tree-svg');
+    if (!orig) return;
+
+    /* Clone the SVG subtree and strip the pan/zoom transform on gWorld
+     * — we want the exported file at 1:1 with no scroll state baked in. */
+    const clone = orig.cloneNode(true);
+    const gWorldClone = clone.querySelector('g');
+    if (gWorldClone) gWorldClone.removeAttribute('transform');
+
+    /* Measure unzoomed content via the LIVE gWorld (the clone isn't in
+     * the document so getBBox would return zeros).  Pad a little. */
+    const bbox = gWorld.node().getBBox();
+    const pad = 12;
+    const exportW = Math.max(1, Math.ceil(bbox.width  + 2 * pad));
+    const exportH = Math.max(1, Math.ceil(bbox.height + 2 * pad));
+    clone.setAttribute('width',  exportW);
+    clone.setAttribute('height', exportH);
+    clone.setAttribute('viewBox',
+        `${bbox.x - pad} ${bbox.y - pad} ${exportW} ${exportH}`);
+
+    /* Inline the #tree-svg stylesheet so the .svg renders without the
+     * page's <style> block.  Prepended via SVG <style> element. */
+    const css = collectTreeSvgCss();
+    if (css) {
+        const styleEl = document.createElementNS(
+            'http://www.w3.org/2000/svg', 'style');
+        styleEl.textContent = css;
+        clone.insertBefore(styleEl, clone.firstChild);
+    }
+
+    clone.setAttribute('xmlns',       'http://www.w3.org/2000/svg');
+    clone.setAttribute('xmlns:xlink', 'http://www.w3.org/1999/xlink');
+
+    const svgText = '<?xml version="1.0" standalone="no"?>\n' +
+                     new XMLSerializer().serializeToString(clone);
+
+    /* Trigger download via a temporary anchor.  Note: in regular
+     * browsers this requires a recent user gesture (clicking the
+     * download button); when the page is driven by a headless tool
+     * like Playwright the gesture-or-permission check is bypassed. */
+    const blob = new Blob([svgText], { type: 'image/svg+xml;charset=utf-8' });
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.style.display = 'none';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    /* Revoke after a short delay so the browser has time to consume
+     * the blob (some browsers race on instant revoke). */
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+/* Default download filename: derived from the data source + a
+ * couple of distinguishing toggles, so multiple downloads from
+ * the same session don't collide. */
+function defaultDownloadFilename() {
+    let stem;
+    if (_dataSource === 'text') {
+        const t = document.getElementById('text-input').value || 'text';
+        stem = 'text-' + t.replace(/[^a-z0-9]+/gi, '_').slice(0, 20);
+    } else if (_dataSource === 'dataset') {
+        stem = document.getElementById('dataset-select').value || 'tree';
+    } else {
+        stem = 'tree';
+    }
+    if (document.getElementById('ph-opt').checked) stem += '-phopt';
+    if (document.getElementById('condense-flat').checked) stem += '-folded';
+    return stem + '.svg';
+}
+
+/* Build a URL search string from current control state.  Includes
+ * data source: text=... if a text was built, dataset=... if a preset
+ * is selected, neither for file-loaded data.  Booleans only included
+ * when they differ from the HTML-default state, so default-shaped
+ * URLs stay short. */
+function updateUrlFromState() {
+    const q = new URLSearchParams();
+    if (_dataSource === 'text') {
+        const t = document.getElementById('text-input').value;
+        if (t) q.set('text', t);
+    } else if (_dataSource === 'dataset') {
+        const n = document.getElementById('dataset-select').value;
+        if (n) q.set('dataset', n);
+    }
+    /* Controls — include only if they differ from HTML defaults so
+     * default views produce clean URLs. */
+    for (const m of URL_PARAM_MAP) {
+        const el = document.getElementById(m.id);
+        if (!el) continue;
+        if (m.kind === 'bool') {
+            const cur = !!el.checked;
+            const def = el.hasAttribute('checked');
+            if (cur !== def) q.set(m.param, cur ? '1' : '0');
+        } else {
+            const cur = el.value;
+            const def = el.defaultValue;
+            if (cur !== def) q.set(m.param, cur);
+        }
+    }
+    const s = q.toString();
+    const url = s ? `${window.location.pathname}?${s}` : window.location.pathname;
+    history.replaceState(null, '', url);
+}
+
+/* Choose initial data: URL text= → URL dataset= → first dataset.
+ * Run AFTER applyUrlParamsToControls so the render uses URL settings. */
+function loadInitialData() {
+    const q = parseUrlParams();
+    const dists = window.PIVCO_DISTRIBUTIONS || [];
+
+    if (q.has('text')) {
+        const s = q.get('text');
+        document.getElementById('text-input').value = s;
+        _dataSource = 'text';
+        buildFromText(s);
+        return;
+    }
+    if (q.has('dataset')) {
+        const name = q.get('dataset');
+        const d = dists.find(x => x.name === name);
+        if (d) {
+            const sel = document.getElementById('dataset-select');
+            sel.value = name;
+            _dataSource = 'dataset';
+            setFreqs(d.freq, d.name, d.is_main);
+            return;
+        }
+    }
+    /* Default: first dataset (preserves pre-URL-params behaviour). */
+    if (dists.length > 0) {
+        /* Replicate the MAIN-first ordering used in populateDatasetSelect. */
+        const main    = dists.filter(d =>  d.is_main).slice().sort((a,b) => a.name.localeCompare(b.name));
+        const nonMain = dists.filter(d => !d.is_main).slice().sort((a,b) => a.name.localeCompare(b.name));
+        const first = main.concat(nonMain)[0];
+        _dataSource = 'dataset';
+        setFreqs(first.freq, first.name, first.is_main);
+    }
 }
 
 /* Hover over a row in the top-N table → temporarily highlight the
@@ -1869,11 +2323,26 @@ function setupTopTableHover() {
 
 window.addEventListener('load', () => {
     initSvg();
-    populateDatasetSelect();
+    populateDatasetSelect();   /* fills the dropdown but does NOT pick data */
     setupFileInput();
     setupTextInput();
     setupToggles();
     setupTopTableHover();
+    setupControlTooltips();
+    /* URL params drive both the control state AND the initial data
+     * source.  Apply controls first, THEN load data so the first
+     * render reflects URL-driven settings. */
+    applyUrlParamsToControls();
+    loadInitialData();
+    /* Optional auto-download: when ?download=filename.svg is in the
+     * URL, fire off a download after the first render settles.  Works
+     * reliably under Playwright/Puppeteer; regular browsers may block
+     * the download without a user gesture, which is fine — the user
+     * can click the button instead. */
+    const q = parseUrlParams();
+    if (q.has('download')) {
+        setTimeout(() => downloadCurrentSvg(q.get('download')), 150);
+    }
 });
 window.addEventListener('resize', () => {
     if (currentTree) renderTree(currentTree, currentMeta);
