@@ -289,6 +289,10 @@ table.node-table tr.in-flat { color: #b45309; }
             <input type="checkbox" id="show-primitives">
             primitives
         </label>
+        <label class="toggle">
+            <input type="checkbox" id="show-bitmaps">
+            show bitmaps
+        </label>
         <label class="toggle" title="Draw leaf boxes with character + hex byte. Off = tiny circles only.">
             <input type="checkbox" id="show-leaf-details" checked>
             show leaf details
@@ -798,40 +802,76 @@ function annotatePrimitives(root, meta) {
 
     function isLeaf(n) { return n && n.symbol >= 0; }
 
-    /* Returns 'left' | 'right' | null — which child of this internal is
-     * the constant-leaf side.  Constant detection fires only when
-     * EXACTLY ONE child is a leaf (the leaf-vs-subtree configuration).
-     * Two-leaf parents fall under fuse-leaves (S2) or stay as naive
-     * P + 2*S1 when fuse-leaves is off; we do NOT mark one of two
-     * sibling leaves as C. */
-    function constantSide(n) {
-        if (!meta.constantDetect) return null;
+    /* Two "constant" models depending on mode:
+     *
+     *   TD: there's exactly ONE constant — the single globally-most-
+     *       frequent leaf.  Memset replaces its scatter; only its
+     *       direct parent uses PH/PRH.  This is the only place TD can
+     *       cheaply skip a scatter loop, so we don't proliferate.
+     *
+     *   BU: any leaf paired with a subtree sibling is a constant —
+     *       the merge uses tree_merge_bcast_{left,right}, with the
+     *       leaf-side broadcast as a scalar.  Multiple such leaves can
+     *       coexist independently; every leaf-vs-subtree internal
+     *       gets MH/MRH.  Both-leaf parents don't qualify (neither
+     *       side is "the constant against a subtree"); those fall to
+     *       fuse-leaves S2 or plain M.
+     */
+    let tdConstantLeaf = null;
+    if (meta.constantDetect && tdMode) {
+        let best = null;
+        (function pick(n) {
+            if (!n) return;
+            if (isLeaf(n)) {
+                if (!best || n.freq > best.freq) best = n;
+                return;
+            }
+            pick(n.left); pick(n.right);
+        })(root);
+        tdConstantLeaf = best;
+    }
+    function isBuConstantLeaf(n, parent) {
+        if (!meta.constantDetect || tdMode) return false;
+        if (!parent || !isLeaf(n)) return false;
+        const sibling = (parent.left === n) ? parent.right : parent.left;
+        return !!sibling && !isLeaf(sibling);
+    }
+    function isConstantParent(n) {
+        if (!meta.constantDetect) return false;
+        if (tdMode) {
+            return tdConstantLeaf &&
+                (n.left === tdConstantLeaf || n.right === tdConstantLeaf);
+        }
+        /* BU: exactly one child is a leaf, the other a subtree. */
         const L = n.left, R = n.right;
-        if (!L || !R) return null;
-        const lL = isLeaf(L), lR = isLeaf(R);
-        if (lL === lR) return null;     /* both leaves OR neither leaf */
-        return lL ? 'left' : 'right';
+        if (!L || !R) return false;
+        return isLeaf(L) !== isLeaf(R);
     }
 
     function walk(n, parent) {
         if (!n) return;
         n._primitive = null;
+        /* _isConstantLeaf drives the red border.  TD: the single
+         * tdConstantLeaf.  BU: every leaf whose sibling is a subtree. */
+        n._isConstantLeaf = isLeaf(n) && (tdMode
+            ? (n === tdConstantLeaf)
+            : isBuConstantLeaf(n, parent));
 
         if (isLeaf(n)) {
             /* Absorbed: inside a flat region. */
             if (meta.showFlat && n.inFlat) return;
-            if (parent) {
-                /* Absorbed by parent's S2 (fuse-leaves takes precedence). */
-                if (meta.fuseLeaves && isLeaf(parent.left) && isLeaf(parent.right)) return;
-                /* Constant detection at parent: am I the constant side? */
-                const cs = constantSide(parent);
-                if (cs) {
-                    const meIsConst = (cs === 'left')
-                        ? (n === parent.left)
-                        : (n === parent.right);
-                    if (meIsConst) { n._primitive = 'C'; return; }
-                }
-            }
+            /* Absorbed by parent's S2 (fuse-leaves wins, both leaves
+             * disappear into S2). */
+            if (parent && meta.fuseLeaves &&
+                isLeaf(parent.left) && isLeaf(parent.right)) return;
+            /* BU: leaves have no per-leaf primitive (no scatter, no
+             * memset — the leaf value is just a scalar input to the
+             * parent's merge).  The constant marker survives via
+             * _isConstantLeaf for the red border.
+             * TD: leaves do scatter (S1) or memset (C for the
+             * single most-frequent leaf). */
+            if (!tdMode) return;
+            if (n === tdConstantLeaf) { n._primitive = 'C'; return; }
             n._primitive = 'S1';
             return;
         }
@@ -852,11 +892,24 @@ function annotatePrimitives(root, meta) {
             walk(n.left, n); walk(n.right, n);
             return;
         }
+        /* Half-partition variant fires ONLY at the constant leaf's
+         * direct parent.  Every other internal stays at P / PR / M / MR
+         * regardless of leaf-vs-subtree configuration. */
         const isRoot = n.depth === 0;
-        const half = constantSide(n) != null;
+        const half = isConstantParent(n);
         let p = Pletter;
-        if (isRoot) p += 'R';
-        if (half)   p += 'H';
+        /* TD has a genuine root variant (PR/PRH) because the root
+         * partition operates on the identity index array [0..N-1]
+         * and skips the index load.  BU has no root-specific merge
+         * primitive — the merge logic at the root is identical to any
+         * internal merge, only the output buffer differs.  So we
+         * suffix R only in TD. */
+        if (isRoot && tdMode) p += 'R';
+        /* TD uses H (half-partition — we genuinely skip work on the
+         * leaf side).  BU uses C (full merge, but with a constant
+         * scalar input from the leaf side — no half-skip, just a
+         * different operand source). */
+        if (half) p += tdMode ? 'H' : 'C';
         n._primitive = p;
         walk(n.left, n); walk(n.right, n);
     }
@@ -873,6 +926,71 @@ function collectInternals(root) {
     }
     walk(root);
     return out;
+}
+
+/* Trace each source byte through the tree, returning an array of
+ * { sourceIdx, byte, char, code, codeLen } where code is the bit
+ * string of the leaf this byte routes to.  The code is the leaf's
+ * bitPrefix (already computed by the walkLeaves pass).
+ * Returns null if the trace can't be built (no text, or a byte that
+ * doesn't have a leaf in the current tree). */
+function buildSourceTrace(text, tree) {
+    if (!text) return null;
+    /* Build byte -> bitPrefix map by walking the tree once. */
+    const byteToBits = new Map();
+    (function walk(n) {
+        if (!n) return;
+        if (n.symbol >= 0) {
+            byteToBits.set(n.symbol, n.bitPrefix || '');
+            return;
+        }
+        walk(n.left); walk(n.right);
+    })(tree);
+    const bytes = new TextEncoder().encode(text);
+    const trace = [];
+    for (let i = 0; i < bytes.length; i++) {
+        const b = bytes[i];
+        const bits = byteToBits.get(b);
+        if (bits == null) return null;   /* tree doesn't cover this byte */
+        const ch = (b >= 32 && b <= 126) ? String.fromCharCode(b) : '·';
+        trace.push({
+            sourceIdx: i,
+            byte: b,
+            char: ch,
+            code: bits,
+            codeLen: bits.length,
+        });
+    }
+    return trace;
+}
+
+/* Attach to each internal node the "bitmap entering" it: an array of
+ * { sourceIdx, char, bitIdx, bit } describing the bits being routed
+ * at this node.  Leaves get bitmap = null.  Requires buildSourceTrace
+ * to have been called first; takes the returned trace as input. */
+function annotateBitmaps(root, trace) {
+    function walk(node, positions, depth) {
+        if (!node) return;
+        node.bitmap = null;
+        if (node.symbol >= 0 || positions.length === 0) return;
+        const entries = [], left = [], right = [];
+        for (const p of positions) {
+            const bit = p.code[depth];
+            if (bit == null) continue;   /* defensive — shouldn't happen */
+            entries.push({
+                sourceIdx: p.sourceIdx,
+                char: p.char,
+                bitIdx: depth,
+                bit: bit,
+            });
+            if (bit === '0') left.push(p);
+            else            right.push(p);
+        }
+        node.bitmap = entries;
+        walk(node.left,  left,  depth + 1);
+        walk(node.right, right, depth + 1);
+    }
+    walk(root, trace || [], 0);
 }
 
 // ============================================================
@@ -1092,7 +1210,13 @@ function renderTree(rootNode, meta) {
      * boxes (need room for char + hex + skew bar above the parent
      * circle).  Halve it when leaves are tiny circles so deep trees
      * fit. */
-    const levelH = detailed ? 60 : 30;
+    /* When "show bitmaps" is on, each internal node gets a 2-row
+     * bitmap glyph above it that needs ~32 px of vertical room; bump
+     * the per-level spacing so the bitmap doesn't crowd the parent
+     * link or the child node. */
+    const levelH = meta.showBitmaps
+        ? (detailed ? 72 : 56)
+        : (detailed ? 60 : 30);
     const treeH = Math.max(120, levelH * (maxDepth + 1));
 
     /* In "no overlap" mode use d3.cluster so every leaf gets its own
@@ -1415,6 +1539,13 @@ function renderTree(rootNode, meta) {
             .attr('transform', d => `translate(${d.x},${d.y})`)
             .on('mousemove', (e, d) => showTooltip(nodeTooltipHtml(d.data, totalN), e))
             .on('mouseleave', hideTooltip);
+    /* "Constant" leaves get a red border.  Set of constant leaves
+     * differs by mode:
+     *   TD: at most the one globally-most-frequent leaf (its
+     *       primitive is C; memset fast-path).
+     *   BU: every leaf whose sibling is a subtree (its parent uses
+     *       MH/MRH and treats this leaf as a broadcast input). */
+    const isConstantLeaf = d => d.data._isConstantLeaf;
     if (meta.showLeafDetails) {
         const W2 = leafSize - 2, H2 = 18;
         lg.append('rect')
@@ -1426,7 +1557,9 @@ function renderTree(rootNode, meta) {
                 const p = d.data.freq / totalN;
                 const lit = Math.min(95, 60 + 35 * (1 - Math.min(1, p * 10)));
                 return `hsl(220, 30%, ${lit}%)`;
-            });
+            })
+            .style('stroke', d => isConstantLeaf(d) ? '#dc2626' : null)
+            .style('stroke-width', d => isConstantLeaf(d) ? 2 : null);
         lg.append('text')
             .attr('class', 'leaf-char')
             .attr('y', -2)
@@ -1437,14 +1570,14 @@ function renderTree(rootNode, meta) {
             .text(d => d.data.symbol.toString(16).padStart(2,'0'));
     } else {
         lg.append('circle')
-            .attr('r', 3)
+            .attr('r', d => isConstantLeaf(d) ? 4 : 3)
             .attr('fill', d => {
                 const p = d.data.freq / totalN;
                 const lit = Math.min(85, 50 + 30 * (1 - Math.min(1, p * 10)));
                 return `hsl(220, 40%, ${lit}%)`;
             })
-            .attr('stroke', '#666')
-            .attr('stroke-width', 0.5);
+            .attr('stroke', d => isConstantLeaf(d) ? '#dc2626' : '#666')
+            .attr('stroke-width', d => isConstantLeaf(d) ? 1.5 : 0.5);
     }
 
     /* Optional leaf-code label (off by default).  Placed below the
@@ -1518,14 +1651,27 @@ function renderTree(rootNode, meta) {
         lg.each(drawBubble);
     }
 
-    /* Title + labels overlay.  Placed in gWorld at positions relative
-     * to the tree's bounding box, so:
-     *   - the SVG export captures them in the right place (top-centre
-     *     for title, top-right for the labels column).
-     *   - they zoom/pan with the tree on screen, which is OK for
-     *     paper-figure use cases.
-     * Title sits one line above the labels so they don't overlap when
-     * both are wide. */
+    /* "show bitmaps" — per-node bitmaps above each internal node, and
+     * a 3-row source-trace strip on top of the tree.  Active only when
+     * we have a text source to trace.  letterColor maps each input
+     * character to a stable colour from a small palette. */
+    const bmActive    = !!(meta.showBitmaps && meta.sourceTrace);
+    const bmNeedsText = !!(meta.showBitmaps && !meta.sourceTrace);
+    const letterColor = bmActive ? buildLetterColors(meta.sourceTrace) : null;
+    if (bmActive) {
+        intG.each(function(d) {
+            if (!d.data.bitmap || d.data.bitmap.length === 0) return;
+            renderNodeBitmap(d3.select(this), d.data.bitmap, letterColor);
+        });
+    }
+
+    /* Top overlay: source strip (if showBitmaps + text), title, labels.
+     * Placed in gWorld at positions relative to the tree's bounding
+     * box so the SVG export captures them.  Stack from tree upward:
+     * strip nearest the tree, then title at the top.  Labels live
+     * separately — at the root's vertical level, off to its right —
+     * so they sit alongside the tree rather than crowding the title /
+     * source-strip column. */
     {
         const treeBBox = gWorld.node().getBBox();
         const hasTitle  = !!(meta.titleText && meta.titleText.length);
@@ -1533,47 +1679,88 @@ function renderTree(rootNode, meta) {
             ? meta.showLabels.split(',').map(s => s.trim()).filter(Boolean)
             : [];
         const hasLabels = labelKeys.length > 0 && meta.stats;
-        if (hasTitle || hasLabels) {
-            const titleSize = 14;
-            const labelSize = 11;
-            const labelLineH = 14;
-            const gapToTree = 8;
-            /* Stack: title (if any) on top, then labels below it.
-             * Position bottommost line at treeBBox.y - gapToTree. */
-            const bottomY = treeBBox.y - gapToTree;
-            const labelTopY = hasLabels
-                ? bottomY - (labelKeys.length - 1) * labelLineH
-                : bottomY;
-            const titleY = hasLabels
-                ? labelTopY - labelLineH
-                : bottomY;
-            if (hasTitle) {
+        const hasStrip  = bmActive && meta.sourceTrace.length > 0;
+        const labelLineH = 14;
+        const gapToTree  = hasStrip ? 22 : 8;   /* more breathing room
+                                                  when strip is shown */
+        const gapBetween = 10;
+        const titleH     = 18;
+        const stripH     = 36;  /* 3 rows × ~12 px */
+
+        /* Stack source-strip + title upward from the tree top. */
+        let bottomY = treeBBox.y - gapToTree;
+
+        if (hasStrip) {
+            const stripBottomY = bottomY;
+            renderSourceStrip(treeBBox, meta.sourceTrace,
+                               letterColor, stripBottomY);
+            /* Horizontal separator between the strip's index row and
+             * the root bitmap — spans the full tree width so the
+             * "source side" and "decode side" of the figure read as
+             * two stacked panels. */
+            const sepY = (stripBottomY + treeBBox.y) / 2;
+            gWorld.append('line')
+                .attr('class', 'source-tree-sep')
+                .attr('x1', treeBBox.x)
+                .attr('x2', treeBBox.x + treeBBox.width)
+                .attr('y1', sepY)
+                .attr('y2', sepY)
+                .style('stroke', '#888')
+                .style('stroke-width', 1);
+            bottomY = stripBottomY - stripH - gapBetween;
+        }
+        if (hasTitle) {
+            gWorld.append('text')
+                .attr('class', 'tree-title')
+                .attr('x', treeBBox.x + treeBBox.width / 2)
+                .attr('y', bottomY)
+                .attr('text-anchor', 'middle')
+                .style('font', '14px sans-serif')
+                .style('font-weight', 600)
+                .style('fill', '#222')
+                .text(meta.titleText);
+            bottomY -= titleH;
+        }
+
+        /* Labels at the ROOT's vertical level, right-aligned to the
+         * right edge of the rightmost leaf so the label column hugs
+         * the tree's right boundary regardless of width. */
+        if (hasLabels) {
+            const leafXs = root.leaves().map(n => n.x);
+            const rightmostLeafX = leafXs.length
+                ? Math.max(...leafXs)
+                : treeBBox.x + treeBBox.width;
+            const labelX = rightmostLeafX + leafSize / 2;
+            const blockH = (labelKeys.length - 1) * labelLineH;
+            let labelY0 = (root.y || treeBBox.y) - blockH / 2;
+            let y = labelY0;
+            for (const key of labelKeys) {
+                const fn = LABEL_VOCAB[key];
+                const line = fn ? fn(meta.stats) : `${key}: ?`;
                 gWorld.append('text')
-                    .attr('class', 'tree-title')
-                    .attr('x', treeBBox.x + treeBBox.width / 2)
-                    .attr('y', titleY)
-                    .attr('text-anchor', 'middle')
-                    .style('font', titleSize + 'px sans-serif')
-                    .style('font-weight', 600)
-                    .style('fill', '#222')
-                    .text(meta.titleText);
+                    .attr('class', 'tree-label')
+                    .attr('x', labelX)
+                    .attr('y', y)
+                    .attr('text-anchor', 'end')
+                    .style('font', '11px monospace')
+                    .style('fill', '#444')
+                    .text(line);
+                y += labelLineH;
             }
-            if (hasLabels) {
-                let y = labelTopY;
-                for (const key of labelKeys) {
-                    const fn = LABEL_VOCAB[key];
-                    const line = fn ? fn(meta.stats) : `${key}: ?`;
-                    gWorld.append('text')
-                        .attr('class', 'tree-label')
-                        .attr('x', treeBBox.x + treeBBox.width)
-                        .attr('y', y)
-                        .attr('text-anchor', 'end')
-                        .style('font', labelSize + 'px monospace')
-                        .style('fill', '#444')
-                        .text(line);
-                    y += labelLineH;
-                }
-            }
+        }
+
+        /* "show bitmaps requires text" error — shown when the user
+         * enabled the toggle but the data source isn't a text input. */
+        if (bmNeedsText) {
+            gWorld.append('text')
+                .attr('class', 'bm-error')
+                .attr('x', treeBBox.x + treeBBox.width / 2)
+                .attr('y', treeBBox.y - 8)
+                .attr('text-anchor', 'middle')
+                .style('font', '12px sans-serif')
+                .style('font-weight', 500)
+                .style('fill', '#b91c1c')
+                .text('"show bitmaps" needs a text source (type into the text input above)');
         }
     }
 
@@ -1712,6 +1899,148 @@ function computeTreeStats(rootNode, meta) {
         opsSimple: n_leaves ? (opsSimpleSum / n_leaves) : 0,
         opsW:      opsWeightedSum,
     };
+}
+
+/* Colour palette for source-character labels in the "show bitmaps"
+ * overlay.  Stable per character within a render so x_0 and x_1
+ * share a colour distinct from y_0 etc.  Tableau-style hues, picked
+ * to stay distinguishable on white. */
+const LETTER_PALETTE = [
+    '#1f77b4', '#d62728', '#2ca02c', '#9467bd', '#ff7f0e',
+    '#8c564b', '#e377c2', '#17becf', '#bcbd22', '#7f7f7f',
+];
+function buildLetterColors(trace) {
+    const m = new Map();
+    for (const p of trace) {
+        if (!m.has(p.char)) {
+            m.set(p.char, LETTER_PALETTE[m.size % LETTER_PALETTE.length]);
+        }
+    }
+    return m;
+}
+
+/* Render a "letter_idx" tag as SVG text with the index as a true
+ * subscript (smaller font, baseline-shifted).  Centred at (x, y). */
+function appendLetterIdxTag(parent, x, y, letter, idx,
+                            fontSize, color, weight) {
+    const t = parent.append('text')
+        .attr('x', x).attr('y', y)
+        .attr('text-anchor', 'middle')
+        .style('font', `${fontSize}px monospace`)
+        .style('font-weight', weight || 400)
+        .style('fill', color);
+    t.append('tspan').text(letter);
+    t.append('tspan')
+        .attr('baseline-shift', 'sub')
+        .attr('font-size', '0.72em')
+        .text(idx);
+    return t;
+}
+
+/* Render the 3-row source-trace strip above the tree:
+ *     row 1: each character, centered over its codeLen columns
+ *     row 2: per-bit binary value
+ *     row 3: "letter_b" tag (b = bit index INSIDE that character's
+ *            code, not the global source position), coloured per
+ *            letter, with b as a true subscript.
+ * Thin vertical separators between adjacent characters so the column
+ * groups are visually distinct.  Bottom row anchored at stripBottomY
+ * (just above the tree); strip centred horizontally over treeBBox. */
+function renderSourceStrip(treeBBox, trace, letterColor, stripBottomY) {
+    const cellW = 14;
+    const charY = stripBottomY - 24;
+    const bitY  = stripBottomY - 12;
+    const idxY  = stripBottomY;
+    const totalBits = trace.reduce((s, p) => s + p.codeLen, 0);
+    if (totalBits === 0) return;
+    const stripWidth = totalBits * cellW;
+    const stripX0 = treeBBox.x + treeBBox.width / 2 - stripWidth / 2;
+    const dividerYTop    = charY - 10;
+    const dividerYBottom = idxY  + 4;
+
+    let col = 0;
+    for (let pi = 0; pi < trace.length; pi++) {
+        const p = trace[pi];
+        const color = letterColor.get(p.char) || '#333';
+        const charX0 = stripX0 + col * cellW;
+        const charX1 = charX0 + p.codeLen * cellW;
+        /* Divider BEFORE this character (skip the very first). */
+        if (pi > 0) {
+            gWorld.append('line')
+                .attr('class', 'src-divider')
+                .attr('x1', charX0).attr('y1', dividerYTop)
+                .attr('x2', charX0).attr('y2', dividerYBottom)
+                .style('stroke', '#bbb')
+                .style('stroke-width', 0.5);
+        }
+        /* Character label, centred over its codeLen-cell span. */
+        gWorld.append('text')
+            .attr('class', 'src-char')
+            .attr('x', (charX0 + charX1) / 2)
+            .attr('y', charY)
+            .attr('text-anchor', 'middle')
+            .style('font', '13px monospace')
+            .style('font-weight', 600)
+            .style('fill', color)
+            .text(p.char);
+        for (let b = 0; b < p.codeLen; b++) {
+            const cx = charX0 + (b + 0.5) * cellW;
+            gWorld.append('text')
+                .attr('class', 'src-bit')
+                .attr('x', cx).attr('y', bitY)
+                .attr('text-anchor', 'middle')
+                .style('font', '11px monospace')
+                .style('font-weight', 600)
+                .style('fill', '#222')
+                .text(p.code[b]);
+            appendLetterIdxTag(gWorld, cx, idxY, p.char, b,
+                                9, color, 500);
+        }
+        col += p.codeLen;
+    }
+    /* Final right-side divider for symmetry. */
+    gWorld.append('line')
+        .attr('class', 'src-divider')
+        .attr('x1', stripX0 + totalBits * cellW)
+        .attr('y1', dividerYTop)
+        .attr('x2', stripX0 + totalBits * cellW)
+        .attr('y2', dividerYBottom)
+        .style('stroke', '#bbb')
+        .style('stroke-width', 0.5);
+    /* Leading divider so both ends are bracketed. */
+    gWorld.append('line')
+        .attr('class', 'src-divider')
+        .attr('x1', stripX0).attr('y1', dividerYTop)
+        .attr('x2', stripX0).attr('y2', dividerYBottom)
+        .style('stroke', '#bbb')
+        .style('stroke-width', 0.5);
+}
+
+/* Render the bitmap entering one internal node.  Centred horizontally
+ * on the node; bit values on top, "letter_b" tags below with b as a
+ * subscript (b = bit-index inside that letter's code).  Positioned
+ * well above the node circle so neither the circle nor the parent
+ * link line crowds the labels. */
+function renderNodeBitmap(g, bitmap, letterColor) {
+    if (!bitmap || bitmap.length === 0) return;
+    const cellW = 12;
+    const w = bitmap.length * cellW;
+    const x0 = -w / 2;
+    const bitY = -34;
+    const idxY = -22;
+    const bg = g.append('g').attr('class', 'node-bitmap');
+    bitmap.forEach((e, i) => {
+        const cx = x0 + (i + 0.5) * cellW;
+        bg.append('text')
+            .attr('x', cx).attr('y', bitY)
+            .attr('text-anchor', 'middle')
+            .style('font', '10px monospace')
+            .style('font-weight', 600)
+            .style('fill', '#222')
+            .text(e.bit);
+        appendLetterIdxTag(bg, cx, idxY, e.char, e.bitIdx,
+                            8, letterColor.get(e.char) || '#666', 500);
+    });
 }
 
 /* Vocabulary for the labels overlay.  Each entry: short key the user
@@ -1876,6 +2205,7 @@ function refreshFromFreqs() {
     const noOverlap = document.getElementById('no-overlap').checked;
     const showSplitting = document.getElementById('splitting').checked;
     const showPrimitives = document.getElementById('show-primitives').checked;
+    const showBitmaps = document.getElementById('show-bitmaps').checked;
     const titleText = document.getElementById('title-input').value;
     const showLabels = document.getElementById('show-labels').value;
     const showLeafDetails = document.getElementById('show-leaf-details').checked;
@@ -1917,11 +2247,14 @@ function refreshFromFreqs() {
     }
     walkLeaves(tree, '');
 
+    const sourceText = (_dataSource === 'text')
+        ? document.getElementById('text-input').value
+        : null;
     const meta = {
         name: _name, isMain: _isMain, totalN: _totalN,
         phOpt, showFlat, condenseFlat, noOverlap, showSplitting,
-        showPrimitives, mode, constantDetect, fuseLeaves,
-        titleText, showLabels,
+        showPrimitives, showBitmaps, mode, constantDetect, fuseLeaves,
+        titleText, showLabels, sourceText,
         showLeafDetails, showSkew, showBitPrefix, showLeafCode,
         showBranchBits, keysSort, maxLen,
     };
@@ -1930,6 +2263,23 @@ function refreshFromFreqs() {
      * computeTreeStats so ops/byte reflects the current toggles. */
     annotatePrimitives(tree, meta);
     annotateLeafOps(tree);
+
+    /* "show bitmaps" — trace each source byte through the tree,
+     * recording at each internal node the bits being routed there.
+     * Active only when the data source is text (we need the actual
+     * input string, not just a frequency distribution). */
+    if (meta.showBitmaps && meta.sourceText) {
+        meta.sourceTrace = buildSourceTrace(meta.sourceText, tree);
+        annotateBitmaps(tree, meta.sourceTrace);
+    } else {
+        meta.sourceTrace = null;
+        /* Clear any stale per-node bitmaps from a previous render. */
+        (function clear(n) {
+            if (!n) return;
+            n.bitmap = null;
+            clear(n.left); clear(n.right);
+        })(tree);
+    }
     /* Compute stats up-front so both renderTree (overlay) and
      * renderStats (panel) read from the same numbers. */
     meta.stats = computeTreeStats(tree, meta);
@@ -2056,6 +2406,7 @@ function setupToggles() {
     document.getElementById('no-overlap').addEventListener('change', refreshAndUrl);
     document.getElementById('splitting').addEventListener('change', refreshAndUrl);
     document.getElementById('show-primitives').addEventListener('change', refreshAndUrl);
+    document.getElementById('show-bitmaps').addEventListener('change', refreshAndUrl);
     document.getElementById('tree-mode').addEventListener('change', refreshAndUrl);
     document.getElementById('constant-detect').addEventListener('change', refreshClearAndUrl);
     document.getElementById('fuse-leaves').addEventListener('change', refreshClearAndUrl);
@@ -2134,9 +2485,10 @@ const URL_PARAM_MAP = [
       desc: 'Highlight detected flat subtrees (uniform-depth, fast-path candidates). When primitives are shown, flat-subtree roots render as DX (skipping X partition levels).',
       values: '1 | 0' },
     { kind: 'bool', param: 'constant',       id: 'constant-detect',
-      desc: 'Detect the high-frequency ("constant") child of each internal node and use a memset-fast-path scatter for it (primitive C).<br><br>' +
-            'When on, the parent uses the <b>half-partition</b> variant (PH / PRH / MH / MRH) since one side is fixed-by-construction and only the other side needs partitioning.<br><br>' +
-            'When off: no half variants, no C primitive; every non-flat internal is P / PR / M / MR and every non-absorbed leaf is S1.',
+      desc: 'Mark "constant" leaves and use a half / with-constant primitive at their parent.  The two modes have different semantics:<br><br>' +
+            '<b>Top-down</b>: at most ONE constant — the single globally-most-frequent leaf.  Its primitive is <b>C</b> (memset fast-path, skips that leaf\'s scatter loop entirely).  Only its direct parent uses <b>PH</b> / <b>PRH</b> (genuine half-partition — only the other side is partitioned).<br><br>' +
+            '<b>Bottom-up</b>: any leaf whose sibling is a subtree is a constant — the parent\'s merge uses <b>MC</b> and broadcasts the leaf\'s value as a scalar (tree_merge_bcast_left / _right).  Full merge, just a different operand source — not a "half" anything.  No per-leaf primitive in BU, only the red border.  Multiple constants coexist independently.<br><br>' +
+            'When off: no with-constant variants anywhere; every non-flat internal is P / PR (TD) or M (BU).  In TD, all non-absorbed leaves are S1.',
       values: '1 | 0' },
     { kind: 'bool', param: 'fuse-leaves',    id: 'fuse-leaves',
       desc: 'When an internal node\'s two children are both leaves, emit one fused S2 primitive (scatter two symbols at once) at the parent. Absorbs both leaves\' S1s. Wins over constant detection when both children are leaves.',
@@ -2150,17 +2502,29 @@ const URL_PARAM_MAP = [
     { kind: 'bool', param: 'splitting',      id: 'splitting',
       desc: 'Enable interactive tree splitting: flattenable nodes draw with a thick stroke and clicking toggles flatten/unflatten. Off = nodes are plain circles and clicks do nothing.',
       values: '1 | 0' },
+    { kind: 'bool', param: 'show-bitmaps',   id: 'show-bitmaps',
+      desc: 'Trace the source string\'s bits through the tree.<br><br>' +
+            'Above the tree: each input character with its binary code, plus a colored <b>letter_index</b> tag under each bit.<br><br>' +
+            'Above each internal node: the bitmap entering that node (the bits being routed at that depth), with the same letter_index tags so you can follow individual source bits through the tree.<br><br>' +
+            'Requires a "text" data source — shows an error if a dataset (frequency-only) is selected.',
+      values: '1 | 0' },
     { kind: 'bool', param: 'primitives',     id: 'show-primitives',
       desc: 'Draw a small badge to the left of each node showing the decode primitive used.<br><br>' +
-            'Vocabulary (top-down letters; bottom-up swaps P→M):<br>' +
-            '&nbsp;&nbsp;<b>P</b> / <b>M</b>      — partition / merge, general internal node<br>' +
-            '&nbsp;&nbsp;<b>PR</b> / <b>MR</b>    — root variant<br>' +
-            '&nbsp;&nbsp;<b>PH</b> / <b>MH</b>    — half variant (one child is the constant leaf — needs constant detection)<br>' +
-            '&nbsp;&nbsp;<b>PRH</b> / <b>MRH</b>  — root + half<br>' +
-            '&nbsp;&nbsp;<b>DX</b>         — flat subtree of depth X (replaces X partition levels)<br>' +
-            '&nbsp;&nbsp;<b>S2</b>         — scatter two leaves (fuse-leaves on)<br>' +
+            '<b>Internal — top-down</b> (P = partition):<br>' +
+            '&nbsp;&nbsp;<b>P</b>          — general internal partition<br>' +
+            '&nbsp;&nbsp;<b>PR</b>         — root partition<br>' +
+            '&nbsp;&nbsp;<b>PH</b>         — half-partition: skip work on the constant leaf side<br>' +
+            '&nbsp;&nbsp;<b>PRH</b>        — root + half<br><br>' +
+            '<b>Internal — bottom-up</b> (M = merge):<br>' +
+            '&nbsp;&nbsp;<b>M</b>          — merge (root and non-root use the same primitive)<br>' +
+            '&nbsp;&nbsp;<b>MC</b>         — merge with constant leaf input (broadcast, full merge)<br><br>' +
+            '<b>Both modes</b>:<br>' +
+            '&nbsp;&nbsp;<b>DX</b>         — flat subtree of depth X (replaces X levels)<br><br>' +
+            '<b>Leaf-side</b> (TD only — BU leaves have no primitive badge):<br>' +
+            '&nbsp;&nbsp;<b>S2</b>         — fused scatter of two sibling leaves (needs <b>fuse-leaves</b>)<br>' +
             '&nbsp;&nbsp;<b>S1</b>         — scatter one leaf<br>' +
-            '&nbsp;&nbsp;<b>C</b>          — constant (high-frequency leaf, memset-fast-path scatter)',
+            '&nbsp;&nbsp;<b>C</b>          — memset of the constant leaf<br><br>' +
+            'In BU the constant leaf gets a red border but no badge — it\'s the broadcast input to MC / MRC.',
       values: '1 | 0' },
     { kind: 'str',  param: 'title',          id: 'title-input',
       desc: 'Optional title rendered centred above the tree. Leave empty to omit. Free text (no metric substitution).',
