@@ -17,35 +17,68 @@
   },
   "figures": [
     {
-      "name": "flattree-canon",
+      "name": "treeopt-naive",
       "tool": "tree_viz",
       "params": {
-        "text":         "coconut papaya",
-        "ph-opt":       "0",
-        "show-flat":    "0",
-        "title":        "coconut papaya — canonical",
+        "text":         "coconut-papaya",
+        "ph-opt":       0,
+        "show-flat":    0,
+        "constant":     0,
+        "fuse-leaves":  0,
+        "primitives":   1,
+        "title":        "coconut-papaya — naive tree",
         "labels":       "ops/byte"
       }
     },
     {
-      "name": "flattree-flat",
+      "name": "treeopt-fuse",
       "tool": "tree_viz",
       "params": {
-        "text":         "coconut papaya",
+        "text":         "coconut-papaya",
+        "ph-opt":       0,
+        "show-flat":    0,
+        "constant":     0,
+        "fuse-leaves":  1,
+        "primitives":   1,
+        "title":        "coconut-papaya — fused leaves",
+        "labels":       "ops/byte"
+      }
+    },
+    {
+      "name": "treeopt-constant",
+      "tool": "tree_viz",
+      "params": {
+        "text":         "coconut-papaya",
+        "ph-opt":       0,
+        "show-flat":    0,
+        "constant":     1,
+        "fuse-leaves":  1,
+        "primitives":   1,
+        "title":        "coconut-papaya — constant nodes",
+        "labels":       "ops/byte"
+      }
+    },
+    {
+      "name": "treeopt-flat",
+      "tool": "tree_viz",
+      "params": {
+        "text":         "coconut-papaya",
         "ph-opt":       0,
         "show-flat":    1,
-        "title":        "coconut papaya — flat subtrees",
+        "primitives":   1,
+        "title":        "coconut-papaya — flat subtrees",
         "labels":       "ops/byte"
       }
     },
     {
-      "name": "flattree-opt",
+      "name": "treeopt-opt",
       "tool": "tree_viz",
       "params": {
-        "text":         "coconut papaya",
+        "text":         "coconut-papaya",
         "ph-opt":       1,
         "show-flat":    1,
-        "title":        "coconut papaya — optimized subtrees",
+        "primitives":   1,
+        "title":        "coconut-papaya — optimized subtrees",
         "labels":       "ops/byte"
       }
     },

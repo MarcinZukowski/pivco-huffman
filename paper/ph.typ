@@ -40,6 +40,7 @@ Oh well, maybe one day reviewers will have a sense of humor...
 #include "updown.typ"
 #include "enc.typ"
 #include "ans.typ"
+#include "cao.typ"
 #include "related.typ"
 
 

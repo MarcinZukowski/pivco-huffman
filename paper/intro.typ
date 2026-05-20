@@ -21,7 +21,7 @@ huff0, Oodle
 Mostly the same idea - predefined table, multi-stream or interleaved-stream for exposing more
 work for modern CPUs.
 
-== Motivating Example: Hash Join in Databases
+== Motivating Example: Hash Join in Databases <hj>
 
 Hash table lookup is one of the most performance-intensive operations in many systems, including
 databases.

@@ -64,5 +64,7 @@
   if _pdf {
     base = URLBASE
   }
-  link(base + "figures/fig-web.html?" + figname, image("figures/" + figname + ".svg"))
+  link(
+      base + "figures/fig-web.html?" + figname,
+      image("figures/" + figname + ".svg"))
 }

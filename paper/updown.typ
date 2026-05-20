@@ -8,11 +8,3 @@ indices to form a dense sequence so writes could be sequential.
 But the word "merge" triggered an idea of merging uncompressed leaf collections
 based on the node bitmap. And so on.
 
-= Encoding <encoding>
-
-== Encoding structure
-
-== High performance primitives
-
-== Performance/compression tradeoffs
-
