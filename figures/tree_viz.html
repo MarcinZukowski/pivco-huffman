@@ -795,10 +795,11 @@ function detectFlatSubtrees(root) {
  *   2. inside a flat subtree      → null
  *   3. fuse-leaves on AND both children are leaves → S2 (and absorb both leaves)
  *   4. constant on AND at least one child is a leaf:
- *        - parent → half variant: PH / PRH / MH / MRH
+ *        - parent (TD) → half variant: PH / PRH
+ *        - parent (BU) → MC
  *        - the constant-side leaf → C
  *        - the other side (if also a leaf) → S1
- *   5. otherwise: parent = P / PR / M / MR; leaves = S1.
+ *   5. otherwise: parent = P / PR / M; leaves = S1.
  *
  * When BOTH children are leaves and constant is on AND fuse-leaves is
  * off: pick the higher-frequency leaf as the "constant" side (gets C);
@@ -820,8 +821,8 @@ function annotatePrimitives(root, meta) {
      *       the merge uses tree_merge_bcast_{left,right}, with the
      *       leaf-side broadcast as a scalar.  Multiple such leaves can
      *       coexist independently; every leaf-vs-subtree internal
-     *       gets MH/MRH.  Both-leaf parents don't qualify (neither
-     *       side is "the constant against a subtree"); those fall to
+     *       gets MC.  Both-leaf parents don't qualify (neither side is
+     *       "the constant against a subtree"); those fall to
      *       fuse-leaves S2 or plain M.
      */
     let tdConstantLeaf = null;
@@ -918,7 +919,7 @@ function annotatePrimitives(root, meta) {
             return;
         }
         /* Half-partition variant fires ONLY at the constant leaf's
-         * direct parent.  Every other internal stays at P / PR / M / MR
+         * direct parent.  Every other internal stays at P / PR / M
          * regardless of leaf-vs-subtree configuration. */
         const isRoot = n.depth === 0;
         const half = isConstantParent(n);
@@ -1577,7 +1578,7 @@ function renderTree(rootNode, meta) {
      *   TD: at most the one globally-most-frequent leaf (its
      *       primitive is C; memset fast-path).
      *   BU: every leaf whose sibling is a subtree (its parent uses
-     *       MH/MRH and treats this leaf as a broadcast input). */
+     *       MC and treats this leaf as a broadcast input). */
     const isConstantLeaf = d => d.data._isConstantLeaf;
     if (meta.showLeafDetails) {
         const W2 = leafSize - 2, H2 = 18;

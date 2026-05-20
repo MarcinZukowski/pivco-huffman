@@ -59,7 +59,7 @@
  *    partition bit is at position `15 - depth`, which the primitives
  *    derive from the `depth` argument they receive.
  *
- *  int prim_build_bitmap_partition(uint16_t *codes_la, int n, int depth,
+ *  int prim_partition(uint16_t *codes_la, int n, int depth,
  *                                   uint8_t *bm, uint16_t *tmp);
  *
  *    Build the n-bit partition bitmap from codes_la[0..n) and partition
@@ -82,7 +82,7 @@
  *
  *        marker_slot = *out_ptr;  *marker_slot = 0;  *out_ptr += 1;
  *        bm = *out_ptr;  *out_ptr += bitmap_bytes(n);
- *        n_right = prim_build_bitmap_partition(codes_la, n, depth, bm, tmp);
+ *        n_right = prim_partition(codes_la, n, depth, bm, tmp);
  *        codec_maybe_fse_attempt(...);  // may rewrite marker + bm,
  *                                       // adjust *out_ptr on commit
  *        wire_commit_kr_header(kr_slot, n_right);
@@ -105,21 +105,21 @@
  *  DECODE PRIMITIVES (bottom-up)
  * ---------------------------------------------------------------------------
  *
- *  void prim_flat_decode_to_buffer(uint8_t *out, int n,
+ *  void prim_merge_flat(uint8_t *out, int n,
  *                                   const uint8_t *bm, int D,
  *                                   const uint8_t *c2s);
  *
  *    Unpack n D-bit codes from bm[], look each up in c2s[2^D], write
  *    the resulting symbols to out[0..n).  bm is `ceil(n*D/8)` bytes.
  *
- *  void prim_merge_both_const(const uint8_t *bm, int K,
+ *  void prim_merge_two(const uint8_t *bm, int K,
  *                              uint8_t left_sym, uint8_t right_sym,
  *                              uint8_t *out);
  *
  *    Both-leaves merge: for j in [0..K),
  *        out[j] = (bit_j ? right_sym : left_sym).
  *
- *  void prim_tree_merge_bcast_left(const uint8_t *bm, int K,
+ *  void prim_merge_constant_left(const uint8_t *bm, int K,
  *                                   uint8_t left_sym,
  *                                   const uint8_t *right_buf,
  *                                   uint8_t *out);
@@ -128,14 +128,14 @@
  *    : left_sym).  Used by HALF_RIGHT when the left child is a leaf
  *    (or prefilled).
  *
- *  void prim_tree_merge_bcast_right(const uint8_t *bm, int K,
+ *  void prim_merge_constant_right(const uint8_t *bm, int K,
  *                                    const uint8_t *left_buf,
  *                                    uint8_t right_sym,
  *                                    uint8_t *out);
  *
  *    Mirror of the above: out[j] = (bit_j ? right_sym : left_buf[l++]).
  *
- *  void prim_tree_merge(const uint8_t *bm, int K,
+ *  void prim_merge(const uint8_t *bm, int K,
  *                        const uint8_t *left_buf,
  *                        const uint8_t *right_buf,
  *                        uint8_t *out);

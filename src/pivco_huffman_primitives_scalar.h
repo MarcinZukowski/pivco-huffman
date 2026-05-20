@@ -175,7 +175,7 @@ PIVCO_PRIM_ALWAYS_INLINE void prim_enc_init(uint16_t *codes_la, int n,
                                               const uint16_t *code_la_lut)
 { enc_init_scalar(codes_la, n, symbols, code_la_lut); }
 
-PIVCO_PRIM_ALWAYS_INLINE int prim_build_bitmap_partition(uint16_t *codes_la, int n,
+PIVCO_PRIM_ALWAYS_INLINE int prim_partition(uint16_t *codes_la, int n,
                                                            int depth,
                                                            uint8_t *bm,
                                                            uint16_t *tmp)
@@ -186,30 +186,30 @@ PIVCO_PRIM_ALWAYS_INLINE void prim_pack_dN(uint8_t *out,
                                              int n, int D, int depth)
 { pack_dN_scalar(out, codes_la, n, D, depth); }
 
-PIVCO_PRIM_ALWAYS_INLINE void prim_flat_decode_to_buffer(uint8_t *out, int n,
+PIVCO_PRIM_ALWAYS_INLINE void prim_merge_flat(uint8_t *out, int n,
                                                            const uint8_t *bm, int D,
                                                            const uint8_t *c2s)
 { flat_decode_to_buffer_scalar(out, n, bm, D, c2s); }
 
-PIVCO_PRIM_ALWAYS_INLINE void prim_merge_both_const(const uint8_t *bm, int K,
+PIVCO_PRIM_ALWAYS_INLINE void prim_merge_two(const uint8_t *bm, int K,
                                                       uint8_t left_sym,
                                                       uint8_t right_sym,
                                                       uint8_t *out)
 { merge_both_const_scalar(bm, K, left_sym, right_sym, out); }
 
-PIVCO_PRIM_ALWAYS_INLINE void prim_tree_merge_bcast_left(const uint8_t *bm, int K,
+PIVCO_PRIM_ALWAYS_INLINE void prim_merge_constant_left(const uint8_t *bm, int K,
                                                            uint8_t left_sym,
                                                            const uint8_t *right_buf,
                                                            uint8_t *out)
 { tree_merge_bcast_left_scalar(bm, K, left_sym, right_buf, out); }
 
-PIVCO_PRIM_ALWAYS_INLINE void prim_tree_merge_bcast_right(const uint8_t *bm, int K,
+PIVCO_PRIM_ALWAYS_INLINE void prim_merge_constant_right(const uint8_t *bm, int K,
                                                             const uint8_t *left_buf,
                                                             uint8_t right_sym,
                                                             uint8_t *out)
 { tree_merge_bcast_right_scalar(bm, K, left_buf, right_sym, out); }
 
-PIVCO_PRIM_ALWAYS_INLINE void prim_tree_merge(const uint8_t *bm, int K,
+PIVCO_PRIM_ALWAYS_INLINE void prim_merge(const uint8_t *bm, int K,
                                                 const uint8_t *left_buf,
                                                 const uint8_t *right_buf,
                                                 uint8_t *out)

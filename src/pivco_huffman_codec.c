@@ -199,7 +199,7 @@ static void codec_encode_node(const pivco_huffman_table_t *table,
     uint8_t *bm = *out_ptr;
     *out_ptr += nbytes;
 
-    int n_right = prim_build_bitmap_partition(codes_la, n, depth, bm, tmp);
+    int n_right = prim_partition(codes_la, n, depth, bm, tmp);
     int n_left  = n - n_right;
 
     /* Optional FSE attempt on the raw bitmap.  On commit, marker_slot
@@ -302,7 +302,7 @@ static void codec_decode_subtree(const pivco_huffman_table_t *table,
         *in_ptr += total_bytes;
         const uint8_t *c2s =
             &table->flat_code_to_sym[table->flat_offset[node_id]];
-        prim_flat_decode_to_buffer(out_buf, K, bm, D, c2s);
+        prim_merge_flat(out_buf, K, bm, D, c2s);
         return;
     }
 
@@ -310,7 +310,7 @@ static void codec_decode_subtree(const pivco_huffman_table_t *table,
         /* No K_right header (kr_header_needed returns false). */
         uint8_t bm_scratch[PIVCO_BLOCK_SIZE / 8 + 16];
         const uint8_t *bm = wire_read_bitmap(in_ptr, K, bm_scratch);
-        prim_merge_both_const(bm, K,
+        prim_merge_two(bm, K,
                                (uint8_t)table->tree[node->left].symbol,
                                (uint8_t)table->tree[node->right].symbol,
                                out_buf);
@@ -326,7 +326,7 @@ static void codec_decode_subtree(const pivco_huffman_table_t *table,
          * merge_both_const with prefill_sym on the left and the
          * right child's symbol on the right. */
         if (table->node_type[node->right] == (uint8_t)PIVCO_NODE_LEAF) {
-            prim_merge_both_const(bm, K, table->prefill_sym,
+            prim_merge_two(bm, K, table->prefill_sym,
                                    (uint8_t)table->tree[node->right].symbol,
                                    out_buf);
             return;
@@ -334,7 +334,7 @@ static void codec_decode_subtree(const pivco_huffman_table_t *table,
         uint8_t *right_buf = scratch_top;
         codec_decode_subtree(table, node->right, K_right,
                               right_buf, in_ptr, scratch_top + K_right);
-        prim_tree_merge_bcast_left(bm, K, table->prefill_sym,
+        prim_merge_constant_left(bm, K, table->prefill_sym,
                                     right_buf, out_buf);
         return;
     }
@@ -345,7 +345,7 @@ static void codec_decode_subtree(const pivco_huffman_table_t *table,
         const uint8_t *bm = wire_read_bitmap(in_ptr, K, bm_scratch);
 
         if (table->node_type[node->left] == (uint8_t)PIVCO_NODE_LEAF) {
-            prim_merge_both_const(bm, K,
+            prim_merge_two(bm, K,
                                    (uint8_t)table->tree[node->left].symbol,
                                    table->prefill_sym, out_buf);
             return;
@@ -354,7 +354,7 @@ static void codec_decode_subtree(const pivco_huffman_table_t *table,
         uint8_t *left_buf = scratch_top;
         codec_decode_subtree(table, node->left, K_left,
                               left_buf, in_ptr, scratch_top + K_left);
-        prim_tree_merge_bcast_right(bm, K, left_buf,
+        prim_merge_constant_right(bm, K, left_buf,
                                      table->prefill_sym, out_buf);
         return;
     }
@@ -370,7 +370,7 @@ static void codec_decode_subtree(const pivco_huffman_table_t *table,
 
         if (left_kind == (uint8_t)PIVCO_NODE_LEAF
             && right_kind == (uint8_t)PIVCO_NODE_LEAF) {
-            prim_merge_both_const(bm, K,
+            prim_merge_two(bm, K,
                                    (uint8_t)table->tree[node->left].symbol,
                                    (uint8_t)table->tree[node->right].symbol,
                                    out_buf);
@@ -380,7 +380,7 @@ static void codec_decode_subtree(const pivco_huffman_table_t *table,
             uint8_t *right_buf = scratch_top;
             codec_decode_subtree(table, node->right, K_right,
                                   right_buf, in_ptr, scratch_top + K_right);
-            prim_tree_merge_bcast_left(bm, K,
+            prim_merge_constant_left(bm, K,
                                         (uint8_t)table->tree[node->left].symbol,
                                         right_buf, out_buf);
             return;
@@ -390,7 +390,7 @@ static void codec_decode_subtree(const pivco_huffman_table_t *table,
             uint8_t *left_buf = scratch_top;
             codec_decode_subtree(table, node->left, K_left,
                                   left_buf, in_ptr, scratch_top + K_left);
-            prim_tree_merge_bcast_right(bm, K, left_buf,
+            prim_merge_constant_right(bm, K, left_buf,
                                          (uint8_t)table->tree[node->right].symbol,
                                          out_buf);
             return;
@@ -407,7 +407,7 @@ static void codec_decode_subtree(const pivco_huffman_table_t *table,
                               left_buf,  in_ptr, new_scratch_top);
         codec_decode_subtree(table, node->right, K_right,
                               right_buf, in_ptr, new_scratch_top);
-        prim_tree_merge(bm, K, left_buf, right_buf, out_buf);
+        prim_merge(bm, K, left_buf, right_buf, out_buf);
         return;
     }
     }
@@ -450,7 +450,7 @@ int CODEC_DECODE_ENTRY(const uint8_t *in, size_t in_len,
         const uint8_t *bm = wire_read_bitmap(&ptr, N, bm_scratch);
         const pivco_tree_node_t *left_child  = &table->tree[root->left];
         const pivco_tree_node_t *right_child = &table->tree[root->right];
-        prim_merge_both_const(bm, N,
+        prim_merge_two(bm, N,
                                (uint8_t)left_child->symbol,
                                (uint8_t)right_child->symbol,
                                symbols);
