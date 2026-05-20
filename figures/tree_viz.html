@@ -2062,6 +2062,14 @@ function renderNodeBitmap(g, bitmap, letterColor) {
     const bitY = -34;
     const idxY = -22;
     const bg = g.append('g').attr('class', 'node-bitmap');
+    /* Rounded bubble around the digits row (matches pivot view). */
+    bg.append('rect')
+        .attr('x', x0 - 2).attr('y', bitY - 10)
+        .attr('width', w + 4).attr('height', 13)
+        .attr('rx', 3)
+        .attr('fill', '#f8fafc')
+        .attr('stroke', '#cbd5e1')
+        .attr('stroke-width', 0.6);
     bitmap.forEach((e, i) => {
         const cx = x0 + (i + 0.5) * cellW;
         bg.append('text')
@@ -2291,18 +2299,21 @@ function renderPivot(tree, meta) {
             const boxY0 = yCursor + bitmapLabelH;
             const nRows = node.bitmap.length;
             const boxH = nRows * rowH + 2 * bitmapBoxPadY;
-            /* Bitmap rounded box. */
-            gWorld.append('rect')
-                .attr('x', colX)
-                .attr('y', boxY0)
-                .attr('width', bitmapBoxW)
-                .attr('height', boxH)
-                .attr('rx', 5)
-                .attr('fill', boxFill).attr('stroke', boxStroke)
-                .attr('stroke-width', 0.7);
             const tagX  = colX + bitmapBoxPadX + colTagW / 2;
             const bitX  = colX + bitmapBoxPadX + colTagW + colBitW / 2;
             const starX = colX + bitmapBoxPadX + colTagW + colBitW + 1;
+            /* Rounded box around the bit COLUMN only (letter_b tags
+             * and the terminator * sit outside the bubble — matches
+             * the top-strip + tree-view convention of bubbling just
+             * the digits). */
+            gWorld.append('rect')
+                .attr('x', bitX - colBitW / 2 - 3)
+                .attr('y', boxY0)
+                .attr('width', colBitW + 6)
+                .attr('height', boxH)
+                .attr('rx', 4)
+                .attr('fill', boxFill).attr('stroke', boxStroke)
+                .attr('stroke-width', 0.7);
             node.bitmap.forEach((e, ei) => {
                 const yRow = boxY0 + bitmapBoxPadY + (ei + 0.5) * rowH + 4;
                 const color = letterColor.get(e.char) || '#333';
