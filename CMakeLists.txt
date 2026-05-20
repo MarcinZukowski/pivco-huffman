@@ -585,6 +585,14 @@ if(BUILD_BENCH)
             target_link_libraries(pivco_fusion_v4_avx512_cnt
                 pivco_huffman counters::counters m)
             target_include_directories(pivco_fusion_v4_avx512_cnt PRIVATE src)
+
+            # Bit-sliced (transposed) packing layout microbench --
+            # classic LSB bit-pack vs bit-sliced layout for D in {3,5,7}.
+            # Standalone; AVX-512 VBMI2 only.
+            add_executable(pivco_bench_bitslice extras/bench_bitslice.c)
+            target_compile_options(pivco_bench_bitslice PRIVATE
+                -mavx512f -mavx512bw -mavx512vbmi -mavx512vbmi2)
+            target_include_directories(pivco_bench_bitslice PRIVATE src)
         endif()
 
         add_executable(pivco_fusion_v3_sse_cnt

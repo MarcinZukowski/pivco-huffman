@@ -1,0 +1,25 @@
+Linux ip-172-31-17-236.us-west-1.compute.internal 6.1.166-197.305.amzn2023.x86_64 #1 SMP PREEMPT_DYNAMIC Mon Mar 23 09:53:26 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux
+model name	: Intel(R) Xeon(R) 6975P-C
+---
+N = 32768, iters = 4000
+roundtrip OK for D=2..7 (classic + bitslice; ph-simd D<=6; blend D<=4)
+
+decode (ns/sym; baseline = ph-simd for D<=6, scalar for D>=7):
+D   |    dec-cls |     dec-ph |     dec-bs |  dec-blend | bs-vs-ph  blend-vs-ph
+----+------------+------------+------------+------------+----------------------
+2   |      0.259 |      0.030 |      0.020 |      0.014 |  1.50x      2.20x
+3   |      0.246 |      0.029 |      0.029 |      0.022 |  1.00x      1.31x
+4   |      0.279 |      0.031 |      0.036 |      0.040 |  0.84x      0.76x
+5   |      0.229 |      0.036 |      0.044 |          - |  0.81x           -
+6   |      0.772 |      0.048 |      0.052 |          - |  0.92x           -
+7   |      0.273 |      0.273 |      0.069 |          - |  3.97x           -
+
+encode (ns/sym; enc-cls is NAIVE scalar -- not ph's prim_pack_dN):
+D   |    enc-cls |     enc-bs | bs-vs-cls
+----+------------+------------+-----------
+2   |      0.695 |      0.017 | 40.02x
+3   |      0.865 |      0.024 | 35.89x
+4   |      1.037 |      0.032 | 32.23x
+5   |      1.186 |      0.040 | 29.50x
+6   |      1.377 |      0.049 | 28.37x
+7   |      1.510 |      0.056 | 26.82x

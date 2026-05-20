@@ -1,0 +1,25 @@
+Linux ip-172-31-21-217.us-west-2.compute.internal 6.1.168-203.330.amzn2023.x86_64 #1 SMP PREEMPT_DYNAMIC Fri May  1 14:05:56 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux
+model name	: AMD EPYC 9R45
+---
+N = 32768, iters = 4000
+roundtrip OK for D=2..7 (classic + bitslice; ph-simd D<=6; blend D<=4)
+
+decode (ns/sym; baseline = ph-simd for D<=6, scalar for D>=7):
+D   |    dec-cls |     dec-ph |     dec-bs |  dec-blend | bs-vs-ph  blend-vs-ph
+----+------------+------------+------------+------------+----------------------
+2   |      0.221 |      0.017 |      0.012 |      0.011 |  1.38x      1.50x
+3   |      0.223 |      0.018 |      0.015 |      0.011 |  1.23x      1.66x
+4   |      0.335 |      0.017 |      0.020 |      0.018 |  0.86x      0.93x
+5   |      0.212 |      0.028 |      0.024 |          - |  1.16x           -
+6   |      0.587 |      0.022 |      0.028 |          - |  0.77x           -
+7   |      0.245 |      0.245 |      0.040 |          - |  6.17x           -
+
+encode (ns/sym; enc-cls is NAIVE scalar -- not ph's prim_pack_dN):
+D   |    enc-cls |     enc-bs | bs-vs-cls
+----+------------+------------+-----------
+2   |      0.483 |      0.016 | 31.11x
+3   |      0.581 |      0.020 | 29.34x
+4   |      0.697 |      0.025 | 28.22x
+5   |      0.809 |      0.030 | 27.39x
+6   |      0.909 |      0.034 | 26.43x
+7   |      1.017 |      0.039 | 26.12x
