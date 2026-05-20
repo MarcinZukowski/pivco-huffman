@@ -1,5 +1,5 @@
 // import variables, functions
-#import "conf.typ": _html, _pdf, _fmt, htmlonly, setup
+#import "conf.typ": _html, _pdf, _fmt, htmlonly, setup, PH
 // run the side effects (style injection, page setup, show rules)
 #include "conf.typ"
 
@@ -35,8 +35,6 @@ a scientific paper.
 Oh well, maybe one day reviewers will have a sense of humor...
 ]
 
-#let PH="PivCo-Huffman"
-
 #include "intro.typ"
 #include "sideways.typ"
 #include "updown.typ"
@@ -66,7 +64,7 @@ during development of this project, in areas
 like coding, testing, automation and research.
 It also contributed many small ideas and improvements,
 especially around SIMD code.
-At the same time, Author declares that the vast majority of the ideas and concepts here are human-invented.
+At the same time, Author declares that the vast majority of the key ideas and concepts here are human-invented.
 
 == Acknowledgments
 

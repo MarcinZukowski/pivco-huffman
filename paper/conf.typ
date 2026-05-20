@@ -46,3 +46,23 @@
   )
   body
 }
+
+#let PH="PivCo-Huffman"
+#let URLBASE="githubpages/blalba/paper"
+
+// HTML element with a provided class name
+#let he(cname, body) = {
+  if _html {
+    html.elem("div", attrs: (class: cname), body)
+  } else {
+    body
+  }
+}
+
+#let mf(figname) = {
+  let base = "../"
+  if _pdf {
+    base = URLBASE
+  }
+  link(base + "figures/fig-web.html?" + figname, image("figures/" + figname + ".svg"))
+}

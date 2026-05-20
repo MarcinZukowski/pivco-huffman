@@ -5,9 +5,10 @@
       "cli": "extras/figures/capture_tree_viz.py",
       "web": "figures/tree_viz.html",
       "defaults": {
-        "splitting":     "0",
-        "fold-subtrees": "0",
-        "no-overlap":    "1"
+        "splitting":     0,
+        "fold-subtrees": 0,
+        "no-overlap":    1,
+        "show-skew":     0
       }
     },
     "plot_viz": {
@@ -31,21 +32,44 @@
       "tool": "tree_viz",
       "params": {
         "text":         "coconut papaya",
-        "ph-opt":       "0",
-        "show-flat":    "1",
+        "ph-opt":       0,
+        "show-flat":    1,
         "title":        "coconut papaya — flat subtrees",
         "labels":       "ops/byte"
       }
     },
     {
-      "name": "flattree-phopt",
+      "name": "flattree-opt",
       "tool": "tree_viz",
       "params": {
         "text":         "coconut papaya",
-        "ph-opt":       "1",
-        "show-flat":    "1",
+        "ph-opt":       1,
+        "show-flat":    1,
         "title":        "coconut papaya — optimized subtrees",
         "labels":       "ops/byte"
+      }
+    },
+    {
+      "name": "pivot-bitmaps",
+      "tool": "tree_viz",
+      "params": {
+        "title": "Pivoting \"huffman\"",
+        "text": "huffman",
+        "view": "pivot"
+      }
+    },
+    {
+      "name": "pivot-tree",
+      "tool": "tree_viz",
+      "params": {
+        "title": "Pivoted \"huffman\" tree",
+        "text": "huffman",
+        "ph-opt": 0,
+        "show-flat": 0,
+        "fuse-leaves": 0,
+        "constant": 0,
+        "leaf-details": 1,
+        "show-bitmaps": 1
       }
     }
   ]

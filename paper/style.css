@@ -201,6 +201,10 @@ th, td {
     vertical-align: top;
 }
 
+.myfig td {
+    text-align: center;
+}
+
 th {
     border-bottom-width: 2px;
     font-weight: 700;
