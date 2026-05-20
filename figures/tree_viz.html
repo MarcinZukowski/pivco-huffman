@@ -274,6 +274,13 @@ table.node-table tr.in-flat { color: #b45309; }
     <div class="row">
         <span class="row-label">view</span>
         <label class="toggle">
+            view:
+            <select id="view-mode">
+                <option value="tree" selected>tree</option>
+                <option value="pivot">pivot</option>
+            </select>
+        </label>
+        <label class="toggle">
             <input type="checkbox" id="condense-flat">
             fold subtrees
         </label>
@@ -1139,6 +1146,14 @@ function renderTree(rootNode, meta) {
         if (n.symbol < 0) { indexAll(n.left); indexAll(n.right); }
     }
     indexAll(rootNode);
+
+    /* View mode dispatch — `pivot` is a fundamentally different figure
+     * (no tree drawing; per-node bitmaps laid out as a wavelet-tree-
+     * style pivot table). */
+    if (meta.viewMode === 'pivot') {
+        renderPivot(rootNode, meta);
+        return;
+    }
 
     const pane = document.getElementById('tree-pane');
     const W = pane.clientWidth;
@@ -2061,6 +2076,295 @@ function renderNodeBitmap(g, bitmap, letterColor) {
     });
 }
 
+/* ============================================================
+ *  Pivot view — wavelet-tree-style "pivot" the ph encoder performs.
+ *
+ *  Top strip:   the source string with binary codes + letter_b tags
+ *               (chars/codes wrapped in rounded boxes per character).
+ *  Before panel (left): one ROW per source byte, each row wrapped in
+ *               a rounded box around its bits.
+ *  Arrow →
+ *  After panel (right): one ROW per tree DEPTH (depth 0 on top, then
+ *               1, 2, …).  Within a row, the per-internal-node
+ *               bitmaps at that depth sit side-by-side, each in its
+ *               own rounded box and labelled with the bit-prefix
+ *               ("0"/"1"/"10"/etc.).  Each bitmap entry shows the
+ *               bit, a colored `letter_b` tag below, and a bold left-
+ *               anchored `*` immediately after the bit when this is
+ *               the source byte's terminating bit.
+ *  Selected via `view=pivot` URL param.
+ * ============================================================ */
+function renderPivot(tree, meta) {
+    gWorld.selectAll('*').remove();
+    svg.call(zoom.transform, d3.zoomIdentity);
+
+    if (!meta.sourceTrace || meta.sourceTrace.length === 0) {
+        gWorld.append('text')
+            .attr('x', 30).attr('y', 50)
+            .style('font', '13px sans-serif')
+            .style('fill', '#b91c1c')
+            .text('pivot view requires a text data source — type a string into the text input.');
+        _fitTransform = d3.zoomIdentity;
+        return;
+    }
+
+    const trace = meta.sourceTrace;
+    const letterColor = buildLetterColors(trace);
+
+    /* Layout constants. */
+    const cellW       = 16;   /* bit cell width (top strip + before panel) */
+    const rowH        = 20;   /* per-position row height (before + after panels) */
+    const charLabelW  = 22;   /* leading "char:" col in before panel */
+    const xMargin     = 30;
+    const yMargin     = 26;
+    const groupPad    = 4;    /* padding inside each rounded codeword box */
+    const boxFill     = '#f8fafc';
+    const boxStroke   = '#cbd5e1';
+
+    /* ===== 1. Source strip ============================================
+     * Per character: a rounded box around the bits + char/tag pair. */
+    const totalBits = trace.reduce((s, p) => s + p.codeLen, 0);
+    const stripBaseX = xMargin;
+    const stripBoxY  = yMargin;
+    const stripBoxH  = 52;
+    const stripCharY = stripBoxY + 14;
+    const stripBitY  = stripBoxY + 30;
+    const stripIdxY  = stripBoxY + 46;
+    let col = 0;
+    for (let pi = 0; pi < trace.length; pi++) {
+        const p = trace[pi];
+        const color = letterColor.get(p.char) || '#333';
+        const x0 = stripBaseX + col * cellW;
+        const x1 = x0 + p.codeLen * cellW;
+        /* Rounded box around the binary code only (not the char or
+         * letter_b subscripts) — emphasizes that the code is what
+         * gets pivoted down into the after-panel bitmaps.  Inset so
+         * adjacent characters' boxes leave a visible gap. */
+        gWorld.append('rect')
+            .attr('x', x0 + 2).attr('y', stripBitY - 11)
+            .attr('width', (x1 - x0) - 4).attr('height', 16)
+            .attr('rx', 4)
+            .attr('fill', boxFill).attr('stroke', boxStroke)
+            .attr('stroke-width', 0.7);
+        gWorld.append('text')
+            .attr('x', (x0 + x1) / 2).attr('y', stripCharY)
+            .attr('text-anchor', 'middle')
+            .style('font', '13px monospace')
+            .style('font-weight', 600)
+            .style('fill', color)
+            .text(p.char);
+        for (let b = 0; b < p.codeLen; b++) {
+            const cx = x0 + (b + 0.5) * cellW;
+            gWorld.append('text')
+                .attr('x', cx).attr('y', stripBitY)
+                .attr('text-anchor', 'middle')
+                .style('font', '12px monospace')
+                .style('font-weight', 600)
+                .style('fill', '#222')
+                .text(p.code[b]);
+            appendLetterIdxTag(gWorld, cx, stripIdxY, p.char, b,
+                                10, color, 500);
+        }
+        col += p.codeLen;
+    }
+    const stripWidth = totalBits * cellW;
+    const stripBoxBottom = stripBoxY + stripBoxH;
+
+    /* ===== 2. Vertical down-arrow between top strip and before panel.
+     * Placed roughly under the first bit so it visually anchors the
+     * "this is what gets pivoted" reading order. */
+    const sepY = stripBoxBottom + 18;     /* still used as a y reference */
+    const arrowDownX  = stripBaseX + cellW + 4;
+    const arrowDownY0 = stripBoxBottom + 2;
+    const arrowDownY1 = sepY + 6;         /* tip of arrow head */
+    gWorld.append('line')
+        .attr('x1', arrowDownX).attr('y1', arrowDownY0)
+        .attr('x2', arrowDownX).attr('y2', arrowDownY1 - 4)
+        .style('stroke', '#666').style('stroke-width', 1.5);
+    gWorld.append('polygon')
+        .attr('points', [
+            [arrowDownX, arrowDownY1].join(','),
+            [arrowDownX - 4, arrowDownY1 - 7].join(','),
+            [arrowDownX + 4, arrowDownY1 - 7].join(','),
+        ].join(' '))
+        .style('fill', '#666');
+
+    /* ===== 3. Before panel — per-source-position rows =============== */
+    const beforeBaseX = xMargin;
+    const beforeBaseY = sepY + 20;
+    const maxCodeLen = Math.max(...trace.map(p => p.codeLen));
+
+    trace.forEach((p, i) => {
+        const yRow = beforeBaseY + i * rowH;
+        const color = letterColor.get(p.char) || '#333';
+        const bitsX0 = beforeBaseX + charLabelW;
+        const bitsX1 = bitsX0 + p.codeLen * cellW;
+        /* Rounded box around the bit cells (excludes the char label). */
+        gWorld.append('rect')
+            .attr('x', bitsX0 - groupPad)
+            .attr('y', yRow - rowH / 2 + 2)
+            .attr('width', (bitsX1 - bitsX0) + 2 * groupPad)
+            .attr('height', rowH - 4)
+            .attr('rx', 4)
+            .attr('fill', boxFill).attr('stroke', boxStroke)
+            .attr('stroke-width', 0.7);
+        /* Leading char (outside the box). */
+        gWorld.append('text')
+            .attr('x', beforeBaseX + 2).attr('y', yRow + 4)
+            .attr('text-anchor', 'start')
+            .style('font', '12px monospace')
+            .style('font-weight', 600)
+            .style('fill', color)
+            .text(p.char);
+        for (let b = 0; b < p.codeLen; b++) {
+            const cx = bitsX0 + (b + 0.5) * cellW;
+            gWorld.append('text')
+                .attr('x', cx).attr('y', yRow + 4)
+                .attr('text-anchor', 'middle')
+                .style('font', '12px monospace')
+                .style('font-weight', 600)
+                .style('fill', '#222')
+                .text(p.code[b]);
+        }
+    });
+    const beforeWidth = charLabelW + maxCodeLen * cellW + 2 * groupPad;
+
+    /* ===== 4. Arrow between panels =================================== */
+    const arrowX = beforeBaseX + beforeWidth + 18;
+    const arrowY = beforeBaseY + (trace.length - 1) * rowH / 2 + 4;
+    gWorld.append('text')
+        .attr('x', arrowX).attr('y', arrowY + 6)
+        .style('font', '26px sans-serif')
+        .style('fill', '#666')
+        .text('→');
+
+    /* ===== 5. After panel — per-depth COLUMNS of vertical bitmaps ==
+     * Each internal node's bitmap is rendered VERTICALLY: one entry per
+     * row, top-to-bottom.  Per row: [letter_b tag] [bit] [* if end].
+     * Bitmaps at the same tree depth (= bitPrefix.length) stack
+     * vertically within a single column; different depths sit side-by-
+     * side as separate columns. */
+    const internals = collectInternals(tree)
+        .filter(n => n.bitmap && n.bitmap.length > 0);
+    const byDepth = new Map();
+    let maxDepth = 0;
+    for (const n of internals) {
+        const d = (n.bitPrefix || '').length;
+        if (!byDepth.has(d)) byDepth.set(d, []);
+        byDepth.get(d).push(n);
+        if (d > maxDepth) maxDepth = d;
+    }
+
+    const afterBaseX        = arrowX + 40;
+    /* Lift the after-panel so its boxes start near the before-panel's
+     * top row, but not so high the bitmap label crosses the separator
+     * line above.  Tuned to leave a few px of clearance under the
+     * separator. */
+    const afterBaseY        = beforeBaseY - 18;
+    const colTagW           = 14;   /* letter_b tag column inside bitmap */
+    const colBitW           = 12;   /* bit value column */
+    const colStarW          = 14;   /* terminator marker column */
+    const bitmapInnerW      = colTagW + colBitW + colStarW;
+    const bitmapBoxPadX     = 6;
+    const bitmapBoxPadY     = 4;
+    const bitmapBoxW        = bitmapInnerW + 2 * bitmapBoxPadX;
+    const bitmapLabelH      = 16;   /* `"10":` header above each bitmap */
+    const bitmapStackGap    = 14;   /* gap between stacked same-depth bitmaps */
+    const depthColGap       = 18;   /* gap between depth columns */
+
+    for (let d = 0; d <= maxDepth; d++) {
+        const bitmaps = byDepth.get(d) || [];
+        if (!bitmaps.length) continue;
+        const colX = afterBaseX + d * (bitmapBoxW + depthColGap);
+        let yCursor = afterBaseY;
+        for (const node of bitmaps) {
+            const prefix = node.bitPrefix || '';
+            const label = prefix === '' ? '"":' : `"${prefix}":`;
+            /* Header label. */
+            gWorld.append('text')
+                .attr('x', colX + bitmapBoxPadX).attr('y', yCursor + 12)
+                .attr('text-anchor', 'start')
+                .style('font', '11px monospace')
+                .style('font-weight', 600)
+                .style('fill', '#555')
+                .text(label);
+            const boxY0 = yCursor + bitmapLabelH;
+            const nRows = node.bitmap.length;
+            const boxH = nRows * rowH + 2 * bitmapBoxPadY;
+            /* Bitmap rounded box. */
+            gWorld.append('rect')
+                .attr('x', colX)
+                .attr('y', boxY0)
+                .attr('width', bitmapBoxW)
+                .attr('height', boxH)
+                .attr('rx', 5)
+                .attr('fill', boxFill).attr('stroke', boxStroke)
+                .attr('stroke-width', 0.7);
+            const tagX  = colX + bitmapBoxPadX + colTagW / 2;
+            const bitX  = colX + bitmapBoxPadX + colTagW + colBitW / 2;
+            const starX = colX + bitmapBoxPadX + colTagW + colBitW + 1;
+            node.bitmap.forEach((e, ei) => {
+                const yRow = boxY0 + bitmapBoxPadY + (ei + 0.5) * rowH + 4;
+                const color = letterColor.get(e.char) || '#333';
+                const tracedPos = trace[e.sourceIdx];
+                const isEnd = tracedPos &&
+                    tracedPos.codeLen === e.bitIdx + 1;
+                /* letter_b tag on the left of the row. */
+                appendLetterIdxTag(gWorld, tagX, yRow, e.char, e.bitIdx,
+                                    11, color, 500);
+                /* Bit value, centered. */
+                gWorld.append('text')
+                    .attr('x', bitX).attr('y', yRow)
+                    .attr('text-anchor', 'middle')
+                    .style('font', '12px monospace')
+                    .style('font-weight', 600)
+                    .style('fill', '#222')
+                    .text(e.bit);
+                /* Terminator marker — larger, bold, immediately to
+                 * the right of the bit (close to the left of the
+                 * row, not the far right). */
+                if (isEnd) {
+                    gWorld.append('text')
+                        .attr('x', starX).attr('y', yRow + 1)
+                        .attr('text-anchor', 'start')
+                        .style('font', '14px monospace')
+                        .style('font-weight', 700)
+                        .style('fill', color)
+                        .text('*');
+                }
+            });
+            yCursor = boxY0 + boxH + bitmapStackGap;
+        }
+    }
+
+    /* Title (if set) above the source strip. */
+    if (meta.titleText) {
+        gWorld.append('text')
+            .attr('x', xMargin)
+            .attr('y', yMargin - 8)
+            .attr('text-anchor', 'start')
+            .style('font', '14px sans-serif')
+            .style('font-weight', 600)
+            .style('fill', '#222')
+            .text(meta.titleText);
+    }
+
+    /* Fit-to-pane. */
+    const bbox = gWorld.node().getBBox();
+    const pane = document.getElementById('tree-pane');
+    const W = pane.clientWidth;
+    const H = pane.clientHeight;
+    const scale = Math.min(
+        (W - 20) / Math.max(1, bbox.width),
+        (H - 20) / Math.max(1, bbox.height),
+        1.4
+    );
+    const tx = (W - bbox.width * scale) / 2 - bbox.x * scale;
+    const ty = (H - bbox.height * scale) / 2 - bbox.y * scale;
+    _fitTransform = d3.zoomIdentity.translate(tx, ty).scale(scale);
+    svg.call(zoom.transform, _fitTransform);
+}
+
 /* Vocabulary for the labels overlay.  Each entry: short key the user
  * types (label-side of show-labels), how to render it as a one-line
  * "name: value" string given the precomputed stats object. */
@@ -2228,6 +2532,7 @@ function refreshFromFreqs() {
     const showLabels = document.getElementById('show-labels').value;
     const showLeafDetails = document.getElementById('show-leaf-details').checked;
     const mode = document.getElementById('tree-mode').value;
+    const viewMode = document.getElementById('view-mode').value;
     const constantDetect = document.getElementById('constant-detect').checked;
     const fuseLeaves = document.getElementById('fuse-leaves').checked;
     const showSkew = document.getElementById('show-skew').checked;
@@ -2271,7 +2576,8 @@ function refreshFromFreqs() {
     const meta = {
         name: _name, isMain: _isMain, totalN: _totalN,
         phOpt, showFlat, condenseFlat, noOverlap, showSplitting,
-        showPrimitives, showBitmaps, mode, constantDetect, fuseLeaves,
+        showPrimitives, showBitmaps, mode, viewMode,
+        constantDetect, fuseLeaves,
         titleText, showLabels, sourceText,
         showLeafDetails, showSkew, showBitPrefix, showLeafCode,
         showBranchBits, keysSort, maxLen,
@@ -2282,11 +2588,12 @@ function refreshFromFreqs() {
     annotatePrimitives(tree, meta);
     annotateLeafOps(tree);
 
-    /* "show bitmaps" — trace each source byte through the tree,
-     * recording at each internal node the bits being routed there.
-     * Active only when the data source is text (we need the actual
-     * input string, not just a frequency distribution). */
-    if (meta.showBitmaps && meta.sourceText) {
+    /* Source-trace + per-node bitmaps — needed by either the
+     * "show bitmaps" overlay (tree view) or the pivot view.  Both
+     * require an actual input string, not just a frequency
+     * distribution. */
+    const needTrace = (meta.showBitmaps || meta.viewMode === 'pivot');
+    if (needTrace && meta.sourceText) {
         meta.sourceTrace = buildSourceTrace(meta.sourceText, tree);
         annotateBitmaps(tree, meta.sourceTrace);
     } else {
@@ -2425,6 +2732,7 @@ function setupToggles() {
     document.getElementById('splitting').addEventListener('change', refreshAndUrl);
     document.getElementById('show-primitives').addEventListener('change', refreshAndUrl);
     document.getElementById('show-bitmaps').addEventListener('change', refreshAndUrl);
+    document.getElementById('view-mode').addEventListener('change', refreshAndUrl);
     document.getElementById('tree-mode').addEventListener('change', refreshAndUrl);
     document.getElementById('constant-detect').addEventListener('change', refreshClearAndUrl);
     document.getElementById('fuse-leaves').addEventListener('change', refreshClearAndUrl);
@@ -2519,6 +2827,11 @@ const URL_PARAM_MAP = [
     { kind: 'bool', param: 'splitting',      id: 'splitting',
       desc: 'Enable interactive tree splitting: flattenable nodes draw with a thick stroke and clicking toggles flatten/unflatten. Off = nodes are plain circles and clicks do nothing.',
       values: '1 | 0' },
+    { kind: 'str',  param: 'view',           id: 'view-mode',
+      desc: 'Switch between figure types.<br><br>' +
+            '<b>tree</b> — the full Huffman tree with optional primitives, bitmaps, and decode-time annotations.<br><br>' +
+            '<b>pivot</b> — the ph "pivot" view: each input byte\'s code laid out per row, an arrow, then the same bits pivoted into the per-internal-node bitmaps that ph actually emits.  Requires a text data source.',
+      values: 'tree | pivot' },
     { kind: 'bool', param: 'show-bitmaps',   id: 'show-bitmaps',
       desc: 'Trace the source string\'s bits through the tree.<br><br>' +
             'Above the tree: each input character with its binary code, plus a colored <b>letter_index</b> tag under each bit.<br><br>' +
