@@ -29,6 +29,7 @@ set(PH_TD_SOURCES
     src/pivco_huffman.c
     src/pivco_huffman_neon.c
     src/pivco_huffman_neon_tables.c
+    src/pivco_huffman_naive.c
     src/huffman_table.c
 )
 
@@ -37,3 +38,29 @@ target_include_directories(ph_td PUBLIC include PRIVATE src)
 
 add_executable(ph_td_test test/ph_td_test.c)
 target_link_libraries(ph_td_test PRIVATE ph_td)
+
+# ----- ph-td-naive vs huf0 bench (uses upstream ext/fse) -----
+# Pulls huf0 from the parent project's ext/fse tree.  Only built when
+# that tree exists (it does in the standard repo layout).
+set(FSE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../ext/fse")
+message(STATUS "ph-td: looking for FSE at ${FSE_DIR}/lib/huf.h")
+if(EXISTS "${FSE_DIR}/lib/huf.h")
+    message(STATUS "ph-td: FSE found -- building ph_td_bench_naive")
+    add_library(ph_td_huf0 STATIC
+        "${FSE_DIR}/lib/entropy_common.c"
+        "${FSE_DIR}/lib/huf_compress.c"
+        "${FSE_DIR}/lib/huf_decompress.c"
+        "${FSE_DIR}/lib/hist.c"
+        "${FSE_DIR}/lib/fse_compress.c"
+        "${FSE_DIR}/lib/fse_decompress.c"
+        "${FSE_DIR}/lib/debug.c"
+    )
+    target_include_directories(ph_td_huf0 PUBLIC "${FSE_DIR}/lib")
+    target_compile_options(ph_td_huf0 PRIVATE -O3 -w)
+
+    add_executable(ph_td_bench_naive test/ph_td_bench_naive.c)
+    target_link_libraries(ph_td_bench_naive PRIVATE ph_td ph_td_huf0)
+    target_include_directories(ph_td_bench_naive PRIVATE "${FSE_DIR}/lib")
+else()
+    message(STATUS "ph-td-naive bench skipped (ext/fse not found at ${FSE_DIR})")
+endif()

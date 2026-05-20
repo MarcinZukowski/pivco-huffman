@@ -202,6 +202,30 @@ void pivco_huffman_fse_root_get(int idx, pivco_huffman_fse_root_event_t *out);
 int pivco_huffman_build_table(const uint64_t freq[PIVCO_MAX_SYMBOLS],
                               pivco_huffman_table_t *table);
 
+/* Build a Huffman table whose node_type[] classification reflects a
+ * naive decoder: every internal -> PIVCO_NODE_INTERNAL_FULL, every
+ * leaf -> PIVCO_NODE_LEAF.  No flat-subtree path, no half-partition
+ * variant, no fused both-leaves scatter, no prefill.  Pair with
+ * pivco_huffman_decode_naive. */
+int pivco_huffman_build_table_naive(const uint64_t freq[PIVCO_MAX_SYMBOLS],
+                                     pivco_huffman_table_t *table);
+
+/* Naive TD encoder paired with the naive decoder below.  Emits only
+ * raw bitmaps in DFS-preorder of internal nodes (no FSE marker, no
+ * K_right header).  Pair with pivco_huffman_decode_naive. */
+int pivco_huffman_encode_naive(const uint8_t *symbols,
+                                const pivco_huffman_table_t *table,
+                                uint8_t *out, size_t *out_len);
+
+/* Naive scalar TD decoder built from exactly two primitives:
+ *   P  -- scalar partition
+ *   S1 -- scalar scatter-symbol
+ * Reads the slim naive wire format produced by
+ * pivco_huffman_encode_naive (raw bitmaps only). */
+int pivco_huffman_decode_naive(const uint8_t *in, size_t in_len,
+                                const pivco_huffman_table_t *table,
+                                uint8_t *symbols, size_t *consumed);
+
 /* Build a Huffman table from already-known code lengths plus an
  * optional explicit within-tier ordering.  This is the path used by
  * decoders that recovered code_lens from a wire format and want to

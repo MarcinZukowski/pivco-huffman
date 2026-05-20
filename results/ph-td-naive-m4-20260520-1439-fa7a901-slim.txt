@@ -1,0 +1,7 @@
+ph-td-naive (slim wire: no FSE marker, no K_right header) vs huf0_x2 on M4 Max
+---
+ph-td-naive vs huf0 (decode throughput)
+    256 blocks of 8192 symbols = 2048 KB each pass; 500 iters; best-of-3
+
+proba80        | ph-naive  0.609 GB/s ( 2.70 bpc) | huf0_x2  1.464 GB/s ( 2.63 bpc) | ph/huf0_x2 0.42x
+prose_pride    | ph-naive  0.436 GB/s ( 4.56 bpc) | huf0_x2  1.611 GB/s ( 4.55 bpc) | ph/huf0_x2 0.27x
