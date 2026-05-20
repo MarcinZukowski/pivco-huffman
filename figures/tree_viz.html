@@ -132,6 +132,19 @@ main {
     pointer-events: none;
 }
 #tree-svg .skew-bar { stroke: #444; stroke-width: 0.3px; }
+#tree-svg .prim-bubble rect {
+    fill: #dbeafe;
+    stroke: #1e40af;
+    stroke-width: 0.5px;
+}
+#tree-svg .prim-bubble text {
+    font: 8px monospace;
+    font-weight: 600;
+    fill: #1e3a8a;
+    text-anchor: middle;
+    dominant-baseline: middle;
+    pointer-events: none;
+}
 #stats-pane {
     background: #fff;
     border: 1px solid #ddd;
@@ -219,12 +232,27 @@ table.node-table tr.in-flat { color: #b45309; }
     <div class="row">
         <span class="row-label">tree</span>
         <label class="toggle">
+            mode:
+            <select id="tree-mode">
+                <option value="top-down" selected>top-down</option>
+                <option value="bottom-up">bottom-up</option>
+            </select>
+        </label>
+        <label class="toggle">
             <input type="checkbox" id="ph-opt" checked>
             ph-optimize
         </label>
         <label class="toggle">
             <input type="checkbox" id="show-flat" checked>
             flat-subtrees
+        </label>
+        <label class="toggle">
+            <input type="checkbox" id="constant-detect" checked>
+            constant
+        </label>
+        <label class="toggle">
+            <input type="checkbox" id="fuse-leaves" checked>
+            fuse-leaves
         </label>
         <label class="toggle" title="Within-tier ordering of leaves when building the flat-aware tree. Affects which symbols land in the deepest D-flat chunk per length tier. 'byte asc' is the textbook canonical order (no frequency-based reorder).">
             keys:
@@ -258,14 +286,8 @@ table.node-table tr.in-flat { color: #b45309; }
             splitting
         </label>
         <label class="toggle">
-            title:
-            <input type="text" id="title-input" size="18"
-                placeholder="(empty = no title)" autocomplete="off">
-        </label>
-        <label class="toggle">
-            labels:
-            <input type="text" id="show-labels" size="22"
-                placeholder="e.g. #symbols,H,ops/byte" autocomplete="off">
+            <input type="checkbox" id="show-primitives">
+            primitives
         </label>
         <label class="toggle" title="Draw leaf boxes with character + hex byte. Off = tiny circles only.">
             <input type="checkbox" id="show-leaf-details" checked>
@@ -286,6 +308,19 @@ table.node-table tr.in-flat { color: #b45309; }
         <label class="toggle" title="Label each branch with the bit it represents (0 = left child, 1 = right child).">
             <input type="checkbox" id="show-branch-bits">
             branch 0/1
+        </label>
+    </div>
+    <div class="row">
+        <span class="row-label">figure</span>
+        <label class="toggle">
+            title:
+            <input type="text" id="title-input" size="18"
+                placeholder="(empty = no title)" autocomplete="off">
+        </label>
+        <label class="toggle">
+            labels:
+            <input type="text" id="show-labels" size="22"
+                placeholder="e.g. #symbols,H,ops/byte" autocomplete="off">
         </label>
         <button id="reset-view" type="button">reset view</button>
         <button id="reset-params" type="button">reset params</button>
@@ -628,21 +663,36 @@ function annotateTree(root) {
  *   - n.opsAvgSubtree    = mean opsToLeaf over leaves below n (each leaf 1×)
  *   - n.opsWeightedSubtree = freq-weighted avg ops over the subtree
  *                            (per source byte passing through n) */
-function annotateLeafOps(root, useFlat) {
-    function walk(n, inFlatFromDepth) {
+/* Counts ops contributed by a single primitive at one node.
+ * - C  (constant-leaf, memset bulk-amortized) → 0 ops/byte
+ * - any other non-null primitive               → 1 op/byte
+ * - null (absorbed by parent-level primitive)  → 0 ops
+ * The leaf's own primitive (S1/C) IS included now — i.e. ops/byte
+ * counts every visible badge a byte traverses, NOT just partitions. */
+function opsForPrimitive(p) {
+    if (!p) return 0;
+    if (p === 'C') return 0;
+    return 1;
+}
+
+/* Walks the tree counting primitive ops along each root-to-leaf
+ * path.  Requires annotatePrimitives() to have been called first. */
+function annotateLeafOps(root) {
+    function walk(n, accumOps) {
         if (!n) return;
+        const newOps = accumOps + opsForPrimitive(n._primitive);
         if (n.symbol >= 0) {
-            n.opsToLeaf = (useFlat && inFlatFromDepth >= 0)
-                ? inFlatFromDepth + 1
-                : n.depth;
+            n.opsToLeaf = newOps;
             return;
         }
-        let childInFlat = inFlatFromDepth;
-        if (useFlat && n.flatD && childInFlat < 0) childInFlat = n.depth;
-        walk(n.left,  childInFlat);
-        walk(n.right, childInFlat);
+        /* For flat-roots, descendants have _primitive = null so they
+         * contribute nothing — the DX op at the flat-root is the
+         * single "scatter X levels at once" cost.  We still recurse
+         * so leaves inside the flat get their opsToLeaf set. */
+        walk(n.left,  newOps);
+        walk(n.right, newOps);
     }
-    walk(root, -1);
+    walk(root, 0);
     /* Post-order aggregation per internal node. */
     function agg(n) {
         if (!n) return { sumOps: 0, sumWOps: 0, nLeaves: 0 };
@@ -722,6 +772,95 @@ function detectFlatSubtrees(root) {
         walk(n.right, inFlat);
     }
     walk(root, false);
+}
+
+/* Tag every node with `_primitive`: the abbreviated name of the decode
+ * primitive applied at this node, given the current optimization
+ * toggles in `meta`.  Children absorbed by a parent-level primitive
+ * (S2's two leaves, DX's whole subtree, C's leaf) get _primitive = null.
+ *
+ * Precedence (highest first):
+ *   1. flat-subtree root          → DX  (and absorb all descendants)
+ *   2. inside a flat subtree      → null
+ *   3. fuse-leaves on AND both children are leaves → S2 (and absorb both leaves)
+ *   4. constant on AND at least one child is a leaf:
+ *        - parent → half variant: PH / PRH / MH / MRH
+ *        - the constant-side leaf → C
+ *        - the other side (if also a leaf) → S1
+ *   5. otherwise: parent = P / PR / M / MR; leaves = S1.
+ *
+ * When BOTH children are leaves and constant is on AND fuse-leaves is
+ * off: pick the higher-frequency leaf as the "constant" side (gets C);
+ * the lower-frequency leaf is S1; parent is the half variant. */
+function annotatePrimitives(root, meta) {
+    const tdMode = meta.mode !== 'bottom-up';
+    const Pletter = tdMode ? 'P' : 'M';
+
+    function isLeaf(n) { return n && n.symbol >= 0; }
+
+    /* Returns 'left' | 'right' | null — which child of this internal is
+     * the constant-leaf side.  Constant detection fires only when
+     * EXACTLY ONE child is a leaf (the leaf-vs-subtree configuration).
+     * Two-leaf parents fall under fuse-leaves (S2) or stay as naive
+     * P + 2*S1 when fuse-leaves is off; we do NOT mark one of two
+     * sibling leaves as C. */
+    function constantSide(n) {
+        if (!meta.constantDetect) return null;
+        const L = n.left, R = n.right;
+        if (!L || !R) return null;
+        const lL = isLeaf(L), lR = isLeaf(R);
+        if (lL === lR) return null;     /* both leaves OR neither leaf */
+        return lL ? 'left' : 'right';
+    }
+
+    function walk(n, parent) {
+        if (!n) return;
+        n._primitive = null;
+
+        if (isLeaf(n)) {
+            /* Absorbed: inside a flat region. */
+            if (meta.showFlat && n.inFlat) return;
+            if (parent) {
+                /* Absorbed by parent's S2 (fuse-leaves takes precedence). */
+                if (meta.fuseLeaves && isLeaf(parent.left) && isLeaf(parent.right)) return;
+                /* Constant detection at parent: am I the constant side? */
+                const cs = constantSide(parent);
+                if (cs) {
+                    const meIsConst = (cs === 'left')
+                        ? (n === parent.left)
+                        : (n === parent.right);
+                    if (meIsConst) { n._primitive = 'C'; return; }
+                }
+            }
+            n._primitive = 'S1';
+            return;
+        }
+
+        /* Internal node. */
+        if (meta.showFlat && n.flatD) {
+            n._primitive = 'D' + n.flatD;
+            /* Don't recurse — descendants are absorbed. */
+            return;
+        }
+        if (meta.showFlat && n.inFlat) {
+            walk(n.left, n); walk(n.right, n);
+            return;
+        }
+        if (meta.fuseLeaves && isLeaf(n.left) && isLeaf(n.right)) {
+            n._primitive = 'S2';
+            /* Recurse so the two leaves get _primitive = null (absorbed). */
+            walk(n.left, n); walk(n.right, n);
+            return;
+        }
+        const isRoot = n.depth === 0;
+        const half = constantSide(n) != null;
+        let p = Pletter;
+        if (isRoot) p += 'R';
+        if (half)   p += 'H';
+        n._primitive = p;
+        walk(n.left, n); walk(n.right, n);
+    }
+    walk(root, null);
 }
 
 /* Collect all internal nodes into an array. */
@@ -1021,20 +1160,30 @@ function renderTree(rootNode, meta) {
                 });
     }
 
-    // Flat-subtree boxes (D >= 2, dashed orange) and pair boxes
-    // (D = 1, two sibling leaves; lighter gray).  Drawn before
-    // nodes so nodes overlay them.  Skipped when "condense" is on
-    // because we draw the condensed-info box instead (further down).
-    if (meta.showFlat && !condense) {
-        const flatRoots = root.descendants().filter(n => n.data.flatD);
+    /* Flat-subtree boxes (D >= 2, dashed orange) and pair boxes
+     * (D = 1, two sibling leaves; lighter gray).  Drawn before nodes
+     * so nodes overlay them.  Skipped when "condense" is on because
+     * we draw the condensed-info box instead.
+     *
+     * Visibility rules:
+     *   - flat-roots and "D=1" labels: show-flat only.
+     *   - pair-boxes (the subtle box around two-leaf siblings):
+     *     show-flat OR fuse-leaves.  Fuse-leaves IS the optimization
+     *     that handles these pairs (S2), so it makes sense for the
+     *     visual cue to follow either toggle.
+     */
+    if ((meta.showFlat || meta.fuseLeaves) && !condense) {
+        const flatRoots = meta.showFlat
+            ? root.descendants().filter(n => n.data.flatD)
+            : [];
         // Find D=1 "pair" internal nodes: both children are leaves,
         // and this node is NOT inside a flat subtree (those are
         // already covered by the dashed-orange box).
         const pairRoots = root.descendants().filter(n => {
             const d = n.data;
             if (d.symbol >= 0) return false;          // leaf
-            if (d.flatD) return false;                // already a flat root
-            if (d.inFlat) return false;               // inside a flat subtree
+            if (meta.showFlat && d.flatD) return false;
+            if (meta.showFlat && d.inFlat) return false;
             if (!d.left || !d.right) return false;
             return d.left.symbol >= 0 && d.right.symbol >= 0;
         });
@@ -1084,9 +1233,12 @@ function renderTree(rootNode, meta) {
         }
 
         // Pair boxes first (drawn behind flat boxes for layering).
+        // "D=1" label only when flat-subtree analysis is on; with
+        // just fuse-leaves we draw the box but omit the label since
+        // D-numbering is a flat-subtree concept, not an S2 concept.
         pairRoots.forEach(n => {
             drawBox('pair-box', n, 6, 6, 3, 1);
-            placeDLabel(n, 'pair-label', 'D=1');
+            if (meta.showFlat) placeDLabel(n, 'pair-label', 'D=1');
         });
 
         // Flat-subtree boxes (D >= 2)
@@ -1333,6 +1485,39 @@ function renderTree(rootNode, meta) {
         });
     }
 
+    /* Primitive bubbles — small rounded rect with the abbreviated
+     * decode primitive (P / PH / DX / S2 / S1 / C / …) to the left of
+     * each node.  Skipped when the node's _primitive is null (absorbed
+     * by a parent-level primitive). */
+    if (meta.showPrimitives) {
+        /* Place each bubble in the UPPER-LEFT of its node so it doesn't
+         * overlap the leaf rect's char/hex text or the parent-link line
+         * dropping down to the internal node.  Anchor: bubble's lower-
+         * right corner sits just outside the node's upper-left. */
+        const drawBubble = function(d) {
+            const p = d.data._primitive;
+            if (!p) return;
+            const w = p.length * 6 + 6;
+            const h = 12;
+            /* Bubble center: (-w/2 - 4) px left of node, 12 px above. */
+            const cx = -w / 2 - 4;
+            const cy = -12;
+            const g = d3.select(this).append('g').attr('class', 'prim-bubble');
+            g.append('rect')
+                .attr('x', cx - w / 2)
+                .attr('y', cy - h / 2)
+                .attr('width', w)
+                .attr('height', h)
+                .attr('rx', 3);
+            g.append('text')
+                .attr('x', cx)
+                .attr('y', cy)
+                .text(p);
+        };
+        intG.each(drawBubble);
+        lg.each(drawBubble);
+    }
+
     /* Title + labels overlay.  Placed in gWorld at positions relative
      * to the tree's bounding box, so:
      *   - the SVG export captures them in the right place (top-centre
@@ -1497,21 +1682,22 @@ function computeTreeStats(rootNode, meta) {
     let byteEntropy = 0;
     let n_leaves = 0;
     let longestCode = 0;
-    let opsSimpleSum = 0, opsFlatSimpleSum = 0;
-    let opsWeightedSum = 0, opsFlatWeightedSum = 0;
+    let opsSimpleSum = 0;
+    let opsWeightedSum = 0;
     function walkLeaves(n) {
         if (!n) return;
         if (n.symbol >= 0) {
             n_leaves++;
             if (n.depth > longestCode) longestCode = n.depth;
             const p = n.freq / totalN;
-            opsSimpleSum     += n.depth;
-            opsFlatSimpleSum += (n.opsToLeaf != null) ? n.opsToLeaf : n.depth;
+            /* opsToLeaf is set by annotateLeafOps based on the primitive
+             * chain — already reflects show-flat, constant, fuse-leaves. */
+            const ops = (n.opsToLeaf != null) ? n.opsToLeaf : n.depth;
+            opsSimpleSum   += ops;
             if (p > 0) {
-                hufWeighted += p * n.depth;
-                byteEntropy -= p * Math.log2(p);
-                opsWeightedSum     += p * n.depth;
-                opsFlatWeightedSum += p * ((n.opsToLeaf != null) ? n.opsToLeaf : n.depth);
+                hufWeighted    += p * n.depth;
+                byteEntropy    -= p * Math.log2(p);
+                opsWeightedSum += p * ops;
             }
             return;
         }
@@ -1523,10 +1709,8 @@ function computeTreeStats(rootNode, meta) {
         totalN, n_leaves, longestCode,
         totalEntropyBits, totalBitsSaved, nFlat, flatRawBits,
         hufWeighted, byteEntropy,
-        opsSimple:     n_leaves ? (opsSimpleSum     / n_leaves) : 0,
-        opsSimpleF:    n_leaves ? (opsFlatSimpleSum / n_leaves) : 0,
-        opsW:          opsWeightedSum,
-        opsWF:         opsFlatWeightedSum,
+        opsSimple: n_leaves ? (opsSimpleSum / n_leaves) : 0,
+        opsW:      opsWeightedSum,
     };
 }
 
@@ -1540,12 +1724,8 @@ const LABEL_VOCAB = {
     'H':         (s) => `H: ${s.byteEntropy.toFixed(3)} bpb`,
     'huff':      (s) => `Huff: ${s.hufWeighted.toFixed(3)} bpb`,
     'saved':     (s) => `saved: ${s.totalBitsSaved.toFixed(0)} bits`,
-    'ops/leaf':  (s) => `ops/leaf: ${s.opsSimple.toFixed(2)}` +
-                        (s.opsSimpleF !== s.opsSimple
-                            ? ` → ${s.opsSimpleF.toFixed(2)}` : ''),
-    'ops/byte':  (s) => `ops/byte: ${s.opsW.toFixed(3)}` +
-                        (s.opsWF !== s.opsW
-                            ? ` → ${s.opsWF.toFixed(3)}` : ''),
+    'ops/leaf':  (s) => `ops/leaf: ${s.opsSimple.toFixed(2)}`,
+    'ops/byte':  (s) => `ops/byte: ${s.opsW.toFixed(3)}`,
     '#flat':     (s) => `#flat: ${s.nFlat}`,
     'flat-bits': (s) => `flat-bits: ${(s.flatRawBits / s.totalN).toFixed(3)} bpb`,
 };
@@ -1562,9 +1742,7 @@ function renderStats(rootNode, meta, stats) {
     const n_leaves         = stats.n_leaves;
     const longestCode      = stats.longestCode;
     const opsSimple        = stats.opsSimple;
-    const opsSimpleF       = stats.opsSimpleF;
     const opsW             = stats.opsW;
-    const opsWF            = stats.opsWF;
 
     const summary = document.getElementById('summary');
     summary.innerHTML = '';
@@ -1624,18 +1802,14 @@ function renderStats(rootNode, meta, stats) {
     /* Operations / leaf — both simple (per-leaf avg, each leaf
      * counted once) and frequency-weighted.  Without and with the
      * flat-subtree fast path. */
-    addRow('ops/leaf (avg)',
-            opsSimple.toFixed(2) +
-            (meta.showFlat ? `  →  ${opsSimpleF.toFixed(2)} w/ flat` : ''),
-        "Average decode operations per distinct symbol (each leaf counted " +
-        "once).  '→ X w/ flat' shows the improvement from ph's flat-subtree " +
-        "fast path: a D-deep flat region costs 1 op instead of D.");
-    addRow('ops/byte (weighted)',
-            opsW.toFixed(3) +
-            (meta.showFlat ? `  →  ${opsWF.toFixed(3)} w/ flat` : ''),
+    addRow('ops/leaf (avg)', opsSimple.toFixed(2),
+        "Average decode primitives per distinct symbol (each leaf counted " +
+        "once).  Counts every primitive on the root-to-leaf path (P/M/PH/DX/S2/S1, " +
+        "but NOT C which is bulk-amortised memset).  Flip show-flat / fuse-leaves / " +
+        "constant to see the savings each optimisation contributes.");
+    addRow('ops/byte (weighted)', opsW.toFixed(3),
         "Frequency-weighted ops per source byte: Σ p_leaf · ops_to_decode.  " +
-        "The actual avg cost over a typical source.  '→ X w/ flat' shows " +
-        "savings from the flat-subtree fast path.");
+        "Same primitive accounting as above, weighted by source byte frequency.");
     if (meta.showFlat) {
         const flatPct = totalN > 0 ? (100 * flatRawBits / (8 * totalN)).toFixed(1) : '-';
         addRow('# maximal flat subtrees', nFlat.toString(),
@@ -1701,9 +1875,13 @@ function refreshFromFreqs() {
     const condenseFlat = document.getElementById('condense-flat').checked;
     const noOverlap = document.getElementById('no-overlap').checked;
     const showSplitting = document.getElementById('splitting').checked;
+    const showPrimitives = document.getElementById('show-primitives').checked;
     const titleText = document.getElementById('title-input').value;
     const showLabels = document.getElementById('show-labels').value;
     const showLeafDetails = document.getElementById('show-leaf-details').checked;
+    const mode = document.getElementById('tree-mode').value;
+    const constantDetect = document.getElementById('constant-detect').checked;
+    const fuseLeaves = document.getElementById('fuse-leaves').checked;
     const showSkew = document.getElementById('show-skew').checked;
     const showBitPrefix = document.getElementById('show-bit-prefix').checked;
     const showLeafCode = document.getElementById('show-leaf-code').checked;
@@ -1721,7 +1899,6 @@ function refreshFromFreqs() {
     const tree = buildTree(codes, _freqs);
     annotateTree(tree);
     detectFlatSubtrees(tree);
-    annotateLeafOps(tree, showFlat);
 
     // Stash codes per leaf for the tooltip + bit-prefix per node for
     // the optional "internal prefix" / "leaf code" view toggles.
@@ -1743,10 +1920,16 @@ function refreshFromFreqs() {
     const meta = {
         name: _name, isMain: _isMain, totalN: _totalN,
         phOpt, showFlat, condenseFlat, noOverlap, showSplitting,
+        showPrimitives, mode, constantDetect, fuseLeaves,
         titleText, showLabels,
         showLeafDetails, showSkew, showBitPrefix, showLeafCode,
         showBranchBits, keysSort, maxLen,
     };
+    /* Tag each node with its decode primitive, then count ops along
+     * each root-to-leaf primitive path.  Both must run before
+     * computeTreeStats so ops/byte reflects the current toggles. */
+    annotatePrimitives(tree, meta);
+    annotateLeafOps(tree);
     /* Compute stats up-front so both renderTree (overlay) and
      * renderStats (panel) read from the same numbers. */
     meta.stats = computeTreeStats(tree, meta);
@@ -1872,6 +2055,10 @@ function setupToggles() {
     document.getElementById('condense-flat').addEventListener('change', refreshClearAndUrl);
     document.getElementById('no-overlap').addEventListener('change', refreshAndUrl);
     document.getElementById('splitting').addEventListener('change', refreshAndUrl);
+    document.getElementById('show-primitives').addEventListener('change', refreshAndUrl);
+    document.getElementById('tree-mode').addEventListener('change', refreshAndUrl);
+    document.getElementById('constant-detect').addEventListener('change', refreshClearAndUrl);
+    document.getElementById('fuse-leaves').addEventListener('change', refreshClearAndUrl);
     document.getElementById('title-input').addEventListener('input', refreshAndUrl);
     document.getElementById('show-labels').addEventListener('input', refreshAndUrl);
     document.getElementById('show-leaf-details').addEventListener('change', refreshAndUrl);
@@ -1935,11 +2122,24 @@ function setupTextInput() {
  * tooltip wiring all walk the same list. */
 const URL_PARAM_MAP = [
     /* checkboxes: 1/0 in URL, .checked in DOM */
+    { kind: 'str',  param: 'mode',           id: 'tree-mode',
+      desc: 'Decode traversal direction. Affects only which primitive letters are shown when "primitives" is on; the tree shape is identical either way.<br><br>' +
+            '<b>top-down</b> — partition input bytes left/right at each internal, scatter at leaves (P / S* primitives)<br>' +
+            '<b>bottom-up</b> — recursively merge child outputs (M / S* primitives)',
+      values: 'top-down | bottom-up' },
     { kind: 'bool', param: 'ph-opt',         id: 'ph-opt',
       desc: 'Order symbols by frequency-descending within each code-length tier (ph-flat-aware). Off = canonical (byte-ascending) order.',
       values: '1 | 0' },
     { kind: 'bool', param: 'show-flat',      id: 'show-flat',
-      desc: 'Highlight detected flat subtrees (uniform-depth, fast-path candidates).',
+      desc: 'Highlight detected flat subtrees (uniform-depth, fast-path candidates). When primitives are shown, flat-subtree roots render as DX (skipping X partition levels).',
+      values: '1 | 0' },
+    { kind: 'bool', param: 'constant',       id: 'constant-detect',
+      desc: 'Detect the high-frequency ("constant") child of each internal node and use a memset-fast-path scatter for it (primitive C).<br><br>' +
+            'When on, the parent uses the <b>half-partition</b> variant (PH / PRH / MH / MRH) since one side is fixed-by-construction and only the other side needs partitioning.<br><br>' +
+            'When off: no half variants, no C primitive; every non-flat internal is P / PR / M / MR and every non-absorbed leaf is S1.',
+      values: '1 | 0' },
+    { kind: 'bool', param: 'fuse-leaves',    id: 'fuse-leaves',
+      desc: 'When an internal node\'s two children are both leaves, emit one fused S2 primitive (scatter two symbols at once) at the parent. Absorbs both leaves\' S1s. Wins over constant detection when both children are leaves.',
       values: '1 | 0' },
     { kind: 'bool', param: 'fold-subtrees',  id: 'condense-flat',
       desc: 'Collapse each flat subtree into a single "D=N, M leaves" info box. Combine with no-overlap for clean layout.',
@@ -1949,6 +2149,18 @@ const URL_PARAM_MAP = [
       values: '1 | 0' },
     { kind: 'bool', param: 'splitting',      id: 'splitting',
       desc: 'Enable interactive tree splitting: flattenable nodes draw with a thick stroke and clicking toggles flatten/unflatten. Off = nodes are plain circles and clicks do nothing.',
+      values: '1 | 0' },
+    { kind: 'bool', param: 'primitives',     id: 'show-primitives',
+      desc: 'Draw a small badge to the left of each node showing the decode primitive used.<br><br>' +
+            'Vocabulary (top-down letters; bottom-up swaps P→M):<br>' +
+            '&nbsp;&nbsp;<b>P</b> / <b>M</b>      — partition / merge, general internal node<br>' +
+            '&nbsp;&nbsp;<b>PR</b> / <b>MR</b>    — root variant<br>' +
+            '&nbsp;&nbsp;<b>PH</b> / <b>MH</b>    — half variant (one child is the constant leaf — needs constant detection)<br>' +
+            '&nbsp;&nbsp;<b>PRH</b> / <b>MRH</b>  — root + half<br>' +
+            '&nbsp;&nbsp;<b>DX</b>         — flat subtree of depth X (replaces X partition levels)<br>' +
+            '&nbsp;&nbsp;<b>S2</b>         — scatter two leaves (fuse-leaves on)<br>' +
+            '&nbsp;&nbsp;<b>S1</b>         — scatter one leaf<br>' +
+            '&nbsp;&nbsp;<b>C</b>          — constant (high-frequency leaf, memset-fast-path scatter)',
       values: '1 | 0' },
     { kind: 'str',  param: 'title',          id: 'title-input',
       desc: 'Optional title rendered centred above the tree. Leave empty to omit. Free text (no metric substitution).',
