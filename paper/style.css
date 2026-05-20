@@ -169,30 +169,82 @@ pre code {
       border-left: 5px solid black;     /* optional accent — looks nice */
 }
 
-/* Toggle from web-code.js: when body.hide-author is set, all author
- * comments collapse.  Default state has the class absent (musings
- * visible) so first-paint matches the default-ON button state. */
+/* --- Floating top-right tools panel (from web-code.js) --- */
 body.hide-author .htmlonly { display: none; }
+body.hide-toc    #toc-panel { display: none; }
 
-#author-toggle {
+#ph-tools {
       position: fixed;
       top: 12px;
       right: 12px;
       z-index: 1000;
-      padding: 6px 12px;
+      display: flex;
+      flex-direction: column;
+      align-items: stretch;
+      gap: 8px;
+      /* Fixed (not max-) width so the panel doesn't reflow as TOC
+       * subsections collapse/expand. */
+      width: 260px;
+}
+#ph-tools-buttons {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+}
+#ph-tools button {
+      padding: 5px 9px;
       border: 1px solid #888;
       border-radius: 6px;
       background: #fff;
       cursor: pointer;
-      font: 12px sans-serif;
+      font: 11px sans-serif;
       box-shadow: 0 1px 3px rgba(0,0,0,0.15);
 }
-#author-toggle[data-state="on"] {
+#ph-tools button:hover { background: #f0f0f0; }
+#ph-tools button[data-state="on"] {
       background: #cfc;
       border-color: #4a8;
 }
-#author-toggle:hover { background: #f0f0f0; }
-#author-toggle[data-state="on"]:hover { background: #b8e8b8; }
+#ph-tools button[data-state="on"]:hover { background: #b8e8b8; }
+
+#toc-panel {
+      background: #fff;
+      border: 1px solid #888;
+      border-radius: 6px;
+      padding: 8px 10px 8px 8px;
+      font: 11px/1.4 sans-serif;
+      max-height: 70vh;
+      overflow-y: auto;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.15);
+}
+#toc-panel ul {
+      list-style: none;
+      margin: 0;
+      padding-left: 12px;
+}
+#toc-panel > ul { padding-left: 0; }
+#toc-panel a {
+      color: #1d4ed8;
+      text-decoration: none;
+      display: block;
+      padding: 1px 2px;
+      /* Wrap long titles to a second line instead of overflowing.
+       * `anywhere` lets the browser break mid-word for very long
+       * tokens (e.g. URLs in a heading). */
+      overflow-wrap: anywhere;
+      word-break: break-word;
+}
+#toc-panel a:hover { text-decoration: underline; }
+/* Default: collapse all subsection lists.  Only LIs marked
+ * .toc-expanded (the current heading + all ancestors) show their
+ * children. */
+#toc-panel ul ul { display: none; }
+#toc-panel li.toc-expanded > ul { display: block; }
+#toc-panel li.toc-current > a {
+      font-weight: bold;
+      color: #000;
+}
 
 
 /* ---------- Lists ---------- */
