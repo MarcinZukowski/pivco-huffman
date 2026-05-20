@@ -11,6 +11,10 @@
 // post-processing needed.
 #if _html {
   html.elem("style", read("style.css"))
+  // web-code.js: runtime extras (author-comments toggle today; more
+  // later).  Inlined the same way as style.css — keeps the HTML
+  // build self-contained, PDF build never sees it.
+  html.elem("script", read("web-code.js"))
 }
 
 #if _pdf {

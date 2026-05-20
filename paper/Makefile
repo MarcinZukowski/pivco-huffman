@@ -39,7 +39,7 @@ $(PDF): $(SRC) $(INCS) | $(OUT)
 	$(TYPST) compile $(SRC) $(PDF)
 
 html: $(HTML)
-$(HTML): $(SRC) $(INCS) $(STYLE) | $(OUT)
+$(HTML): $(SRC) $(INCS) $(STYLE) web-code.js | $(OUT)
 	$(TYPST) compile --creation-timestamp $$(date +%s) -f html --features html --input target=html $(SRC) $(HTML)
 
 watch: | $(OUT)

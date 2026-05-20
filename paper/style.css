@@ -169,6 +169,31 @@ pre code {
       border-left: 5px solid black;     /* optional accent — looks nice */
 }
 
+/* Toggle from web-code.js: when body.hide-author is set, all author
+ * comments collapse.  Default state has the class absent (musings
+ * visible) so first-paint matches the default-ON button state. */
+body.hide-author .htmlonly { display: none; }
+
+#author-toggle {
+      position: fixed;
+      top: 12px;
+      right: 12px;
+      z-index: 1000;
+      padding: 6px 12px;
+      border: 1px solid #888;
+      border-radius: 6px;
+      background: #fff;
+      cursor: pointer;
+      font: 12px sans-serif;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.15);
+}
+#author-toggle[data-state="on"] {
+      background: #cfc;
+      border-color: #4a8;
+}
+#author-toggle:hover { background: #f0f0f0; }
+#author-toggle[data-state="on"]:hover { background: #b8e8b8; }
+
 
 /* ---------- Lists ---------- */
 
