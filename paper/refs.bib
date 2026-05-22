@@ -799,3 +799,23 @@
               wisdom, and where the bulk-decode primitive departs
               from it.}
 }
+
+@article{fastlanes,
+  author    = {Afroozeh, Azim and Boncz, Peter},
+  title     = {The {FastLanes} Compression Layout:
+               Decoding >100 Billion Integers per Second
+               with Scalar Code},
+  journal   = {Proceedings of the VLDB Endowment},
+  volume    = {16},
+  number    = {9},
+  pages     = {2132--2144},
+  year      = {2023},
+  doi       = {10.14778/3598581.3598587},
+  note      = {Transposed/bit-sliced integer layout enabling
+              data-parallel decode from scalar (auto-vectorizable)
+              code.  Prior art for ph's bit-sliced flat-subtree
+              experiment: FastLanes uses a wide (1024-value) interleave
+              stride; ph's variant is streamier (8/16/64-symbol
+              groups) and applied to Huffman flat-subtree codes rather
+              than fixed-width integers.}
+}
