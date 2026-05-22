@@ -37,8 +37,8 @@ bits from the stream, a different data layout is needed.
 
 // #mf("pivot-bitmaps")
 
-@fig-pivot presents how the encoded word "huffman" can be presented differently.
-Instead of a code-after-code stream, we divide all the bits stream bits
+@fig-pivot shows how the encoded word "huffman" can be represented differently.
+Instead of a code-after-code stream, we divide all the stream bits
 by their (possibly empty) prefix.
 @fig-pivot-tree shows how this layout maps onto the Huffman tree when decoding
 data.
@@ -46,11 +46,11 @@ Each node receives all the bits of the codes that pass through it, and navigates
 these codes to its children, where another bitmap is used for the next step.
 
 While logically this representation contains the same information, since bitmaps
-are typically stored byte-aligned, it might reduce in a marginally worse compression
+are typically stored byte-aligned, it might result in a marginally worse compression
 ratio due to byte-rounding.
-However, for non-trivial datasets this overhead acceptable if this approach provides other benefits.
+However, for non-trivial datasets this overhead is acceptable if this approach provides other benefits.
 
-Note, that this basic tree representation is equivalent to
+Note that this basic tree representation is equivalent to
 _wavelet trees_ (see @wt), specifically _Huffman-shaped wavelet trees_ (e.g. @dinklage2023wt).
 However, with a very different focus, use cases, and structural changes to the tree,
 we do not use this term in this paper.
@@ -156,8 +156,8 @@ to the actual compute primitives.
         [`PR`], [`partition_root` - like `partition` but for the root node],
         [`S1`], [`scatter` - scatters a single symbol into output],
         [`S2`], [`scatter_two` - scatters two symbols into output],
-        [`PH`], [`partitions_half` - like `partition`, but produces only one output],
-        [`C`], [_not a primivite_ - marks the "constant", top-frequency key]
+        [`PH`], [`partition_half` - like `partition`, but produces only one output],
+        [`C`], [_not a primitive_ - marks the "constant", top-frequency key]
       ),
     caption: [Primitive symbols used in figures in this Section]
     )<treeopt-symbols>
@@ -191,7 +191,7 @@ Note that `memset` is 1-2 orders of magnitude faster than our primitives, so tha
 cost is negligible.
 
 @treeopt-constant shows the tree with this optimization applied.
-Note, that as a result we introduce a new operation called `PH` - `partition_half`,
+Note that as a result we introduce a new operation called `PH` - `partition_half`,
 similar to `partition`, but only producing one of the output index lists.
 
 #table(
@@ -221,7 +221,7 @@ We can decode such a subtree with a single operation
 *`scatter_flat_-D(output, indices, bitmap, symbols)`*, where `D` represents
 the depth of the subtree.
 
-Note, that for this, the input `bitmap` is not _binary_, but _D-ary_, with
+Note that for this, the input `bitmap` is not _binary_, but _D-ary_, with
 bits packed contiguously.
 Also, note that `scatter-two` is a special case of this approach, with _D=1_.
 
@@ -252,8 +252,8 @@ for (i: 0..len(indices)):
 
 Looking at @treeopt-flat, we can see that while the #sym("- n t u") symbols
 benefit from the "flat subtrees" strategy,  we also have #sym("c o p y") symbols,
-which share the same code lenghts, but are not decoded together.
-This is because the canonical Huffman trees produced a tree of this particular
+which share the same code lengths, but are not decoded together.
+This is because canonical Huffman construction produces a tree of this particular
 shape.
 
 We can reorganize the Huffman tree to make it more amenable to the "flat subtree"
@@ -298,7 +298,7 @@ with faster compute primitives.
 == Computing Primitives
 
 @treeopt-symbols lists primitives used during decoding of #PH.
-Most of them can expressed with a simple "scalar" loop, but
+Most of them can be expressed with a simple "scalar" loop, but
 since they work on multiple items, they also represent
 opportunities for SIMD optimization.
 And even with a scalar loop, coding methods can make a dramatic difference.
@@ -349,11 +349,11 @@ int partition(const uint16_t *indices, int n,
 The main performance problem here is the `if` condition.
 It depends on an extracted bit value, and may be hard to predict for the branch predictor.
 If the distribution is skewed (like `proba80`), it makes the branch easier to guess.
-For more uniform data (like `prose_pride`), the branch predictor can not guess properly.
-We can see that in @prim-td-naive, with `prose_pride` performance for `partition` worse.
+For more uniform data, the branch predictor can not guess properly,
+as we can see in @prim-td-naive for `prose_pride`.
 On `m4`, with its cheaper branch predictor misses, the difference is minimal, but on `c8i` it is significant.
 
-One way to alleviate this is to replace branching with an unconditional assignment, here's this apprach shown
+One way to alleviate this is to replace branching with an unconditional assignment, here's this approach shown
 inside the smaller `partition_half_right` primitive:
 
 ```c
@@ -379,7 +379,7 @@ implementation (just an 8-value kernel with a given 8-bit `mask` from the bitmap
     uint8x16_t right = vqtbl1q_u8(data, shuf_r);
     uint8x16_t left  = vqtbl1q_u8(data, shuf_l);
 
-    /* Compute how many values wen right */
+    /* Compute how many values went right */
     int n_right = compress_popcnt[mask];
 
     /* Store both results - always 16 bytes */
@@ -394,8 +394,8 @@ How it works:
 - `vqtbl1q_8` operation creates _condensed_ subsets of input for left/right.
   Note, these vectors might have zeros in their tail, as on average they are only
   half-full.
-- result vectors are always written as 16-bytes - while it might sound wastful,
-  it is simpler and fast.
+- result vectors are always written as 16 bytes - while it might sound wasteful,
+  it is simpler and faster.
 - the next iteration needs to adjust both output pointers based on `n_right`
   (`n_left` is simply `8 - n_right`)
 
@@ -472,10 +472,10 @@ The second problem is the actual writing of the symbols. It boils down to the fo
   output[indices[i+7]] = input_function(i+7)
 ```
 
-Note, that with indices being ordered, but not contiguous, this results in a lot of
+Note that with indices being ordered, but not contiguous, this results in a lot of
 individual writes. All 3 versions of `scatter` use this approach.
 This tends to saturate the CPUs load/store units, and limits further performance improvements.
-The author does not know of an efficient solution to that on neither x86 or ARM architectures.
+The author does not know of an efficient solution to this on either x86 or ARM architectures.
 Only AVX-512 provides _scatter_ instructions, but they do not seem applicable here,
 as they only work with 32- and 64-bit values.
 
@@ -497,9 +497,9 @@ as they only work with 32- and 64-bit values.
 )<prim-td-opt>
 
 @prim-td-opt demonstrates the memory writes problem.
-You can see even seemingly trivial `simd_s1_scatter` taking 2-5x more time per element
+You can see even the seemingly trivial `simd_s1_scatter` taking 2-5x more time per element
 than `simd_partition`.
-Note, that per-dataset distributions vary due to different cardinalities.
+Note that per-dataset numbers vary due to different cardinalities.
 In particular, `proba80` has very few elements reaching `simd_s2_scatter_both`, causing a high
 per/element cost.
 
@@ -509,14 +509,14 @@ per/element cost.
 
 @ph-td-final-bw and @ph-td-final-ratio show how
 thanks to combining tree optimizations and high-performance SIMD primitives,
-this version of #PH enter the performance territory of huf0.
+this version of #PH enters the performance territory of huf0.
 We also see how with faster primitives the impact of the optimized tree shape provides
 stronger and more consistent benefits comparing to @tab-tree-opt.
 
-Notably, the performance really depends on dataset - in `probe80`, with its higher
+Notably, the performance really depends on dataset - in `proba80`, with its higher
 entropy / shorter codes, average number of operations per symbol is much smaller.
-This behaviour is unique to #PH, and allows it to beat `huff0` on such
-distributions decidedly.
+This behaviour is unique to #PH, and allows it to decidedly beat huf0 on such
+distributions.
 
 Still, the performance is not consistently impressive - this is mostly
 impacted by the bottleneck of writes in `scatter` primitives.

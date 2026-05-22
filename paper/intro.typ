@@ -3,9 +3,9 @@
 = Introduction
 
 Huffman encoding @huff is one of the most important algorithms in the area of compression.
-Moffat and Stuiver nicely put it in @moffat - it is very _enduring_:
-even with all the introduction of better-compression encodings (e.g. @arithmetic or @dudaans),
-70+ years in it's still ubiquitous.
+Moffat and Turpin nicely put it in @moffat - it is very _enduring_:
+despite the introduction of better-compressing encodings (e.g. @arithmetic or @dudaans),
+70+ years on, it's still ubiquitous.
 
 Note: formally, most modern systems don't necessarily use the _exact_ encoding proposed in @huff,
 but rather "canonical" coding from @schwartz1964canonical.
@@ -16,7 +16,7 @@ In this paper we use the term "Huffman" for all versions of it.
 == Current Huffman SotA
 
 Most modern Huffman implementations
-huff0, Oodle
+huf0, Oodle
 
 Mostly the same idea - predefined table, multi-stream or interleaved-stream for exposing more
 work for modern CPUs.
@@ -58,10 +58,10 @@ Below, we can see the pseudocode of a simple linear-hashing lookup, and its rela
   ],
 )
 
-Both problems can be seen as a state-machine traversal, and in both, data dependencies in the loop and unpredictable branching prevent CPU for achieving high performance.
+Both problems can be seen as a state-machine traversal, and in both, data dependencies in the loop and unpredictable branching prevent the CPU from achieving high performance.
 Hash join additionally performs an expensive memory lookup causing additional stalls.
 
-In @zuk09 Section 5.3.3.2 Author proposed an alternative hash table lookup approach based on the idea of going through
+In @zuk09, Section 5.3.3.2, the author proposed an alternative hash table lookup approach based on the idea of going through
 each node in the state machine not for one, but for a _vector_ of records,
 presented in this simplified pseudocode:
 
@@ -76,7 +76,7 @@ while not active.empty():            // if we still have work to do
   // get all values from the hash table for active indices
   vals = hash_table_vals(active)
   // compute comparisons
-  compr_esults = compare(vals, keys, active)
+  comp_results = compare(vals, keys, active)
   // split into hits if equal, active if not - those needs more work
   split_on_equality(comp_results, &active, &hits)
   // get all the next positions for all still active records
@@ -85,7 +85,7 @@ while not active.empty():            // if we still have work to do
 ```
 
 This approach, while more complex and seemingly labor-intensive (definitely issues more CPU instructions),
-in each phase exposes to CPUs a lot of simple, indendent operations and avoids and data or control dependencies.
+in each phase exposes to CPUs a lot of simple, independent operations and avoids any data or control dependencies.
 As a result, it achieves a significant performance benefit (even >10x) over the _scalar_ approach.
 
 
