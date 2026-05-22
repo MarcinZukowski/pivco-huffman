@@ -309,12 +309,66 @@ if(BUILD_BENCH)
     target_link_libraries(pivco_huffman_bench pivco_huffman huf0 m)
     target_include_directories(pivco_huffman_bench PRIVATE ext/fse/lib ext/ryg_rans)
 
+    # Independent (namespaced) top-down TD library, retired from the main
+    # lib but resurrected as its own lib so the fair-bench can show the
+    # TD 2x2 grid (tree naive/opt x prims scalar/simd) next to BU.  Its
+    # exported symbols are renamed to phtd_* via -include phtd_names.h, so
+    # it links alongside the main pivco_huffman (BU) lib.
+    set(PHTD_DIR ${CMAKE_SOURCE_DIR}/extras/ph-td)
+    set(PHTD_SOURCES
+        ${PHTD_DIR}/src/pivco_huffman.c
+        ${PHTD_DIR}/src/pivco_huffman_naive.c
+        ${PHTD_DIR}/src/huffman_table.c
+        ${PHTD_DIR}/src/phtd_shim.c)
+    set(PHTD_DEFS "")
+    set(PHTD_SIMD_DEF "")          # define passed to the bench so it knows the SIMD ISA
+    set(PHTD_AVX512_SRC "")
+    if(CMAKE_SYSTEM_PROCESSOR MATCHES "arm64|aarch64")
+        list(APPEND PHTD_SOURCES
+            ${PHTD_DIR}/src/pivco_huffman_neon.c
+            ${PHTD_DIR}/src/pivco_huffman_neon_tables.c)
+        set(PHTD_DEFS PIVCO_HAS_NEON=1)
+        set(PHTD_SIMD_DEF PIVCO_HAS_NEON=1)
+    elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64|AMD64")
+        # Probe for AVX-512 VBMI2 (the ISA the resurrected TD AVX-512
+        # decoder needs).  If present, build it for the simd grid rows.
+        include(CheckCSourceCompiles)
+        set(CMAKE_REQUIRED_FLAGS "-mavx512f -mavx512bw -mavx512vbmi -mavx512vbmi2")
+        check_c_source_compiles("#include <immintrin.h>\nint main(void){__m512i v=_mm512_setzero_si512();return (int)_mm512_test_epi8_mask(v,v);}" PHTD_AVX512_OK)
+        set(CMAKE_REQUIRED_FLAGS "")
+        if(PHTD_AVX512_OK)
+            list(APPEND PHTD_SOURCES ${PHTD_DIR}/src/pivco_huffman_avx512.c)
+            set(PHTD_AVX512_SRC ${PHTD_DIR}/src/pivco_huffman_avx512.c)
+            set(PHTD_DEFS PIVCO_HAS_AVX512=1 PIVCO_BLOCK_SIZE=8192)
+            set(PHTD_SIMD_DEF PIVCO_HAS_AVX512=1)
+        else()
+            set(PHTD_DEFS PIVCO_BLOCK_SIZE=8192)   # scalar-only TD rows
+        endif()
+    else()
+        set(PHTD_DEFS PIVCO_BLOCK_SIZE=8192)
+    endif()
+    add_library(ph_td STATIC ${PHTD_SOURCES})
+    target_include_directories(ph_td PUBLIC ${PHTD_DIR}/include PRIVATE ${PHTD_DIR}/src)
+    target_compile_definitions(ph_td PRIVATE ${PHTD_DEFS})
+    # ph-td was designed without the per-node FSE path (raw bitmaps); the
+    # main project's global -DPIVCO_HAS_FSE must be undone for this lib so
+    # neon.c doesn't try to include pivco_fse.h (which ph-td doesn't vendor).
+    target_compile_options(ph_td PRIVATE -O3 -w -UPIVCO_HAS_FSE
+        -include ${PHTD_DIR}/include/phtd_names.h)
+    if(PHTD_AVX512_SRC)
+        set_source_files_properties(${PHTD_AVX512_SRC} PROPERTIES COMPILE_OPTIONS
+            "-mavx512f;-mavx512bw;-mavx512vbmi;-mavx512vbmi2;-mavx512vpopcntdq;-mavx512vl")
+    endif()
+
     add_executable(pivco_fair_bench
         bench/bench_fair.c
         bench/bench_distributions.c
     )
-    target_link_libraries(pivco_fair_bench pivco_huffman huf0 m)
-    target_include_directories(pivco_fair_bench PRIVATE include src ext/fse/lib extras)
+    target_link_libraries(pivco_fair_bench pivco_huffman huf0 m ph_td)
+    target_include_directories(pivco_fair_bench PRIVATE include src ext/fse/lib extras ${PHTD_DIR}/include)
+    if(PHTD_SIMD_DEF)
+        target_compile_definitions(pivco_fair_bench PRIVATE ${PHTD_SIMD_DEF})
+    endif()
 
     add_executable(pivco_fse_tune
         bench/bench_fse_tune.c

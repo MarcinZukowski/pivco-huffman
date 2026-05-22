@@ -35,6 +35,12 @@
 #include "bitstream.h"
 #include "fse_xy_codec.h"   /* encode_x + decode_x8_y1 (tuned shape) */
 
+/* Independent namespaced top-down TD library (phtd_*), for the TD grid.
+ * The SIMD ISA macro (PIVCO_HAS_NEON / PIVCO_HAS_AVX512) is passed by
+ * CMake to match the ph_td lib build, so phtd.h exposes the right
+ * prototypes and the right simd grid rows compile in. */
+#include "phtd.h"
+
 /* From bench_distributions.c */
 extern void         bench_init(void);
 extern int          bench_num_distributions(void);
@@ -201,6 +207,61 @@ done_fail:
     return R;
 }
 
+/* ===================== top-down TD grid (phtd_* lib) ===================== */
+/* Generic over (build, encode, decode) so the 2x2 grid -- tree {naive,opt}
+ * x prims {scalar,simd} -- reuses one driver.  Mirrors measure_ph's
+ * opaque (rebuild table per G window) vs prebuilt (one static table) split,
+ * but on the namespaced TD library with its opaque table type. */
+typedef int (*phtd_build_fn)(const uint64_t*, phtd_table_t*);
+typedef int (*phtd_enc_fn)(const uint8_t*, const phtd_table_t*, uint8_t*, size_t*);
+typedef int (*phtd_dec_fn)(const uint8_t*, size_t, const phtd_table_t*, uint8_t*, size_t*);
+
+static result_t measure_phtd(phtd_build_fn B, phtd_enc_fn E, phtd_dec_fn D,
+                             const uint8_t *sym, size_t n) {
+    result_t R; memset(&R, 0, sizeof R);
+    const size_t TB = PHTD_BLOCK_SIZE, tsz = phtd_table_size();
+    size_t nblk = n / TB, nwin = n / g_table_G, bpw = g_table_G / TB;
+    R.builds = (int)nwin;
+    char *gt = malloc(tsz), *wt = malloc(tsz), *wts = malloc(nwin * tsz);
+    uint8_t *enc = malloc(n + n/2 + 4096), *eno = malloc(n + n/2 + 4096), *dec = malloc(n);
+    size_t *off = malloc((nblk+1)*sizeof(size_t)), *ofo = malloc((nblk+1)*sizeof(size_t));
+    if (!gt||!wt||!wts||!enc||!eno||!dec||!off||!ofo) goto done;
+#define WT(k) ((phtd_table_t*)(wts + (k)*tsz))
+    uint64_t f[256]; histo_u64(sym, n, f);
+    if (B(f, (phtd_table_t*)gt) != 0) goto done;
+    for (size_t k=0;k<nwin;k++){ uint64_t wf[256]; histo_u64(sym+k*g_table_G, g_table_G, wf);
+        if (B(wf, WT(k)) != 0) goto done; }
+
+    off[0]=0; for (size_t b=0;b<nblk;b++){ size_t L=0; if (E(sym+b*TB,(phtd_table_t*)gt,enc+off[b],&L)!=0) goto done; off[b+1]=off[b]+L; }
+    ofo[0]=0; for (size_t k=0;k<nwin;k++) for (size_t i=0;i<bpw;i++){ size_t b=k*bpw+i,L=0;
+        if (E(sym+b*TB,WT(k),eno+ofo[b],&L)!=0) goto done; ofo[b+1]=ofo[b]+L; }
+
+    for (size_t b=0;b<nblk;b++){ size_t c=0; D(enc+off[b],off[b+1]-off[b],(phtd_table_t*)gt,dec,&c);
+        if (memcmp(sym+b*TB,dec,TB)){fprintf(stderr,"phtd PB mismatch blk %zu\n",b);goto done;} }
+    for (size_t k=0;k<nwin;k++) for (size_t i=0;i<bpw;i++){ size_t b=k*bpw+i,c=0;
+        D(eno+ofo[b],ofo[b+1]-ofo[b],WT(k),dec,&c);
+        if (memcmp(sym+b*TB,dec,TB)){fprintf(stderr,"phtd OP mismatch blk %zu\n",b);goto done;} }
+
+    double best;
+    BEST_MBPS({ for (size_t b=0;b<nblk;b++){ size_t L=0; E(sym+b*TB,(phtd_table_t*)gt,enc+off[b],&L);} });
+    R.enc_pb = best;
+    BEST_MBPS({ for (size_t k=0;k<nwin;k++){ uint64_t wf[256]; histo_u64(sym+k*g_table_G,g_table_G,wf); B(wf,(phtd_table_t*)wt);
+        for (size_t i=0;i<bpw;i++){ size_t b=k*bpw+i,L=0; E(sym+b*TB,(phtd_table_t*)wt,eno+ofo[b],&L);} } });
+    R.enc_op = best;
+    BEST_MBPS({ for (size_t b=0;b<nblk;b++){ size_t c=0; D(enc+off[b],off[b+1]-off[b],(phtd_table_t*)gt,dec,&c);} });
+    R.dec_pb = best;
+    BEST_MBPS({ for (size_t k=0;k<nwin;k++){ uint64_t wf[256]; histo_u64(sym+k*g_table_G,g_table_G,wf); B(wf,(phtd_table_t*)wt);
+        for (size_t i=0;i<bpw;i++){ size_t b=k*bpw+i,c=0; D(eno+ofo[b],ofo[b+1]-ofo[b],(phtd_table_t*)wt,dec,&c);} } });
+    R.dec_op = best;
+    R.ratio_pb = (double)n / (double)(off[nblk] + 128);
+    R.ratio_op = (double)n / (double)(ofo[nblk] + 128 * nwin);
+    R.ok = 1;
+#undef WT
+done:
+    free(gt); free(wt); free(wts); free(enc); free(eno); free(dec); free(off); free(ofo);
+    return R;
+}
+
 /* ============================ huf0 (4X2) ============================ */
 static result_t measure_huf0(const uint8_t *sym, size_t n) {
     result_t R; memset(&R, 0, sizeof R);
@@ -267,6 +328,41 @@ static result_t measure_huf0(const uint8_t *sym, size_t n) {
     R.ok = 1;
 fail:
     free(enc); free(encp); free(off); free(offp); free(dec); free(wksp); free(dt); free(dtpb);
+    return R;
+}
+
+/* ===== stock huf0: the top-level one-liner API a user would reach for =====
+ * HUF_compress / HUF_decompress (auto-dispatch X1/X2, RLE/uncompressed
+ * handling, table built+read per call).  Opaque-only -- the stock API
+ * exposes no prebuilt-table path.  Contrast with the `huf0` row above,
+ * which is the tuned 4X2 + usingD/CTable path (we gave SoTA every
+ * advantage there; this shows the realistic default). */
+static result_t measure_huf0_stk(const uint8_t *sym, size_t n) {
+    result_t R; memset(&R, 0, sizeof R);
+    R.enc_pb = R.dec_pb = R.ratio_pb = -1.0;          /* no prebuilt API */
+    size_t nch = (n + HUF_CHUNK - 1) / HUF_CHUNK;
+    R.builds = (int)nch;
+    uint8_t *enc = malloc(n + n/2 + 4096), *dec = malloc(n);
+    size_t  *off = malloc((nch+1)*sizeof(size_t));
+    if (!enc||!dec||!off) goto fail;
+    off[0]=0;
+    for (size_t c=0;c<nch;c++){ size_t sz=(c<nch-1)?HUF_CHUNK:n-c*HUF_CHUNK;
+        size_t r=HUF_compress(enc+off[c], sz+1024, sym+c*HUF_CHUNK, sz);
+        if (HUF_isError(r)||r==0) goto fail; off[c+1]=off[c]+r; }
+    for (size_t c=0;c<nch;c++){ size_t sz=(c<nch-1)?HUF_CHUNK:n-c*HUF_CHUNK;
+        size_t r=HUF_decompress(dec, sz, enc+off[c], off[c+1]-off[c]);
+        if (HUF_isError(r)||memcmp(sym+c*HUF_CHUNK,dec,sz)!=0){fprintf(stderr,"huf0_stk mismatch ch %zu\n",c);goto fail;} }
+    double best;
+    BEST_MBPS({ for (size_t c=0;c<nch;c++){ size_t sz=(c<nch-1)?HUF_CHUNK:n-c*HUF_CHUNK;
+        HUF_compress(enc+off[c], sz+1024, sym+c*HUF_CHUNK, sz); } });
+    R.enc_op = best;
+    BEST_MBPS({ for (size_t c=0;c<nch;c++){ size_t sz=(c<nch-1)?HUF_CHUNK:n-c*HUF_CHUNK;
+        HUF_decompress(dec, sz, enc+off[c], off[c+1]-off[c]); } });
+    R.dec_op = best;
+    R.ratio_op = (double)n / (double)off[nch];
+    R.ok = 1;
+fail:
+    free(enc); free(dec); free(off);
     return R;
 }
 
@@ -468,32 +564,92 @@ static void print_row(const char *name, result_t R) {
     printf(" |"); r5(R.ratio_op); r5(R.ratio_pb); printf(" | %3d\n", R.builds);
 }
 
+/* ---- engine registry: uniform (sym,n)->result_t thunks ---- */
+static result_t e_ph (const uint8_t*s,size_t n){ return measure_ph(s,n,0); }
+static result_t e_pha(const uint8_t*s,size_t n){ return measure_ph(s,n,1); }
+static result_t e_td_naive (const uint8_t*s,size_t n){ return measure_phtd(phtd_build_table_naive, phtd_encode_naive,      phtd_decode_naive,      s,n); }
+static result_t e_td_scl   (const uint8_t*s,size_t n){ return measure_phtd(phtd_build_table,       phtd_encode_scalar_opt, phtd_decode_scalar_opt, s,n); }
+#if defined(PIVCO_HAS_NEON)
+static result_t e_td_nvsimd(const uint8_t*s,size_t n){ return measure_phtd(phtd_build_table_naive, phtd_encode_naive, phtd_decode_naive_simd_neon, s,n); }
+static result_t e_td_simdopt(const uint8_t*s,size_t n){ return measure_phtd(phtd_build_table,      phtd_encode_neon,  phtd_decode_neon,            s,n); }
+#elif defined(PIVCO_HAS_AVX512)
+static result_t e_td_nvsimd(const uint8_t*s,size_t n){ return measure_phtd(phtd_build_table_naive, phtd_encode_naive,  phtd_decode_naive_simd_avx512, s,n); }
+static result_t e_td_simdopt(const uint8_t*s,size_t n){ return measure_phtd(phtd_build_table,      phtd_encode_avx512, phtd_decode_avx512,            s,n); }
+#endif
+static result_t e_huf0    (const uint8_t*s,size_t n){ return measure_huf0(s,n); }
+static result_t e_huf0_stk(const uint8_t*s,size_t n){ return measure_huf0_stk(s,n); }
+static result_t e_fse_stk (const uint8_t*s,size_t n){ return measure_fse(s,n); }
+static result_t e_fse_x8y1(const uint8_t*s,size_t n){ return measure_fse_tuned(s,n); }
+#ifdef PIVCO_HAS_OODLE
+static result_t e_oo_huff (const uint8_t*s,size_t n){ return measure_oodle(s,n,0); }
+static result_t e_oo_tans (const uint8_t*s,size_t n){ return measure_oodle(s,n,1); }
+#endif
+
+typedef result_t (*engine_fn)(const uint8_t*, size_t);
+static const struct { const char *name; engine_fn fn; } ENGINES[] = {
+    {"ph", e_ph}, {"pha", e_pha},
+    {"td_naive", e_td_naive}, {"td_scl_opt", e_td_scl},
+#if defined(PIVCO_HAS_NEON) || defined(PIVCO_HAS_AVX512)
+    {"td_nv_simd", e_td_nvsimd}, {"td_simdopt", e_td_simdopt},
+#endif
+    {"huf0", e_huf0}, {"huf0_stk", e_huf0_stk}, {"fse_stk", e_fse_stk}, {"fse_x8y1", e_fse_x8y1},
+#ifdef PIVCO_HAS_OODLE
+    {"oo_huff", e_oo_huff}, {"oo_tans", e_oo_tans},
+#endif
+};
+#define N_ENGINES (int)(sizeof(ENGINES)/sizeof(ENGINES[0]))
+
+/* membership in a comma-separated list; NULL list = match everything */
+static int in_csv(const char *csv, const char *name){
+    if (!csv) return 1;
+    size_t nl = strlen(name);
+    for (const char *p = csv; *p; ) {
+        const char *c = strchr(p, ',');
+        size_t len = c ? (size_t)(c - p) : strlen(p);
+        if (len == nl && strncmp(p, name, nl) == 0) return 1;
+        p += len; if (*p) p++;
+    }
+    return 0;
+}
+
 int main(int argc, char **argv) {
     int run_all = 0;
+    const char *eng_filter = NULL, *dist_filter = NULL;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--all")) run_all = 1;
         else if (!strncmp(argv[i], "--G=", 4)) g_table_G = (size_t)atoi(argv[i]+4) * 1024;
+        else if (!strncmp(argv[i], "--engines=", 10)) eng_filter = argv[i] + 10;
+        else if (!strncmp(argv[i], "--dist=", 7)) { dist_filter = argv[i] + 7; }
+        else if (!strcmp(argv[i], "--list") || !strcmp(argv[i], "--help")) {
+            bench_init();
+            printf("usage: pivco_fair_bench [--all] [--G=KB] [--engines=a,b] [--dist=x,y]\n\n");
+            printf("engines:");
+            for (int e = 0; e < N_ENGINES; e++) printf(" %s", ENGINES[e].name);
+            printf("\n\ndistributions (* = in default 'main' set):\n");
+            for (int d = 0; d < bench_num_distributions(); d++)
+                printf("  %s%s\n", bench_dist_name(d), bench_dist_is_main(d) ? " *" : "");
+            return 0;
+        }
     }
     bench_init();
+    phtd_set_fse_enabled(0);   /* TD grid: raw bitmaps, isolate tree x prims */
     printf("fair-bench: %d MB-class buffer = %d KB, best of %dx%d, ph table-G=%zu KB, BLK=%d\n",
            TOTAL/(1<<20), TOTAL/1024, RUNS, REPEATS, g_table_G/1024, BLK);
+    if (eng_filter)  printf("  engines: %s\n", eng_filter);
+    if (dist_filter) printf("  dists:   %s\n", dist_filter);
     printf("columns: enc(opaque prebuilt)  dec(opaque prebuilt)  MB/s | ratio(op pb) | builds/1MB\n\n");
 
     uint8_t *sym = malloc(TOTAL);
     int nd = bench_num_distributions();
     for (int d = 0; d < nd; d++) {
-        if (!run_all && !bench_dist_is_main(d)) continue;
+        int include = dist_filter ? in_csv(dist_filter, bench_dist_name(d))
+                                  : (run_all || bench_dist_is_main(d));
+        if (!include) continue;
         bench_generate_symbols(d, sym, TOTAL, SEED);
         printf("== %-16s ==        enc_op  enc_pb   dec_op  dec_pb |  r_op  r_pb | blds\n", bench_dist_name(d));
-        print_row("ph",      measure_ph(sym, TOTAL, 0));
-        print_row("pha",     measure_ph(sym, TOTAL, 1));
-        print_row("huf0",    measure_huf0(sym, TOTAL));
-        print_row("fse_stk", measure_fse(sym, TOTAL));
-        print_row("fse_x8y1",measure_fse_tuned(sym, TOTAL));
-#ifdef PIVCO_HAS_OODLE
-        print_row("oo_huff", measure_oodle(sym, TOTAL, 0));
-        print_row("oo_tans", measure_oodle(sym, TOTAL, 1));
-#endif
+        for (int e = 0; e < N_ENGINES; e++)
+            if (in_csv(eng_filter, ENGINES[e].name))
+                print_row(ENGINES[e].name, ENGINES[e].fn(sym, TOTAL));
         printf("\n");
     }
     free(sym);
