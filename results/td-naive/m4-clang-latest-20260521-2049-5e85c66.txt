@@ -1,0 +1,62 @@
+proba80 tree: total=11  FULL=3 FLAT=0 (avg D=0.0)  BOTH=1 HALF_R=1 HALF_L=0  LEAF=5 SKIP=1  prefill_sym=0
+prose_pride tree: total=191  FULL=46 FLAT=4 (avg D=3.2)  BOTH=44 HALF_R=1 HALF_L=0  LEAF=95 SKIP=1  prefill_sym=32
+ph-td-naive vs huf0 (decode throughput)
+    256 blocks of 8192 symbols = 2048 KB each pass; 500 iters; best-of-3
+
+=== profile: proba80 -- naive (tick=1.000 GHz, 1.000 ns/tick) ===
+primitive                     calls       elements        ticks    ns/elem    ns/call
+p_partition                  640000     1311456000    511101212      0.390      798.6
+s1_scatter                   765500     1048576000    254467358      0.243      332.4
+
+=== profile: proba80 -- naive_simd (tick=1.000 GHz, 1.000 ns/tick) ===
+primitive                     calls       elements        ticks    ns/elem    ns/call
+simd_partition               640000     1311456000     81244936      0.062      126.9
+simd_s1_scatter              765500     1048576000    128531407      0.123      167.9
+
+proba80        | naive_simd  3.663 GB/s (1.25 bpc)
+=== profile: proba80 -- scalar_opt (tick=1.000 GHz, 1.000 ns/tick) ===
+primitive                     calls       elements        ticks    ns/elem    ns/call
+p_partition                  384000      260847000    102039102      0.391      265.7
+p_half_right                 128000     1048576000    395922511      0.378     3093.2
+s1_scatter                   384000      207986000     51844353      0.249      135.0
+s2_scatter_both              128000        2033000      1003425      0.494        7.8
+
+=== profile: proba80 -- simd_opt (neon) (tick=1.000 GHz, 1.000 ns/tick) ===
+primitive                     calls       elements        ticks    ns/elem    ns/call
+simd_partition               384000      260847000     16358221      0.063       42.6
+simd_partition_root_half_right       128000     1048576000     51650697      0.049      403.5
+simd_s1_scatter              384000      207986000     27096098      0.130       70.6
+simd_s2_scatter_both         128000        2033000       410083      0.202        3.2
+
+proba80        | simd_opt (neon)  6.415 GB/s (1.27 bpc)
+proba80        | naive  1.243 GB/s (1.25 bpc) | scalar-opt  1.647 GB/s (1.27 bpc) | huf0_x2  2.894 GB/s (1.25 bpc) | naive/x2 0.43x  opt/x2 0.57x
+=== profile: prose_pride -- naive (tick=1.000 GHz, 1.000 ns/tick) ===
+primitive                     calls       elements        ticks    ns/elem    ns/call
+p_partition                10150500     4825964000   1951140132      0.404      192.2
+s1_scatter                  8893500     1048576000    290490919      0.277       32.7
+
+=== profile: prose_pride -- naive_simd (tick=1.000 GHz, 1.000 ns/tick) ===
+primitive                     calls       elements        ticks    ns/elem    ns/call
+simd_partition             10150500     4825964000    328560058      0.068       32.4
+simd_s1_scatter             8893500     1048576000    175982472      0.168       19.8
+
+prose_pride    | naive_simd  1.696 GB/s (4.64 bpc)
+=== profile: prose_pride -- scalar_opt (tick=1.000 GHz, 1.000 ns/tick) ===
+primitive                     calls       elements        ticks    ns/elem    ns/call
+p_partition                 1792000     3125605500   1262816075      0.404      704.7
+p_half_right                 128000      277315000    112855481      0.407      881.7
+s1_scatter                   896000      208865000     58113502      0.278       64.9
+s2_scatter_both              386500      193893000     62276163      0.321      161.1
+sfx_scatter_flat             512000      470819500    186241784      0.396      363.8
+
+=== profile: prose_pride -- simd_opt (neon) (tick=1.000 GHz, 1.000 ns/tick) ===
+primitive                     calls       elements        ticks    ns/elem    ns/call
+simd_partition              1664000     2077029500    136307685      0.066       81.9
+simd_partition_half_right       128000      277315000     13276915      0.048      103.7
+simd_partition_root          128000     1048576000     67184701      0.064      524.9
+simd_s1_scatter              896000      208865000     31901651      0.153       35.6
+simd_s2_scatter_both         386500      193893000     31723371      0.164       82.1
+simd_sfx_scatter_flat        512000      470819500     75564552      0.160      147.6
+
+prose_pride    | simd_opt (neon)  2.385 GB/s (4.66 bpc)
+prose_pride    | naive  0.441 GB/s (4.64 bpc) | scalar-opt  0.584 GB/s (4.66 bpc) | huf0_x2  2.577 GB/s (4.58 bpc) | naive/x2 0.17x  opt/x2 0.23x

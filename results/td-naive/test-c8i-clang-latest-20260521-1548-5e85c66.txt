@@ -1,0 +1,60 @@
+ph-td-naive vs huf0 (decode throughput)
+    256 blocks of 8192 symbols = 2048 KB each pass; 500 iters; best-of-3
+
+=== profile: proba80 -- naive (tick=2.700 GHz, 0.370 ns/tick) ===
+primitive                     calls       elements        ticks    ns/elem    ns/call
+p_partition                  640000     1311456000   7471634690      2.110     4323.9
+s1_scatter                   765500     1048576000    607931996      0.215      294.1
+
+=== profile: proba80 -- naive_simd (tick=2.700 GHz, 0.370 ns/tick) ===
+primitive                     calls       elements        ticks    ns/elem    ns/call
+simd_partition               640000     1311456000    212557320      0.060      123.0
+simd_s1_scatter              765500     1048576000    784969334      0.277      379.8
+
+proba80        | naive_simd  2.463 GB/s (1.25 bpc)
+=== profile: proba80 -- scalar_opt (tick=2.700 GHz, 0.370 ns/tick) ===
+primitive                     calls       elements        ticks    ns/elem    ns/call
+p_partition                  384000      260847000   1516588162      2.153     1462.8
+p_half_right                 128000     1048576000   1831781674      0.647     5300.3
+s1_scatter                   384000      207986000    117574124      0.209      113.4
+s2_scatter_both              128000        2033000     20918904      3.811       60.5
+
+=== profile: proba80 -- simd_opt (avx512) (tick=2.700 GHz, 0.370 ns/tick) ===
+primitive                     calls       elements        ticks    ns/elem    ns/call
+simd_partition               384000      260847000     56059110      0.080       54.1
+simd_partition_root_half_right       128000     1048576000    101763662      0.036      294.5
+simd_s1_scatter              384000      207986000    160292822      0.285      154.6
+simd_s2_scatter_both         128000        2033000      7281734      1.327       21.1
+
+proba80        | simd_opt (avx512)  6.922 GB/s (1.26 bpc)
+proba80        | naive  0.339 GB/s (1.25 bpc) | scalar-opt  0.753 GB/s (1.27 bpc) | huf0_x2  1.825 GB/s (1.25 bpc) | naive/x2 0.19x  opt/x2 0.41x
+=== profile: prose_pride -- naive (tick=2.700 GHz, 0.370 ns/tick) ===
+primitive                     calls       elements        ticks    ns/elem    ns/call
+p_partition                10150500     4825964000  53492788776      4.105     1951.9
+s1_scatter                  8893500     1048576000   1019506858      0.360       42.5
+
+=== profile: prose_pride -- naive_simd (tick=2.700 GHz, 0.370 ns/tick) ===
+primitive                     calls       elements        ticks    ns/elem    ns/call
+simd_partition             10150500     4825964000   1211606952      0.093       44.2
+simd_s1_scatter             8893500     1048576000   1331123098      0.470       55.4
+
+prose_pride    | naive_simd  0.780 GB/s (4.64 bpc)
+=== profile: prose_pride -- scalar_opt (tick=2.700 GHz, 0.370 ns/tick) ===
+primitive                     calls       elements        ticks    ns/elem    ns/call
+p_partition                 1792000     3125605500  36593503278      4.336     7563.2
+p_half_right                 128000      277315000    495944066      0.662     1435.0
+s1_scatter                   896000      208865000    156452358      0.277       64.7
+s2_scatter_both              386500      193893000   2209892068      4.221     2117.7
+sfx_scatter_flat             512000      470819500   1183771272      0.931      856.3
+
+=== profile: prose_pride -- simd_opt (avx512) (tick=2.700 GHz, 0.370 ns/tick) ===
+primitive                     calls       elements        ticks    ns/elem    ns/call
+simd_partition              1664000     2077029500    371661214      0.066       82.7
+simd_partition_half_right       128000      277315000     26322882      0.035       76.2
+simd_partition_root          128000     1048576000    167699826      0.059      485.2
+simd_s1_scatter              896000      208865000    183695868      0.326       75.9
+simd_s2_scatter_both         386500      193893000    122298628      0.234      117.2
+simd_sfx_scatter_flat        512000      470819500    278840894      0.219      201.7
+
+prose_pride    | simd_opt (avx512)  2.038 GB/s (4.64 bpc)
+prose_pride    | naive  0.051 GB/s (4.64 bpc) | scalar-opt  0.069 GB/s (4.66 bpc) | huf0_x2  1.671 GB/s (4.58 bpc) | naive/x2 0.03x  opt/x2 0.04x

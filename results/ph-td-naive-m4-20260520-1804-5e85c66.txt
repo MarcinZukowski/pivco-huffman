@@ -1,0 +1,11 @@
+ph-td naive vs scalar-opt vs huf0_x2 on M4 Max
+  naive       -- only P + S1 primitives, slim wire (no FSE marker, no K_right)
+  scalar-opt  -- all tree-shape optimisations on (constant/flat/leaf-fusion/half-partition),
+                  every primitive scalar (no NEON), full ph wire format
+  huf0_x2     -- HUF_decompress4X2 (canonical baseline)
+---
+ph-td-naive vs huf0 (decode throughput)
+    256 blocks of 8192 symbols = 2048 KB each pass; 500 iters; best-of-3
+
+proba80        | naive  0.608 GB/s (2.70 bpc) | scalar-opt  0.740 GB/s (2.62 bpc) | huf0_x2  1.451 GB/s (2.63 bpc) | naive/x2 0.42x  opt/x2 0.51x
+prose_pride    | naive  0.439 GB/s (4.56 bpc) | scalar-opt  0.475 GB/s (4.60 bpc) | huf0_x2  1.607 GB/s (4.55 bpc) | naive/x2 0.27x  opt/x2 0.30x

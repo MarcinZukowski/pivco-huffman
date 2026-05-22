@@ -1,0 +1,8 @@
+ph-td-naive vs huf0 on M4 (arm64, Apple M4 Max)
+Built with: cmake -DCMAKE_BUILD_TYPE=Release
+---
+ph-td-naive vs huf0 (decode throughput)
+    256 blocks of 8192 symbols = 2048 KB each pass; 500 iters; best-of-3
+
+proba80        | N=2048 KB | ph-td-naive  0.585 GB/s ( 3.20 bpc) | huf0  1.442 GB/s ( 2.63 bpc) | ratio 0.41x
+prose_pride    | N=2048 KB | ph-td-naive  0.435 GB/s ( 4.69 bpc) | huf0  1.596 GB/s ( 4.55 bpc) | ratio 0.27x

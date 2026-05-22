@@ -1,0 +1,8 @@
+ph-td-naive vs huf0_x2 on M4 (Apple M4 Max)
+huf0 baseline: HUF_decompress4X2 (always, per project convention)
+---
+ph-td-naive vs huf0 (decode throughput)
+    256 blocks of 8192 symbols = 2048 KB each pass; 500 iters; best-of-3
+
+proba80        | ph-naive  0.589 GB/s ( 3.20 bpc) | huf0_x2  1.457 GB/s ( 2.63 bpc) | ph/huf0_x2 0.40x
+prose_pride    | ph-naive  0.436 GB/s ( 4.69 bpc) | huf0_x2  1.603 GB/s ( 4.55 bpc) | ph/huf0_x2 0.27x

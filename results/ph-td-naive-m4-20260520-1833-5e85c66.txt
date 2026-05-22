@@ -1,0 +1,18 @@
+ph-td naive vs scalar-opt vs huf0_x2 on M4 Max
+  naive       -- only P + S1 (slim wire)
+  scalar-opt  -- all tree-shape optimisations on, every primitive scalar (no NEON),
+                 BRANCHLESS p_half_right/p_half_left (write-then-conditional-advance)
+  huf0_x2     -- HUF_decompress4X2 (canonical baseline)
+  Distributions sourced from bench/bench_distributions.c
+---
+proba80 tree: total=11  FULL=3 FLAT=0 (avg D=0.0)  BOTH=1 HALF_R=1 HALF_L=0  LEAF=5 SKIP=1  prefill_sym=0
+prose_pride tree: total=191  FULL=46 FLAT=4 (avg D=3.2)  BOTH=44 HALF_R=1 HALF_L=0  LEAF=95 SKIP=1  prefill_sym=32
+primitive microbench (N=8192, 200000 iters/trial, best-of-3):
+  p1=80% (bits=1): p_partition 0.401 ns/byte | p_half_right 0.407 ns/byte | half/full 1.01x
+  p1=50% (bits=1): p_partition 0.403 ns/byte | p_half_right 0.407 ns/byte | half/full 1.01x
+
+ph-td-naive vs huf0 (decode throughput)
+    256 blocks of 8192 symbols = 2048 KB each pass; 500 iters; best-of-3
+
+proba80        | naive  1.190 GB/s (1.25 bpc) | scalar-opt  1.574 GB/s (1.27 bpc) | huf0_x2  2.376 GB/s (1.26 bpc) | naive/x2 0.50x  opt/x2 0.66x
+prose_pride    | naive  0.430 GB/s (4.64 bpc) | scalar-opt  0.572 GB/s (4.66 bpc) | huf0_x2  1.453 GB/s (4.62 bpc) | naive/x2 0.30x  opt/x2 0.39x

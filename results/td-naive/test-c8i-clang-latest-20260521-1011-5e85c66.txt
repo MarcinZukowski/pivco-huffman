@@ -1,0 +1,30 @@
+ph-td-naive vs huf0 (decode throughput)
+    256 blocks of 8192 symbols = 2048 KB each pass; 500 iters; best-of-3
+
+=== profile: proba80 -- naive (tick=2.700 GHz, 0.370 ns/tick) ===
+primitive                     calls       elements        ticks    ns/elem    ns/call
+p_partition                  640000     1311456000   7748379994      2.188     4484.1
+s1_scatter                   765500     1048576000    438426824      0.155      212.1
+
+=== profile: proba80 -- scalar-opt (tick=2.700 GHz, 0.370 ns/tick) ===
+primitive                     calls       elements        ticks    ns/elem    ns/call
+p_partition                  384000      260847000   1448567176      2.057     1397.2
+p_half_right                 128000     1048576000   1286319998      0.454     3722.0
+s1_scatter                   384000      207986000     95160442      0.169       91.8
+s2_scatter_both              128000        2033000     10391146      1.893       30.1
+
+proba80        | naive  0.341 GB/s (1.25 bpc) | scalar-opt  0.958 GB/s (1.27 bpc) | huf0_x2  2.160 GB/s (1.25 bpc) | naive/x2 0.16x  opt/x2 0.44x
+=== profile: prose_pride -- naive (tick=2.700 GHz, 0.370 ns/tick) ===
+primitive                     calls       elements        ticks    ns/elem    ns/call
+p_partition                10150500     4825964000  54681220052      4.197     1995.2
+s1_scatter                  8893500     1048576000   1059724826      0.374       44.1
+
+=== profile: prose_pride -- scalar-opt (tick=2.700 GHz, 0.370 ns/tick) ===
+primitive                     calls       elements        ticks    ns/elem    ns/call
+p_partition                 1792000     3125605500  34549195790      4.094     7140.7
+p_half_right                 128000      277315000    345885968      0.462     1000.8
+s1_scatter                   896000      208865000    148898994      0.264       61.5
+s2_scatter_both              386500      193893000   1908187448      3.645     1828.6
+sfx_scatter_flat             512000      470819500    924265632      0.727      668.6
+
+prose_pride    | naive  0.050 GB/s (4.64 bpc) | scalar-opt  0.074 GB/s (4.66 bpc) | huf0_x2  1.932 GB/s (4.58 bpc) | naive/x2 0.03x  opt/x2 0.04x

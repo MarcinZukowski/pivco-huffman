@@ -1,0 +1,9 @@
+distribution,decoder,throughput_gbs,bpc
+proba80,simd_opt,6.3057,1.2651
+proba80,naive,1.2272,1.2524
+proba80,scalar_opt,1.6344,1.2651
+proba80,huf0_x2,2.8736,1.2514
+prose_pride,simd_opt,2.3799,4.6562
+prose_pride,naive,0.4385,4.6397
+prose_pride,scalar_opt,0.5821,4.6562
+prose_pride,huf0_x2,2.5402,4.5831
