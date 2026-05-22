@@ -81,4 +81,7 @@ FetchContent_MakeAvailable(oodle_data)
 add_subdirectory(data)
 #add_subdirectory(texture)
 #add_subdirectory(network)
-add_subdirectory(test)
+# test target disabled - it builds RAD's `ozip` example utility
+# (test/main.cpp), which is Oodle source we don't ship or need.
+# The bench only links liboodle-data-static.a.  Patched 2026-05-22.
+#add_subdirectory(test)

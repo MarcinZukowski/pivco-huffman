@@ -887,6 +887,96 @@ static double time_oodle_encode_min(const uint8_t *src, size_t bytes,
     }
     return best_mbps;
 }
+
+/* ---- Oodle tANS (newlz_arrays_tans): the entropy stage we compare
+ *      head-to-head against FSE.  Same per-call shape as the huff
+ *      path (encode-once in setup, then time decode/encode). ---- */
+
+static uint8_t g_oodle_tans_buf[131072];
+static int     g_oodle_tans_total;
+static int     g_oodle_tans_ok;
+
+static int oodle_tans_setup(const uint8_t *src, size_t n)
+{
+    g_oodle_tans_total = oodle_tans_encode(src, n,
+                                            g_oodle_tans_buf,
+                                            sizeof(g_oodle_tans_buf));
+    if (g_oodle_tans_total <= 0 || g_oodle_tans_total > (int)n) {
+        g_oodle_tans_ok = 0; return 0;
+    }
+    g_oodle_tans_ok = 1;
+    return 1;
+}
+
+static size_t oodle_tans_dec(uint8_t *dec, size_t dec_cap)
+{
+    int r = oodle_tans_decode(g_oodle_tans_buf, (size_t)g_oodle_tans_total,
+                               dec, dec_cap);
+    return r > 0 ? (size_t)r : 0;
+}
+
+static size_t oodle_tans_enc(const uint8_t *src, size_t n,
+                             uint8_t *dst, size_t cap)
+{
+    int r = oodle_tans_encode(src, n, dst, cap);
+    return r > 0 ? (size_t)r : 0;
+}
+
+static double time_oodle_tans_decode_min(uint8_t *dec, size_t bytes,
+                                          int iters, const uint8_t *expect_src,
+                                          double pmaj_for_msg)
+{
+    for (int w = 0; w < 256; w++) (void)oodle_tans_dec(dec, bytes);
+    double best_mbps = 0.0;
+    for (int b = 0; b < N_BATCHES; b++) {
+        volatile uint8_t sink = 0;
+        double t0 = now_ns();
+        for (int i = 0; i < iters; i++) {
+            (void)oodle_tans_dec(dec, bytes);
+            sink ^= dec[0] ^ dec[bytes/2];
+        }
+        double t1 = now_ns();
+        (void)sink;
+        if (memcmp(expect_src, dec, bytes) != 0) {
+            fprintf(stderr, "OODLE TANS DECODE MISMATCH mid-timing: "
+                    "size=%zu pmaj=%.2f batch=%d\n",
+                    bytes, pmaj_for_msg, b);
+            exit(2);
+        }
+        double mbps = 1000.0 * ((double)bytes * (double)iters) / (t1 - t0);
+        if (mbps > best_mbps) best_mbps = mbps;
+    }
+    return best_mbps;
+}
+
+static double time_oodle_tans_encode_min(const uint8_t *src, size_t bytes,
+                                          uint8_t *scratch, size_t scratch_cap,
+                                          int iters, double pmaj_for_msg)
+{
+    for (int w = 0; w < 64; w++) (void)oodle_tans_enc(src, bytes, scratch, scratch_cap);
+    double best_mbps = 0.0;
+    for (int b = 0; b < N_BATCHES; b++) {
+        volatile size_t sink = 0;
+        double t0 = now_ns();
+        for (int i = 0; i < iters; i++)
+            sink ^= oodle_tans_enc(src, bytes, scratch, scratch_cap);
+        double t1 = now_ns();
+        (void)sink;
+        size_t last_len = oodle_tans_enc(src, bytes, scratch, scratch_cap);
+        if ((int)last_len != g_oodle_tans_total ||
+            memcmp(g_oodle_tans_buf, scratch, last_len) != 0) {
+            fprintf(stderr, "OODLE TANS ENCODE MISMATCH mid-timing: "
+                    "size=%zu pmaj=%.2f batch=%d "
+                    "(expected len=%d got len=%zu)\n",
+                    bytes, pmaj_for_msg, b,
+                    g_oodle_tans_total, last_len);
+            exit(2);
+        }
+        double mbps = 1000.0 * ((double)bytes * (double)iters) / (t1 - t0);
+        if (mbps > best_mbps) best_mbps = mbps;
+    }
+    return best_mbps;
+}
 #endif  /* PIVCO_HAS_OODLE */
 
 
@@ -972,12 +1062,17 @@ int main(int argc, char **argv)
     printf("                 reads table header + builds DTable + decodes).\n");
     printf("                 Matches what zstd does at runtime per call.\n");
 #ifdef PIVCO_HAS_OODLE
-    printf("  Oodle column - FULL per-call (newlz_get_array_huff:\n");
+    printf("  oodle column - FULL per-call (newlz_get_array_huff:\n");
     printf("                 reads table header + builds tab + decodes).\n");
     printf("                 No _usingDTable variant in Oodle's public API.\n");
-    printf("                 Tuner picks huff6 (6-stream).  ASM kernels\n");
-    printf("                 wired in via OodleUE patches in\n");
-    printf("                 extras/oodle_build_patches/.\n");
+    printf("                 Tuner picks huff6 (6-stream).\n");
+    printf("  o_tans column- FULL per-call Oodle tANS (newlz_*_array_tans:\n");
+    printf("                 2 bitstreams x 5-way interleave).  Compare\n");
+    printf("                 head-to-head vs the FSE x*y columns.\n");
+    printf("                 Both decode kernels are ASM, wired in via\n");
+    printf("                 extras/oodle_build_patches/ (huff + tANS).\n");
+    printf("                 Set -DOODLE_LIB_VARIANT=shipped to link\n");
+    printf("                 RAD's prebuilt lib instead of our build-out.\n");
 #endif
     fflush(stdout);
 
@@ -998,6 +1093,9 @@ int main(int argc, char **argv)
     double oodle_enc_mbps[24];
     double oodle_dec_mbps[24];
     int    oodle_type_mat[24] = {0}; /* OODLE_HUFF_TYPE_HUFF{3,6} or 0 */
+    /* Oodle tANS — head-to-head vs FSE (the entropy stage, not huff). */
+    double oodle_tans_enc_mbps[24];
+    double oodle_tans_dec_mbps[24];
 #endif
 
     for (int ci = 0; ci < n_cells; ci++) {
@@ -1146,6 +1244,28 @@ int main(int argc, char **argv)
             oodle_enc_mbps[ci] = -1.0;
             oodle_dec_mbps[ci] = -1.0;
         }
+
+        /* Oodle tANS reference path: setup, sanity, time. */
+        if (oodle_tans_setup(src, bytes)) {
+            memset(dec, 0xCC, bytes);
+            if (oodle_tans_dec(dec, bytes) == 0 ||
+                memcmp(src, dec, bytes) != 0) {
+                fprintf(stderr, "OODLE TANS SANITY MISMATCH size=%zu p=%.2f\n",
+                        bytes, p);
+                free_tables();
+                return 1;
+            }
+            oodle_tans_dec_mbps[ci] = time_oodle_tans_decode_min(dec, bytes,
+                                                                 iters, src, p);
+            uint8_t otans_scratch[131072];
+            oodle_tans_enc_mbps[ci] = time_oodle_tans_encode_min(src, bytes,
+                                                                 otans_scratch,
+                                                                 sizeof(otans_scratch),
+                                                                 iters, p);
+        } else {
+            oodle_tans_enc_mbps[ci] = -1.0;
+            oodle_tans_dec_mbps[ci] = -1.0;
+        }
 #endif
 
         free_tables();
@@ -1160,13 +1280,13 @@ int main(int argc, char **argv)
     }
     printf("  %6s %6s", "hufC1", "hufC4");
 #ifdef PIVCO_HAS_OODLE
-    printf("  %6s", "oodle");
+    printf("  %6s %6s", "oodle", "o_tans");
 #endif
     printf("\n%5s %5s-+", "-----", "----");
     for (int xi = 0; xi < n_x; xi++) printf("-------");
     printf("---------------");
 #ifdef PIVCO_HAS_OODLE
-    printf("--------");
+    printf("---------------");
 #endif
     printf("\n");
     for (int ci = 0; ci < n_cells; ci++) {
@@ -1184,6 +1304,8 @@ int main(int argc, char **argv)
         printf(" ");
         if (oodle_enc_mbps[ci] < 0) printf(" %6s", "  -  ");
         else printf(" %6.1f", oodle_enc_mbps[ci]);
+        if (oodle_tans_enc_mbps[ci] < 0) printf(" %6s", "  -  ");
+        else printf(" %6.1f", oodle_tans_enc_mbps[ci]);
 #endif
         printf("\n");
     }
@@ -1204,7 +1326,7 @@ int main(int argc, char **argv)
     printf("  %6s", " su_ns");
     printf("  %6s %6s %6s", "huf1X1", "huf4X1", "huf4X2");
 #ifdef PIVCO_HAS_OODLE
-    printf("  %6s", "oodle");
+    printf("  %6s %6s", "oodle", "o_tans");
 #endif
     printf("\n%5s %5s-+", "-----", "----");
     for (size_t c = 0; c < N_CFGS; c++) {
@@ -1214,7 +1336,7 @@ int main(int argc, char **argv)
     printf("--------");
     printf("-----------------------");
 #ifdef PIVCO_HAS_OODLE
-    printf("--------");
+    printf("---------------");
 #endif
     printf("\n");
     for (int ci = 0; ci < n_cells; ci++) {
@@ -1235,6 +1357,8 @@ int main(int argc, char **argv)
         printf(" ");
         if (oodle_dec_mbps[ci] < 0) printf(" %6s", "  -  ");
         else printf(" %6.1f", oodle_dec_mbps[ci]);
+        if (oodle_tans_dec_mbps[ci] < 0) printf(" %6s", "  -  ");
+        else printf(" %6.1f", oodle_tans_dec_mbps[ci]);
 #endif
         printf("\n");
     }

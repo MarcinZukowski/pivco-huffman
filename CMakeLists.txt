@@ -673,7 +673,22 @@ if(BUILD_BENCH)
         # user has symlinked ext/oodle -> a built OodleUE clone.
         # See extras/bench_oodle_wrapper.h for setup instructions.
         set(OODLE_ROOT "${CMAKE_SOURCE_DIR}/ext/oodle/Engine/Source/Runtime/OodleDataCompression/Sdks/2.9.16")
-        set(OODLE_STATIC_LIB "${CMAKE_SOURCE_DIR}/ext/oodle/build-out/ar/liboodle-data-static.a")
+        # OODLE_LIB_VARIANT=source links our from-source build-out lib
+        # (so the build patches' ASM wiring is what's measured);
+        # =shipped links RAD's prebuilt platform lib (their production
+        # ASM build) for a head-to-head against our from-source numbers.
+        set(OODLE_LIB_VARIANT "source" CACHE STRING "Oodle lib to link: source | shipped")
+        if(OODLE_LIB_VARIANT STREQUAL "shipped")
+            if(APPLE)
+                set(OODLE_STATIC_LIB "${OODLE_ROOT}/lib/Mac/liboo2coremac64.a")
+            elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
+                set(OODLE_STATIC_LIB "${OODLE_ROOT}/lib/LinuxArm64/liboo2corelinuxarm64.a")
+            else()
+                set(OODLE_STATIC_LIB "${OODLE_ROOT}/lib/Linux/liboo2corelinux64_dbg.a")
+            endif()
+        else()
+            set(OODLE_STATIC_LIB "${CMAKE_SOURCE_DIR}/ext/oodle/build-out/ar/liboodle-data-static.a")
+        endif()
         if(EXISTS "${OODLE_ROOT}/src/oodle2/core/newlz_arrays_huff.h"
            AND EXISTS "${OODLE_STATIC_LIB}")
             set(OODLE_DETECTED ON)

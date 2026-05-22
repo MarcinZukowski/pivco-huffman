@@ -1,6 +1,6 @@
 # Enable ASM languages once at the parent scope so add_library()
-# calls in subdirs can include .a64.S (ASM) and .nas (ASM_NASM)
-# files.  Patched 2026-05-15 for pivco-huffman ASM kernel hookup.
+# can include .a64.S (ASM) and .nas (ASM_NASM) files.  Patched
+# 2026-05-15 for pivco-huffman ASM kernel hookup.
 #
 # CMake's ASM_NASM auto-detects only .asm/.nasm extensions, so we
 # also register .nas (the extension Oodle's NASM kernels use).
@@ -11,5 +11,28 @@ elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64)$")
     list(APPEND CMAKE_ASM_NASM_SOURCE_FILE_EXTENSIONS nas)
 endif()
 
-add_subdirectory(static)
-add_subdirectory(shared)
+# Splice the pivco prebuilt-table export shim (pha_export.inc) into the
+# extracted newlz_arrays_tans.cpp.  pivco code only -- no Oodle source
+# enters this repo; the shim + injector live in the build glue dir
+# (one level up from this data/ dir).  Runs every configure but is a
+# no-op once injected.  Patched 2026-05-22.
+execute_process(
+    COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/../inject_export_shim.sh
+            ${oodle_data_SOURCE_DIR}
+            ${CMAKE_CURRENT_SOURCE_DIR}/../pha_export.inc
+    RESULT_VARIABLE _pha_inject_rc)
+if(NOT _pha_inject_rc EQUAL 0)
+    message(FATAL_ERROR "pha export-shim injection failed (rc=${_pha_inject_rc})")
+endif()
+
+# Build ONLY the static lib, inline.  Upstream's smake glue splits
+# this into data/static/ + data/shared/ subdir stubs (4-line files
+# that set PROJ_* then include ../Build.cmake).  We fold the static
+# case in here so this recipe depends on no upstream project stubs
+# - pivco ships only its own build glue and copies nothing from the
+# OodleUE tree.  The shared lib and ozip test exe are not needed.
+# Patched 2026-05-22.
+set(PROJ_NAME static)
+set(PROJ_TYPE STATIC_LIB)
+set(PROJ_DEF OODLE_BUILDING_LIB)
+include(${CMAKE_CURRENT_SOURCE_DIR}/Build.cmake)

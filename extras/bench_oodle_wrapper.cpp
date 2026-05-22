@@ -22,6 +22,7 @@
 #include <cstring>
 
 #include "newlz_arrays_huff.h"
+#include "newlz_arrays_tans.h"
 #include "newlz_arrays.h"
 #include "newlz_speedfit.h"
 #include "rrarenaallocator.h"
@@ -86,6 +87,43 @@ int oodle_huff_decode(const unsigned char *comp, size_t comp_len,
     return (int)newlz_get_array_huff(comp, (SINTa)comp_len,
                                       dst, (SINTa)dst_cap,
                                       is_huff6);
+}
+
+/* ---- tANS (newlz_arrays_tans) ---- */
+
+int oodle_tans_encode(const unsigned char *src, size_t n,
+                      unsigned char *dst, size_t dst_cap)
+{
+    using namespace oo2;
+
+    uint32_t histo[256];
+    CountHistoArrayU8(src, (SINTa)n, histo, 256);
+
+    const OodleSpeedFit *speedfit = speedfit_get_default();
+    unsigned char arena_buf[131072];
+    rrArenaAllocator arena(arena_buf, sizeof(arena_buf), /*allowFallback=*/false);
+
+    float pJ     = 1e30f;
+    float lambda = 1.0f;
+
+    SINTa comp_len = newLZ_put_array_tans(
+        dst, dst + dst_cap,
+        src, (SINTa)n,
+        histo, lambda, speedfit, &pJ, &arena);
+
+    return (int)comp_len;
+}
+
+int oodle_tans_decode(const unsigned char *comp, size_t comp_len,
+                      unsigned char *dst, size_t dst_cap)
+{
+    using namespace oo2;
+    /* tANS decode needs scratch for the decode tables + interleave
+     * state.  64 KB is comfortably above the 2^L table footprint. */
+    unsigned char scratch[65536];
+    return (int)newlz_get_array_tans(comp, (SINTa)comp_len,
+                                      dst, (SINTa)dst_cap,
+                                      scratch, scratch + sizeof(scratch));
 }
 
 }  /* extern "C" */

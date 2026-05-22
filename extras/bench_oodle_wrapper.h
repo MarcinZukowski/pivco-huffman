@@ -39,6 +39,21 @@ int oodle_huff_decode(const unsigned char *comp, size_t comp_len,
 #define OODLE_HUFF_TYPE_HUFF3  2
 #define OODLE_HUFF_TYPE_HUFF6  4
 
+/* Oodle tANS (newlz_arrays_tans): 2 physical bitstreams, 5-way
+ * interleave.  Encoder is the J-cost tuner; it may decline (return
+ * < 0) on data that doesn't benefit. */
+
+/* Encode `src` (n bytes) into `dst`.  Returns compressed bytes on
+ * success; < 0 = decline / failure without touching dst; > n =
+ * failure with dst clobbered. */
+int oodle_tans_encode(const unsigned char *src, size_t n,
+                      unsigned char *dst, size_t dst_cap);
+
+/* Decode `comp` (comp_len bytes) into `dst`.  Returns decoded byte
+ * count on success; < 0 on failure. */
+int oodle_tans_decode(const unsigned char *comp, size_t comp_len,
+                      unsigned char *dst, size_t dst_cap);
+
 #ifdef __cplusplus
 }
 #endif

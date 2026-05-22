@@ -16,6 +16,8 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "arm64|aarch64")
     s_add_file_force(${oodle_data_SOURCE_DIR}/core/newlz_huff6_wide.a64.S)
     s_add_file_force(${oodle_data_SOURCE_DIR}/core/enchuff3c.a64.S)
     s_add_file_force(${oodle_data_SOURCE_DIR}/core/histo.a64.S)
+    # tANS decode kernel (wide / M1-scheduled, same rationale as huff).
+    s_add_file_force(${oodle_data_SOURCE_DIR}/core/newlz_tans_wide.a64.S)
     if(APPLE)
         # asmlib_arm_a64.inc needs __RADMACARM64__ to pick the Mach-O
         # symbol-mangle path (prepend underscore).  Not set by
@@ -25,6 +27,7 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "arm64|aarch64")
             ${oodle_data_SOURCE_DIR}/core/newlz_huff6_wide.a64.S
             ${oodle_data_SOURCE_DIR}/core/enchuff3c.a64.S
             ${oodle_data_SOURCE_DIR}/core/histo.a64.S
+            ${oodle_data_SOURCE_DIR}/core/newlz_tans_wide.a64.S
             PROPERTIES COMPILE_OPTIONS "-D__RADMACARM64__"
         )
     endif()
@@ -40,6 +43,11 @@ elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64)$")
         ${oodle_data_SOURCE_DIR}/core/enchuff3_x64_generic.nas
         ${oodle_data_SOURCE_DIR}/core/enchuff3_x64_bmi2.nas
         ${oodle_data_SOURCE_DIR}/core/histo_x64_generic.nas
+        # tANS decode kernels: generic + BMI2 + BMI2-RaptorLake.
+        # newlz_arrays_tans.cpp dispatches dynamically by CPU feature.
+        ${oodle_data_SOURCE_DIR}/core/newlz_tans_x64_generic.nas
+        ${oodle_data_SOURCE_DIR}/core/newlz_tans_x64_bmi2.nas
+        ${oodle_data_SOURCE_DIR}/core/newlz_tans_x64_bmi2_rpl.nas
     )
 endif()
 
@@ -72,9 +80,9 @@ s_compile_definitions(PRIVATE ${PROJ_DEF} OODLE_BUILDING_DATA)
 # portable C fallback even if the .S / .nas objects are in the
 # lib.
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "arm64|aarch64")
-    s_compile_definitions(PRIVATE NEWLZ_ARM64_HUFF_ASM)
+    s_compile_definitions(PRIVATE NEWLZ_ARM64_HUFF_ASM NEWLZ_ARM64_TANS_ASM)
 elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64)$")
-    s_compile_definitions(PRIVATE NEWLZ_X64GENERIC_HUFF_ASM OODLE_HISTO_X64GENERIC_ASM)
+    s_compile_definitions(PRIVATE NEWLZ_X64GENERIC_HUFF_ASM OODLE_HISTO_X64GENERIC_ASM NEWLZ_X64GENERIC_TANS_ASM)
     # CMake doesn't auto-detect .nas as ASM_NASM (only .asm/.nasm),
     # so explicitly set LANGUAGE for each file, then add via
     # target_sources.  smake's s_add_file_force would also work but
