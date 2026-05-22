@@ -1,0 +1,59 @@
+FSE shape tuning sweep: best of 5x10 over 983040 bytes
+
+== proba80      ==  N=983040  tableLog=12  maxSym=5
+  shape   enc MB/s   dec MB/s   ratio
+  stock        673        685    8.86
+  (wide-cursor shapes skipped: P(max symbol) > 50%, FSE fast-decode unsafe)
+
+== english      ==  N=983040  tableLog=12  maxSym=122
+  shape   enc MB/s   dec MB/s   ratio
+  stock        773        870    1.89
+  x2y1         867        866    1.89
+  x2y2         840        870    1.89
+  x2y4         850        860    1.89
+  x4y1        1400       1503    1.89
+  x4y2        1396       1475    1.89
+  x4y4        1404       1522    1.89
+  x6y1        1344       1745    1.89
+  x6y2        1367       1714    1.89
+  x6y4        1333       1702    1.89
+  x8y1        1414       2101    1.89
+  x8y2        1363       1973    1.89
+  x8y4        1367       1923    1.89
+  x10y1       1391       1916    1.89
+  x10y2       1440       1882    1.89
+  x10y4       1398       2230    1.89
+  x12y1       1378       2036    1.89
+  x12y2       1349       1740    1.89
+  x12y4       1356       1803    1.89
+  x16y1       1360       1595    1.89
+  x16y2       1348       2373    1.89
+  x16y4       1349       2024    1.89
+  -> best dec shape: x16y2 (2373 MB/s)
+
+== prose_pride  ==  N=983040  tableLog=12  maxSym=226
+  shape   enc MB/s   dec MB/s   ratio
+  stock        774        870    1.76
+  x2y1         839        856    1.76
+  x2y2         838        870    1.76
+  x2y4         831        863    1.76
+  x4y1        1417       1482    1.76
+  x4y2        1452       1490    1.76
+  x4y4        1404       1459    1.76
+  x6y1        1351       1786    1.76
+  x6y2        1349       1706    1.76
+  x6y4        1351       1689    1.76
+  x8y1        1404       2112    1.76
+  x8y2        1366       1919    1.76
+  x8y4        1372       1891    1.76
+  x10y1       1399       1903    1.76
+  x10y2       1426       1914    1.76
+  x10y4       1395       2236    1.76
+  x12y1       1360       2020    1.76
+  x12y2       1333       1737    1.76
+  x12y4       1352       1806    1.76
+  x16y1       1359       1590    1.76
+  x16y2       1350       2270    1.76
+  x16y4       1350       2031    1.76
+  -> best dec shape: x16y2 (2270 MB/s)
+

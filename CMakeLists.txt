@@ -309,6 +309,20 @@ if(BUILD_BENCH)
     target_link_libraries(pivco_huffman_bench pivco_huffman huf0 m)
     target_include_directories(pivco_huffman_bench PRIVATE ext/fse/lib ext/ryg_rans)
 
+    add_executable(pivco_fair_bench
+        bench/bench_fair.c
+        bench/bench_distributions.c
+    )
+    target_link_libraries(pivco_fair_bench pivco_huffman huf0 m)
+    target_include_directories(pivco_fair_bench PRIVATE include src ext/fse/lib extras)
+
+    add_executable(pivco_fse_tune
+        bench/bench_fse_tune.c
+        bench/bench_distributions.c
+    )
+    target_link_libraries(pivco_fse_tune pivco_huffman huf0 m)
+    target_include_directories(pivco_fse_tune PRIVATE include src ext/fse/lib extras)
+
     add_executable(pivco_huffman_bench_encode
         bench/bench_encode.c
         bench/bench_distributions.c
@@ -719,6 +733,16 @@ if(BUILD_BENCH)
                 PROPERTIES COMPILE_DEFINITIONS OODLE_IMPORT_LIB)
             set_source_files_properties(extras/bench_oodle_wrapper.cpp
                 PROPERTIES COMPILE_FLAGS "-std=c++20 -w")
+
+            # fair-bench also gets the Oodle opaque-only reference columns
+            target_sources(pivco_fair_bench PRIVATE extras/bench_oodle_wrapper.cpp)
+            target_link_libraries(pivco_fair_bench "${OODLE_STATIC_LIB}")
+            target_include_directories(pivco_fair_bench PRIVATE
+                "${OODLE_ROOT}/src/oodle2/core"
+                "${OODLE_ROOT}/src/oodle2/core/public"
+                "${OODLE_ROOT}/src/oodle2/base"
+                "${OODLE_ROOT}/include")
+            target_compile_definitions(pivco_fair_bench PRIVATE PIVCO_HAS_OODLE=1)
         else()
             add_executable(pivco_fse_xy_micro
                 extras/bench_fse_xy_micro.c
