@@ -1,0 +1,253 @@
+# Registry of paper benchmarks.  Parallel to figures.json: each entry
+# describes (a) how to build + run the benchmark, (b) the host x
+# compiler matrix it should be reproduced under, and (c) where the
+# raw CSV / text outputs live.
+#
+# Convention: every benchmark CLI accepts --csv-out=PATH and writes
+# a long-form CSV (one row per measurement).  The paper consumes
+# the collated CSVs under paper/data/ via Typst's #csv().
+#
+# Reproduction is documented, not automated -- run `paper/bench.py
+# show-how <name>` for the recipe per host.  `paper/bench.py collate
+# <name>` gathers the latest matching files from results/ into a
+# single CSV with host + compiler columns added.
+#
+# CONTRACT (column names): every value that appears in a column that
+# might be PIVOTed (host, compiler, decoder, distribution, ...) MUST
+# use SQL-safe identifiers -- only [a-z0-9_].  No dashes.  The
+# collate step rewrites `-` -> `_` for host + compiler whose source-
+# of-truth aliases naturally have dashes (e.g. test-c8i, clang-latest);
+# bench tools enforce this for their own value columns at emit time.
+#
+# Views (paper/bench.py build-views): each bench may define one or
+# more SQL views over its collated CSV.  The SQL is embedded here
+# (DuckDB dialect) and produces paper/data/<bench>.<view>.csv -- the
+# paper reads those directly.  Each view is a separate file (never
+# conflated with the long-form CSV).
+
+hosts:
+  m4:
+    description: "Apple M4 Max, 14C/16C, 410 GB/s LPDDR5, macOS 26"
+    arch: arm64
+    compilers:
+      clang-latest: /usr/bin/clang             # Apple Clang 16 (system)
+      gcc-latest:   /opt/homebrew/bin/gcc-14   # Homebrew GCC 14
+
+  test-c8i:
+    description: "Intel Xeon 6975P-C (Sapphire Rapids), AWS c8i.2xlarge, Amazon Linux 2023"
+    arch: x86_64
+    compilers:
+      gcc-default:  /usr/bin/cc          # GCC 11.5 (system default)
+      gcc-latest:   /usr/bin/gcc14-gcc   # GCC 14.2
+      clang-latest: /usr/bin/clang-20    # Clang 20.1
+
+benches:
+  - name: td-naive-vs-opt
+    description: |
+      Scalar top-down decoder variants vs huf0_x2 baseline, across
+      proba80 and prose_pride distributions.
+
+      - naive       -- only P + S1 primitives, slim wire format.
+      - scalar-opt  -- full tree-shape optimisations on, scalar
+                       primitives (no SIMD), standard wire format.
+      - huf0_x2     -- HUF_decompress4X2 reference baseline.
+
+    source: extras/ph-td/test/ph_td_bench_naive.c
+
+    build:
+      cwd: extras/ph-td
+      cmd: cmake -B build -DCMAKE_BUILD_TYPE=Release &&
+           cmake --build build --target ph_td_bench_naive
+
+    run:
+      cwd: extras/ph-td
+      # {csv} and {text} are filled in by bench.py show-how; the
+      # latter captures the human-readable per-host log.
+      cmd: ./build/ph_td_bench_naive --no-micro --csv-out={csv} > {text}
+
+    matrix:
+      hosts:     [m4, test-c8i]
+      compilers: [clang-latest]   # add gcc-latest / gcc-default for compiler sweeps
+
+    outputs:
+      # Result files land here as
+      #   {host}-{compiler}-{date}-{sha}.{csv,txt}
+      # bench.py collate finds the lexically-newest match per cell.
+      dir: results/td-naive/
+
+    views:
+      # The headline cross-host table used in the discussion thread:
+      # distribution rows; M4 + c8i blocks of (naive, opt, huf0_x2,
+      # opt_vs_huf0_ratio) columns.  Wrap PIVOT in a CTE so the
+      # downstream SELECT can rename ergonomic and add derived
+      # columns (the opt/huf0 ratio).
+      - name: hosts-x-decoders
+        description: |
+          Cross-host throughput table: M4 + test_c8i, with naive,
+          scalar_opt, huf0_x2 columns per host plus an opt/huf0
+          ratio column.
+        sql: |
+          WITH p AS (
+            PIVOT 'paper/data/td-naive-vs-opt.csv'
+            ON host IN ('m4', 'test_c8i'),
+               decoder IN ('naive', 'naive_simd', 'scalar_opt', 'simd_opt',
+                            'huf0_x2')
+            USING MAX(throughput_gbs)
+            GROUP BY distribution
+          )
+          SELECT
+            distribution,
+            -- M4 block: full (tree-shape x primitives) grid plus huf0_x2.
+            -- Columns ordered: naive/scalar -> naive/simd -> opt/scalar
+            -- -> opt/simd -> huf0, so the gradient is left-to-right.
+            m4_naive,
+            m4_naive_simd        AS m4_naive_simd,
+            m4_scalar_opt        AS m4_scalar,
+            m4_simd_opt          AS m4_simd,
+            m4_huf0_x2           AS m4_huf0,
+            printf('%.2f', m4_naive       / m4_huf0_x2)             AS m4_naive_vs_huf0,
+            printf('%.2f', m4_naive_simd  / m4_huf0_x2)             AS m4_naive_simd_vs_huf0,
+            printf('%.2f', m4_scalar_opt  / m4_huf0_x2)             AS m4_scalar_vs_huf0,
+            printf('%.2f', m4_simd_opt    / m4_huf0_x2)             AS m4_simd_vs_huf0,
+            -- c8i block (mirror).
+            test_c8i_naive       AS c8i_naive,
+            test_c8i_naive_simd  AS c8i_naive_simd,
+            test_c8i_scalar_opt  AS c8i_scalar,
+            test_c8i_simd_opt    AS c8i_simd,
+            test_c8i_huf0_x2     AS c8i_huf0,
+            printf('%.2f', test_c8i_naive       / test_c8i_huf0_x2) AS c8i_naive_vs_huf0,
+            printf('%.2f', test_c8i_naive_simd  / test_c8i_huf0_x2) AS c8i_naive_simd_vs_huf0,
+            printf('%.2f', test_c8i_scalar_opt  / test_c8i_huf0_x2) AS c8i_scalar_vs_huf0,
+            printf('%.2f', test_c8i_simd_opt    / test_c8i_huf0_x2) AS c8i_simd_vs_huf0
+          FROM p
+          ORDER BY distribution
+
+      # Per-primitive ns/elem comparison (the "branchy vs branchless"
+      # M4-vs-c8i table from the discussion).  Reads the auxiliary
+      # profile.csv stream emitted by the same bench tool.  Picks
+      # proba80 (the distribution we used for the table) and the
+      # three primitives we care about, in the order the paper
+      # presents them.
+      - name: primitive-host-cmp
+        description: |
+          Per-primitive ns/element on M4 vs c8i, for BOTH proba80
+          and prose_pride.  Scalar-opt decoder only (so we see every
+          primitive variant used by the production-shape tree:
+          partition, half-partition, single-symbol scatter, fused
+          both-leaves scatter, flat-subtree scatter).  Highlights:
+            (a) the branchy vs branchless cost asymmetry on c8i, and
+            (b) how p_partition and s2_scatter_both (both branchy)
+                get much worse on prose_pride (deeper tree -> more
+                50/50 splits -> more mispredicts).
+          Empty cells = primitive didn't fire on that distribution
+          (e.g. proba80's tree has no flat subtrees, so
+          sfx_scatter_flat has no data there).
+        sql: |
+          WITH src AS (
+            SELECT host, distribution, primitive, ns_per_elem
+            FROM 'paper/data/td-naive-vs-opt.profile.csv'
+            WHERE decoder = 'scalar_opt'
+              AND primitive IN ('p_partition', 'p_half_right',
+                                's1_scatter', 's2_scatter_both',
+                                'sfx_scatter_flat')
+          ),
+          p AS (
+            PIVOT src
+            ON host IN ('m4', 'test_c8i'),
+               distribution IN ('proba80', 'prose_pride')
+            USING MAX(ns_per_elem)
+            GROUP BY primitive
+          )
+          SELECT
+            primitive,
+            -- proba80 block
+            COALESCE(printf('%.2f',  m4_proba80),                              '—')  AS m4_proba80,
+            COALESCE(printf('%.2f',  test_c8i_proba80),                        '—')  AS c8i_proba80,
+            COALESCE(printf('%.1fx', test_c8i_proba80 / m4_proba80),           '—')  AS c8i_over_m4_proba80,
+            -- prose_pride block
+            COALESCE(printf('%.2f',  m4_prose_pride),                          '—')  AS m4_prose,
+            COALESCE(printf('%.2f',  test_c8i_prose_pride),                    '—')  AS c8i_prose,
+            COALESCE(printf('%.1fx', test_c8i_prose_pride / m4_prose_pride),   '—')  AS c8i_over_m4_prose
+          FROM p
+          ORDER BY CASE primitive
+            WHEN 'p_partition'      THEN 1
+            WHEN 'p_half_right'     THEN 2
+            WHEN 'p_half_left'      THEN 3
+            WHEN 's1_scatter'       THEN 4
+            WHEN 's2_scatter_both'  THEN 5
+            WHEN 'sfx_scatter_flat' THEN 6
+            ELSE 99
+          END
+
+      # SIMD-optimised TD primitives (NEON on M4, AVX-512 on c8i).
+      # Reads the same profile.csv stream but filters to decoder =
+      # 'simd_opt'.  Names line up with the scalar table 1:1 so the
+      # paper can put them side-by-side.
+      - name: simd-primitive-host-cmp
+        description: |
+          Per-primitive ns/element on M4 (NEON) vs c8i (AVX-512) for
+          the SIMD-optimised TD decoder, across proba80 and
+          prose_pride.  Root-and-non-root variants of each primitive
+          (e.g. simd_partition + simd_partition_root) are MERGED
+          into a single canonical row -- they are the same semantic
+          operation, only differing in how the input index array is
+          initialised at the root.  Aggregation is a weighted average
+          of ns_per_elem over elements (algebraically equivalent to
+          re-deriving from sum(ticks) / sum(elements) on the
+          underlying counters).
+
+          Headline: SIMD primitives cost 0.05-0.3 ns/elem on both
+          hosts; the scalar 5-10x asymmetry largely disappears.
+        sql: |
+          WITH src AS (
+            SELECT host, distribution,
+              -- Map root variants onto their canonical name.
+              CASE primitive
+                WHEN 'simd_partition_root'           THEN 'simd_partition'
+                WHEN 'simd_partition_root_half_right' THEN 'simd_partition_half_right'
+                WHEN 'simd_partition_root_half_left'  THEN 'simd_partition_half_left'
+                WHEN 'simd_sfx_decode_direct'        THEN 'simd_sfx_scatter_flat'
+                ELSE primitive
+              END AS primitive,
+              elements,
+              ns_per_elem
+            FROM 'paper/data/td-naive-vs-opt.profile.csv'
+            WHERE decoder = 'simd_opt'
+          ),
+          agg AS (
+            SELECT host, distribution, primitive,
+              SUM(ns_per_elem * elements) / SUM(elements) AS ns_per_elem
+            FROM src
+            WHERE primitive IN ('simd_partition',
+                                 'simd_partition_half_right',
+                                 'simd_partition_half_left',
+                                 'simd_s1_scatter',
+                                 'simd_s2_scatter_both',
+                                 'simd_sfx_scatter_flat')
+            GROUP BY host, distribution, primitive
+          ),
+          p AS (
+            PIVOT agg
+            ON host IN ('m4', 'test_c8i'),
+               distribution IN ('proba80', 'prose_pride')
+            USING MAX(ns_per_elem)
+            GROUP BY primitive
+          )
+          SELECT
+            primitive,
+            COALESCE(printf('%.3f',  m4_proba80),                            '—')  AS m4_proba80,
+            COALESCE(printf('%.3f',  test_c8i_proba80),                      '—')  AS c8i_proba80,
+            COALESCE(printf('%.1fx', test_c8i_proba80 / m4_proba80),         '—')  AS c8i_over_m4_proba80,
+            COALESCE(printf('%.3f',  m4_prose_pride),                        '—')  AS m4_prose,
+            COALESCE(printf('%.3f',  test_c8i_prose_pride),                  '—')  AS c8i_prose,
+            COALESCE(printf('%.1fx', test_c8i_prose_pride / m4_prose_pride), '—')  AS c8i_over_m4_prose
+          FROM p
+          ORDER BY CASE primitive
+            WHEN 'simd_partition'              THEN 1
+            WHEN 'simd_partition_half_right'   THEN 2
+            WHEN 'simd_partition_half_left'    THEN 3
+            WHEN 'simd_s1_scatter'             THEN 4
+            WHEN 'simd_s2_scatter_both'        THEN 5
+            WHEN 'simd_sfx_scatter_flat'       THEN 6
+            ELSE 99
+          END
