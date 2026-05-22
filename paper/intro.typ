@@ -34,18 +34,18 @@ Below, we can see the pseudocode of a simple linear-hashing lookup, and its rela
   table.header(
     [*Huffman symbol decoding*], [*Hash table lookup*]
   ),
-  [```
+  [```js
     state = root
 
     while not is_leaf(state)
-      if read_bit() == 1 then
+      if read_bit() == 1:
         state = state->right
-      else
+      else:
         state = state->left
     return state
     ```
   ],
-  [```
+  [```js
     hash = compute_hash(key)
     pos = hash_table_first(hash)
     while not hash_table_empty(pos)
@@ -65,20 +65,20 @@ In @zuk09 Section 5.3.3.2 Author proposed an alternative hash table lookup appro
 each node in the state machine not for one, but for a _vector_ of records,
 presented in this simplified pseudocode:
 
-```
+```js
 misses = []                          // miss input positions
 hits = []                            // hits input positions
 hash = compute_hash(keys)            // all input hash values
-active = hash_table_first(hash)     // input positions we're still looking up
+active = hash_table_first(hash)      // input positions we're still looking up
 while not active.empty():            // if we still have work to do
   // move empty slots to misses, reduce active
   hash_table_split_empty(&active, &misses)
   // get all values from the hash table for active indices
   vals = hash_table_vals(active)
   // compute comparisons
-  compresults = compare(vals, keys, active)
+  compr_esults = compare(vals, keys, active)
   // split into hits if equal, active if not - those needs more work
-  split_on_equality(compresults, &active, &hits)
+  split_on_equality(comp_results, &active, &hits)
   // get all the next positions for all still active records
   active = hash_table_next(active)
 // misses have all miss positions, hits have all hit positions

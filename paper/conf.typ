@@ -10,6 +10,8 @@
 // rather than <head>, but browsers happily apply it globally — no
 // post-processing needed.
 #if _html {
+  // simd.dev tooltips
+  html.elem("script", attrs: (src: "https://simd.dev/dist/simd-tooltips.js"))
   html.elem("style", read("style.css"))
   // web-code.js: runtime extras (author-comments toggle today; more
   // later).  Inlined the same way as style.css — keeps the HTML
@@ -30,6 +32,8 @@
     html.elem("div", attrs: (class: "htmlonly"), body)
   }
 }
+
+#let todo(body) = text(red)[*TODO: #body*]
 
 #let setup(body) = {
   show title: set text(size: 17pt)
@@ -71,4 +75,19 @@
   link(
       base + "figures/fig-web.html?" + figname,
       image("figures/" + figname + ".svg"))
+}
+
+#let sym(t) = { [*#raw("\"" + t + "\"")*] }
+
+// (c) Keep only specified columns (often cleaner than repeated drops)
+#let pick-cols(table, names) = {
+  let h = table.first()
+  let idxs = names.map(n => {
+    let i = h.position(c => c == n)
+    if i == none {
+      panic("pick-cols: no column '" + n + "' (have: " + h.join(", ") + ")")
+    }
+    i
+  })
+  table.map(row => idxs.map(i => row.at(i)))
 }

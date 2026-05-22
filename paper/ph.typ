@@ -72,3 +72,22 @@ At the same time, Author declares that the vast majority of the key ideas and co
 Author would like to thank Fabian Giesen for his help with Oodle.
 
 #bibliography("refs.bib")
+
+
+#heading(numbering:none, level: 1)[Appendices]
+
+#let appendix(body) = {
+  set heading(numbering: "A", supplement: [Appendix])
+  counter(heading).update(0)
+  body
+}
+#set heading(numbering: "1")
+
+#show: appendix
+
+// #outline(target: heading.where(supplement: [Appendix]), title: [Appendix])
+
+= Datasets
+= Machines Tested
+= Failed top-down optimizations
+

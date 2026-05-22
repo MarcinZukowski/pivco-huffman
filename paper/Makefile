@@ -43,7 +43,7 @@ $(HTML): $(SRC) $(INCS) $(STYLE) web-code.js | $(OUT)
 	$(TYPST) compile --creation-timestamp $$(date +%s) -f html --features html --input target=html $(SRC) $(HTML)
 
 watch: | $(OUT)
-	$(TYPST) watch $(SRC) $(PDF)
+	$(TYPST) watch --features html $(SRC) $(PDF)
 
 watchh: | $(OUT)
 	$(TYPST) watch -f html --features html --input target=html \
