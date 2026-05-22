@@ -184,7 +184,7 @@ body.hide-toc    #toc-panel { display: none; }
       gap: 8px;
       /* Fixed (not max-) width so the panel doesn't reflow as TOC
        * subsections collapse/expand. */
-      width: 260px;
+      width: 220px;
 }
 #ph-tools-buttons {
       display: flex;
