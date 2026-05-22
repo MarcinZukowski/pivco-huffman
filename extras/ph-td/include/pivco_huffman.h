@@ -226,6 +226,22 @@ int pivco_huffman_decode_naive(const uint8_t *in, size_t in_len,
                                 const pivco_huffman_table_t *table,
                                 uint8_t *symbols, size_t *consumed);
 
+/* Scalar-opt TD decoder: every tree-shape optimisation enabled
+ * (constant-prefill, flat-subtree path, both-leaves fused scatter,
+ * half-partition variants, K_right header), every primitive in
+ * scalar C (no SIMD).  Reads the FULL ph wire format produced by
+ * pivco_huffman_encode_scalar_opt or pivco_huffman_encode_neon. */
+int pivco_huffman_decode_scalar_opt(const uint8_t *in, size_t in_len,
+                                     const pivco_huffman_table_t *table,
+                                     uint8_t *symbols, size_t *consumed);
+
+/* Scalar-opt encoder: same wire format as pivco_huffman_encode_neon
+ * but pure scalar C (no NEON).  Bit-for-bit equivalent output.  Used
+ * on non-NEON hosts so the scalar-opt decoder has data to read. */
+int pivco_huffman_encode_scalar_opt(const uint8_t *symbols,
+                                      const pivco_huffman_table_t *table,
+                                      uint8_t *out, size_t *out_len);
+
 /* Build a Huffman table from already-known code lengths plus an
  * optional explicit within-tier ordering.  This is the path used by
  * decoders that recovered code_lens from a wire format and want to
@@ -276,6 +292,13 @@ int pivco_huffman_decode_neon(const uint8_t *in, size_t in_len,
                               const pivco_huffman_table_t *table,
                               uint8_t *symbols, size_t *consumed);
 
+/* Naive-tree + NEON-SIMD-primitives decoder.  Reads the slim wire
+ * format from pivco_huffman_encode_naive (no FSE marker, no K_right). */
+int pivco_huffman_decode_naive_simd_neon(
+        const uint8_t *in, size_t in_len,
+        const pivco_huffman_table_t *table,
+        uint8_t *symbols, size_t *consumed);
+
 /* Experimental: bottom-up tree_merge decode (NEON). */
 int pivco_huffman_decode_bu_neon(const uint8_t *in, size_t in_len,
                                   const pivco_huffman_table_t *table,
@@ -325,6 +348,13 @@ int pivco_huffman_encode_avx512(const uint8_t *symbols,
 int pivco_huffman_decode_avx512(const uint8_t *in, size_t in_len,
                                  const pivco_huffman_table_t *table,
                                  uint8_t *symbols, size_t *consumed);
+
+/* Naive-tree + AVX-512-SIMD-primitives decoder.  Same slim wire as
+ * pivco_huffman_decode_naive_simd_neon. */
+int pivco_huffman_decode_naive_simd_avx512(
+        const uint8_t *in, size_t in_len,
+        const pivco_huffman_table_t *table,
+        uint8_t *symbols, size_t *consumed);
 #endif
 
 /* ---------- Traditional Huffman encode/decode (for comparison) ---------- */

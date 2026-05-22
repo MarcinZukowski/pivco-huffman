@@ -781,37 +781,27 @@ static inline void scatter_sym(uint8_t *symbols,
                                 const uint16_t *indices, int n,
                                 uint8_t sym)
 {
+    /* Direct indices[] access (not vld1q+vgetq_lane): on Neoverse V2
+     * the UMOV vector->GPR extract is ~1.45x slower than a plain LDRH
+     * here; on Apple M4 the two are within noise.  Direct is
+     * strictly better-or-equal on both ARM targets.  See the A/B in
+     * the scatter-index-style investigation. */
     int j = 0;
     for (; j + 16 <= n; j += 16) {
-        uint16x8_t i0 = vld1q_u16(indices + j);
-        uint16x8_t i1 = vld1q_u16(indices + j + 8);
-        symbols[vgetq_lane_u16(i0, 0)] = sym;
-        symbols[vgetq_lane_u16(i0, 1)] = sym;
-        symbols[vgetq_lane_u16(i0, 2)] = sym;
-        symbols[vgetq_lane_u16(i0, 3)] = sym;
-        symbols[vgetq_lane_u16(i0, 4)] = sym;
-        symbols[vgetq_lane_u16(i0, 5)] = sym;
-        symbols[vgetq_lane_u16(i0, 6)] = sym;
-        symbols[vgetq_lane_u16(i0, 7)] = sym;
-        symbols[vgetq_lane_u16(i1, 0)] = sym;
-        symbols[vgetq_lane_u16(i1, 1)] = sym;
-        symbols[vgetq_lane_u16(i1, 2)] = sym;
-        symbols[vgetq_lane_u16(i1, 3)] = sym;
-        symbols[vgetq_lane_u16(i1, 4)] = sym;
-        symbols[vgetq_lane_u16(i1, 5)] = sym;
-        symbols[vgetq_lane_u16(i1, 6)] = sym;
-        symbols[vgetq_lane_u16(i1, 7)] = sym;
+        symbols[indices[j +  0]] = sym; symbols[indices[j +  1]] = sym;
+        symbols[indices[j +  2]] = sym; symbols[indices[j +  3]] = sym;
+        symbols[indices[j +  4]] = sym; symbols[indices[j +  5]] = sym;
+        symbols[indices[j +  6]] = sym; symbols[indices[j +  7]] = sym;
+        symbols[indices[j +  8]] = sym; symbols[indices[j +  9]] = sym;
+        symbols[indices[j + 10]] = sym; symbols[indices[j + 11]] = sym;
+        symbols[indices[j + 12]] = sym; symbols[indices[j + 13]] = sym;
+        symbols[indices[j + 14]] = sym; symbols[indices[j + 15]] = sym;
     }
     for (; j + 8 <= n; j += 8) {
-        uint16x8_t idx = vld1q_u16(indices + j);
-        symbols[vgetq_lane_u16(idx, 0)] = sym;
-        symbols[vgetq_lane_u16(idx, 1)] = sym;
-        symbols[vgetq_lane_u16(idx, 2)] = sym;
-        symbols[vgetq_lane_u16(idx, 3)] = sym;
-        symbols[vgetq_lane_u16(idx, 4)] = sym;
-        symbols[vgetq_lane_u16(idx, 5)] = sym;
-        symbols[vgetq_lane_u16(idx, 6)] = sym;
-        symbols[vgetq_lane_u16(idx, 7)] = sym;
+        symbols[indices[j +  0]] = sym; symbols[indices[j +  1]] = sym;
+        symbols[indices[j +  2]] = sym; symbols[indices[j +  3]] = sym;
+        symbols[indices[j +  4]] = sym; symbols[indices[j +  5]] = sym;
+        symbols[indices[j +  6]] = sym; symbols[indices[j +  7]] = sym;
     }
     for (; j < n; j++) {
         symbols[indices[j]] = sym;
@@ -825,48 +815,53 @@ static inline void scatter_both_leaves(uint8_t *symbols,
                                         const uint8_t *bm,
                                         uint8_t sym0, uint8_t sym1)
 {
-    uint8x8_t vsym0  = vdup_n_u8(sym0);
-    uint8x8_t vdelta = vdup_n_u8(sym0 ^ sym1);
+    uint8x16_t vsym0q  = vdupq_n_u8(sym0);
+    uint8x16_t vdeltaq = vdupq_n_u8(sym0 ^ sym1);
     static const uint8_t bit_pos_tab[8] = {1,2,4,8,16,32,64,128};
     uint8x8_t vbit_pos = vld1_u8(bit_pos_tab);
 
     int j = 0;
     for (; j + 16 <= n; j += 16) {
-        uint8x8_t bits0 = vtst_u8(vdup_n_u8(bm[j >> 3]), vbit_pos);
-        uint8x8_t vals0 = veor_u8(vsym0, vand_u8(vdelta, bits0));
-        uint8x8_t bits1 = vtst_u8(vdup_n_u8(bm[(j >> 3) + 1]), vbit_pos);
-        uint8x8_t vals1 = veor_u8(vsym0, vand_u8(vdelta, bits1));
-        uint16x8_t i0 = vld1q_u16(indices + j);
-        uint16x8_t i1 = vld1q_u16(indices + j + 8);
-        symbols[vgetq_lane_u16(i0, 0)] = vget_lane_u8(vals0, 0);
-        symbols[vgetq_lane_u16(i0, 1)] = vget_lane_u8(vals0, 1);
-        symbols[vgetq_lane_u16(i0, 2)] = vget_lane_u8(vals0, 2);
-        symbols[vgetq_lane_u16(i0, 3)] = vget_lane_u8(vals0, 3);
-        symbols[vgetq_lane_u16(i0, 4)] = vget_lane_u8(vals0, 4);
-        symbols[vgetq_lane_u16(i0, 5)] = vget_lane_u8(vals0, 5);
-        symbols[vgetq_lane_u16(i0, 6)] = vget_lane_u8(vals0, 6);
-        symbols[vgetq_lane_u16(i0, 7)] = vget_lane_u8(vals0, 7);
-        symbols[vgetq_lane_u16(i1, 0)] = vget_lane_u8(vals1, 0);
-        symbols[vgetq_lane_u16(i1, 1)] = vget_lane_u8(vals1, 1);
-        symbols[vgetq_lane_u16(i1, 2)] = vget_lane_u8(vals1, 2);
-        symbols[vgetq_lane_u16(i1, 3)] = vget_lane_u8(vals1, 3);
-        symbols[vgetq_lane_u16(i1, 4)] = vget_lane_u8(vals1, 4);
-        symbols[vgetq_lane_u16(i1, 5)] = vget_lane_u8(vals1, 5);
-        symbols[vgetq_lane_u16(i1, 6)] = vget_lane_u8(vals1, 6);
-        symbols[vgetq_lane_u16(i1, 7)] = vget_lane_u8(vals1, 7);
+        /* Build 16 lanes of 0/0xFF from two bitmap bytes, combine
+         * into one 128-bit vector, then a single veorq/vandq for
+         * the value computation. */
+        uint8x8_t  bits0 = vtst_u8(vdup_n_u8(bm[j >> 3]),        vbit_pos);
+        uint8x8_t  bits1 = vtst_u8(vdup_n_u8(bm[(j >> 3) + 1]),  vbit_pos);
+        uint8x16_t bits  = vcombine_u8(bits0, bits1);
+        uint8x16_t vals  = veorq_u8(vsym0q, vandq_u8(vdeltaq, bits));
+        /* Indexed (scatter-style) stores -- lane-by-lane on NEON.
+         * Direct indices[] access beats vld1q+vgetq_lane on Neoverse
+         * V2 (~1.45x); a wash on M4.  Only the value (vals) stays in
+         * a vector. */
+        symbols[indices[j +  0]] = vgetq_lane_u8(vals,  0);
+        symbols[indices[j +  1]] = vgetq_lane_u8(vals,  1);
+        symbols[indices[j +  2]] = vgetq_lane_u8(vals,  2);
+        symbols[indices[j +  3]] = vgetq_lane_u8(vals,  3);
+        symbols[indices[j +  4]] = vgetq_lane_u8(vals,  4);
+        symbols[indices[j +  5]] = vgetq_lane_u8(vals,  5);
+        symbols[indices[j +  6]] = vgetq_lane_u8(vals,  6);
+        symbols[indices[j +  7]] = vgetq_lane_u8(vals,  7);
+        symbols[indices[j +  8]] = vgetq_lane_u8(vals,  8);
+        symbols[indices[j +  9]] = vgetq_lane_u8(vals,  9);
+        symbols[indices[j + 10]] = vgetq_lane_u8(vals, 10);
+        symbols[indices[j + 11]] = vgetq_lane_u8(vals, 11);
+        symbols[indices[j + 12]] = vgetq_lane_u8(vals, 12);
+        symbols[indices[j + 13]] = vgetq_lane_u8(vals, 13);
+        symbols[indices[j + 14]] = vgetq_lane_u8(vals, 14);
+        symbols[indices[j + 15]] = vgetq_lane_u8(vals, 15);
     }
     for (; j + 8 <= n; j += 8) {
         uint8x8_t bits = vtst_u8(vdup_n_u8(bm[j >> 3]), vbit_pos);
-        uint8x8_t vals = veor_u8(vsym0, vand_u8(vdelta, bits));
-        uint16x8_t idx = vld1q_u16(indices + j);
-        symbols[vgetq_lane_u16(idx, 0)] = vget_lane_u8(vals, 0);
-        symbols[vgetq_lane_u16(idx, 1)] = vget_lane_u8(vals, 1);
-        symbols[vgetq_lane_u16(idx, 2)] = vget_lane_u8(vals, 2);
-        symbols[vgetq_lane_u16(idx, 3)] = vget_lane_u8(vals, 3);
-        symbols[vgetq_lane_u16(idx, 4)] = vget_lane_u8(vals, 4);
-        symbols[vgetq_lane_u16(idx, 5)] = vget_lane_u8(vals, 5);
-        symbols[vgetq_lane_u16(idx, 6)] = vget_lane_u8(vals, 6);
-        symbols[vgetq_lane_u16(idx, 7)] = vget_lane_u8(vals, 7);
+        uint8x8_t vals = veor_u8(vget_low_u8(vsym0q),
+                                  vand_u8(vget_low_u8(vdeltaq), bits));
+        symbols[indices[j +  0]] = vget_lane_u8(vals, 0);
+        symbols[indices[j +  1]] = vget_lane_u8(vals, 1);
+        symbols[indices[j +  2]] = vget_lane_u8(vals, 2);
+        symbols[indices[j +  3]] = vget_lane_u8(vals, 3);
+        symbols[indices[j +  4]] = vget_lane_u8(vals, 4);
+        symbols[indices[j +  5]] = vget_lane_u8(vals, 5);
+        symbols[indices[j +  6]] = vget_lane_u8(vals, 6);
+        symbols[indices[j +  7]] = vget_lane_u8(vals, 7);
     }
     for (; j < n; j++) {
         uint8_t bit = (bm[j >> 3] >> (j & 7)) & 1;
@@ -1399,6 +1394,79 @@ int pivco_huffman_decode_neon(const uint8_t *in, size_t in_len,
         decode_node_neon(table, root->right, tmp, n_right,
                          symbols, &ptr, tmp + n_right + 8, skip_node);
     }
+
+    free(tmp);
+    *consumed = (size_t)(ptr - in);
+    return PIVCO_OK;
+}
+
+/* ============================================================
+ * "Naive-tree / SIMD-primitives" decoder for grid completeness.
+ *
+ * Decodes the slim wire format produced by pivco_huffman_encode_naive
+ * (raw bitmap per internal node in DFS preorder, no FSE marker, no
+ * K_right header, no flat-subtree path).  Uses the NEON SIMD
+ * partition + scatter primitives.  Pair with
+ * pivco_huffman_build_table_naive (every internal -> INTERNAL_FULL,
+ * every leaf -> LEAF, no prefill, no FLAT, no BOTH_LEAVES, no
+ * HALF_*).  This fills the (tree shape) x (primitives) grid cell
+ * that the paper otherwise lacks.
+ * ============================================================ */
+
+static void decode_node_naive_simd_neon(
+        const pivco_huffman_table_t *table, int16_t node_id,
+        uint16_t *indices, int n, uint8_t *symbols,
+        const uint8_t **in_ptr, uint16_t *tmp)
+{
+    if (n == 0) return;
+    const pivco_tree_node_t *node = &table->tree[node_id];
+    if (node->symbol >= 0) {
+        PROF_TIC();
+        scatter_sym(symbols, indices, n, (uint8_t)node->symbol);
+        PROF_TOC(PROF_SCATTER_SYM, n);
+        return;
+    }
+    /* Slim wire: just N bits of raw bitmap.  No marker, no K_right. */
+    int nbytes = bitmap_bytes(n);
+    const uint8_t *bm = *in_ptr;
+    *in_ptr += nbytes;
+    int n_left, n_right;
+    node_full(indices, n, bm, tmp, &n_left, &n_right);
+    decode_node_naive_simd_neon(table, node->left,  indices, n_left,
+                                  symbols, in_ptr, tmp + n_right + 8);
+    decode_node_naive_simd_neon(table, node->right, tmp, n_right,
+                                  symbols, in_ptr, tmp + n_right + 8);
+}
+
+int pivco_huffman_decode_naive_simd_neon(
+        const uint8_t *in, size_t in_len,
+        const pivco_huffman_table_t *table,
+        uint8_t *symbols, size_t *consumed)
+{
+    if (!in || !table || !symbols || !consumed) return PIVCO_ERR_NULL;
+    (void)in_len;
+    init_compress_table();
+    const int N = PIVCO_BLOCK_SIZE;
+    const uint8_t *ptr = in;
+
+    const pivco_tree_node_t *root = &table->tree[table->tree_root];
+    if (root->symbol >= 0) {
+        memset(symbols, (uint8_t)root->symbol, (size_t)N);
+        *consumed = 0;
+        return PIVCO_OK;
+    }
+
+    uint16_t indices[PIVCO_BLOCK_SIZE + 8] __attribute__((aligned(64)));
+    const size_t tmp_capacity =
+        (size_t)PIVCO_BLOCK_SIZE * (PIVCO_MAX_CODE_LEN + 2);
+    uint16_t *tmp = (uint16_t *)aligned_alloc(64, tmp_capacity * sizeof(uint16_t));
+    if (!tmp) return PIVCO_ERR_NULL;
+
+    /* Naive tree has no prefill -- every byte gets scattered. */
+    for (int k = 0; k < N; k++) indices[k] = (uint16_t)k;
+
+    decode_node_naive_simd_neon(table, table->tree_root, indices, N,
+                                  symbols, &ptr, tmp);
 
     free(tmp);
     *consumed = (size_t)(ptr - in);

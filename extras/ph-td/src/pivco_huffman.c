@@ -40,13 +40,23 @@ int pivco_huffman_encode(const uint8_t *symbols,
                          const pivco_huffman_table_t *table,
                          uint8_t *out, size_t *out_len)
 {
+#ifdef PIVCO_HAS_NEON
     return pivco_huffman_encode_neon(symbols, table, out, out_len);
+#else
+    (void)symbols; (void)table; (void)out; (void)out_len;
+    return PIVCO_ERR_NULL;
+#endif
 }
 
 int pivco_huffman_decode(const uint8_t *in, size_t in_len,
                          const pivco_huffman_table_t *table,
                          uint8_t *symbols, size_t *consumed)
 {
+#ifdef PIVCO_HAS_NEON
     /* Top-down stream-scatter decode (the historical primary path). */
     return pivco_huffman_decode_neon(in, in_len, table, symbols, consumed);
+#else
+    (void)in; (void)in_len; (void)table; (void)symbols; (void)consumed;
+    return PIVCO_ERR_NULL;
+#endif
 }

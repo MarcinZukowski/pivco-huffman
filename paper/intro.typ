@@ -61,7 +61,7 @@ Below, we can see the pseudocode of a simple linear-hashing lookup, and its rela
 Both problems can be seen as a state-machine traversal, and in both, data dependencies in the loop and unpredictable branching prevent CPU for achieving high performance.
 Hash join additionally performs an expensive memory lookup causing additional stalls.
 
-In @zuk09 Section 5.3.3.2 Author proposed an alternative hash tablel lookup approach based on the idea of going through
+In @zuk09 Section 5.3.3.2 Author proposed an alternative hash table lookup approach based on the idea of going through
 each node in the state machine not for one, but for a _vector_ of records,
 presented in this simplified pseudocode:
 

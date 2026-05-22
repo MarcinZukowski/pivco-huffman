@@ -248,8 +248,8 @@ for (i: 0..len(indices)):
 
 === Non-Canonical Subtrees
 
-Looking at @treeopt-flat, we can see that while the `-ntu` symbols
-benefit from the "flat subtrees" strategy,  we also have `copy` symbols,
+Looking at @treeopt-flat, we can see that while the *`"- n t u"`* symbols
+benefit from the "flat subtrees" strategy,  we also have *`"c o p y"`* symbols,
 which share the same code lenghts, but are not decoded together.
 This is because the canonical Huffman trees produced a tree of this particular
 shape.
@@ -264,8 +264,8 @@ into a single node with a combined frequency.
 We repeat the process, with one length-group possibly creating multiple such nodes (of different depth).
 
 The result is a new, (usually) non-canonical Huffman tree, with the exact same average
-code withs, but a different shape.
-@treeopt-opt shows how applying this strategy allows the `copy` nodes to be processed
+code widths, but a different shape.
+@treeopt-opt shows how applying this strategy allows the *`"c o p y"`* nodes to be processed
 together, further reducing ops/byte.
 
 XXX-maybe: Also mention sorting by frequency to give performance benefit to
