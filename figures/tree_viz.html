@@ -300,6 +300,15 @@ table.node-table tr.in-flat { color: #b45309; }
             <input type="checkbox" id="show-bitmaps">
             show bitmaps
         </label>
+        <label class="toggle" title="What to render under each node's bitmap (only when 'show bitmaps' is on). nothing | code bits (symbol with bit-index subscript) | symbols (just the letter) | indices (output index of the symbol).">
+            bitmap label:
+            <select id="bitmap-label">
+                <option value="nothing" selected>nothing</option>
+                <option value="code_bits">code bits</option>
+                <option value="symbols">symbols</option>
+                <option value="indices">indices</option>
+            </select>
+        </label>
         <label class="toggle" title="Draw leaf boxes with character + hex byte. Off = tiny circles only.">
             <input type="checkbox" id="show-leaf-details" checked>
             show leaf details
@@ -1754,7 +1763,7 @@ function renderTree(rootNode, meta) {
     if (bmActive) {
         intG.each(function(d) {
             if (!d.data.bitmap || d.data.bitmap.length === 0) return;
-            renderNodeBitmap(d3.select(this), d.data.bitmap, letterColor);
+            renderNodeBitmap(d3.select(this), d.data.bitmap, letterColor, meta.bitmapLabel);
         });
     }
 
@@ -2114,8 +2123,9 @@ function renderSourceStrip(treeBBox, trace, letterColor, stripBottomY) {
  * subscript (b = bit-index inside that letter's code).  Positioned
  * well above the node circle so neither the circle nor the parent
  * link line crowds the labels. */
-function renderNodeBitmap(g, bitmap, letterColor) {
+function renderNodeBitmap(g, bitmap, letterColor, labelMode) {
     if (!bitmap || bitmap.length === 0) return;
+    labelMode = labelMode || 'nothing';
     const cellW = 12;
     const w = bitmap.length * cellW;
     const x0 = -w / 2;
@@ -2139,8 +2149,20 @@ function renderNodeBitmap(g, bitmap, letterColor) {
             .style('font-weight', 600)
             .style('fill', '#222')
             .text(e.bit);
-        appendLetterIdxTag(bg, cx, idxY, e.char, e.bitIdx,
-                            8, letterColor.get(e.char) || '#666', 500);
+        /* Under-bitmap label (per-symbol colour kept in every mode). */
+        const color = letterColor.get(e.char) || '#666';
+        if (labelMode === 'code_bits') {
+            appendLetterIdxTag(bg, cx, idxY, e.char, e.bitIdx, 8, color, 500);
+        } else if (labelMode === 'symbols' || labelMode === 'indices') {
+            bg.append('text')
+                .attr('x', cx).attr('y', idxY)
+                .attr('text-anchor', 'middle')
+                .style('font', '8px monospace')
+                .style('font-weight', 500)
+                .style('fill', color)
+                .text(labelMode === 'symbols' ? e.char : e.sourceIdx);
+        }
+        /* labelMode === 'nothing' → no under-label */
     });
 }
 
@@ -2599,6 +2621,7 @@ function refreshFromFreqs() {
     const showSplitting = document.getElementById('splitting').checked;
     const showPrimitives = document.getElementById('show-primitives').checked;
     const showBitmaps = document.getElementById('show-bitmaps').checked;
+    const bitmapLabel = document.getElementById('bitmap-label').value;
     const titleText = document.getElementById('title-input').value;
     const showLabels = document.getElementById('show-labels').value;
     const showLeafDetails = document.getElementById('show-leaf-details').checked;
@@ -2647,7 +2670,7 @@ function refreshFromFreqs() {
     const meta = {
         name: _name, isMain: _isMain, totalN: _totalN,
         phOpt, showFlat, condenseFlat, noOverlap, showSplitting,
-        showPrimitives, showBitmaps, mode, viewMode,
+        showPrimitives, showBitmaps, bitmapLabel, mode, viewMode,
         constantDetect, fuseLeaves,
         titleText, showLabels, sourceText,
         showLeafDetails, showSkew, showBitPrefix, showLeafCode,
@@ -2803,6 +2826,7 @@ function setupToggles() {
     document.getElementById('splitting').addEventListener('change', refreshAndUrl);
     document.getElementById('show-primitives').addEventListener('change', refreshAndUrl);
     document.getElementById('show-bitmaps').addEventListener('change', refreshAndUrl);
+    document.getElementById('bitmap-label').addEventListener('change', refreshAndUrl);
     document.getElementById('view-mode').addEventListener('change', refreshAndUrl);
     document.getElementById('tree-mode').addEventListener('change', refreshAndUrl);
     document.getElementById('constant-detect').addEventListener('change', refreshClearAndUrl);
@@ -2909,6 +2933,13 @@ const URL_PARAM_MAP = [
             'Above each internal node: the bitmap entering that node (the bits being routed at that depth), with the same letter_index tags so you can follow individual source bits through the tree.<br><br>' +
             'Requires a "text" data source — shows an error if a dataset (frequency-only) is selected.',
       values: '1 | 0' },
+    { kind: 'str',  param: 'bmlabel',        id: 'bitmap-label',
+      desc: 'What to render under each internal node\'s bitmap (only when <b>show bitmaps</b> is on). Cells keep their per-symbol colour in every mode.<br><br>' +
+            '<b>nothing</b> — just the routed bits, no labels.<br>' +
+            '<b>code bits</b> — the symbol with its bit-index as a subscript (which bit of the code is routed at this node).<br>' +
+            '<b>symbols</b> — just the symbol letter (handy when reading bottom-up).<br>' +
+            '<b>indices</b> — the symbol\'s output index (the "indices going down" value).',
+      values: 'nothing | code_bits | symbols | indices' },
     { kind: 'bool', param: 'primitives',     id: 'show-primitives',
       desc: 'Draw a small badge to the left of each node showing the decode primitive used.<br><br>' +
             '<b>Internal — top-down</b> (P = partition):<br>' +
