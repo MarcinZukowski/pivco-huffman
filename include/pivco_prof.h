@@ -56,6 +56,11 @@ typedef enum {
     PROF_BU_POPCOUNT_K,             /* compute K_right from bitmap */
     PROF_BU_LEAF_MEMSET,            /* LEAF / SKIP: write K copies of sym */
 
+    /* Wire-format decode reads (shared TD/BU; charged per node). */
+    PROF_WIRE_KR,                   /* read K_right:u16 header */
+    PROF_WIRE_BITMAP_RAW,           /* marker==0: raw bitmap, pointer + advance */
+    PROF_WIRE_BITMAP_FSE,           /* marker!=0: FSE-decompress bitmap body */
+
     /* Encoder (pivco_huffman_encode_neon / encode_node_neon).  Mirrors
      * the decode side: per-primitive timing of the work done inside a
      * node body (not the recursion itself), plus the per-block setup. */

@@ -61,6 +61,14 @@ int main(int argc, char **argv)
     bench_generate_symbols(dist_idx, symbols, NBLOCKS * N,
                            0xBEEFCAFE12345678ULL);
 
+    /* FSE-on-bitmaps OFF by default so we profile the pure ph primitives
+     * (raw bitmaps), matching the top-down primitive benchmark.  Set
+     * PIVCO_PROFILE_FSE=1 to measure the ph+ANS path instead. */
+    int fse_on = (getenv("PIVCO_PROFILE_FSE") &&
+                  strcmp(getenv("PIVCO_PROFILE_FSE"), "1") == 0);
+    pivco_huffman_set_fse_enabled(fse_on);
+    printf("FSE-on-bitmaps: %s\n", fse_on ? "ON (ph+ANS)" : "OFF (raw bitmaps)");
+
     pivco_huffman_table_t table;
     pivco_huffman_build_table(bench_dist_freq(dist_idx), &table);
 

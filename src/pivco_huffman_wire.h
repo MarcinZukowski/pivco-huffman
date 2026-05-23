@@ -27,6 +27,7 @@
 
 #include "pivco_huffman.h"
 #include "pivco_huffman_common.h"
+#include "pivco_prof.h"
 #ifdef PIVCO_HAS_FSE
 #include "pivco_fse.h"
 #endif
@@ -78,9 +79,11 @@ static inline int wire_read_kr_header(const pivco_huffman_table_t *table,
                                        const uint8_t **in_ptr)
 {
     if (!kr_header_needed(table, node_id)) return -1;
+    PROF_TIC();
     uint16_t v;
     memcpy(&v, *in_ptr, 2);
     *in_ptr += KR_HEADER_BYTES;
+    PROF_TOC(PROF_WIRE_KR, 1);
     return (int)v;
 }
 
@@ -95,12 +98,14 @@ static inline const uint8_t *wire_read_bitmap(const uint8_t **in_ptr,
                                                 int n,
                                                 uint8_t *scratch)
 {
+    PROF_TIC();
     int nbytes = bitmap_bytes(n);
     uint8_t marker = **in_ptr;
     *in_ptr += 1;
     if (marker == 0) {
         const uint8_t *bm = *in_ptr;
         *in_ptr += nbytes;
+        PROF_TOC(PROF_WIRE_BITMAP_RAW, n);
         return bm;
     }
 #ifdef PIVCO_HAS_FSE
@@ -115,6 +120,7 @@ static inline const uint8_t *wire_read_bitmap(const uint8_t **in_ptr,
                                 (size_t)nbytes, &out_len);
     *in_ptr += fse_len;
     if (xor_flag) pivco_fse_flip_bits(scratch, (size_t)nbytes);
+    PROF_TOC(PROF_WIRE_BITMAP_FSE, n);
     return scratch;
 #else
     /* FSE not built but stream uses it — best-effort fallback.  The
@@ -122,6 +128,7 @@ static inline const uint8_t *wire_read_bitmap(const uint8_t **in_ptr,
      * mismatch.  We don't fault, just advance and return zeros. */
     (void)scratch;
     *in_ptr += nbytes;
+    PROF_TOC(PROF_WIRE_BITMAP_FSE, n);
     return *in_ptr - nbytes;
 #endif
 }

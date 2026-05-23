@@ -1,0 +1,7 @@
+primitive,m4_proba80,c8i_proba80,c8i_over_m4_proba80,m4_prose,c8i_prose,c8i_over_m4_prose
+bu_tree_merge,—,—,—,0.05,0.11,2.2x
+bu_tree_merge_bcast_left,0.05,0.08,1.6x,0.06,0.18,3.0x
+bu_merge_both_const,0.59,1.52,2.6x,0.04,0.06,1.5x
+bu_flat_decode,—,—,—,0.04,0.29,7.3x
+wire_kr,0.25,13.34,53x,0.25,14.22,57x
+wire_bitmap_raw,0.00,0.01,—,0.00,0.01,—
