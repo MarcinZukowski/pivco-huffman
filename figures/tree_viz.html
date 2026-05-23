@@ -242,6 +242,10 @@ table.node-table tr.in-flat { color: #b45309; }
             <input type="checkbox" id="ph-opt" checked>
             ph-optimize
         </label>
+        <label class="toggle" title="Experimental max-skew topology for ANS: keep the optimal Huffman code lengths, but build the tree bottom-up, sorting each level by combined frequency descending and merging left-to-right (heavier child = left). Same compression ratio, but the tree leans left by frequency to push per-node bitmaps toward maximum skew. Overrides ph-optimize / within-tier order.">
+            <input type="checkbox" id="max-skew">
+            max-skew (ANS)
+        </label>
         <label class="toggle">
             <input type="checkbox" id="show-flat" checked>
             flat-subtrees
@@ -621,6 +625,56 @@ function buildTree(symbols, freqs) {
         cur.symbol = s.symbol;
         cur.freq = freqs[s.symbol];
     }
+    return root;
+}
+
+/* Max-skew construction (experiment, for ANS).  Keeps the optimal
+ * Huffman *code lengths* (so compression ratio is unchanged) but chooses
+ * the tree TOPOLOGY to lean left by frequency:
+ *   1. compute code lengths (Huffman),
+ *   2. place each symbol as a leaf at its code-length depth,
+ *   3. bottom-up, per level: sort nodes by (combined) freq descending and
+ *      merge left-to-right into parents one level up (heavier child = left).
+ * The level populations are exactly the canonical ones (Kraft), so every
+ * level has an even node count and pairs cleanly. */
+function buildTreeMaxSkew(freqs, maxLen) {
+    const lens = buildHuffmanLengths(freqs, maxLen);
+    let nextId = 0;
+    const levels = [];               // levels[d] = nodes currently at depth d
+    let maxD = 0, nLeaves = 0;
+    let onlyLeaf = null;
+    for (let s = 0; s < lens.length; s++) {
+        const L = lens[s];
+        if (!L) continue;
+        if (L > maxD) maxD = L;
+        nLeaves++;
+        const leaf = { symbol: s, freq: freqs[s], left: null, right: null, id: nextId++ };
+        onlyLeaf = leaf;
+        (levels[L] || (levels[L] = [])).push(leaf);
+    }
+    /* Degenerate: 0 or 1 symbol -> just the leaf as root (whole block is
+     * one symbol; no internal nodes / pairing). */
+    if (nLeaves <= 1) {
+        if (onlyLeaf) { onlyLeaf.depth = 0; return onlyLeaf; }
+        return { symbol: -1, freq: 0, left: null, right: null, id: 0, depth: 0 };
+    }
+    for (let d = maxD; d >= 1; d--) {
+        const here = levels[d] || [];
+        here.sort((a, b) => b.freq - a.freq);          // heaviest first
+        const up = (levels[d - 1] || (levels[d - 1] = []));
+        for (let i = 0; i + 1 < here.length; i += 2) {
+            const Lc = here[i], Rc = here[i + 1];      // heavier = left
+            const parent = { symbol: -1, freq: Lc.freq + Rc.freq,
+                             left: Lc, right: Rc, id: nextId++ };
+            Lc.parent = parent; Rc.parent = parent;
+            up.push(parent);
+        }
+    }
+    const root = (levels[0] || [])[0];
+    (function setDepth(n, d) {
+        n.depth = d;
+        if (n.symbol < 0) { setDepth(n.left, d + 1); setDepth(n.right, d + 1); }
+    })(root, 0);
     return root;
 }
 
@@ -2615,6 +2669,7 @@ let _totalN = 0;
 function refreshFromFreqs() {
     if (!_freqs) return;
     const phOpt = document.getElementById('ph-opt').checked;
+    const maxSkew = document.getElementById('max-skew').checked;
     const showFlat = document.getElementById('show-flat').checked;
     const condenseFlat = document.getElementById('condense-flat').checked;
     const noOverlap = document.getElementById('no-overlap').checked;
@@ -2639,11 +2694,26 @@ function refreshFromFreqs() {
     const status = document.getElementById('status');
     const t0 = performance.now();
 
-    const lens = buildHuffmanLengths(_freqs, maxLen);
-    const codes = phOpt ?
-        assignPhFlatCodes(lens, _freqs, keysSort) :
-        assignCanonicalCodes(lens);
-    const tree = buildTree(codes, _freqs);
+    let tree, codes;
+    if (maxSkew) {
+        /* Max-skew topology (same code lengths, leans left by frequency).
+         * Derive the per-symbol code array from the built tree (path =
+         * code, depth = length) so the tooltip / leaf-code views work. */
+        tree = buildTreeMaxSkew(_freqs, maxLen);
+        codes = [];
+        (function collect(n, code, len) {
+            if (!n) return;
+            if (n.symbol >= 0) { codes.push({ symbol: n.symbol, code: code, len: len }); return; }
+            collect(n.left,  code << 1,         len + 1);
+            collect(n.right, (code << 1) | 1,   len + 1);
+        })(tree, 0, 0);
+    } else {
+        const lens = buildHuffmanLengths(_freqs, maxLen);
+        codes = phOpt ?
+            assignPhFlatCodes(lens, _freqs, keysSort) :
+            assignCanonicalCodes(lens);
+        tree = buildTree(codes, _freqs);
+    }
     annotateTree(tree);
     detectFlatSubtrees(tree);
 
@@ -2669,7 +2739,7 @@ function refreshFromFreqs() {
         : null;
     const meta = {
         name: _name, isMain: _isMain, totalN: _totalN,
-        phOpt, showFlat, condenseFlat, noOverlap, showSplitting,
+        phOpt, maxSkew, showFlat, condenseFlat, noOverlap, showSplitting,
         showPrimitives, showBitmaps, bitmapLabel, mode, viewMode,
         constantDetect, fuseLeaves,
         titleText, showLabels, sourceText,
@@ -2820,6 +2890,7 @@ function setupToggles() {
         _flatOverride.clear(); refreshFromFreqs(); updateUrlFromState();
     };
     document.getElementById('ph-opt').addEventListener('change', refreshClearAndUrl);
+    document.getElementById('max-skew').addEventListener('change', refreshClearAndUrl);
     document.getElementById('show-flat').addEventListener('change', refreshClearAndUrl);
     document.getElementById('condense-flat').addEventListener('change', refreshClearAndUrl);
     document.getElementById('no-overlap').addEventListener('change', refreshAndUrl);
@@ -2901,6 +2972,10 @@ const URL_PARAM_MAP = [
       values: 'top-down | bottom-up' },
     { kind: 'bool', param: 'ph-opt',         id: 'ph-opt',
       desc: 'Order symbols by frequency-descending within each code-length tier (ph-flat-aware). Off = canonical (byte-ascending) order.',
+      values: '1 | 0' },
+    { kind: 'bool', param: 'max-skew',       id: 'max-skew',
+      desc: 'Experimental <b>max-skew topology for ANS</b>.  Keeps the optimal Huffman <i>code lengths</i> (ratio unchanged), but rebuilds the tree bottom-up: at each level, sort nodes by combined frequency descending and merge left-to-right, so the heavier child is always on the left.<br><br>' +
+            'The tree "leans left" by frequency rather than by subtree size, pushing each internal node\'s bitmap toward maximum skew (better for an ANS/FSE bitmap coder).  Overrides ph-optimize and within-tier order.',
       values: '1 | 0' },
     { kind: 'bool', param: 'show-flat',      id: 'show-flat',
       desc: 'Highlight detected flat subtrees (uniform-depth, fast-path candidates). When primitives are shown, flat-subtree roots render as <b>SFx</b> in top-down (scatter to non-contiguous output) or <b>MFx</b> in bottom-up (expand into contiguous buffer), both skipping x partition/merge levels.',
