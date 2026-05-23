@@ -381,37 +381,59 @@ ph v2) has a structured starting point and doesn't have to
 re-derive the option space.
 
 
-## FSE-decode ↔ merge fusion — microbench weak, integration in progress, 2026-05-23
+## FSE-decode ↔ merge fusion — TRIED, net-negative in production; paper-relevant, 2026-05-23
 
-**Status: microbench done (weak signal), real-decoder integration being
-tried.**  Premise: the per-node bitmap path runs FSE-decode then merge
-*serially* (`wire_read_bitmap` fills a scratch buffer, then `prim_merge*`
-reads it).  FSE is scalar (state transitions, table loads, bit extract);
-the merge is SIMD (TBL + stores) — different ports — so interleaving
-decode-chunk/merge-chunk should hide one behind the other.  No wire-format
-change: whether a node is FSE is already in the per-block marker; fusion is
-a pure decode-side dispatch on (static node type = bcast/const) × (marker =
-FSE).
+**Status: closed.  Real integration measured a ~1-2% regression and was
+reverted.  Genuine per-byte fusion confirmed in the microbench but does
+not beat the shipped wide-cursor path.  Interesting analysis for the
+paper, not a production change.**  Microbench kept at
+`extras/bench_fuse_fse_merge.c`; integration commit reverted.
+
+Premise: the per-node bitmap path runs FSE-decode then merge *serially*
+(`wire_read_bitmap` fills a scratch buffer, then `prim_merge*` reads it).
+FSE is scalar (state chain, table loads, bit extract); the merge is SIMD
+(TBL + stores) — different ports — so interleaving should hide one behind
+the other.  No wire change: FSE-or-raw is already in the per-block marker,
+so fusion is a pure decode-side dispatch on (static node type = bcast/const)
+× (marker = FSE).
 
 Profile (BU, wide FSE on): FSE is **62.7%** of proba80 wall, **42.8%** of
 calgary (calgary = a single fat root FSE bitmap feeding the root
-bcast_left).  Ideal overlap would be ~1.6× / ~1.4×.
+bcast_left).  Naive "ideal overlap" would be ~1.6× / ~1.4×.
 
-Microbench (`extras/bench_fuse_fse_merge.c`, synthetic proba80-root,
-serial vs chunked decode+merge):
+What actually happened, in order:
 
-| cursors | serial M/s | fused M/s | fusion gain |
-|--------:|-----------:|----------:|------------:|
-| x2      | ~4960      | 6202      | 1.25×       |
-| x8      | ~9020      | 10193     | 1.13×       |
+1. **Microbench, x8 (shipped shape):** serial 9020 M/s → "fused" 10193 M/s
+   (1.13×).  **x2:** 5003 → 6202 (1.24×).  But the absolute winner is
+   **x8-serial (9020) >> x2-fused (6202)** — the 8-way ILP is worth far
+   more than the fusion overlap.
 
-The mechanism is real but **mostly spent by the wide cursors we just
-shipped**: fusion fills *latency bubbles*, and x8's 8-way ILP already
-keeps the pipe full, so x8 fused is only 1.13× and x8-serial (9020) beats
-x2-fused (6202) outright.  Per this doc's calibration that microbench
-overlap over-promises 2-5× vs the real decoder, the projected end-to-end
-gain is marginal.  Trying the real integration anyway (env-gated
-`prim_*_chunk` + fused driver) to replace the projection with a number.
+2. **The first "fused" kernel was not fusion** — it was chunked
+   decode-into-buffer-then-merge-buffer.  A genuine per-byte `fused_x2`
+   (decode a byte on a cursor, immediately TBL-expand its 8 bits, no
+   buffer) was only +3% over chunked (6198 vs 6027).
+
+3. **The chunked win is locality, not overlap.**  CH sweep (bytes →
+   speedup): 16→1.25, 32→1.21, 64→1.14, 128→1.06, 256→0.99.  Monotonic
+   decay to 1.0 = working-set signature: a small chunk stays hot (store
+   buffer / L1) when the merge reads it, so the merge skips the bitmap
+   *scratch round-trip*; a large chunk drains to L1 first = same as serial.
+   Overlap would not vanish at larger chunks.  So the lever is "don't
+   materialize the full bitmap to scratch — merge it in cache-resident
+   pieces," and it's *independent of fusion*.
+
+4. **Real-decoder integration (env-gated, NEON, bcast_left only):**
+   proba80 6285 → 6144 (−2.2%), calgary 6705 → 6612 (−1.4%).  The fused
+   tail uses FSE's *safe* loop, plus per-chunk merge setup + register
+   pressure from 8 live states; together they outweigh the small locality
+   win that the wide cursors hadn't already captured.  Reverted.
+
+Takeaways for the paper: (a) wide-cursor FSE and decode/merge fusion are
+**substitutes** — the wide cursors spend the ILP fusion wanted; (b) the
+measurable effect attributed to "fusion" is really **bitmap-scratch
+locality**, worth ~1.2× in isolation but eaten by integration overhead in
+the real recursive decoder; (c) confirms docs/FUSION.md's lesson that
+microbench overlap over-promises vs the real decoder.
 
 
 ## LZ4 + ph — speed bench on LZ4 output worth doing — open, 2026-05-17

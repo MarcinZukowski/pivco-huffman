@@ -91,6 +91,56 @@ static void serial(const uint8_t *cmp, size_t clen, const FSE_DTable *dt,
     merge_chunk(bm_scratch, K, left_sym, right, &rc, out);
 }
 
+/* merge ONE freshly-decoded bitmap byte `b` into out[0..8): expand its 8
+ * bits via TBL over [left_sym x8 | right8].  Off the FSE critical path --
+ * depends only on the decoded symbol value, not the FSE state. */
+static inline void merge_one_byte(uint8_t b, uint8x8_t Lbcast,
+                                  const uint8_t *right, int *rcp, uint8_t *out)
+{
+    uint8x16_t both = vcombine_u8(Lbcast, vld1_u8(right + *rcp));
+    vst1_u8(out, vqtbl1_u8(both, vld1_u8(expand_tab[b])));
+    *rcp += expand_popcnt[b];
+}
+
+/* GENUINELY FUSED, 2 cursors.  One loop body: decode a byte on cursor 0,
+ * immediately merge it (8 outputs); decode a byte on cursor 1, immediately
+ * merge it.  The merges feed off the decoded symbols, NOT the FSE state,
+ * so cursor 0's next state-transition (the latency-bound op) overlaps
+ * cursor 1's decode + both merges.  No intermediate bitmap buffer. */
+static void fused_x2(const uint8_t *cmp, size_t clen, const FSE_DTable *dt,
+                     uint8_t left_sym, const uint8_t *right, uint8_t *out)
+{
+    BIT_DStream_t bitD; BIT_initDStream(&bitD, cmp, clen);
+    FSE_DState_t s0, s1;
+    FSE_initDState(&s0, &bitD, dt);
+    FSE_initDState(&s1, &bitD, dt);
+    uint8x8_t Lbcast = vdup_n_u8(left_sym);
+    int j = 0, rc = 0;
+    const int MARGIN = 16;                  /* bytes reserved for safe tail */
+    int bulk_bytes = NBYTES - MARGIN;
+    while ((j >> 3) + 2 <= bulk_bytes) {
+        BIT_reloadDStream(&bitD);
+        uint8_t b0 = FSE_decodeSymbolFast(&s0, &bitD);
+        merge_one_byte(b0, Lbcast, right, &rc, out + j);
+        uint8_t b1 = FSE_decodeSymbolFast(&s1, &bitD);
+        merge_one_byte(b1, Lbcast, right, &rc, out + j + 8);
+        j += 16;
+    }
+    /* tail: safe per-symbol decode + immediate merge */
+    while (j < K) {
+        uint8_t b = FSE_decodeSymbol((((j >> 3) & 1) ? &s1 : &s0), &bitD);
+        BIT_reloadDStream(&bitD);
+        int kc = (K - j >= 8) ? 8 : (K - j);
+        if (kc == 8) {
+            merge_one_byte(b, Lbcast, right, &rc, out + j);
+        } else {
+            for (int t = 0; t < kc; t++)
+                out[j + t] = ((b >> t) & 1) ? right[rc++] : left_sym;
+        }
+        j += 8;
+    }
+}
+
 static void fused(const uint8_t *cmp, size_t clen, const FSE_DTable *dt,
                   uint8_t left_sym, const uint8_t *right, uint8_t *out)
 {
@@ -158,22 +208,35 @@ int main(int argc, char **argv)
     printf("X=%d K=%d nbytes=%d ones=%d clen=%zu fast_safe=%d CH=%d\n",
            XVAL,K,NBYTES,ones,clen,safe,CH);
 
-    uint8_t *out_s=malloc(K), *out_f=malloc(K), *scratch=malloc(NBYTES+16);
+    uint8_t *out_s=malloc(K), *out_f=malloc(K), *out_x2=malloc(K), *scratch=malloc(NBYTES+16);
     serial(cmp,clen,dt,scratch,left_sym,right,out_s);
     fused (cmp,clen,dt,        left_sym,right,out_f);
     int match = memcmp(out_s,out_f,K)==0;
-    printf("fused==serial: %d\n", match);
-    if(!match){ for(int i=0;i<K;i++) if(out_s[i]!=out_f[i]){printf(" diff@%d s=%02x f=%02x\n",i,out_s[i],out_f[i]);break;} }
+    printf("chunked==serial: %d\n", match);
 
+#if XVAL == 2
+    fused_x2(cmp,clen,dt,left_sym,right,out_x2);
+    int match2 = memcmp(out_s,out_x2,K)==0;
+    printf("fused_x2==serial: %d\n", match2);
+    if(!match2){ for(int i=0;i<K;i++) if(out_s[i]!=out_x2[i]){printf(" diff@%d s=%02x f=%02x\n",i,out_s[i],out_x2[i]);break;} }
+#endif
+
+    double mb=(double)reps*K/1e6;
     double t0=now_sec();
     for(int r=0;r<reps;r++) serial(cmp,clen,dt,scratch,left_sym,right,out_s);
     double ts=now_sec()-t0;
+    printf("serial      : %.3f s  %.0f M/s\n", ts, mb/ts);
+
     t0=now_sec();
     for(int r=0;r<reps;r++) fused(cmp,clen,dt,left_sym,right,out_f);
     double tf=now_sec()-t0;
+    printf("chunked     : %.3f s  %.0f M/s   %.2fx\n", tf, mb/tf, ts/tf);
 
-    double mb=(double)reps*K/1e6;
-    printf("serial: %.3f s  %.0f M/s\n", ts, mb/ts);
-    printf("fused : %.3f s  %.0f M/s   speedup %.2fx\n", tf, mb/tf, ts/tf);
+#if XVAL == 2
+    t0=now_sec();
+    for(int r=0;r<reps;r++) fused_x2(cmp,clen,dt,left_sym,right,out_x2);
+    double tx=now_sec()-t0;
+    printf("fused_x2    : %.3f s  %.0f M/s   %.2fx vs serial\n", tx, mb/tx, ts/tx);
+#endif
     return match?0:1;
 }
