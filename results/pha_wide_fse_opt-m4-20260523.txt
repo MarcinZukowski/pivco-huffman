@@ -1,0 +1,94 @@
+fair-bench: 1 MB-class buffer = 1024 KB, best of 5x10, ph table-G=128 KB, BLK=8192
+  engines: pha
+columns: enc(opaque prebuilt)  dec(opaque prebuilt)  MB/s | ratio(op pb) | builds/1MB
+
+== proba80          ==        enc_op  enc_pb   dec_op  dec_pb |  r_op  r_pb | blds
+pha      |     493    2051 |    5625    6394 |  8.45  8.51 |   8
+
+== proba50          ==        enc_op  enc_pb   dec_op  dec_pb |  r_op  r_pb | blds
+pha      |     609    2207 |    7643   10044 |  3.92  3.94 |   8
+
+== proba14          ==        enc_op  enc_pb   dec_op  dec_pb |  r_op  r_pb | blds
+pha      |     949    1718 |    4280    5490 |  1.87  1.87 |   8
+
+== proba02          ==        enc_op  enc_pb   dec_op  dec_pb |  r_op  r_pb | blds
+pha      |     887    1532 |    2694    4955 |  1.11  1.12 |   8
+
+== bell_s10         ==        enc_op  enc_pb   dec_op  dec_pb |  r_op  r_pb | blds
+pha      |    1050    1952 |    3964    6179 |  1.44  1.40 |   8
+
+== bell_s30         ==        enc_op  enc_pb   dec_op  dec_pb |  r_op  r_pb | blds
+pha      |     886    1519 |    2728    4909 |  1.12  1.12 |   8
+
+== bell_s80         ==        enc_op  enc_pb   dec_op  dec_pb |  r_op  r_pb | blds
+pha      |     960    1699 |    2697    4597 |  1.00  1.00 |   8
+
+== uniform          ==        enc_op  enc_pb   dec_op  dec_pb |  r_op  r_pb | blds
+pha      |    1458    3705 |    3418    5444 |  1.00  1.00 |   8
+
+== english          ==        enc_op  enc_pb   dec_op  dec_pb |  r_op  r_pb | blds
+pha      |    1034    1837 |    5230    6570 |  1.86  1.87 |   8
+
+== zipfian          ==        enc_op  enc_pb   dec_op  dec_pb |  r_op  r_pb | blds
+pha      |     803    1514 |    2447    4753 |  1.26  1.27 |   8
+
+== sparse_4         ==        enc_op  enc_pb   dec_op  dec_pb |  r_op  r_pb | blds
+pha      |     930    3539 |   29372   52168 |  3.98  4.00 |   8
+
+== sparse_16        ==        enc_op  enc_pb   dec_op  dec_pb |  r_op  r_pb | blds
+pha      |    1512    3748 |   25389   51654 |  2.00  2.00 |   8
+
+== geometric        ==        enc_op  enc_pb   dec_op  dec_pb |  r_op  r_pb | blds
+pha      |     609    2201 |    7437   10131 |  3.90  3.92 |   8
+
+== two_sym_eq       ==        enc_op  enc_pb   dec_op  dec_pb |  r_op  r_pb | blds
+pha      |     603    2900 |   19454   26479 |  7.93  7.98 |   8
+
+== two_sym_90/10    ==        enc_op  enc_pb   dec_op  dec_pb |  r_op  r_pb | blds
+pha      |     518    2417 |    8659    9939 | 16.18 16.40 |   8
+
+== flat_M3          ==        enc_op  enc_pb   dec_op  dec_pb |  r_op  r_pb | blds
+pha      |    1209    3115 |   16308   23302 |  2.66  2.67 |   8
+
+== flat_M5          ==        enc_op  enc_pb   dec_op  dec_pb |  r_op  r_pb | blds
+pha      |    1337    2385 |   15420   24907 |  1.60  1.60 |   8
+
+== flat_M6          ==        enc_op  enc_pb   dec_op  dec_pb |  r_op  r_pb | blds
+pha      |    1341    2296 |   11902   20972 |  1.33  1.33 |   8
+
+== flat_M7          ==        enc_op  enc_pb   dec_op  dec_pb |  r_op  r_pb | blds
+pha      |    1277    2300 |    4055    5160 |  1.14  1.14 |   8
+
+== html_wiki        ==        enc_op  enc_pb   dec_op  dec_pb |  r_op  r_pb | blds
+pha      |     923    1577 |    2974    4696 |  1.41  1.40 |   8
+
+== prose_pride      ==        enc_op  enc_pb   dec_op  dec_pb |  r_op  r_pb | blds
+pha      |     867    1480 |    3616    5100 |  1.72  1.72 |   8
+
+== image_jpeg       ==        enc_op  enc_pb   dec_op  dec_pb |  r_op  r_pb | blds
+pha      |     906    1595 |    2603    4024 |  1.00  1.00 |   8
+
+== json_api         ==        enc_op  enc_pb   dec_op  dec_pb |  r_op  r_pb | blds
+pha      |     915    1541 |    3402    4607 |  1.51  1.51 |   8
+
+== source_c         ==        enc_op  enc_pb   dec_op  dec_pb |  r_op  r_pb | blds
+pha      |     830    1682 |    3901    5277 |  1.59  1.58 |   8
+
+== log_apache       ==        enc_op  enc_pb   dec_op  dec_pb |  r_op  r_pb | blds
+pha      |     992    1646 |    3584    5085 |  1.43  1.43 |   8
+
+== dna_fasta        ==        enc_op  enc_pb   dec_op  dec_pb |  r_op  r_pb | blds
+pha      |     767    1939 |    5012    6079 |  3.76  3.77 |   8
+
+== csv_numeric      ==        enc_op  enc_pb   dec_op  dec_pb |  r_op  r_pb | blds
+pha      |     669    1682 |    5003    7005 |  2.36  2.36 |   8
+
+== gzip_random      ==        enc_op  enc_pb   dec_op  dec_pb |  r_op  r_pb | blds
+pha      |    1462    3780 |    3692    5369 |  1.00  1.00 |   8
+
+== chinese_text     ==        enc_op  enc_pb   dec_op  dec_pb |  r_op  r_pb | blds
+pha      |     953    1517 |    3514    5130 |  1.34  1.33 |   8
+
+== calgary_pic      ==        enc_op  enc_pb   dec_op  dec_pb |  r_op  r_pb | blds
+pha      |     461    2069 |    4140    7104 |  6.13  6.08 |   8
+

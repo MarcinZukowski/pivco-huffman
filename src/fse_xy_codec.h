@@ -28,12 +28,18 @@ static size_t encode_x(int x, const uint8_t *src, size_t n,
         FSE_initCState2(&st[k], ct, src[--i]);
     }
 
+    /* Flush after at most 4 symbols: at tableLog 12 each FSE_encodeSymbol
+     * adds up to 12 bits, and a flush leaves up to 7 bits in the 64-bit
+     * container, so 7 + 4*12 = 55 <= 64 is safe but 7 + 5*12 = 67 would
+     * overflow and silently drop bits (corrupts high-nbBits runs).  This
+     * matches FSE's own 4-symbols-between-flushes bound and the decoder's
+     * reload-every-4 cadence (D8RND). */
     while (i > 0) {
         int pushed = 0;
         for (int k = x - 1; k >= 0; k--) {
             FSE_encodeSymbol(&bitC, &st[k], src[--i]);
             pushed++;
-            if (pushed == 5 && i > 0) {
+            if (pushed == 4 && i > 0) {
                 BIT_flushBitsFast(&bitC);
                 pushed = 0;
             }
