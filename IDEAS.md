@@ -381,6 +381,39 @@ ph v2) has a structured starting point and doesn't have to
 re-derive the option space.
 
 
+## FSE-decode ↔ merge fusion — microbench weak, integration in progress, 2026-05-23
+
+**Status: microbench done (weak signal), real-decoder integration being
+tried.**  Premise: the per-node bitmap path runs FSE-decode then merge
+*serially* (`wire_read_bitmap` fills a scratch buffer, then `prim_merge*`
+reads it).  FSE is scalar (state transitions, table loads, bit extract);
+the merge is SIMD (TBL + stores) — different ports — so interleaving
+decode-chunk/merge-chunk should hide one behind the other.  No wire-format
+change: whether a node is FSE is already in the per-block marker; fusion is
+a pure decode-side dispatch on (static node type = bcast/const) × (marker =
+FSE).
+
+Profile (BU, wide FSE on): FSE is **62.7%** of proba80 wall, **42.8%** of
+calgary (calgary = a single fat root FSE bitmap feeding the root
+bcast_left).  Ideal overlap would be ~1.6× / ~1.4×.
+
+Microbench (`extras/bench_fuse_fse_merge.c`, synthetic proba80-root,
+serial vs chunked decode+merge):
+
+| cursors | serial M/s | fused M/s | fusion gain |
+|--------:|-----------:|----------:|------------:|
+| x2      | ~4960      | 6202      | 1.25×       |
+| x8      | ~9020      | 10193     | 1.13×       |
+
+The mechanism is real but **mostly spent by the wide cursors we just
+shipped**: fusion fills *latency bubbles*, and x8's 8-way ILP already
+keeps the pipe full, so x8 fused is only 1.13× and x8-serial (9020) beats
+x2-fused (6202) outright.  Per this doc's calibration that microbench
+overlap over-promises 2-5× vs the real decoder, the projected end-to-end
+gain is marginal.  Trying the real integration anyway (env-gated
+`prim_*_chunk` + fused driver) to replace the projection with a number.
+
+
 ## LZ4 + ph — speed bench on LZ4 output worth doing — open, 2026-05-17
 
 **Status: ratio measured (docs/FSE-V0.md §"LZ4-compressed data is
