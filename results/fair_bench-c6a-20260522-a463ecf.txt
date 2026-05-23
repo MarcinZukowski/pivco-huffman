@@ -1,0 +1,28 @@
+fair-bench: 1 MB-class buffer = 1024 KB, best of 5x10, ph table-G=128 KB, BLK=4096
+  dists:   proba80,prose_pride
+columns: enc(opaque prebuilt)  dec(opaque prebuilt)  MB/s | ratio(op pb) | builds/1MB
+
+== proba80          ==        enc_op  enc_pb   dec_op  dec_pb |  r_op  r_pb | blds
+ph       |     464    1784 |    6756    9038 |  6.22  6.25 |   8
+pha      |     409    1195 |    2558    2839 |  8.26  8.31 |   8
+td_naive |     205     304 |     213     326 |  6.35  6.39 |   8
+td_scl_opt |     238     383 |     351     814 |  6.29  6.32 |   8
+td_nv_simd   (n/a)
+td_simdopt   (n/a)
+huf0     |     882    1685 |    1702    1714 |  6.40  6.40 |   8
+huf0_stk |     883     -   |    1710     -   |  6.40   -   |   8
+fse_stk  |     468     643 |     530     542 |  8.86  8.86 |   8
+fse_x8y1   (n/a)
+
+== prose_pride      ==        enc_op  enc_pb   dec_op  dec_pb |  r_op  r_pb | blds
+ph       |     531     777 |    1253    1670 |  1.70  1.70 |   8
+pha      |     507     726 |    1255    1675 |  1.70  1.70 |   8
+td_naive |      40      41 |      52      54 |  1.73  1.72 |   8
+td_scl_opt |      71      73 |      74      76 |  1.72  1.72 |   8
+td_nv_simd   (n/a)
+td_simdopt   (n/a)
+huf0     |    1090    1670 |    1502    1573 |  1.74  1.75 |   8
+huf0_stk |    1090     -   |    1513     -   |  1.74   -   |   8
+fse_stk  |     527     641 |     676     696 |  1.76  1.76 |   8
+fse_x8y1 |     621     847 |     985    1074 |  1.76  1.76 |   8
+
