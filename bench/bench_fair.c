@@ -573,8 +573,14 @@ static result_t e_td_scl   (const uint8_t*s,size_t n){ return measure_phtd(phtd_
 static result_t e_td_nvsimd(const uint8_t*s,size_t n){ return measure_phtd(phtd_build_table_naive, phtd_encode_naive, phtd_decode_naive_simd_neon, s,n); }
 static result_t e_td_simdopt(const uint8_t*s,size_t n){ return measure_phtd(phtd_build_table,      phtd_encode_neon,  phtd_decode_neon,            s,n); }
 #elif defined(PIVCO_HAS_AVX512)
-static result_t e_td_nvsimd(const uint8_t*s,size_t n){ return measure_phtd(phtd_build_table_naive, phtd_encode_naive,  phtd_decode_naive_simd_avx512, s,n); }
-static result_t e_td_simdopt(const uint8_t*s,size_t n){ return measure_phtd(phtd_build_table,      phtd_encode_avx512, phtd_decode_avx512,            s,n); }
+/* The CMake AVX-512 probe is compile-time; the run host may still lack
+ * the hardware (e.g. Zen 3).  Guard at runtime so those rows show n/a
+ * instead of SIGILL. */
+static int avx512_runtime_ok(void){ return __builtin_cpu_supports("avx512vbmi2"); }
+static result_t e_td_nvsimd(const uint8_t*s,size_t n){ result_t na={0};
+    return avx512_runtime_ok() ? measure_phtd(phtd_build_table_naive, phtd_encode_naive,  phtd_decode_naive_simd_avx512, s,n) : na; }
+static result_t e_td_simdopt(const uint8_t*s,size_t n){ result_t na={0};
+    return avx512_runtime_ok() ? measure_phtd(phtd_build_table,      phtd_encode_avx512, phtd_decode_avx512,            s,n) : na; }
 #endif
 static result_t e_huf0    (const uint8_t*s,size_t n){ return measure_huf0(s,n); }
 static result_t e_huf0_stk(const uint8_t*s,size_t n){ return measure_huf0_stk(s,n); }
