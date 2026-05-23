@@ -1289,13 +1289,72 @@ function renderTree(rootNode, meta) {
 
     gWorld.selectAll('*').remove();
 
-    // Links (rendered as straight diagonals).
-    const linkGen = d3.linkVertical().x(d => d.x).y(d => d.y);
+    // Links (straight node-to-node segments, so the flow arrowheads
+    // below land exactly on the line).
+    const linkGen = d => `M${d.source.x},${d.source.y}L${d.target.x},${d.target.y}`;
     gWorld.selectAll('path.link')
         .data(root.links())
         .enter().append('path')
             .attr('class', 'link')
             .attr('d', linkGen);
+
+    // Flow arrows: a small arrowhead at each edge midpoint, pointing the
+    // way the chosen decode mode flows -- top-down = parent->child (down),
+    // bottom-up = child->parent (up).
+    const flowTD = meta.mode !== 'bottom-up';
+    // Skip arrows whose destination node sits inside a box -- flat (D>=2,
+    // inFlat/flatD) OR pair (D=1, an internal whose two children are both
+    // leaves) -- so no arrowtip lands inside a colored rectangle.
+    const boxesOn = (meta.showFlat || meta.fuseLeaves);
+    const isPairRoot = nd => {
+        const d = nd.data;
+        if (d.symbol >= 0) return false;
+        if (meta.showFlat && (d.flatD || d.inFlat)) return false;
+        if (!d.left || !d.right) return false;
+        return d.left.symbol >= 0 && d.right.symbol >= 0;
+    };
+    const inBox = nd =>
+        (meta.showFlat && (nd.data.flatD || nd.data.inFlat)) ||
+        isPairRoot(nd) || (nd.parent && isPairRoot(nd.parent));
+    // Keep the edge that *enters* a box (its arrow points at the S2/SFx
+    // box-root); drop only edges internal to a box -- i.e. those whose
+    // parent-side node is itself in the box.  (d.source is always the
+    // parent in a d3 link, regardless of flow direction.)
+    const flowLinks = root.links().filter(d => {
+        if (!boxesOn) return true;
+        return !inBox(d.source);
+    });
+    gWorld.selectAll('path.flow-arrow')
+        .data(flowLinks)
+        .enter().append('path')
+            .attr('class', 'flow-arrow')
+            .attr('d', 'M-4.5,-3.2 L0,0 L-4.5,3.2 Z')   // triangle, tip at origin (+x)
+            .attr('fill', '#888')
+            .attr('pointer-events', 'none')
+            .attr('transform', d => {
+                // Arrowtip at the destination node (child for top-down,
+                // parent for bottom-up), pulled back by that node's actual
+                // half-extent + a small gap so the tip rests on its edge
+                // rather than inside its glyph.
+                const dest = flowTD ? d.target : d.source;
+                const src  = flowTD ? d.source : d.target;
+                const dx = dest.x - src.x, dy = dest.y - src.y;
+                const L = Math.hypot(dx, dy) || 1;
+                let half;
+                if (dest.data.symbol >= 0)      // leaf
+                    half = meta.showLeafDetails ? 10 : 4.5;
+                else                            // internal node (r 4-6)
+                    half = 6.5;
+                const back = half + 2;
+                const px = dest.x - dx / L * back;
+                const py = dest.y - dy / L * back;
+                const a = Math.atan2(dy, dx) * 180 / Math.PI;  // point at dest
+                return `translate(${px},${py}) rotate(${a})`;
+            });
+    // Nodes/boxes are appended later in this render, so raise the arrows
+    // to the top once the synchronous render finishes -- otherwise the
+    // node circles paint over the arrowtips.
+    setTimeout(() => gWorld.selectAll('path.flow-arrow').raise(), 0);
 
     // Optional 0/1 labels on each branch (off by default).  Decide
     // bit from target's bitPrefix last char (cheaper than re-walking).
