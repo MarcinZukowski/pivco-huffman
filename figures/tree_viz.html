@@ -1683,6 +1683,30 @@ function renderTree(rootNode, meta) {
         .attr('y1', BAR_Y - 1).attr('y2', BAR_Y + BAR_H + 1)
         .attr('stroke', '#000').attr('stroke-width', 1.4)
         .attr('pointer-events', 'none');
+    // Numeric labels to the RIGHT of the bar: left/right split % (top)
+    // and this subtree's share of all source tuples (bottom).  e.g.
+    // proba80 root -> "80/20" over "100%".
+    const LBL_X = BAR_W / 2 + 3;
+    intG.append('text')
+        .attr('x', LBL_X).attr('y', BAR_Y + 3)
+        .attr('text-anchor', 'start')
+        .attr('font-family', 'monospace').attr('font-size', '7px')
+        .attr('fill', '#333').attr('pointer-events', 'none')
+        .text(d => {
+            const L = Math.round(d.data.pLeft * 100);
+            return `${L}/${100 - L}`;
+        });
+    intG.append('text')
+        .attr('x', LBL_X).attr('y', BAR_Y + BAR_H + 4)
+        .attr('text-anchor', 'start')
+        .attr('font-family', 'monospace').attr('font-size', '7px')
+        .attr('fill', '#888').attr('pointer-events', 'none')
+        .text(d => {
+            const share = totalN > 0 ? 100 * d.data.subtreeCount / totalN : 0;
+            const txt = share >= 10 ? Math.round(share)
+                                    : Math.round(share * 10) / 10;
+            return `${txt}%`;
+        });
     }  // end if (meta.showSkew)
 
     // Leaves: full box (char + hex byte) when meta.showLeafDetails,
