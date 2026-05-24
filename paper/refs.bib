@@ -245,9 +245,18 @@
   volume    = {47},
   pages     = {15--32},
   year      = {2015},
-  note      = {Alternative layout that avoids pointer overhead at
-              large σ.  Not what ph uses (binary alphabet σ=2 at
-              every node) but listed in prior art for completeness.}
+  note      = {Wavelet *matrix*: levelwise node-reorder layout that
+              avoids pointer overhead at large σ -- not what ph uses
+              (per-node tree bitmaps, binary σ=2 at every node).  Also
+              a key prior-art source for the Huffman-shaped framing:
+              builds Huffman-shaped wavelet trees AND matrices for
+              zero-order (H0) compression with canonical Huffman codes.
+              But its "decode" is the canonical access(S,i) query --
+              top-down, per-symbol, root->leaf, O(lg σ) rank ops
+              (Alg. 1) -- the opposite direction and granularity from
+              ph's bulk, bottom-up, SIMD block decode.  Supports
+              access/rank/select queries in compressed space; never
+              does bulk decode-as-codec (ph's regime).}
 }
 
 @inproceedings{kaneta2018wt,
@@ -279,6 +288,51 @@
               number for this representation.  Notes
               construction only, never measures decode (ph's
               regime).
+              % [USED FOR: docs/WAVELET_TREES.md]}
+}
+
+@article{rrr2007,
+  author    = {Raman, Rajeev and Raman, Venkatesh and Satti, Srinivasa Rao},
+  title     = {Succinct Indexable Dictionaries with Applications to
+              Encoding k-ary Trees, Prefix Sums and Multisets},
+  journal   = {ACM Transactions on Algorithms},
+  volume    = {3},
+  number    = {4},
+  pages     = {Article 43},
+  year      = {2007},
+  url       = {https://arxiv.org/abs/0705.0552},
+  note      = {The "RRR" compressed bitvector: O(1) rank/select in
+              B(n,m)+o(n) bits.  The compressed-AND-queryable bitmap layer
+              wavelet-tree INDEXES (e.g. claude2015matrix) plug in for
+              zero-order compression while retaining rank/select.  ph needs
+              none of it: pha compresses the same partition bitmaps to ~H0
+              with FSE/tANS but reads each bitmap once in bulk (no rank/
+              select queries), dropping RRR's o(n) index + random-access
+              machinery in favour of a stronger, bulk-only entropy coder.}
+}
+
+@article{dinklage2021jea,
+  author    = {Dinklage, Patrick and Ellert, Jonas and Fischer, Johannes and
+              Kurpicz, Florian and L\"{o}bel, Marvin},
+  title     = {Practical Wavelet Tree Construction},
+  journal   = {ACM Journal of Experimental Algorithmics ({JEA})},
+  volume    = {26},
+  number    = {1},
+  pages     = {Article 1.8, 67 pp.},
+  year      = {2021},
+  doi       = {10.1145/3457197},
+  url       = {https://kurpicz.org/assets/publications/jea_2021.pdf},
+  note      = {Journal consolidation of the Dinklage/Kurpicz wavelet-tree
+              construction line (same group as dinklage2023wt).  Introduces a
+              "bottom-up" CONSTRUCTION technique: derive every level's
+              histogram + interval positions from the leaf (full-character)
+              histogram by aggregating bit-prefix pairs, avoiding per-level
+              text scans.  NB: their "bottom-up" is the inverse of ph's --
+              theirs builds the bit vectors from text for rank/select
+              indexing; ph's bottom-up DECODES the block by merging child
+              streams up to the root.  Sequential + shared/distributed/
+              external-memory parallel, plus a Huffman-shaped variant (S9).
+              Construction only; never measures decode (ph's regime).
               % [USED FOR: docs/WAVELET_TREES.md]}
 }
 
