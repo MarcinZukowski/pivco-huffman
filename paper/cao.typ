@@ -1,4 +1,4 @@
-#import "conf.typ": htmlonly, PH, he, mf
+#import "conf.typ": _html, _pdf, _fmt, htmlonly, setup, PH, he, sym, PHA, todo
 
 = Challenges and opportunities
 
@@ -45,7 +45,7 @@ Presented primives map pretty well to GPU.
 A naive reimplementation of `partition` primitive
 for GPU on M4 resulted in ~40 GB/s throughput.
 
-XXX
+#todo[A simple experiment]
 
 == Better sub-bit strategies
 

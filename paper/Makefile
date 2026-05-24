@@ -16,12 +16,13 @@
 TYPST  ?= typst
 SRC    := ph.typ
 INCS   := conf.typ \
-	intro.typ \
-	sideways.typ \
-	updown.typ \
-	enc.typ \
 	ans.typ \
+	appendix.typ \
+	bottom-up.typ \
+	enc.typ \
+	intro.typ \
 	related.typ
+	sideways.typ \
 STYLE  := style.css
 OUT    := out
 PDF    := $(OUT)/ph.pdf

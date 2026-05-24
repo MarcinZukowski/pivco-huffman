@@ -37,7 +37,7 @@ Oh well, maybe one day reviewers will have a sense of humor...
 
 #include "intro.typ"
 #include "sideways.typ"
-#include "updown.typ"
+#include "bottom-up.typ"
 #include "enc.typ"
 #include "ans.typ"
 #include "cao.typ"
@@ -60,12 +60,11 @@ While interesting and possibly promising, PivCo-Huffman still has some problems 
 
 == AI disclosure
 
-Anthropic Claude was used extensively
-during development of this project, in areas
+Anthropic Claude was used extensively during development of this project, especially in areas
 like coding, testing, automation and research.
-It also contributed many small ideas and improvements,
-especially around SIMD code.
+It also contributed many small ideas and improvements, especially around SIMD code.
 At the same time, Author declares that the vast majority of the key ideas and concepts here are human-invented.
+This paper is purely human-written (except for spellcheck etc.).
 
 == Acknowledgments
 
@@ -73,21 +72,4 @@ Author would like to thank Fabian Giesen for his help with Oodle.
 
 #bibliography("refs.bib")
 
-
-#heading(numbering:none, level: 1)[Appendices]
-
-#let appendix(body) = {
-  set heading(numbering: "A", supplement: [Appendix])
-  counter(heading).update(0)
-  body
-}
-#set heading(numbering: "1")
-
-#show: appendix
-
-// #outline(target: heading.where(supplement: [Appendix]), title: [Appendix])
-
-= Datasets
-= Machines Tested
-= Failed top-down optimizations
-
+#include "appendix.typ"

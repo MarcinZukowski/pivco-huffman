@@ -1,6 +1,6 @@
 #import "conf.typ": htmlonly, PH, he, mf, sym, pick-cols, todo
 
-= Pivoting Huffman
+= Pivoting Huffman <sideways>
 
 Following the example from @hj, it should be possible to create a
 Huffman decoder using similar principles.
@@ -9,7 +9,7 @@ bits from the stream, a different data layout is needed.
 
 #he("myfig")[
   #table(
-    columns: (55%, 45%),
+    columns: (50%, 50%),
     stroke: 0pt,
     align: center,
     [#figure(
@@ -29,6 +29,7 @@ bits from the stream, a different data layout is needed.
       caption: [
       Example of a Huffman tree with "pivoted" data traversing
       it, reusing the previous example.
+      Each node produces a list of indices for its symbols.
       ]
     )<fig-pivot-tree>
     ],
@@ -46,7 +47,7 @@ Each node receives all the bits of the codes that pass through it, and navigates
 these codes to its children, where another bitmap is used for the next step.
 
 While logically this representation contains the same information, since bitmaps
-are typically stored byte-aligned, it might result in a marginally worse compression
+are typically stored byte-aligned, it might result in a _marginally worse_ compression
 ratio due to byte-rounding.
 However, for non-trivial datasets this overhead is acceptable if this approach provides other benefits.
 
@@ -67,10 +68,15 @@ it's really quite different.
 So here we go. I will still call it #PH. Sue me :)
 ]
 
-== Naive implementation
+== Naive implementation <naive>
 
 With a defined Huffman tree, and data stored in per-node bitmaps, we can traverse
-the tree top-down, and apply two operations:
+the tree top-down.
+Note, as we do it, we need to know which output elements we are decoding.
+For that, we also carry an `indices` list (the root node does not need it).
+In our implementation we use 16-bit values for indices, as we decode data in small
+blocks (e.g. 8KB).
+With that, #PH tree traversal boils down to applying two operations:
 
 *`partition(bitmap, indices) => (indices_left, indices_right)`* -- applied for
 all internal nodes.
@@ -80,24 +86,24 @@ Note, a special `partition_root` version can be used in the root node,
 as its list of indices is  the complete input.
 
 The `partition` primitive can be expressed naively with:
-```js
-for (i: 0..len(indices)):
-  bit = bitmap[i];
-  if bit:
-    indices_right.append(indices[i])
-  else:
-    indices_left.append(indices[i])
+```c
+for (i = 0; i < n; i++) {
+  bit = get_bit(bitmap, i);
+  if (bit) indices_right[n_right++] = indices[i];
+  else     indices_left[n_left++] = indices[i];
+}
 ```
 
 *`scatter(output, indices, symbol)`* -- fills all positions in the output stream
 with a given symbol.
 
-```js
-for (i: 0..len(indices)):
-  output[indices[i]] = symbol
+```c
+for (i =0 ; i < n; i++) {
+  output[indices[i]] = symbol;
+}
 ```
 
-We measured the decoding performance of such an implementation on Apple M4 CPU,
+We measured the decoding performance of such a naive implementation on Apple M4 CPU,
 and, as expected, the performance is very sub-par.
 
 #let rows = csv("data/td-naive-vs-opt.hosts-x-decoders.csv")
@@ -118,13 +124,13 @@ and, as expected, the performance is very sub-par.
 
 There are two main reasons for this:
 
-- for each decoded symbol, we perform multiple operations: `len(symbol)` times
-  `partition` nodes + 1 `scatter`
+- for each decoded symbol, we perform multiple operations: we run `partition` for each bit in the code,
+  followed by the final `scatter` for each leaf (`len(code)+1` operations in total).
 - the decoding partitions as written are not efficient
 
 In the following two sections we will discuss how to address both problems.
 
-== Tree Optimizations
+== Tree Optimizations <ph-opt>
 
 A naive Huffman tree discussed before suffers from a large number
 of operations per byte.
@@ -152,12 +158,14 @@ to the actual compute primitives.
       table(
         columns: 2,
         align: (center, left),
+        table.header([*Code*], [*Explanation*]),
         [`P`],  [`partition` - split indices into left/right based on bitmap],
         [`PR`], [`partition_root` - like `partition` but for the root node],
+        [`PH`], [`partition_half` - like `partition`, but produces only one output],
+        [`C`], [_not a primitive_ - marks the "constant", top-frequency key],
         [`S1`], [`scatter` - scatters a single symbol into output],
         [`S2`], [`scatter_two` - scatters two symbols into output],
-        [`PH`], [`partition_half` - like `partition`, but produces only one output],
-        [`C`], [_not a primitive_ - marks the "constant", top-frequency key]
+        [`SFD`], [`scatter_flat_D` - scatters 2^D symbols into output],
       ),
     caption: [Primitive symbols used in figures in this Section]
     )<treeopt-symbols>
@@ -172,17 +180,18 @@ all input indices with the symbol based on the bitmap.
 
 This results in a *`scatter_two(output, indices, bitmap, symbol0, symbol1)`* primitive:
 
-```js
-for (i: 0..len(indices)):
-  output[indices[i]] = bitmap[i] ? symbol1 : symbol0
+```c
+for (i = 0; i < n; i++) {
+  output[indices[i]] = get_bit(bitmap, i) ? symbol1 : symbol0;
+}
 ```
 
 @treeopt-fuse shows the benefit in reduced operations per node.
 
-=== Top symbol optimization
+=== Frequent symbol optimization
 
 One of the problems of our decoding primitives is writing into non-contiguous
-positions in the output, presenting challenges for modern CPUs and memory subsystems.
+positions in the output, presenting challenges for modern CPUs and memory subsystems (see @scatter).
 
 We can mitigate it by avoiding this completely for the _most frequent symbol_,
 by simply prefilling the entire output with `memset` before decoding.
@@ -215,20 +224,21 @@ similar to `partition`, but only producing one of the output index lists.
 
 Huffman trees often contain subtrees where all the symbols
 share the same length.
-In our example, 4 right-most (`-ntu`) nodes form such a subtree.
+In our example, 4 right-most #sym("- n t u") nodes form such a subtree.
 
 We can decode such a subtree with a single operation
-*`scatter_flat_-D(output, indices, bitmap, symbols)`*, where `D` represents
+*`scatter_flat_D(output, indices, bitmap, symbols)`*, where `D` represents
 the depth of the subtree.
 
-Note that for this, the input `bitmap` is not _binary_, but _D-ary_, with
+Note that for this, the input `bitmap` is not _binary_, but _(2^D)-ary_, with
 bits packed contiguously.
-Also, note that `scatter-two` is a special case of this approach, with _D=1_.
+Also, note that `scatter_two` is a special case of this approach, with _D=1_.
 
-```js
-code_indices = bit_unpack(bitmap, D);
-for (i: 0..len(indices)):
-  output[indices[i]] = symbols[code_indices[i]]
+```c
+bit_unpack(bitmap, D, code_indices);
+for (i =0; i < n; i++) {
+  output[indices[i]] = code_to_symbols[code_indices[i]];
+}
 ```
 
 #table(
@@ -253,10 +263,8 @@ for (i: 0..len(indices)):
 Looking at @treeopt-flat, we can see that while the #sym("- n t u") symbols
 benefit from the "flat subtrees" strategy,  we also have #sym("c o p y") symbols,
 which share the same code lengths, but are not decoded together.
-This is because canonical Huffman construction produces a tree of this particular
-shape.
 
-We can reorganize the Huffman tree to make it more amenable to the "flat subtree"
+We can reorganize the canonical Huffman tree to make it more amenable to the "flat subtree"
 optimization by making sure that codes with the same length are grouped as much as
 possible.
 To achieve that, after building an initial Huffman tree, we sort the codes
@@ -266,7 +274,7 @@ into a single node with a combined frequency.
 We repeat the process, with one length-group possibly creating multiple such nodes (of different depth).
 
 The result is a new, (usually) non-canonical Huffman tree, with the exact same average
-code widths, but a different shape.
+code lengths, but a different shape.
 @treeopt-opt shows how applying this strategy allows the #sym("c o p y") nodes to be processed
 together, further reducing ops/byte.
 
@@ -328,26 +336,16 @@ In this Section we'll discuss how some of them are implemented using SIMD instru
 `partition` is the most important operation during #PH tree traversal,
 as each code goes through it multiple
 times before ending up in one of the versions of `scatter`.
-The most naive implementation of `partition` could look like this:
 
+A naive implementation of this primitive was presented in @naive.
+The critical performance aspect there is this fragment:
 ```c
-// Returns the number of bits set in bmap / produced right indices
-int partition(const uint16_t *indices, int n,
-              const uint8_t *bmap,
-              uint16_t *left, uint16_t *right)
-{
-    int li = 0, ri = 0;
-    for (int k = 0; k < n; k++) {
-        int b = (bmap[k >> 3] >> (k & 7)) & 1;  // very slow
-        if (b) right[ri++] = indices[k];        // super branchy
-        else   left [li++] = indices[k];
-    }
-    return ri;
+  if (bit) indices_right[n_right++] = indices[i];
+  else     indices_left[n_left++] = indices[i];
 }
 ```
-
-The main performance problem here is the `if` condition.
-It depends on an extracted bit value, and may be hard to predict for the branch predictor.
+This statement depends on the extracted bit value,
+and may be hard to predict for the branch predictor.
 If the distribution is skewed (like `proba80`), it makes the branch easier to guess.
 For more uniform data, the branch predictor can not guess properly,
 as we can see in @prim-td-naive for `prose_pride`.
@@ -357,20 +355,21 @@ One way to alleviate this is to replace branching with an unconditional assignme
 inside the smaller `partition_half_right` primitive:
 
 ```c
-        // ... same setup
-        right[ri] = indices[k];
-        ri += b;
+    // ... same setup
+    right[n_right] = indices[i];
+    n_right += b;
 ```
 
-We see that this primitive doesn't suffer from the branch misprediction on `prose_pride` as much.
+In @prim-td-naive we see that this primitive doesn't suffer from the branch misprediction on `prose_pride` as much
+as `primitive`.
 
-Still, partitioning performance can be further improved with SIMD. For example, here's an ARM NEON
+Partitioning performance can be further improved with SIMD. For example, here's an ARM NEON
 implementation (just an 8-value kernel with a given 8-bit `mask` from the bitmap).
 
 ```c
     uint8x16_t data = vld1q_u8((const uint8_t *)indices);
 
-    /* Load both shuffle patterns with one ldp (32 bytes, contiguous) */
+    /* Load shuffle patterns for right/left side - they are stored together */
     const uint8_t *tab = compress_tab[mask];
     uint8x16_t shuf_r = vld1q_u8(tab);       /* bytes 0-15: right */
     uint8x16_t shuf_l = vld1q_u8(tab + 16);  /* bytes 16-31: left */
@@ -392,7 +391,7 @@ How it works:
     (for left and right) 16-byte arrays
     determining which bytes from the input should be written to a given output
 - `vqtbl1q_8` operation creates _condensed_ subsets of input for left/right.
-  Note, these vectors might have zeros in their tail, as on average they are only
+  Note, these vectors might have zeros in their tail, as on average they are
   half-full.
 - result vectors are always written as 16 bytes - while it might sound wasteful,
   it is simpler and faster.
@@ -405,13 +404,13 @@ For example, on AVX-512 one can decode even 32 16-bit index values in a few step
 The results in @prim-td-opt show how the performance of `partition` primitive
 improved by a factor of *6x* on *m4* and *25-70x* (!) on *c8i*.
 
-=== `scatter` primitives
+=== `scatter` primitives <scatter>
 
 The other big part of tree traversal are `scatter` primitives. They come in a few forms:
 
 - `S1` - scatter_one - puts a constant symbol at all input indices
 - `S2` - scatter_two - puts one of two symbols based on the bitmap
-- `SFx` - scatter_flat_x - puts one of the 2^x symbols in the indices based on a packed x-bit bitmap.
+- `SFD` - scatter_flat_D - puts one of the 2^D symbols in the indices based on a packed x-bit bitmap.
 
 Each of these primitives can be decomposed into two stages:
 
@@ -444,12 +443,12 @@ arithmetic and a precomputed delta between `symbol0` and `symbol1`.
   output[indices[i+7])] = vget_lane_u8(vals, 7);
 ```
 
-For `scatter_flat_x` we get an x-bit packed bitmap.
+For `scatter_flat_D` we get an D-bit packed bitmap.
 The first step is to unpack it, using an optimized unpacking kernel.
 #footnote[The performance of the used unpacking code is decent, but not as optimized as e.g. @fastlanes].
 Then each unpacked value can be used to lookup an actual symbol to write from a table.
 For up to 64 elements, on ARM this can be done with `vtqbl*` instructions.
-For example, here's an implementation for D=5
+For example, here's an implementation for D=5:
 
 ```c
   // Performed once.
@@ -473,7 +472,8 @@ The second problem is the actual writing of the symbols. It boils down to the fo
 ```
 
 Note that with indices being ordered, but not contiguous, this results in a lot of
-individual writes. All 3 versions of `scatter` use this approach.
+individual writes.
+All 3 versions of `scatter` use this approach.
 This tends to saturate the CPUs load/store units, and limits further performance improvements.
 The author does not know of an efficient solution to this on either x86 or ARM architectures.
 Only AVX-512 provides _scatter_ instructions, but they do not seem applicable here,
@@ -499,9 +499,14 @@ as they only work with 32- and 64-bit values.
 @prim-td-opt demonstrates the memory writes problem.
 You can see even the seemingly trivial `simd_s1_scatter` taking 2-5x more time per element
 than `simd_partition`.
+We also see that SIMD optimizations only improved scatter perfromance by up to factor 2x
+comparing to @prim-td-naive.
+
 Note that per-dataset numbers vary due to different cardinalities.
 In particular, `proba80` has very few elements reaching `simd_s2_scatter_both`, causing a high
 per/element cost.
+
+#todo[weird c8i scatter numbers, slower than naive]
 
 #todo[perhaps a pure primitive benchmark would be better]
 

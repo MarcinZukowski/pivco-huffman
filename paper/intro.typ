@@ -1,4 +1,4 @@
-#import "conf.typ": htmlonly, PH
+#import "conf.typ": htmlonly, PH, he, mf, sym, pick-cols, todo
 
 = Introduction
 
@@ -13,13 +13,34 @@ In this paper we use the term "Huffman" for all versions of it.
 
 == Classical Huffman tree
 
-== Current Huffman SotA
+== Current Huffman SotA <sota>
 
 Most modern Huffman implementations
 huf0, Oodle
 
-Mostly the same idea - predefined table, multi-stream or interleaved-stream for exposing more
-work for modern CPUs.
+Most modern Huffman decoding implementation use a _decoding table_ idea, allowing decoding
+an entire code without traversing bit.
+The size of supported code lengths is typically consrained, e.g. to L=11 bits.
+Then a table of 2^L is created, allowing the following code:
+```c
+  code = peek_bits(L);
+  emit_symbol(decoding_table[code].symbol);
+  skip_bits(decoding_table[code].numBits);
+```
+
+This or similar code is used in fast Huffman decompressors like Huff0 (@fse).
+Two typicall approaches of accelerating it is using multiple cursors (@giesen2014interleaved, @giesen2023oodle)
+or using a table that decodes 2 symbols instead of one.
+
+We measured various Huffman decoding implementations, and the top performing we found
+were huff0 (default from @fse), huff0x2 (2 streams, 2 codes) and Oodle's Huffman decoder (@giesen2021oodle).
+
+Here are decoding bandwidths on two example datasets:
+
+#todo[Decode benchmark]
+
+This is a respectable performance.
+Still, in this paper we investigate if it could be improved by using a completely different approach.
 
 == Motivating Example: Hash Join in Databases <hj>
 

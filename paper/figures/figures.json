@@ -21,6 +21,7 @@
       "tool": "tree_viz",
       "params": {
         "text":         "coconut-papaya",
+        "mode":         "top-down",
         "ph-opt":       0,
         "show-flat":    0,
         "constant":     0,
@@ -35,6 +36,7 @@
       "tool": "tree_viz",
       "params": {
         "text":         "coconut-papaya",
+        "mode":         "top-down",
         "ph-opt":       0,
         "show-flat":    0,
         "constant":     0,
@@ -49,6 +51,7 @@
       "tool": "tree_viz",
       "params": {
         "text":         "coconut-papaya",
+        "mode":         "top-down",
         "ph-opt":       0,
         "show-flat":    0,
         "constant":     1,
@@ -63,6 +66,7 @@
       "tool": "tree_viz",
       "params": {
         "text":         "coconut-papaya",
+        "mode":         "top-down",
         "ph-opt":       0,
         "show-flat":    1,
         "primitives":   1,
@@ -75,11 +79,25 @@
       "tool": "tree_viz",
       "params": {
         "text":         "coconut-papaya",
+        "mode":         "top-down",
         "ph-opt":       1,
         "show-flat":    1,
         "primitives":   1,
         "title":        "coconut-papaya — optimized subtrees",
         "labels":       "ops/byte"
+      }
+    },
+    {
+      "name": "bu-ops",
+      "tool": "tree_viz",
+      "params": {
+        "text":         "coconut-papaya",
+        "ph-opt":       0,
+        "show-flat":    1,
+        "primitives":   1,
+        "title":        "coconut-papaya — bottom up",
+        "labels":       "ops/byte",
+        "mode":         "bottom-up"
       }
     },
     {
@@ -102,7 +120,45 @@
         "fuse-leaves": 0,
         "constant": 0,
         "leaf-details": 1,
-        "show-bitmaps": 1
+        "show-bitmaps": 1,
+        "bmlabel": "indices"
+      }
+    },
+    {
+      "name": "skew-dna-fasta",
+      "tool": "tree_viz",
+      "params": {
+        "dataset": "dna_fasta",
+        "mode": "bottom-up",
+        "ph-opt": 1,
+        "show-flat": 0,
+        "fuse-leaves": 1,
+        "constant": 1,
+        "leaf-details": 1,
+        "show-bitmaps": 0,
+        "show-skew": 1,
+        "mode": "bottom-up",
+        "no-overlap": 0,
+        "crop-top": 0.35
+      }
+    },
+    {
+      "name": "skew-calgary",
+      "tool": "tree_viz",
+      "params": {
+        "dataset": "calgary_pic",
+        "mode": "bottom-up",
+        "ph-opt": 1,
+        "show-flat": 0,
+        "fuse-leaves": 1,
+        "constant": 1,
+        "leaf-details": 1,
+        "show-bitmaps": 0,
+        "show-skew": 1,
+        "mode": "bottom-up",
+        "no-overlap": 0,
+        "crop-top": 0.35,
+        "fold-subtrees": 1
       }
     }
   ]

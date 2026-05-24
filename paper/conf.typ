@@ -33,7 +33,13 @@
   }
 }
 
-#let todo(body) = text(red)[*TODO: #body*]
+#let todo(body) = {
+  if _html {
+    html.elem("div", attrs: (class: "todo"))[TODO: #body]
+  } else {
+    text(fill: red)[*TODO: #body*]
+  }
+}
 
 #let setup(body) = {
   show title: set text(size: 17pt)
@@ -56,6 +62,7 @@
 }
 
 #let PH="PivCo-Huffman"
+#let PHA="PivCo-Huffman+ANS"
 #let URLBASE="githubpages/blalba/paper"
 
 // HTML element with a provided class name

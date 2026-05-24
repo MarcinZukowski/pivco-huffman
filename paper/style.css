@@ -169,6 +169,18 @@ pre code {
       border-left: 5px solid black;     /* optional accent — looks nice */
 }
 
+.todo {
+      background: yellow;
+      color: red;
+      font-weight: bold;
+      padding: 0.6em 1em;
+      border-radius: 5px;
+      margin: 0.8em 0;
+      border-left: 5px solid black;     /* optional accent — looks nice */
+}
+
+
+
 /* --- Floating top-right tools panel (from web-code.js) --- */
 body.hide-author .htmlonly { display: none; }
 body.hide-toc    #toc-panel { display: none; }
