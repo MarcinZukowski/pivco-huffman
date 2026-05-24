@@ -431,11 +431,39 @@ fail:
 }
 
 /* ===================== tuned FSE: x8y1 wide-cursor ===================== */
+/* Is an FSE table fast-mode-safe?  decode_x8_y1 uses FSE_decodeSymbolFast,
+ * which is UB on a zero-bit read -- a DTable entry gets nbBits==0 exactly
+ * when a symbol's normalized count >= tableSize/2 (the same condition
+ * FSE_buildDTable uses to clear its own fastMode flag).  Mirror it
+ * precisely (>=, not >): e.g. `geometric`'s top symbol lands at exactly
+ * 2^(tableLog-1) and would slip past a `>` check, then segfault. */
+static int fse_norm_fast_safe(const short *norm, unsigned maxSym, unsigned tlog) {
+    int lim = 1 << (tlog - 1);
+    for (unsigned i = 0; i <= maxSym; i++) if (norm[i] >= lim) return 0;
+    return 1;
+}
+
+/* Encode/decode one chunk: wide x8y1 when the table is fast-safe, else
+ * fall back to stock FSE (which handles zero-bit symbols correctly).
+ * enc returns 0 on error/incompressible so callers can bail. */
+static size_t enc_chunk(int safe, const uint8_t *src, size_t sz,
+                        uint8_t *dst, size_t cap, const FSE_CTable *ct) {
+    if (safe) return encode_x(8, src, sz, dst, cap, ct);
+    size_t r = FSE_compress_usingCTable(dst, cap, src, sz, ct);
+    return (FSE_isError(r) || r < 2) ? 0 : r;
+}
+static size_t dec_chunk(int safe, const void *src, size_t srclen,
+                        uint8_t *dst, size_t sz, const FSE_DTable *dt) {
+    return safe ? decode_x8_y1(src, srclen, dst, sz, dt)
+                : FSE_decompress_usingDTable(dst, sz, src, srclen, dt);
+}
+
 /* Same byte data + 128 KB chunking as measure_fse, but the entropy
  * stage is the x=8 cursors / y=1 unroll decoder (encode_x(8)/decode_x8_y1
  * from fse_xy_codec.h) -- the shape picked by the 2026-05-22 cross-host
- * sweep as "decent but almost always > stock".  Falls back to n/a when
- * P(max symbol) > 50% (FSE_decodeSymbolFast unsafe). */
+ * sweep as "decent but almost always > stock".  Per-table fast-safe gate:
+ * tables with a >=50% symbol (FSE_decodeSymbolFast unsafe) fall back to
+ * stock FSE for that chunk instead of n/a-ing the whole engine. */
 static result_t measure_fse_tuned(const uint8_t *sym, size_t n) {
     result_t R; memset(&R, 0, sizeof R);
     size_t nch = (n + HUF_CHUNK - 1) / HUF_CHUNK;
@@ -446,8 +474,7 @@ static result_t measure_fse_tuned(const uint8_t *sym, size_t n) {
     unsigned gtlog = FSE_optimalTableLog(MAXLOG, n, gmax);
     short gnorm[256];
     if (FSE_isError(FSE_normalizeCount(gnorm, gtlog, gcnt, n, gmax))) return R;
-    int gMaxNorm = 0; for (int i=0;i<=(int)gmax;i++) if (gnorm[i]>gMaxNorm) gMaxNorm=gnorm[i];
-    if (gMaxNorm > (1 << (gtlog - 1))) return R;  /* P>50%: tuned path unsafe */
+    int safe_pb = fse_norm_fast_safe(gnorm, gmax, gtlog);  /* prebuilt-table path */
 
     FSE_CTable *gct = malloc(FSE_CTABLE_SIZE(MAXLOG,255));
     FSE_DTable *gdt = malloc(FSE_DTABLE_SIZE(MAXLOG));
@@ -455,9 +482,10 @@ static result_t measure_fse_tuned(const uint8_t *sym, size_t n) {
     FSE_DTable *dt  = malloc(FSE_DTABLE_SIZE(MAXLOG));
     short  (*cnorm)[256] = malloc(nch * sizeof *cnorm);
     unsigned *cmax = malloc(nch*sizeof(unsigned)), *ctlog = malloc(nch*sizeof(unsigned));
+    int *safe_op = malloc(nch*sizeof(int));     /* per-chunk opaque-table fast-safe */
     uint8_t *enc = malloc(n + n/2 + 4096), *encp = malloc(n + n/2 + 4096), *dec = malloc(n);
     size_t  *off = malloc((nch+1)*sizeof(size_t)), *offp = malloc((nch+1)*sizeof(size_t));
-    if (!gct||!gdt||!ct||!dt||!cnorm||!cmax||!ctlog||!enc||!encp||!dec||!off||!offp) goto fail;
+    if (!gct||!gdt||!ct||!dt||!cnorm||!cmax||!ctlog||!safe_op||!enc||!encp||!dec||!off||!offp) goto fail;
 
     FSE_buildCTable(gct, gnorm, gmax, gtlog);
     FSE_buildDTable(gdt, gnorm, gmax, gtlog);
@@ -471,33 +499,34 @@ static result_t measure_fse_tuned(const uint8_t *sym, size_t n) {
         unsigned tl = FSE_optimalTableLog(MAXLOG, sz, cm);
         if (FSE_isError(FSE_normalizeCount(cnorm[c], tl, cc, sz, cm))) goto fail;
         cmax[c]=cm; ctlog[c]=tl;
+        safe_op[c] = fse_norm_fast_safe(cnorm[c], cm, tl);
         FSE_buildCTable(ct, cnorm[c], cm, tl);
-        size_t e = encode_x(8, sym+c*HUF_CHUNK, sz, enc+off[c], sz+1024, ct);
-        size_t ep= encode_x(8, sym+c*HUF_CHUNK, sz, encp+offp[c], sz+1024, gct);
+        size_t e = enc_chunk(safe_op[c], sym+c*HUF_CHUNK, sz, enc+off[c], sz+1024, ct);
+        size_t ep= enc_chunk(safe_pb,    sym+c*HUF_CHUNK, sz, encp+offp[c], sz+1024, gct);
         if (e==0||ep==0) goto fail;
         off[c+1]=off[c]+e; offp[c+1]=offp[c]+ep;
     }
     /* correctness */
     for (size_t c=0;c<nch;c++){ size_t sz=(c<nch-1)?HUF_CHUNK:n-c*HUF_CHUNK;
         FSE_buildDTable(dt, cnorm[c], cmax[c], ctlog[c]);
-        if (decode_x8_y1(enc+off[c], off[c+1]-off[c], dec, sz, dt)!=sz || memcmp(sym+c*HUF_CHUNK,dec,sz)){fprintf(stderr,"fse_x8y1 OP mismatch ch %zu\n",c);goto fail;}
-        if (decode_x8_y1(encp+offp[c], offp[c+1]-offp[c], dec, sz, gdt)!=sz || memcmp(sym+c*HUF_CHUNK,dec,sz)){fprintf(stderr,"fse_x8y1 PB mismatch ch %zu\n",c);goto fail;}
+        if (dec_chunk(safe_op[c], enc+off[c], off[c+1]-off[c], dec, sz, dt)!=sz || memcmp(sym+c*HUF_CHUNK,dec,sz)){fprintf(stderr,"fse_x8y1 OP mismatch ch %zu\n",c);goto fail;}
+        if (dec_chunk(safe_pb, encp+offp[c], offp[c+1]-offp[c], dec, sz, gdt)!=sz || memcmp(sym+c*HUF_CHUNK,dec,sz)){fprintf(stderr,"fse_x8y1 PB mismatch ch %zu\n",c);goto fail;}
     }
 
     double best;
     BEST_MBPS({ for (size_t c=0;c<nch;c++){ size_t sz=(c<nch-1)?HUF_CHUNK:n-c*HUF_CHUNK;
         unsigned cc[256], cm; histo_u(sym+c*HUF_CHUNK, sz, cc, &cm);
         unsigned tl=FSE_optimalTableLog(MAXLOG,sz,cm); short nm[256]; FSE_normalizeCount(nm,tl,cc,sz,cm);
-        FSE_buildCTable(ct, nm, cm, tl); encode_x(8, sym+c*HUF_CHUNK, sz, enc+off[c], sz+1024, ct); } });
+        FSE_buildCTable(ct, nm, cm, tl); enc_chunk(safe_op[c], sym+c*HUF_CHUNK, sz, enc+off[c], sz+1024, ct); } });
     R.enc_op = best;
     BEST_MBPS({ for (size_t c=0;c<nch;c++){ size_t sz=(c<nch-1)?HUF_CHUNK:n-c*HUF_CHUNK;
-        encode_x(8, sym+c*HUF_CHUNK, sz, encp+offp[c], sz+1024, gct); } });
+        enc_chunk(safe_pb, sym+c*HUF_CHUNK, sz, encp+offp[c], sz+1024, gct); } });
     R.enc_pb = best;
     BEST_MBPS({ for (size_t c=0;c<nch;c++){ size_t sz=(c<nch-1)?HUF_CHUNK:n-c*HUF_CHUNK;
-        FSE_buildDTable(dt, cnorm[c], cmax[c], ctlog[c]); decode_x8_y1(enc+off[c], off[c+1]-off[c], dec, sz, dt); } });
+        FSE_buildDTable(dt, cnorm[c], cmax[c], ctlog[c]); dec_chunk(safe_op[c], enc+off[c], off[c+1]-off[c], dec, sz, dt); } });
     R.dec_op = best;
     BEST_MBPS({ for (size_t c=0;c<nch;c++){ size_t sz=(c<nch-1)?HUF_CHUNK:n-c*HUF_CHUNK;
-        decode_x8_y1(encp+offp[c], offp[c+1]-offp[c], dec, sz, gdt); } });
+        dec_chunk(safe_pb, encp+offp[c], offp[c+1]-offp[c], dec, sz, gdt); } });
     R.dec_pb = best;
 
     R.ratio_op = (double)n / (double)(off[nch]  + gncSize * nch);  /* one NCount per chunk */
@@ -505,6 +534,7 @@ static result_t measure_fse_tuned(const uint8_t *sym, size_t n) {
     R.ok = 1;
 fail:
     free(gct); free(gdt); free(ct); free(dt); free(cnorm); free(cmax); free(ctlog);
+    free(safe_op);
     free(enc); free(encp); free(dec); free(off); free(offp);
     return R;
 }
