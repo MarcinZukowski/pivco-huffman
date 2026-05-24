@@ -234,8 +234,8 @@ table.node-table tr.in-flat { color: #b45309; }
         <label class="toggle">
             mode:
             <select id="tree-mode">
-                <option value="top-down" selected>top-down</option>
-                <option value="bottom-up">bottom-up</option>
+                <option value="top-down">top-down</option>
+                <option value="bottom-up" selected>bottom-up</option>
             </select>
         </label>
         <label class="toggle">
@@ -258,12 +258,12 @@ table.node-table tr.in-flat { color: #b45309; }
             <input type="checkbox" id="fuse-leaves" checked>
             fuse-leaves
         </label>
-        <label class="toggle" title="Within-tier ordering of leaves when building the flat-aware tree. Affects which symbols land in the deepest D-flat chunk per length tier. 'byte asc' is the textbook canonical order (no frequency-based reorder).">
+        <label class="toggle" title="Within-tier ordering of leaves when building the flat-aware tree. Affects which symbols land in the deepest D-flat chunk per length tier. 'symbol' is the textbook canonical order (sort by symbol value ascending, no frequency-based reorder).">
             keys:
             <select id="keys-sort">
-                <option value="freq_desc" selected>freq desc</option>
+                <option value="freq_desc">freq desc</option>
                 <option value="freq_asc">freq asc</option>
-                <option value="unsorted">byte asc</option>
+                <option value="symbol" selected>symbol</option>
             </select>
         </label>
         <label class="toggle" title="Max Huffman code length (length-limited)">
@@ -543,8 +543,8 @@ function assignCanonicalCodes(lens) {
  * subtrees, exploiting count_L's binary decomposition.  See
  * src/huffman_table.c "Flat-aware code assignment" comment. */
 function assignPhFlatCodes(lens, freqs, keysSort) {
-    // Per-length, gather symbols sorted per keysSort (default: freq desc).
-    // 'unsorted' falls back to symbol value asc (textbook canonical).
+    // Per-length, gather symbols sorted per keysSort (default: symbol).
+    // 'symbol' sorts by symbol value asc (textbook canonical).
     const max_len = lens.reduce((m, x) => Math.max(m, x), 0);
     const perLen = []; // perLen[L] = array of {symbol, freq}
     for (let L = 0; L <= max_len; L++) perLen[L] = [];
@@ -553,7 +553,7 @@ function assignPhFlatCodes(lens, freqs, keysSort) {
     }
     const cmp = keysSort === 'freq_asc'
         ? ((a, b) => a.freq - b.freq || a.symbol - b.symbol)
-        : keysSort === 'unsorted'
+        : keysSort === 'symbol'
         ? ((a, b) => a.symbol - b.symbol)
         : ((a, b) => b.freq - a.freq || a.symbol - b.symbol);  // freq_desc (default)
     for (let L = 1; L <= max_len; L++) {
@@ -3072,7 +3072,7 @@ const URL_PARAM_MAP = [
     /* selects + range: .value as a string */
     { kind: 'str',  param: 'keys',           id: 'keys-sort',
       desc: 'Within-tier ordering of leaves when building the flat-aware tree. Affects which symbols land in the deepest D-flat chunk per length tier.',
-      values: 'freq_desc | freq_asc | unsorted' },
+      values: 'freq_desc | freq_asc | symbol' },
     { kind: 'str',  param: 'max-len',        id: 'max-len',
       desc: 'Maximum Huffman code length (length-limited).',
       values: 'integer 1..20' },

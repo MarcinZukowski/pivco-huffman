@@ -48,8 +48,8 @@ void dist_sample(const distribution_t *dist, uint8_t *symbols, int n,
 /* ---------- Built-in distributions ---------- */
 
 /* The MAIN set is the curated dev-iteration list: nine distributions
- * that span the regimes we care about (text, JSON, image, near-uniform,
- * flat, skewed).  bench_main.c runs MAIN-only by default; pass --all
+ * that span the regimes we care about (text, JSON, image, genomic,
+ * skewed).  bench_main.c runs MAIN-only by default; pass --all
  * to include every distribution below (used for paper-grade sweeps). */
 static distribution_t distributions[] = {
     { .name = "proba80",       .is_main = 1 },
@@ -71,7 +71,7 @@ static distribution_t distributions[] = {
      * Each has 2^M equal-frequency symbols → flat Huffman with all
      * codes of length M. */
     { .name = "flat_M3" },                      /* 8   symbols, M=3 */
-    { .name = "flat_M5",       .is_main = 1 },  /* 32  symbols, M=5 */
+    { .name = "flat_M5" },                      /* 32  symbols, M=5 */
     { .name = "flat_M6" },                      /* 64  symbols, M=6 */
     { .name = "flat_M7" },                      /* 128 symbols, M=7 */
     /* Real-world byte distributions (extras/datasets/README.md). */
@@ -81,9 +81,9 @@ static distribution_t distributions[] = {
     { .name = "json_api",      .is_main = 1 },  /* GitHub API commit feed JSON */
     { .name = "source_c" },                     /* zstd_compress.c */
     { .name = "log_apache" },                   /* NASA HTTP / Logstash sample */
-    { .name = "dna_fasta" },                    /* E. coli K-12 genome FASTA */
+    { .name = "dna_fasta",     .is_main = 1 },  /* E. coli K-12 genome FASTA */
     { .name = "csv_numeric" },                  /* OWID CO2 dataset CSV */
-    { .name = "gzip_random",   .is_main = 1 },  /* gzip(cat-wiki.html) — near-uniform */
+    { .name = "gzip_random" },                  /* gzip(cat-wiki.html) — near-uniform */
     { .name = "chinese_text",  .is_main = 1 },  /* Project Gutenberg 紅樓夢 */
     { .name = "calgary_pic",   .is_main = 1 },  /* Calgary corpus 1bpp scanned page — proba80-like real dataset */
 };
