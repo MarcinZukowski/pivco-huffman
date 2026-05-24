@@ -1,9 +1,10 @@
 /* Thin wrapper around Yann Collet's FSE library for pivco-huffman's
  * per-node partition-bitmap compression path.  See docs/FSE-V0.md.
  *
- * Owns 25 pre-built CTable + DTable globals (one per quarter-power-
- * of-two frequent-bit probability), populated lazily on first use
- * from the normalized counts in pivco_fse_tables.h.
+ * Owns PIVCO_FSE_NUM_TABLES pre-built CTable + DTable globals (one per
+ * frequent-bit probability on a linear 0.50..0.99 / 0.01 schedule),
+ * populated lazily on first use from the normalized counts in
+ * pivco_fse_tables.h.
  *
  * Decoupled from the FSE library types so the FSE includes stay out
  * of the rest of the codec. */
