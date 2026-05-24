@@ -351,6 +351,11 @@ table.node-table tr.in-flat { color: #b45309; }
         <button id="download-svg" type="button">download SVG</button>
         <input type="text" id="download-filename" size="22"
                placeholder="" autocomplete="off">
+        <label class="toggle" title="Crop the exported SVG's viewBox to the top fraction of the tree height (full width kept). e.g. 0.4 exports only the top 40% (root + upper levels). Empty = whole tree.">
+            crop top:
+            <input type="text" id="crop-top" size="4"
+                   placeholder="1.0" autocomplete="off">
+        </label>
     </div>
 </header>
 
@@ -1690,7 +1695,7 @@ function renderTree(rootNode, meta) {
     intG.append('text')
         .attr('x', LBL_X).attr('y', BAR_Y + 3)
         .attr('text-anchor', 'start')
-        .attr('font-family', 'monospace').attr('font-size', '7px')
+        .attr('font-family', 'monospace').attr('font-size', '8.5px')
         .attr('fill', '#333').attr('pointer-events', 'none')
         .text(d => {
             const L = Math.round(d.data.pLeft * 100);
@@ -1699,7 +1704,7 @@ function renderTree(rootNode, meta) {
     intG.append('text')
         .attr('x', LBL_X).attr('y', BAR_Y + BAR_H + 4)
         .attr('text-anchor', 'start')
-        .attr('font-family', 'monospace').attr('font-size', '7px')
+        .attr('font-family', 'monospace').attr('font-size', '8.5px')
         .attr('fill', '#888').attr('pointer-events', 'none')
         .text(d => {
             const share = totalN > 0 ? 100 * d.data.subtreeCount / totalN : 0;
@@ -1944,6 +1949,36 @@ function renderTree(rootNode, meta) {
         }
     }
 
+    /* crop-top preview + export box.  Draw a cut line + dimmed region
+     * over the part that the export will drop, and remember the x-extent
+     * of the kept (top) nodes so the export can also narrow the width. */
+    gWorld.selectAll('.crop-overlay').remove();
+    _cropExportBox = null;
+    const cropTop = getCropTopFrac();
+    if (cropTop) {
+        const cb = gWorld.node().getBBox();
+        const cutY = cb.y + cb.height * cropTop;
+        // x-extent of nodes kept above the cut (+ margin for bars/labels).
+        let minX = Infinity, maxX = -Infinity;
+        root.descendants().forEach(n => {
+            if (n.y <= cutY) { minX = Math.min(minX, n.x); maxX = Math.max(maxX, n.x); }
+        });
+        if (minX === Infinity) { minX = cb.x; maxX = cb.x + cb.width; }
+        const xpad = 46;   // skew bar (~28) + right-side labels
+        _cropExportBox = { x: minX - xpad, y: cb.y,
+                           w: (maxX - minX) + 2 * xpad, cutY };
+        gWorld.append('rect').attr('class', 'crop-overlay')
+            .attr('x', cb.x).attr('y', cutY)
+            .attr('width', cb.width).attr('height', cb.y + cb.height - cutY)
+            .attr('fill', '#fff').attr('opacity', 0.6)
+            .attr('pointer-events', 'none');
+        gWorld.append('line').attr('class', 'crop-overlay')
+            .attr('x1', cb.x).attr('x2', cb.x + cb.width)
+            .attr('y1', cutY).attr('y2', cutY)
+            .attr('stroke', '#c0392b').attr('stroke-width', 1.2)
+            .attr('stroke-dasharray', '5 3').attr('pointer-events', 'none');
+    }
+
     // Initial fit-to-pane: recompute bbox so overlay is included.
     const bbox = gWorld.node().getBBox();
     const scale = Math.min(
@@ -1956,6 +1991,7 @@ function renderTree(rootNode, meta) {
     _fitTransform = d3.zoomIdentity.translate(tx, ty).scale(scale);
     svg.call(zoom.transform, _fitTransform);
 }
+let _cropExportBox = null;
 let _fitTransform = null;
 function resetView() {
     if (_fitTransform) svg.call(zoom.transform, _fitTransform);
@@ -2942,6 +2978,7 @@ function setupToggles() {
      * in sync when the user edits this field. */
     const fnameEl = document.getElementById('download-filename');
     fnameEl.addEventListener('input', updateUrlFromState);
+    document.getElementById('crop-top').addEventListener('input', refreshAndUrl);
     document.getElementById('download-svg').addEventListener('click', () => {
         const explicit = fnameEl.value.trim();
         const fname = explicit || fnameEl.placeholder || 'tree.svg';
@@ -3103,6 +3140,9 @@ const URL_PARAM_MAP = [
     { kind: 'str',  param: 'filename',       id: 'download-filename',
       desc: 'Output filename for the downloaded SVG. Leave empty to use the auto-generated name (shown as placeholder).',
       values: 'string, e.g. tree.svg' },
+    { kind: 'str',  param: 'crop-top',       id: 'crop-top',
+      desc: 'Crop the exported SVG viewBox to the top fraction of the tree height (full width kept) — useful to show only the root + upper levels. Empty or >=1 exports the whole tree.',
+      values: 'fraction 0-1, e.g. 0.4' },
 ];
 
 /* Documentation for non-URL-MAP controls (data source + buttons). */
@@ -3227,6 +3267,15 @@ function collectTreeSvgCss() {
     return out.join('\n');
 }
 
+/* The crop-top export fraction (top portion of the tree to keep), or
+ * null when unset / >=1 (whole tree).  Shared by the SVG export and the
+ * live fit-to-pane preview so the on-screen framing matches the export. */
+function getCropTopFrac() {
+    const el = document.getElementById('crop-top');
+    const v = el ? parseFloat(el.value) : NaN;
+    return (!isNaN(v) && v > 0 && v < 1) ? v : null;
+}
+
 function downloadCurrentSvg(filename) {
     if (!filename) filename = 'tree.svg';
     const orig = document.getElementById('tree-svg');
@@ -3237,17 +3286,31 @@ function downloadCurrentSvg(filename) {
     const clone = orig.cloneNode(true);
     const gWorldClone = clone.querySelector('g');
     if (gWorldClone) gWorldClone.removeAttribute('transform');
+    /* The crop preview (cut line + dimmed region) is a live-view aid,
+     * not part of the figure — drop it from the exported clone. */
+    clone.querySelectorAll('.crop-overlay').forEach(e => e.remove());
 
     /* Measure unzoomed content via the LIVE gWorld (the clone isn't in
      * the document so getBBox would return zeros).  Pad a little. */
     const bbox = gWorld.node().getBBox();
     const pad = 12;
-    const exportW = Math.max(1, Math.ceil(bbox.width  + 2 * pad));
-    const exportH = Math.max(1, Math.ceil(bbox.height + 2 * pad));
+
+    /* Optional top-crop: keep only the top fraction of the tree height
+     * AND narrow the width to the kept nodes' x-extent (_cropExportBox,
+     * computed in the tree render).  Content outside is clipped by the
+     * SVG viewport.  Empty / >=1 / no box = whole tree. */
+    const cropTop = getCropTopFrac();
+    const contentH = cropTop ? bbox.height * cropTop : bbox.height;
+    const cb = (cropTop && _cropExportBox) ? _cropExportBox : null;
+    const vbX = cb ? cb.x : bbox.x;
+    const vbW = cb ? cb.w : bbox.width;
+
+    const exportW = Math.max(1, Math.ceil(vbW      + 2 * pad));
+    const exportH = Math.max(1, Math.ceil(contentH + 2 * pad));
     clone.setAttribute('width',  exportW);
     clone.setAttribute('height', exportH);
     clone.setAttribute('viewBox',
-        `${bbox.x - pad} ${bbox.y - pad} ${exportW} ${exportH}`);
+        `${vbX - pad} ${bbox.y - pad} ${exportW} ${exportH}`);
 
     /* Inline the #tree-svg stylesheet so the .svg renders without the
      * page's <style> block.  Prepended via SVG <style> element. */
