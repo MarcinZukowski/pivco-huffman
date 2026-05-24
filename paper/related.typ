@@ -9,7 +9,7 @@
 @dinklage2021jea - bottom up construction
 @claude2015matrix
 
-since wavelet trees work as indices, they equip their bitmaps with RRR-style succinct rank/select dictionaries [RRR07]
+Since wavelet trees work as indices, they equip their bitmaps with RRR-style succinct rank/select dictionaries @rrr2007.
 
 
 == ?? bitmap compression

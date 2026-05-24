@@ -83,7 +83,7 @@ all internal nodes.
 Takes a list of indices (positions in the output stream), and divides it
 based on the bitmap into left and right indices for its subtrees.
 Note, a special `partition_root` version can be used in the root node,
-as its list of indices is  the complete input.
+as its list of indices is the complete input.
 
 The `partition` primitive can be expressed naively with:
 ```c
@@ -98,7 +98,7 @@ for (i = 0; i < n; i++) {
 with a given symbol.
 
 ```c
-for (i =0 ; i < n; i++) {
+for (i = 0; i < n; i++) {
   output[indices[i]] = symbol;
 }
 ```
@@ -236,7 +236,7 @@ Also, note that `scatter_two` is a special case of this approach, with _D=1_.
 
 ```c
 bit_unpack(bitmap, D, code_indices);
-for (i =0; i < n; i++) {
+for (i = 0; i < n; i++) {
   output[indices[i]] = code_to_symbols[code_indices[i]];
 }
 ```
@@ -261,7 +261,7 @@ for (i =0; i < n; i++) {
 === Non-Canonical Subtrees
 
 Looking at @treeopt-flat, we can see that while the #sym("- n t u") symbols
-benefit from the "flat subtrees" strategy,  we also have #sym("c o p y") symbols,
+benefit from the "flat subtrees" strategy, we also have #sym("c o p y") symbols,
 which share the same code lengths, but are not decoded together.
 
 We can reorganize the canonical Huffman tree to make it more amenable to the "flat subtree"
@@ -361,7 +361,7 @@ inside the smaller `partition_half_right` primitive:
 ```
 
 In @prim-td-naive we see that this primitive doesn't suffer from the branch misprediction on `prose_pride` as much
-as `primitive`.
+as `partition`.
 
 Partitioning performance can be further improved with SIMD. For example, here's an ARM NEON
 implementation (just an 8-value kernel with a given 8-bit `mask` from the bitmap).
@@ -440,14 +440,14 @@ arithmetic and a precomputed delta between `symbol0` and `symbol1`.
   // write 8 symbols
   output[indices[i+0]] = vget_lane_u8(vals, 0);
   // ...
-  output[indices[i+7])] = vget_lane_u8(vals, 7);
+  output[indices[i+7]] = vget_lane_u8(vals, 7);
 ```
 
 For `scatter_flat_D` we get an D-bit packed bitmap.
 The first step is to unpack it, using an optimized unpacking kernel.
 #footnote[The performance of the used unpacking code is decent, but not as optimized as e.g. @fastlanes].
 Then each unpacked value can be used to lookup an actual symbol to write from a table.
-For up to 64 elements, on ARM this can be done with `vtqbl*` instructions.
+For up to 64 elements, on ARM this can be done with `vqtbl*` instructions.
 For example, here's an implementation for D=5:
 
 ```c
@@ -499,7 +499,7 @@ as they only work with 32- and 64-bit values.
 @prim-td-opt demonstrates the memory writes problem.
 You can see even the seemingly trivial `simd_s1_scatter` taking 2-5x more time per element
 than `simd_partition`.
-We also see that SIMD optimizations only improved scatter perfromance by up to factor 2x
+We also see that SIMD optimizations only improved scatter performance by up to factor 2x
 comparing to @prim-td-naive.
 
 Note that per-dataset numbers vary due to different cardinalities.
@@ -518,7 +518,7 @@ this version of #PH enters the performance territory of huf0.
 We also see how with faster primitives the impact of the optimized tree shape provides
 stronger and more consistent benefits comparing to @tab-tree-opt.
 
-Notably, the performance really depends on dataset - in `proba80`, with its higher
+Notably, the performance really depends on dataset - in `proba80`, with its lower
 entropy / shorter codes, average number of operations per symbol is much smaller.
 This behaviour is unique to #PH, and allows it to decidedly beat huf0 on such
 distributions.

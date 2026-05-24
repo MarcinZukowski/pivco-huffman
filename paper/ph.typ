@@ -56,7 +56,7 @@ While interesting and possibly promising, PivCo-Huffman still has some problems 
 - due to its nature, it doesn't work well for very small datasets
 - Huffman encoding is rarely applied by itself, so integrating it with an actual compression library (like @lz4) is an interesting option
 - further improvements of compute primitives are surely possible
-- porting  #PH to GPUs and possibly FPGAs is a natural next step
+- porting #PH to GPUs and possibly FPGAs is a natural next step
 
 == AI disclosure
 

@@ -2,8 +2,8 @@
 
 = Breaking the bit-barrier <ans>
 
-Huffman encoding, while ubiquitous, has one well know, key limitation.
-The code lenghts are limited to full bits.
+Huffman encoding, while ubiquitous, has one well known, key limitation.
+The code lengths are limited to full bits.
 That means, for some distributions, it is further from entropy-optimal
 than desired.
 
@@ -12,8 +12,8 @@ it has not been popular due to its performance and patent controversies.
 Luckily, Jarek Duda proposed _ANS-based encoding_ (@dudaans),
 which solves both problems.
 It led to two main algorithms: tabled-ANS (*tANS*) and range-ANS (*rANS*).
-All these algorithms allow codes to be have average lengths close to entropy-optimal.
-We will focus on tANS
+All these algorithms allow codes to have average lengths close to entropy-optimal.
+We will focus on tANS.
 
 The typical tANS decoding is actually very similar to an optimized
 Huffman decoding routine from @sota.
@@ -58,11 +58,11 @@ caption: [Per-dataset entropy gap and peak single-node bitmap benefit (bits/byte
 )<tab-node-benefit>
 
 @tab-node-benefit shows additional analysis for datasets from @datasets. We can see that for most of them,
-Huffman encoding actually achieves almost perfect code lenght, reaching typically 97-99% of entropy.
+Huffman encoding actually achieves almost perfect code length, reaching typically 97-99% of entropy.
 As a result, for most of them, applying a more expensive compression method is probably not useful.
 Three datasets stand out:
 
-- *proba80* - artificial dataset, skewed on purpuse
+- *proba80* - artificial dataset, skewed on purpose
 - *calgary_pic* - a mostly-white bitmap
 - *dna_fasta* - DNA dataset, mostly #sym("A C G T") letters plus some extras
 
@@ -86,7 +86,7 @@ Three datasets stand out:
 
 @fig-skew-calgary-pic and @fig-skew-dna-fasta show visualization of the
 top parts of the tree for *calgary_pic* and *dna_fasta* datasets.
-For each tree node, we report left/rigth skew, and the percentage of data
+For each tree node, we report left/right skew, and the percentage of data
 covered by a given subtree.
 
 For *calgary_pic* we see how the root node has a skew of 87/13, with *H=0.554*
@@ -106,7 +106,7 @@ optimizing it is not worth it.
 
 == Pivco-Huffman+ANS implementation
 
-The analysis above suggests, that for most of datasets applying ANS-based encoding is not worth additional complexity.
+The analysis above suggests, that for most datasets applying ANS-based encoding is not worth additional complexity.
 This is consistent with what e.g. @fse does - the literal stream is only Huffman compressed, but the significantly
 skewed length/offset data is tANS-compressed.
 
@@ -126,7 +126,7 @@ A concrete implementation of which node should be FSE-selected is currently as f
 Note, that we know all the above information purely from the symbol frequencies used to construct the Huffman tree,
 we do not need to gather any additional data statistics.
 
-When we decide to compress a particular bitmap with ANS, today with use FSE (@fse).
+When we decide to compress a particular bitmap with ANS, today we use FSE (@fse).
 Note, that we compress the bitmap as _bytes_, not as bits.
 This means, that for each symbol decoded with FSE, we cover _8 symbols_.
 This, combined with applying FSE selectively, is critical to making #PHA efficient.

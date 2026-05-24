@@ -3,11 +3,11 @@
 = Going Bottom-Up
 
 The "natural" solution presented in @sideways, while achieving decent performance,
-is heavily penalized by the high number of scatterred writes.
+is heavily penalized by the high number of scattered writes.
 
 When exploring solutions to this problem, we explored
 an idea of first traversing the tree to identify index-symbol positions,
-then merging index positions back into a contiguos sequence,
+then merging index positions back into a contiguous sequence,
 and then using that for a scatter-free writing of symbols.
 That idea was dropped due to a high cost of merging added to already significant
 cost of tree traversal.
@@ -24,7 +24,7 @@ This is the idea we apply here. The process is as follows.
 
 Imagine every tree node produces the values for all output positions with symbols
 that traverse a given node - these were the indices in top-down traversal.
-For leafs, all these values are constants.
+For leaves, all these values are constants.
 For non-leaf nodes, we can construct the output using children symbols, and the same
 bitmap we used for partitioning using *bitmap-based merging*.
 This process proceeds all the way to the top, resulting in the _dense_ sequence
@@ -62,7 +62,7 @@ Note, that this tree is symmetrical to @fig-pivot-tree, with just data travellin
     [`PR`], [`M`], [`merge` for the root node is identical to other cases],
     [`PH`], [`MC`], [`merge_constant` - special `merge` variants where one input is constant],
     [`C`],  [--], [Note that in bottom-up multiple leaves can be "constant"],
-    [`S1`], [--],  [No operation needed for leafs when going bottom up],
+    [`S1`], [--],  [No operation needed for leaves when going bottom up],
     [`S2`], [`M2`],   [`merge_two` - merges two constant symbols into output],
     [`SFD`], [`MFD`], [`merge_flat_D` - merges 2^D constant symbols into output],
   ),
@@ -70,7 +70,7 @@ caption: [Primitives used in bottom-up processing and their top-down equivalents
 )<bu-symbols>
 
 @fig-bu-ops shows the example tree we used before, but this time with operations used for the bottom-up processing.
-Again, it shows a straightforward symmetrical to @treeopt-flat.
+Again, it is straightforwardly symmetrical to @treeopt-flat.
 
 Note, that the _most frequent symbol_ optimization from the top-down approach is not applicable
 when going bottom-up.
@@ -164,7 +164,7 @@ For D=7 and D=8 we currently use non-simd variants, but that could be further op
     ),
     ..rows.slice(1).flatten(),
   ),
-  caption: [Performance of bottom-up primitives(ns/code)]
+  caption: [Performance of bottom-up primitives (ns/code)]
 )<prim-bu>
 
 @prim-bu demonstrates bottom-up primitive-performance.

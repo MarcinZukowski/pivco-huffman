@@ -42,7 +42,7 @@ or perhaps inspire to try harder.
 
 For top-down decoding, before we settled on flat-subtrees, we investigated the idea of
 decoding the top D-deep part of the tree for situations where the shortest code was D-bits long.
-The intuition was that in one operation we would cover a lot of of the most frequent nodes.
+The intuition was that in one operation we would cover a lot of the most frequent nodes.
 However, such an operation would result in 2^D-way stream partitioning, which turned out
 to be simply too slow.
 
@@ -52,7 +52,7 @@ When we tried to optimize top-down decoding, we realized that `scatter` and `par
 by different CPU resources - `scatter` by writes, and `partition` by table lookups and computations.
 We tried to combine them, by having `scatter` for one decompressed block also perform a part of the
 `partition` effort for the following block.
-Alas, we couldn't achieve any significat benefits.
+Alas, we couldn't achieve any significant benefits.
 
 == Tree optimizations for FSE
 
@@ -62,15 +62,15 @@ we tried optimizing the tree to maximize the benefit of FSE.
 Two approaches have been attempted:
 
 - allowing _splitting_ of the _flat trees_ if the root node had significant skew
-- arranging a tree in a left-heavy (by frequency ) way, to force more "skewed" nodes
+- arranging a tree in a left-heavy (by frequency) way, to force more "skewed" nodes
 
-While both optimizations provided occassional benefits, the impact was so small we decided
+While both optimizations provided occasional benefits, the impact was so small we decided
 to park them, especially as both required transferring the actual frequencies (not only code lengths)
 to the decompressor.
 
 == Fusing FSE with `merge` <fuse-fse-merge>
 
-To further optimize PHA performance, we tried to fuse the FSE decoding the with the `merge` step
+To further optimize PHA performance, we tried to fuse the FSE decoding with the `merge` step
 of the bottom-up processing.
 While we achieved small improvements (a few percent), the complexity of this solution was not worth incorporating
 into the code base.
@@ -95,7 +95,7 @@ Still, the data for both states comes from a single, interleaved stream.
 We also see that the loop is explicitly _2-unrolled_ - this allows reducing the loop overhead.
 We call this particular implementation *x2y2* (x: 2 cursors, y: 2-unroll).
 
-We performed a thorough testing of equivalent implementations of FSE with *x={1,2,4}* and *y={2,4,6,8,10,12,16}* on a number of machines.
+We performed a thorough testing of equivalent implementations of FSE with *x={2,4,6,8,10,12,16}* and *y={1,2,4}* on a number of machines.
 The example results for M4 are in @tab-fse-xy-m4.
 The interesting points are in bold.
 We see how the peak performance is at *x10y4*, almost 3x the default *x2y2*.

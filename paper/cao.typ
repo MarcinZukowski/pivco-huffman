@@ -5,7 +5,7 @@
 While #PH is an interesting approach, the author does not claim
 it's a drop-in replacement to the existing solution.
 In this Section we discuss challenges it faces, but also
-furter research and improvement opportunities
+further research and improvement opportunities.
 
 == Data size
 
@@ -14,13 +14,13 @@ comparable to the dictionary size (minus the flat-subtree optimization).
 Additionally, on each level, it requires a sizable amount of data
 to achieve high performance (typically 64+ codes).
 That means, that a minimum data size at which its application
-makes sense is in range of at least kilobytes
+makes sense is in the range of at least kilobytes.
 
 == SIMD-dependency
 
 To achieve high performance, #PH requires a careful
 design of its primitives using SIMD.
-As a result, it might be challenging of impossible
+As a result, it might be challenging or impossible
 to port it to hardware platforms or programming
 languages that do not provide such capabilities.
 
@@ -28,20 +28,20 @@ languages that do not provide such capabilities.
 
 While presented primitives already provide good
 performance, optimizations are surely possible,
-especially when targetting different hardware.
+especially when targeting different hardware.
 
-For example, we prototyped a significantly
+For example, we prototyped significantly
 faster `merge-flat-D2/D3` primitives for AVX-512
-that use bit-spliced packing to achieve
-around 2x performance. But this version
+that use bit-sliced packing to achieve
+around 1.5x performance. But this version
 required a wire format change, which resulted
 in slower performance on other systems.
 Still, optimizations like that are feasible
-in specific scenarios
+in specific scenarios.
 
 == GPU porting / acceleration
 
-Presented primives map pretty well to GPU.
+Presented primitives map pretty well to GPU.
 A naive reimplementation of `partition` primitive
 for GPU on M4 resulted in ~40 GB/s throughput.
 

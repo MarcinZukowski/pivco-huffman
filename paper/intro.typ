@@ -18,9 +18,9 @@ In this paper we use the term "Huffman" for all versions of it.
 Most modern Huffman implementations
 huf0, Oodle
 
-Most modern Huffman decoding implementation use a _decoding table_ idea, allowing decoding
-an entire code without traversing bit.
-The size of supported code lengths is typically consrained, e.g. to L=11 bits.
+Most modern Huffman decoding implementations use a _decoding table_ idea, allowing decoding
+an entire code without traversing it bit by bit.
+The size of supported code lengths is typically constrained, e.g. to L=11 bits.
 Then a table of 2^L is created, allowing the following code:
 ```c
   code = peek_bits(L);
@@ -29,7 +29,7 @@ Then a table of 2^L is created, allowing the following code:
 ```
 
 This or similar code is used in fast Huffman decompressors like Huff0 (@fse).
-Two typicall approaches of accelerating it is using multiple cursors (@giesen2014interleaved, @giesen2023oodle)
+Two typical approaches to accelerating it are using multiple cursors (@giesen2014interleaved, @giesen2023oodle)
 or using a table that decodes 2 symbols instead of one.
 
 We measured various Huffman decoding implementations, and the top performing we found
