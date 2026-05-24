@@ -1,0 +1,10 @@
+name,distinct,total,entropy,avg_huff_len,min_len,max_len,max_node_benefit,source
+proba80,6,2048,0.9044,1.2505,1,5,0.2777,"Synthetic FSE benchmark: geometric, top symbol p~0.80 (very skewed)"
+english,30,12023,4.2253,4.2475,3,10,0.0061,"Synthetic: English letter relative frequencies"
+html_wiki,197,1008695,5.4759,5.6340,4,11,0.0090,"English Wikipedia ""Cat"" article, served HTML (cat-wiki.html)"
+prose_pride,96,738046,4.5295,4.6052,3,11,0.0134,"Project Gutenberg plain-text Pride and Prejudice (pride.txt)"
+image_jpeg,256,279603,7.8867,7.9173,6,10,0.0078,"Wikimedia Commons JPEG photo Cat03.jpg (near-uniform 256 bytes)"
+json_api,98,526902,5.1984,5.2398,3,11,0.0058,"GitHub API commits feed JSON (json_api.json)"
+dna_fasta,38,500000,2.0796,2.2651,2,10,0.1714,"NCBI E. coli K-12 genome FASTA, truncated ~500 KB (dna_fasta.fa)"
+chinese_text,151,500000,5.8143,5.9778,4,11,0.0071,"Project Gutenberg Hong Lou Meng, Chinese UTF-8, truncated (chinese_text.txt)"
+calgary_pic,159,513216,1.2102,1.6904,1,11,0.4460,"Calgary Corpus 1bpp CCITT scanned page, proba80-like real data (calgary_pic)"

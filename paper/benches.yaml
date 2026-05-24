@@ -251,3 +251,74 @@ benches:
             WHEN 'simd_sfx_scatter_flat'       THEN 6
             ELSE 99
           END
+
+  - name: dist-stats
+    description: |
+      Per-distribution static statistics over the MAIN test set:
+      alphabet size, byte entropy H, mean Huffman code length, code-
+      length range, and the peak single-node bitmap benefit.
+
+      max_node_benefit = max over the OPTIMIZED tree's partition-bitmap
+      internal nodes of (n_node / N) * (1 - H_binary(p_split)) -- the
+      largest single-node bits-saved-per-source-byte from entropy-coding
+      one partition bitmap.  The tree comes from pivco_huffman_build_table
+      (the library, no rebuilt logic); flat subtrees (packed bits, no
+      partition bitmap) are skipped, matching "after optimizations".
+      Same metric tree_viz shows as "Top internal nodes by bits saved".
+
+      DETERMINISTIC: a pure function of the embedded frequency tables, so
+      output does NOT vary by host/compiler -- the matrix is a single
+      cell purely to satisfy the collate machinery.  The `source`
+      (provenance) column is hardcoded in the tool.
+
+    source: extras/bench_dist_stats.c
+
+    build:
+      cmd: cmake -B build -DCMAKE_BUILD_TYPE=Release &&
+           cmake --build build --target pivco_dist_stats
+
+    run:
+      cmd: ./build/pivco_dist_stats --main --csv-out={csv}
+
+    matrix:
+      hosts:     [m4]            # deterministic -- any single host suffices
+      compilers: [clang-latest]
+
+    outputs:
+      dir: results/dist-stats/
+
+    views:
+      # Dataset overview table (paper: @tab-main-dists).
+      - name: overview
+        description: |
+          Per-dataset overview: alphabet size, entropy H, mean Huffman
+          code length, min/max code length, and curated source.
+        sql: |
+          SELECT
+            name                          AS dataset,
+            "distinct"                    AS num_symbols,
+            printf('%.3f', entropy)       AS H,
+            printf('%.3f', avg_huff_len)  AS huffman_len,
+            min_len,
+            max_len,
+            source
+          FROM 'paper/data/dist-stats.csv'
+          ORDER BY dataset
+
+      # Entropy-gap + peak single-node benefit table (paper:
+      # @tab-node-benefit).  H_over_huff = Huffman efficiency;
+      # huff_minus_h = per-symbol Huffman redundancy; max_node_benefit
+      # = largest single partition node's bits saved per source byte.
+      - name: node-benefit
+        description: |
+          Entropy gap and peak single-node bitmap benefit (bits/byte).
+        sql: |
+          SELECT
+            name                                   AS dataset,
+            printf('%.3f', entropy)                AS H,
+            printf('%.3f', avg_huff_len)           AS huffman_len,
+            printf('%.3f', entropy / avg_huff_len) AS H_over_huff,
+            printf('%.3f', avg_huff_len - entropy) AS huff_minus_h,
+            printf('%.3f', max_node_benefit)       AS max_node_benefit
+          FROM 'paper/data/dist-stats.csv'
+          ORDER BY dataset
