@@ -21,21 +21,14 @@
  *            [1024, 65535].  Decoder rejects if it can't handle this size.
  *     10-137 CODE_LENGTHS[256] packed as 4-bit nibbles, LSB first
  *            (symbol 2i in low nibble of byte i, symbol 2i+1 in high nibble)
- *     138-139 ORDERING_MASK (uint16) -- bit L set iff code-length tier L has
- *            an encoder-supplied within-tier ordering following.
- *     140... For each L with bit L set in ORDERING_MASK (in L-ascending order):
- *            sym_count[L] bytes giving the symbol IDs at length L in the
- *            encoder's real-frequency-descending order.  This restores the
- *            chunk-assignment optimization (most-frequent symbol gets the
- *            shorter decode path) that the synthetic-freq round-trip would
- *            otherwise destroy.  Bits below 3 (L < 3, so K_L < 3) are
- *            ignored -- no benefit from ordering at K_L < 3.
- *     ...    Concatenated per-block records:
+ *     138... Concatenated per-block records:
  *               4 bytes ENCODED_LEN (uint32)
  *               ENCODED_LEN bytes encoded block (pivco-Huffman stream)
  *
- *   v0.3 vs v0.2: adds the within-tier ORDERING section.  v0.2 streams
- *   are not readable by v0.3 decoders.
+ *   v0.4 vs v0.3: drops the within-tier ORDERING section.  The decode tree
+ *   is fully determined by the code lengths (within-tier order is symbol-
+ *   value), so nothing beyond the lengths is transmitted.  v0.3 streams are
+ *   not readable by v0.4 decoders.
  *
  *   The final block may have fewer than BLOCK_SIZE input symbols.  The
  *   encoder pads the input to BLOCK_SIZE with the file's first byte
@@ -54,7 +47,7 @@ extern "C" {
 
 #define PIVCOHUF_MAGIC          "PIVCOHUF"
 #define PIVCOHUF_VERSION_MAJOR  0
-#define PIVCOHUF_VERSION_MINOR  3  /* 0.3: + within-tier ordering (see IDEAS.md) */
+#define PIVCOHUF_VERSION_MINOR  4  /* 0.4: dropped within-tier ordering */
 #define PIVCOHUF_HEADER_SIZE    26
 
 typedef enum {

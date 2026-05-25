@@ -191,7 +191,7 @@ static result_t measure_ph(const uint8_t *sym, size_t n, int fse_on) {
     /* ---- decode opaque: rebuild table-from-codelens per window ---- */
     BEST_MBPS({
         for (size_t w = 0; w < nwin; w++) {
-            pivco_huffman_build_table_from_code_lens(win_clen[w], NULL, wtbl);
+            pivco_huffman_build_table_from_code_lens(win_clen[w], wtbl);
             for (size_t i = 0; i < bpw; i++) { size_t b=w*bpw+i, c=0; pivco_huffman_decode(enco + offo[b], offo[b+1]-offo[b], wtbl, dec, &c); }
         }
     });

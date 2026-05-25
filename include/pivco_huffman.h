@@ -203,27 +203,20 @@ void pivco_huffman_fse_root_get(int idx, pivco_huffman_fse_root_event_t *out);
 int pivco_huffman_build_table(const uint64_t freq[PIVCO_MAX_SYMBOLS],
                               pivco_huffman_table_t *table);
 
-/* Build a Huffman table from already-known code lengths plus an
- * optional explicit within-tier ordering.  This is the path used by
- * decoders that recovered code_lens from a wire format and want to
- * reproduce a specific encoder-supplied within-tier order (so the
- * chunk-assignment optimization in build_table -- top-frequency byte
- * in the largest chunk per tier -- survives a code-len-only
- * serialization).
+/* Build a Huffman table from already-known code lengths (the path used by
+ * decoders that recovered code_lens from a wire format).  The tree is fully
+ * determined by the lengths -- within-tier order is symbol-value ascending --
+ * so encoder and decoder reconstruct identical tables with no extra wire info.
  *
- * rank_within_tier[s] = 0-based position of symbol s within its
- * code-length tier in the encoder's intended order (lower = earlier).
- * Pass -1 for any tier whose ordering should follow the default
- * (smaller-sym-first tie-break, matching v0.2 behavior).  Pass NULL
- * to use defaults for all tiers (equivalent to build_table with
- * uniform-within-tier synth_freqs).
+ * Internally synthesises power-of-two frequencies that reproduce the lengths
+ * and runs the same build pipeline as pivco_huffman_build_table.
  *
- * Internally synthesises rank-aware frequencies and runs the same
- * build pipeline as pivco_huffman_build_table -- the caller does
- * not see the synth_freq construction. */
+ * (Through wire v0.3 this also took a rank_within_tier array to reproduce a
+ * frequency-based within-tier order; that ordering was dropped in v0.4 -- it
+ * required extra wire bytes and only masked a frequency-blind FSE commit
+ * policy.  See the reshape note in huffman_table.c.) */
 int pivco_huffman_build_table_from_code_lens(
     const uint8_t code_lens[PIVCO_MAX_SYMBOLS],
-    const int16_t *rank_within_tier,
     pivco_huffman_table_t *table);
 
 /* Fill the 2^MAX_CODE_LEN flat decode table (decode_sym/decode_len) used only

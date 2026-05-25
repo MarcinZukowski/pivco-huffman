@@ -68,55 +68,27 @@ static void flat_mark_subtrees(pivco_huffman_table_t *t,
     flat_mark_subtrees(t, n->right, pool_cursor);
 }
 
-/* ---------- Rank-aware synthetic-frequency construction ----------
+/* ---------- Synthetic-frequency reconstruction from code lengths ----------
  *
- * Given just `code_lens` (one length per symbol) and an optional
- * `rank_within_tier` (per-symbol 0-based rank, -1 for default), build
- * a synth_freq array that:
- *  - reproduces the same code lengths through pivco_huffman_build_table
- *    (because inter-tier ratios are exact powers of 2)
- *  - preserves the encoder's intended within-tier ordering as the
- *    primary sort key (instead of the default smaller-sym tiebreak)
- *
- * Formula: synth_freq[s] = (1 << (max_len - L)) * BIG + (K_L - rank).
- *   BIG = 1024: large enough that the within-tier offset (max 256)
- *               can't cross the inter-tier step (factor of 2).
- *   K_L:  count of symbols at code length L.
- *   rank: 0 = top, K_L - 1 = bottom.  When < 0 (default), use 0
- *         (uniform within tier, identical to original synth_freq
- *         behavior).
- *
- * Both encoder and decoder feed the same code_lens + rank_within_tier
- * into this builder, so they construct identical synth_freqs and
- * therefore identical Huffman tables. */
-static void build_rank_aware_synth_freq(
+ * Given just `code_lens` (one length per symbol), build a synth_freq array
+ * that reproduces the same code lengths through pivco_huffman_build_table:
+ * a length-L symbol gets weight 2^(max_len - L), so inter-tier ratios are
+ * exact powers of two and the Huffman heap re-derives the same lengths.
+ * Within a tier all weights are equal, so build_table's symbol-value
+ * within-tier order applies -- identical on encoder and decoder, no rank
+ * info needed on the wire.  (Until v0.4 we also transmitted a within-tier
+ * ordering so the reshape could put high-frequency symbols in the largest
+ * flat chunk; that was dropped -- see the reshape note in build_table.) */
+static void build_synth_freq_from_lengths(
     const uint8_t code_lens[PIVCO_MAX_SYMBOLS],
-    const int16_t *rank_within_tier,
     uint64_t freq_out[PIVCO_MAX_SYMBOLS])
 {
     int max_len = 0;
-    for (int s = 0; s < PIVCO_MAX_SYMBOLS; s++) {
+    for (int s = 0; s < PIVCO_MAX_SYMBOLS; s++)
         if (code_lens[s] > max_len) max_len = code_lens[s];
-    }
-    int sym_count_per_len[PIVCO_MAX_CODE_LEN + 1] = {0};
     for (int s = 0; s < PIVCO_MAX_SYMBOLS; s++) {
-        if (code_lens[s] > 0 && code_lens[s] <= PIVCO_MAX_CODE_LEN)
-            sym_count_per_len[code_lens[s]]++;
-    }
-    const uint64_t BIG = 1024;
-    for (int s = 0; s < PIVCO_MAX_SYMBOLS; s++) {
-        freq_out[s] = 0;
         int L = code_lens[s];
-        if (L == 0) continue;
-        uint64_t base = ((uint64_t)1 << (max_len - L)) * BIG;
-        int rank = (rank_within_tier && rank_within_tier[s] >= 0)
-                   ? rank_within_tier[s] : -1;
-        if (rank < 0) {
-            freq_out[s] = base;
-        } else {
-            int K = sym_count_per_len[L];
-            freq_out[s] = base + (uint64_t)(K - rank);
-        }
+        freq_out[s] = (L == 0) ? 0 : ((uint64_t)1 << (max_len - L));
     }
 }
 
@@ -471,11 +443,19 @@ int pivco_huffman_build_table(const uint64_t freq[PIVCO_MAX_SYMBOLS],
      * analysis (extras/bench_flat_optimal.c).
      */
 
-    /* Per-length: collect symbols sorted by frequency desc (ties by
-       symbol value asc for determinism). */
+    /* Per-length: collect symbols in symbol-value order.
+     *
+     * We used to sort within a tier by frequency-desc so the heaviest
+     * symbols landed in the largest flat chunk.  That was dropped: it is
+     * the only thing that made the tree depend on within-tier frequency
+     * order, which in turn forced a within-tier ordering onto the wire
+     * (the v0.3 ORDERING section + rank_within_tier) so the decoder could
+     * reproduce it.  On FSE-coded blocks the freq-order "win" only *masked*
+     * a bad FSE commit policy (the gate ignores FSE decode cost).  Plain
+     * symbol-value order is deterministic from the code lengths alone, so
+     * encoder and decoder agree with no rank info transmitted. */
     typedef struct {
         uint8_t  sym;
-        uint64_t freq;
     } sf_t;
     sf_t  flat_items[PIVCO_MAX_SYMBOLS];
     int   per_len_start[PIVCO_MAX_CODE_LEN + 2];
@@ -483,25 +463,11 @@ int pivco_huffman_build_table(const uint64_t freq[PIVCO_MAX_SYMBOLS],
         int cursor = 0;
         for (int L = 1; L <= max_len; L++) {
             per_len_start[L] = cursor;
-            int seg_start = cursor;
             for (int s = 0; s < PIVCO_MAX_SYMBOLS; s++) {
                 if (lengths[s] == (uint8_t)L) {
-                    flat_items[cursor].sym  = (uint8_t)s;
-                    flat_items[cursor].freq = freq[s];
+                    flat_items[cursor].sym = (uint8_t)s;
                     cursor++;
                 }
-            }
-            /* Insertion sort: highest freq first; tie-break by smaller sym. */
-            for (int i = seg_start + 1; i < cursor; i++) {
-                sf_t cur = flat_items[i];
-                int j = i - 1;
-                while (j >= seg_start &&
-                       (flat_items[j].freq < cur.freq ||
-                        (flat_items[j].freq == cur.freq && flat_items[j].sym > cur.sym))) {
-                    flat_items[j + 1] = flat_items[j];
-                    j--;
-                }
-                flat_items[j + 1] = cur;
             }
         }
         per_len_start[max_len + 1] = cursor;
@@ -766,16 +732,16 @@ int pivco_huffman_build_table(const uint64_t freq[PIVCO_MAX_SYMBOLS],
     return PIVCO_OK;
 }
 
-/* Public API: build a table from code lengths + optional within-tier
- * ordering.  See the comment in pivco_huffman.h. */
+/* Public API: build a table from code lengths alone.  The tree is fully
+ * determined by the lengths (within-tier order is symbol-value), so encoder
+ * and decoder reconstruct identical tables with no extra wire info. */
 int pivco_huffman_build_table_from_code_lens(
     const uint8_t code_lens[PIVCO_MAX_SYMBOLS],
-    const int16_t *rank_within_tier,
     pivco_huffman_table_t *table)
 {
     if (!code_lens || !table) return PIVCO_ERR_NULL;
     uint64_t freq[PIVCO_MAX_SYMBOLS];
-    build_rank_aware_synth_freq(code_lens, rank_within_tier, freq);
+    build_synth_freq_from_lengths(code_lens, freq);
     return pivco_huffman_build_table(freq, table);
 }
 

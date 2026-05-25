@@ -106,12 +106,8 @@ size_t pivcohuf_compress_bound(size_t in_len)
     size_t nblocks = (in_len + B - 1) / B;
     if (nblocks == 0) nblocks = 1;  /* zero-byte input still produces one header */
     size_t worst_per_block = 4 /* length prefix */ + PIVCO_MAX_ENCODED_SIZE;
-    /* v0.3 ordering section: 2-byte mask + up to 256 bytes of symbol
-     * IDs (each used symbol appears in at most one tier's ordering). */
-    const size_t worst_ordering = 2 + 256;
     return PIVCOHUF_HEADER_SIZE      /* header */
-         + 8 + 2 + 128                /* body header */
-         + worst_ordering             /* within-tier ordering */
+         + 8 + 2 + 128                /* body header: usize + blk + code-len nibbles */
          + nblocks * worst_per_block;
 }
 
@@ -166,62 +162,13 @@ int pivcohuf_compress(const uint8_t *in, size_t in_len,
           return PIVCOHUF_ERR_INTERNAL;
       PROF_TOC(PROF_FILE_BUILD_TABLE_REAL, 1); }
 
-    /* v0.3: compute the within-tier ordering the encoder wants to
-     * communicate to the decoder.  For each code-length L with K_L >= 3,
-     * sort the K_L symbols by real frequency descending (tie-break
-     * smaller-sym wins, matching huffman_table.c's existing convention)
-     * and record both the symbol IDs (for serialisation) and each
-     * symbol's rank (for synth_freq construction). */
-    int16_t rank_within_tier[256];
-    uint16_t enc_ordering_mask = 0;
-    uint8_t  enc_ordered_syms[256];
-    size_t   enc_ordered_len = 0;
-    {
-        for (int s = 0; s < 256; s++) rank_within_tier[s] = -1;
-        int sym_count_per_len[PIVCO_MAX_CODE_LEN + 1] = {0};
-        for (int s = 0; s < 256; s++) {
-            if (real_table.code_len[s] > 0 &&
-                real_table.code_len[s] <= PIVCO_MAX_CODE_LEN)
-                sym_count_per_len[real_table.code_len[s]]++;
-        }
-        for (int L = 3; L <= PIVCO_MAX_CODE_LEN; L++) {
-            int K = sym_count_per_len[L];
-            if (K < 3) continue;
-            uint8_t tier_syms[256];
-            int n = 0;
-            for (int s = 0; s < 256; s++) {
-                if (real_table.code_len[s] == (uint8_t)L)
-                    tier_syms[n++] = (uint8_t)s;
-            }
-            /* Insertion sort: freq desc, tie-break by smaller sym. */
-            for (int i = 1; i < n; i++) {
-                uint8_t cur = tier_syms[i];
-                uint64_t cur_f = real_freq[cur];
-                int j = i - 1;
-                while (j >= 0 &&
-                       (real_freq[tier_syms[j]] < cur_f ||
-                        (real_freq[tier_syms[j]] == cur_f && tier_syms[j] > cur))) {
-                    tier_syms[j + 1] = tier_syms[j];
-                    j--;
-                }
-                tier_syms[j + 1] = cur;
-            }
-            enc_ordering_mask |= (uint16_t)(1U << L);
-            for (int r = 0; r < n; r++) {
-                rank_within_tier[tier_syms[r]] = (int16_t)r;
-                enc_ordered_syms[enc_ordered_len++] = tier_syms[r];
-            }
-        }
-    }
-
-    /* Rebuild the encode-time table via the library's code-lens + rank
-     * builder.  Decoder will call the identical library function with
-     * the same code_lens + rank_within_tier (recovered from the wire
-     * ordering bytes) and arrive at the same tree. */
+    /* Rebuild the encode-time table via the code-lens builder, so encode
+     * uses the exact table the decoder reconstructs from the wire.  The tree
+     * is fully determined by the code lengths (within-tier order is symbol-
+     * value), so nothing beyond the lengths is transmitted. */
     pivco_huffman_table_t table;
     { PROF_TIC();
       if (pivco_huffman_build_table_from_code_lens(real_table.code_len,
-                                                    rank_within_tier,
                                                     &table) != PIVCO_OK)
           return PIVCOHUF_ERR_INTERNAL;
       PROF_TOC(PROF_FILE_BUILD_TABLE_SYN, 1); }
@@ -252,15 +199,6 @@ int pivcohuf_compress(const uint8_t *in, size_t in_len,
         p[i] = (uint8_t)(lo | (hi << 4));
     }
     p += 128;
-
-    /* v0.3 within-tier ORDERING_MASK + concatenated per-tier symbol IDs
-     * in real-freq-descending order (tier 3 first, then tier 4, etc.). */
-    put_u16(p, enc_ordering_mask);
-    p += 2;
-    if (enc_ordered_len > 0) {
-        memcpy(p, enc_ordered_syms, enc_ordered_len);
-        p += enc_ordered_len;
-    }
 
     /* === Encode block-by-block. === */
     size_t off = 0;
@@ -353,8 +291,8 @@ int pivcohuf_decompress(const uint8_t *in, size_t in_len,
     const uint8_t *body = in + PIVCOHUF_HEADER_SIZE;
     /* BODY_CHECKSUM verification disabled (2026-05-12). */
 
-    /* Parse body header. */
-    if (body_len < 8 + 2 + 128 + 2) return PIVCOHUF_ERR_TOO_SHORT;
+    /* Parse body header: UNCOMPRESSED_SIZE(8) + BLOCK_SIZE(2) + nibbles(128). */
+    if (body_len < 8 + 2 + 128) return PIVCOHUF_ERR_TOO_SHORT;
     size_t uncomp_size = (size_t)get_u64(body);
     uint16_t file_blk = get_u16(body + 8);
     if (file_blk != (uint16_t)PIVCO_BLOCK_SIZE) return PIVCOHUF_ERR_BAD_BLOCK_SIZE;
@@ -370,44 +308,9 @@ int pivcohuf_decompress(const uint8_t *in, size_t in_len,
         code_lens[2*i + 1] = (nibbles[i] >> 4) & 0x0F;
     }
 
-    /* v0.3: parse the ordering section right after the nibbles.  The
-     * 2-byte ordering_mask tells us which tiers have a serialized
-     * symbol-ID array (in real-freq-desc order); for each bit set,
-     * sym_count[L] bytes follow. */
-    const uint8_t *order_section = body + 10 + 128;
-    uint16_t ordering_mask = get_u16(order_section);
-    int sym_count_per_len[PIVCO_MAX_CODE_LEN + 1] = {0};
-    for (int s = 0; s < 256; s++) {
-        if (code_lens[s] > 0 && code_lens[s] <= PIVCO_MAX_CODE_LEN)
-            sym_count_per_len[code_lens[s]]++;
-    }
-    size_t order_bytes = 2;   /* the mask */
-    for (int L = 3; L <= PIVCO_MAX_CODE_LEN; L++) {
-        if (ordering_mask & (1U << L))
-            order_bytes += (size_t)sym_count_per_len[L];
-    }
-    if (body_len < 10 + 128 + order_bytes) return PIVCOHUF_ERR_TOO_SHORT;
-
     pivco_huffman_table_t table;
     { PROF_TIC();
-      int16_t rank_within_tier[256];
-      for (int s = 0; s < 256; s++) rank_within_tier[s] = -1;
-      const uint8_t *order_ptr = order_section + 2;
-      for (int L = 3; L <= PIVCO_MAX_CODE_LEN; L++) {
-          if (ordering_mask & (1U << L)) {
-              int K = sym_count_per_len[L];
-              for (int r = 0; r < K; r++) {
-                  uint8_t sym = order_ptr[r];
-                  if (code_lens[sym] != (uint8_t)L)
-                      return PIVCOHUF_ERR_INTERNAL;   /* corrupt ordering */
-                  rank_within_tier[sym] = (int16_t)r;
-              }
-              order_ptr += K;
-          }
-      }
-      if (pivco_huffman_build_table_from_code_lens(code_lens,
-                                                    rank_within_tier,
-                                                    &table) != PIVCO_OK)
+      if (pivco_huffman_build_table_from_code_lens(code_lens, &table) != PIVCO_OK)
           return PIVCOHUF_ERR_INTERNAL;
       PROF_TOC(PROF_FILE_BUILD_TABLE_SYN, 1); }
     /* Sanity check: rebuilt code lengths must match. */
@@ -421,7 +324,7 @@ int pivcohuf_decompress(const uint8_t *in, size_t in_len,
      * sized B which is read from the file). */
     uint8_t *block_buf = (uint8_t *)malloc(B);
     if (!block_buf) return PIVCOHUF_ERR_INTERNAL;
-    const uint8_t *p = body + 10 + 128 + order_bytes;
+    const uint8_t *p = body + 10 + 128;
     const uint8_t *body_end = body + body_len;
     size_t written = 0;
     int err = 0;
