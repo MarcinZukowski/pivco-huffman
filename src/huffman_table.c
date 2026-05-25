@@ -68,29 +68,6 @@ static void flat_mark_subtrees(pivco_huffman_table_t *t,
     flat_mark_subtrees(t, n->right, pool_cursor);
 }
 
-/* ---------- Synthetic-frequency reconstruction from code lengths ----------
- *
- * Given just `code_lens` (one length per symbol), build a synth_freq array
- * that reproduces the same code lengths through pivco_huffman_build_table:
- * a length-L symbol gets weight 2^(max_len - L), so inter-tier ratios are
- * exact powers of two and the Huffman heap re-derives the same lengths.
- * Within a tier all weights are equal, so build_table's symbol-value
- * within-tier order applies -- identical on encoder and decoder, no rank
- * info needed on the wire.  (Until v0.4 we also transmitted a within-tier
- * ordering so the reshape could put high-frequency symbols in the largest
- * flat chunk; that was dropped -- see the reshape note in build_table.) */
-static void build_synth_freq_from_lengths(
-    const uint8_t code_lens[PIVCO_MAX_SYMBOLS],
-    uint64_t freq_out[PIVCO_MAX_SYMBOLS])
-{
-    int max_len = 0;
-    for (int s = 0; s < PIVCO_MAX_SYMBOLS; s++)
-        if (code_lens[s] > max_len) max_len = code_lens[s];
-    for (int s = 0; s < PIVCO_MAX_SYMBOLS; s++) {
-        int L = code_lens[s];
-        freq_out[s] = (L == 0) ? 0 : ((uint64_t)1 << (max_len - L));
-    }
-}
 
 /* ---------- Min-heap for Huffman tree construction ---------- */
 
@@ -309,6 +286,46 @@ static void limit_code_lengths(uint8_t *lengths, int n_symbols, int max_len)
 
 /* ---------- Canonical Huffman code assignment ---------- */
 
+/* Builds everything downstream of the code lengths (canonical assignment,
+ * tree, flat-subtree detection, aux tables).  Shared by the encode path
+ * (after the min-heap derives lengths from frequencies) and the decode path
+ * (lengths come straight off the wire -- no heap needed).  Assumes `table` is
+ * already zeroed and table->num_symbols is set; caller handles n_used <= 1. */
+static int build_table_finish(const uint8_t lengths[PIVCO_MAX_SYMBOLS],
+                              pivco_huffman_table_t *table);
+
+/* Single-symbol degenerate tree: root -> two leaves of the same symbol, with
+ * the left leaf prefilled.  Assumes `table` is zeroed. */
+static void build_single_symbol_table(int sym, pivco_huffman_table_t *table)
+{
+    table->code[sym] = 0;
+    table->code_len[sym] = 1;
+    table->max_len = 1;
+    table->min_len = 1;
+    table->sym_count[1] = 1;
+    table->first_code[1] = 0;
+    table->first_sym_idx[1] = 0;
+    table->sorted_symbols[0] = (uint8_t)sym;
+    table->tree[0].symbol = -1;
+    table->tree[0].left = 1;
+    table->tree[0].right = 2;
+    table->tree[1].symbol = (int16_t)sym;
+    table->tree[1].left = -1;
+    table->tree[1].right = -1;
+    table->tree[2].symbol = (int16_t)sym; /* both children = same symbol */
+    table->tree[2].left = -1;
+    table->tree[2].right = -1;
+    table->tree_root = 0;
+    table->tree_node_count = 3;
+    table->prefill_sym = (uint8_t)sym;
+    table->prefill_node = 1;
+    /* node 0 (root): both children leaves, left=skip -> HALF_RIGHT;
+     * node 1 (left leaf, prefilled): SKIP; node 2 (right, same sym): LEAF. */
+    table->node_type[0] = PIVCO_NODE_HALF_RIGHT;
+    table->node_type[1] = PIVCO_NODE_SKIP;
+    table->node_type[2] = PIVCO_NODE_LEAF;
+}
+
 int pivco_huffman_build_table(const uint64_t freq[PIVCO_MAX_SYMBOLS],
                               pivco_huffman_table_t *table)
 {
@@ -330,40 +347,7 @@ int pivco_huffman_build_table(const uint64_t freq[PIVCO_MAX_SYMBOLS],
     table->num_symbols = (uint16_t)n_used;
 
     if (n_used == 1) {
-        /* Single symbol: code = 0, length = 1 */
-        int sym = used[0];
-        table->code[sym] = 0;
-        table->code_len[sym] = 1;
-        table->max_len = 1;
-        table->min_len = 1;
-        table->sym_count[1] = 1;
-        table->first_code[1] = 0;
-        table->first_sym_idx[1] = 0;
-        table->sorted_symbols[0] = (uint8_t)sym;
-        /* (decode_sym/decode_len filled on demand by
-         * pivco_huffman_build_traditional_table) */
-        /* Build tree: root (internal) -> left child (leaf) */
-        table->tree[0].symbol = -1;
-        table->tree[0].left = 1;
-        table->tree[0].right = 2;
-        table->tree[1].symbol = (int16_t)sym;
-        table->tree[1].left = -1;
-        table->tree[1].right = -1;
-        table->tree[2].symbol = (int16_t)sym; /* both children = same symbol */
-        table->tree[2].left = -1;
-        table->tree[2].right = -1;
-        table->tree_root = 0;
-        table->tree_node_count = 3;
-        table->prefill_sym = (uint8_t)sym;
-        table->prefill_node = 1;
-        /* Classify the 3 nodes for the single-symbol tree:
-         *   node 0 (root, internal): both children leaves, left=skip → HALF_RIGHT
-         *   node 1 (left leaf, prefilled): SKIP
-         *   node 2 (right leaf, same sym): LEAF (functionally equivalent to SKIP
-         *           since output is already filled, but classify per the rule). */
-        table->node_type[0] = PIVCO_NODE_HALF_RIGHT;
-        table->node_type[1] = PIVCO_NODE_SKIP;
-        table->node_type[2] = PIVCO_NODE_LEAF;
+        build_single_symbol_table(used[0], table);
         return PIVCO_OK;
     }
 
@@ -405,6 +389,12 @@ int pivco_huffman_build_table(const uint64_t freq[PIVCO_MAX_SYMBOLS],
     /* Limit code lengths to PIVCO_MAX_CODE_LEN */
     limit_code_lengths(lengths, PIVCO_MAX_SYMBOLS, PIVCO_MAX_CODE_LEN);
 
+    return build_table_finish(lengths, table);
+}
+
+static int build_table_finish(const uint8_t lengths[PIVCO_MAX_SYMBOLS],
+                              pivco_huffman_table_t *table)
+{
     /* Copy lengths to table */
     for (int i = 0; i < PIVCO_MAX_SYMBOLS; i++) {
         table->code_len[i] = lengths[i];
@@ -734,15 +724,27 @@ int pivco_huffman_build_table(const uint64_t freq[PIVCO_MAX_SYMBOLS],
 
 /* Public API: build a table from code lengths alone.  The tree is fully
  * determined by the lengths (within-tier order is symbol-value), so encoder
- * and decoder reconstruct identical tables with no extra wire info. */
+ * and decoder reconstruct identical tables with no extra wire info.  Goes
+ * straight to build_table_finish -- no synthetic frequencies, no Huffman
+ * heap (the lengths are already final). */
 int pivco_huffman_build_table_from_code_lens(
     const uint8_t code_lens[PIVCO_MAX_SYMBOLS],
     pivco_huffman_table_t *table)
 {
     if (!code_lens || !table) return PIVCO_ERR_NULL;
-    uint64_t freq[PIVCO_MAX_SYMBOLS];
-    build_synth_freq_from_lengths(code_lens, freq);
-    return pivco_huffman_build_table(freq, table);
+    memset(table, 0, sizeof(*table));
+
+    int n_used = 0, last = 0;
+    for (int i = 0; i < PIVCO_MAX_SYMBOLS; i++)
+        if (code_lens[i] > 0) { n_used++; last = i; }
+    if (n_used == 0) return PIVCO_ERR_EMPTY;
+    table->num_symbols = (uint16_t)n_used;
+
+    if (n_used == 1) {
+        build_single_symbol_table(last, table);
+        return PIVCO_OK;
+    }
+    return build_table_finish(code_lens, table);
 }
 
 /* Fill the 2^MAX_CODE_LEN flat decode table (decode_sym/decode_len) read by
