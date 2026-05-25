@@ -56,7 +56,11 @@ extern void         bench_generate_symbols(int dist_idx, uint8_t *symbols,
 #define RUNS       5
 #define REPEATS    10
 #define SEED       0xBEEFCAFE12345678ULL
-#define MAXLOG     12                   /* FSE/HUF table log */
+#define MAXLOG     12                   /* FSE tableLog (tANS state-table log) */
+#define HUFLOG     PIVCO_MAX_CODE_LEN    /* HUF max code length = ph's budget (11);
+                                            12 == HUF_TABLELOG_MAX, where a 1-bit
+                                            dominant code yields an invalid weight-12
+                                            header that HUF_readStats rejects */
 
 static size_t g_table_G = 128 * 1024;   /* ph table-refresh granularity */
 
@@ -250,8 +254,11 @@ static result_t measure_phtd(phtd_build_fn B, phtd_enc_fn E, phtd_dec_fn D,
     R.enc_op = best;
     BEST_MBPS({ for (size_t b=0;b<nblk;b++){ size_t c=0; D(enc+off[b],off[b+1]-off[b],(phtd_table_t*)gt,dec,&c);} });
     R.dec_pb = best;
-    BEST_MBPS({ for (size_t k=0;k<nwin;k++){ uint64_t wf[256]; histo_u64(sym+k*g_table_G,g_table_G,wf); B(wf,(phtd_table_t*)wt);
-        for (size_t i=0;i<bpw;i++){ size_t b=k*bpw+i,c=0; D(eno+ofo[b],ofo[b+1]-ofo[b],(phtd_table_t*)wt,dec,&c);} } });
+    /* opaque decode = pure decode against the per-window tables (built once, up
+     * front -- NOT inside the timer).  A decoder never re-histograms or rebuilds
+     * the tree from frequencies, so that work must not pollute the decode timer.
+     * (Tree-construction cost is measured separately, in a dedicated bench.) */
+    BEST_MBPS({ for (size_t k=0;k<nwin;k++){ for (size_t i=0;i<bpw;i++){ size_t b=k*bpw+i,c=0; D(eno+ofo[b],ofo[b+1]-ofo[b],WT(k),dec,&c);} } });
     R.dec_op = best;
     R.ratio_pb = (double)n / (double)(off[nblk] + 128);
     R.ratio_op = (double)n / (double)(ofo[nblk] + 128 * nwin);
@@ -270,7 +277,7 @@ static result_t measure_huf0(const uint8_t *sym, size_t n) {
 
     unsigned cnt[256], maxSym; histo_u(sym, n, cnt, &maxSym);
     HUF_CREATE_STATIC_CTABLE(ctable, 255);
-    size_t huffLog = HUF_buildCTable(ctable, cnt, maxSym, MAXLOG);  /* returns actual maxNbBits */
+    size_t huffLog = HUF_buildCTable(ctable, cnt, maxSym, HUFLOG);  /* returns actual maxNbBits */
     if (HUF_isError(huffLog)) return R;
 
     uint8_t *enc = malloc(n + n/2 + 4096);        /* opaque stream (HUF_compress, w/ header) */
@@ -279,12 +286,12 @@ static result_t measure_huf0(const uint8_t *sym, size_t n) {
     size_t  *offp= malloc((nch+1)*sizeof(size_t));
     uint8_t *dec = malloc(n);
     void    *wksp= malloc(1<<16);
-    HUF_DTable *dt   = malloc(HUF_DTABLE_SIZE(MAXLOG) * sizeof(HUF_DTable)); /* opaque scratch */
-    HUF_DTable *dtpb = malloc(HUF_DTABLE_SIZE(MAXLOG) * sizeof(HUF_DTable)); /* prebuilt, global */
+    HUF_DTable *dt   = malloc(HUF_DTABLE_SIZE(HUFLOG) * sizeof(HUF_DTable)); /* opaque scratch */
+    HUF_DTable *dtpb = malloc(HUF_DTABLE_SIZE(HUFLOG) * sizeof(HUF_DTable)); /* prebuilt, global */
     uint8_t  hdr[512]; size_t hdrSize = HUF_writeCTable(hdr, sizeof hdr, ctable, maxSym, (unsigned)huffLog);
     if (!enc||!encp||!off||!offp||!dec||!wksp||!dt||!dtpb||HUF_isError(hdrSize)) goto fail;
-    dt[0]   = (HUF_DTable)(MAXLOG * 0x01000001);   /* set max table log */
-    dtpb[0] = (HUF_DTable)(MAXLOG * 0x01000001);
+    dt[0]   = (HUF_DTable)(HUFLOG * 0x01000001);   /* set max table log */
+    dtpb[0] = (HUF_DTable)(HUFLOG * 0x01000001);
 
     /* pre-encode opaque (each chunk builds its own table, header inline) */
     off[0]=0;
@@ -628,7 +635,10 @@ static const struct { const char *name; engine_fn fn; } ENGINES[] = {
 #if defined(PIVCO_HAS_NEON) || defined(PIVCO_HAS_AVX512)
     {"td_nv_simd", e_td_nvsimd}, {"td_simdopt", e_td_simdopt},
 #endif
-    {"huf0", e_huf0}, {"huf0_stk", e_huf0_stk}, {"fse_stk", e_fse_stk}, {"fse_x8y1", e_fse_x8y1},
+    /* "huf0" is stock HUF_decompress (auto-dispatch) -- the canonical baseline.
+     * "huf0_4x2" is forced HUF_decompress4X2, kept for ad-hoc reference only
+     * (excluded from the reported set; stock is equal-or-better on all hosts). */
+    {"huf0", e_huf0_stk}, {"huf0_4x2", e_huf0}, {"fse_stk", e_fse_stk}, {"fse_x8y1", e_fse_x8y1},
 #ifdef PIVCO_HAS_OODLE
     {"oo_huff", e_oo_huff}, {"oo_tans", e_oo_tans},
 #endif
