@@ -53,7 +53,14 @@ cmake --build build
 rsync -avz --delete --exclude='build/' --exclude='build-asan/' \
   --exclude='build-release/' --exclude='.git/' --exclude='.claude/' \
   --exclude='.vscode/' --exclude='*.dSYM' --exclude='.venv/' \
+  --exclude='ext/oodle' \
   . test-XXX:pivco-huffman/
+# NB: --exclude='ext/oodle' is required.  ext/oodle is a LOCAL symlink to a
+# built OodleUE clone; without the exclude, rsync --delete pushes the dangling
+# symlink and wipes the real Oodle SDK staged on the remote (disabling Oodle).
+# To (re)enable Oodle on a remote, stage the SDK once: copy src/, include/, and
+# lib/<platform>/ under ext/oodle/Engine/.../Sdks/2.9.16/, then configure with
+# -DOODLE_LIB_VARIANT=shipped.
 
 # SSH aliases: test-c6a (Zen 3 SSE4.1), test-c8i (Xeon AVX-512 VBMI2),
 #              test-c8g (Graviton 4 NEON)

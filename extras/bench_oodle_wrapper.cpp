@@ -103,8 +103,15 @@ int oodle_tans_encode(const unsigned char *src, size_t n,
     unsigned char arena_buf[131072];
     rrArenaAllocator arena(arena_buf, sizeof(arena_buf), /*allowFallback=*/false);
 
-    float pJ     = 1e30f;
-    float lambda = 1.0f;
+    /* pJ is the J-cost budget. Oodle requires it <= from_len+3 (a real size
+     * bound) and internally does (SINTa)(pJ - cost). Passing 1e30 overflows
+     * the float->int64 cast: ARM saturates to INT64_MAX so TANS proceeds, but
+     * x86 yields INT64_MIN (< 4) so TANS bails with -1. Pass a valid bound,
+     * with lambda=0 so TANS is accepted on size alone (force the measurement
+     * regardless of Oodle's per-arch speed model -- which only gates accept/
+     * reject here; the encoded stream itself does not depend on lambda). */
+    float pJ     = (float)(n + 3);
+    float lambda = 0.0f;
 
     SINTa comp_len = newLZ_put_array_tans(
         dst, dst + dst_cap,
