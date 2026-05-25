@@ -1,4 +1,4 @@
-#import "conf.typ": htmlonly, PH, he, mf, sym, pick-cols, todo
+#import "conf.typ": anote, PH, he, mf, sym, pick-cols, todo
 
 = Going Bottom-Up
 

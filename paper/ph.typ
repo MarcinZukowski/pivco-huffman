@@ -1,5 +1,5 @@
 // import variables, functions
-#import "conf.typ": _html, _pdf, _fmt, htmlonly, setup, PH
+#import "conf.typ": _html, _pdf, _fmt, anote, setup, PH
 // run the side effects (style injection, page setup, show rules)
 #include "conf.typ"
 
@@ -26,7 +26,7 @@ Blablalbasd
 
 #set heading(numbering: "1.")
 
-#htmlonly[
+#anote[
 This document is mostly a verbatim copy of the arXiv paper.
 
 However, in boxes like this you'll see some additional thoughts that might not be fitting

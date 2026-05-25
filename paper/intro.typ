@@ -1,4 +1,4 @@
-#import "conf.typ": htmlonly, PH, he, mf, sym, pick-cols, todo
+#import "conf.typ": anote, PH, he, mf, sym, pick-cols, todo
 
 = Introduction
 
@@ -12,6 +12,8 @@ but rather "canonical" coding from @schwartz1964canonical.
 In this paper we use the term "Huffman" for all versions of it.
 
 == Classical Huffman tree
+
+
 
 == Current Huffman SotA <sota>
 
@@ -32,10 +34,25 @@ This or similar code is used in fast Huffman decompressors like Huff0 (@fse).
 Two typical approaches to accelerating it are using multiple cursors (@giesen2014interleaved, @giesen2023oodle)
 or using a table that decodes 2 symbols instead of one.
 
-We measured various Huffman decoding implementations, and the top performing we found
+We measured various Huffman decoding implementations, and the most interesting ones we found
 were huff0 (default from @fse), huff0x2 (2 streams, 2 codes) and Oodle's Huffman decoder (@giesen2021oodle).
 
-Here are decoding bandwidths on two example datasets:
+Here are decoding bandwidths on two example datasets on M4:
+
+#table(
+  columns: 7,
+  inset: 5pt,
+  align: (left, right, right, right, right, right, right),
+  table.header(
+    table.cell(rowspan: 2)[*Dataset*],
+    table.cell(colspan: 2)[*huff0*],
+    table.cell(colspan: 2)[*huff0x2*],
+    table.cell(colspan: 2)[*oodle-huffman*],
+    [enc MB/s],[dec MB/s],
+    [enc MB/s],[dec MB/s],
+    [enc MB/s],[dec MB/s],
+  ),
+)<tab-huffman-perf>
 
 #todo[Decode benchmark]
 
@@ -110,7 +127,7 @@ in each phase exposes to CPUs a lot of simple, independent operations and avoids
 As a result, it achieves a significant performance benefit (even >10x) over the _scalar_ approach.
 
 
-#htmlonly[
+#anote[
 So I've been trying to apply this general approach to a few different problems, including compression, but also
 stuff like regular expression processing.
 

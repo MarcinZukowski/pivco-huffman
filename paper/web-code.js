@@ -9,15 +9,15 @@
  *         level section, subsections expand.  Click any entry to
  *         jump.  Position is tracked by scroll (rAF-throttled,
  *         no IntersectionObserver -- simpler and dependable).
- *       * an "Author's comments" toggle that shows/hides
- *         div.htmlonly blocks.
+ *       * an "Author's notes" toggle that shows/hides
+ *         div.anote blocks.
  *     Both buttons default ON; state persists via localStorage.
  */
 
 (function () {
     'use strict';
 
-    var KEY_AUTHOR = 'phShowAuthorComments';
+    var KEY_ANOTE = 'phShowAuthorNotes';
     var KEY_TOC    = 'phShowToc';
 
     /* ====== TOC build ====== */
@@ -183,12 +183,12 @@
             function (on) { document.body.classList.toggle('hide-toc', !on); });
         buttons.appendChild(tocBtn);
 
-        var authorBtn = makeButton(
-            'author-toggle', true,
-            "Hide author's comments", "Show author's comments",
-            KEY_AUTHOR,
-            function (on) { document.body.classList.toggle('hide-author', !on); });
-        buttons.appendChild(authorBtn);
+        var anoteBtn = makeButton(
+            'anote-toggle', true,
+            "Hide author's notes", "Show author's notes",
+            KEY_ANOTE,
+            function (on) { document.body.classList.toggle('hide-anote', !on); });
+        buttons.appendChild(anoteBtn);
 
         /* --- live current-section tracking --- */
         if (info.flat.length) {

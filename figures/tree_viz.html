@@ -1698,8 +1698,8 @@ function renderTree(rootNode, meta) {
         .attr('font-family', 'monospace').attr('font-size', '8.5px')
         .attr('fill', '#333').attr('pointer-events', 'none')
         .text(d => {
-            const L = Math.round(d.data.pLeft * 100);
-            return `${L}/${100 - L}`;
+            const L = d.data.pLeft * 100;
+            return `${L.toFixed(1)}/${(100 - L).toFixed(1)}`;
         });
     intG.append('text')
         .attr('x', LBL_X).attr('y', BAR_Y + BAR_H + 4)

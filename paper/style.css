@@ -161,12 +161,25 @@ pre code {
 
 /* ---------- Marcin's musings ---------- */
 
-.htmlonly {
+.anote {
+      position: relative;               /* anchor the corner label below */
       background: #cfc;
-      padding: 0.6em 1em;
+      padding: 1.1em 1em 0.6em;          /* extra top padding for the label */
       border-radius: 5px;
       margin: 0.8em 0;
       border-left: 5px solid black;     /* optional accent — looks nice */
+}
+.anote::before {
+      content: "Author's note";
+      position: absolute;
+      top: 0.5em;
+      right: 0.5em;
+      font: bold 0.62em/1 sans-serif;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      background: red;
+      color: gold;
+      padding: 2px;
 }
 
 .todo {
@@ -182,8 +195,8 @@ pre code {
 
 
 /* --- Floating top-right tools panel (from web-code.js) --- */
-body.hide-author .htmlonly { display: none; }
-body.hide-toc    #toc-panel { display: none; }
+body.hide-anote .anote { display: none; }
+body.hide-toc   #toc-panel { display: none; }
 
 #ph-tools {
       position: fixed;

@@ -1,4 +1,4 @@
-#import "conf.typ": _html, _pdf, _fmt, htmlonly, setup, PH, he, sym, PHA, todo
+#import "conf.typ": _html, _pdf, _fmt, anote, setup, PH, he, sym, PHA, todo
 
 = Challenges and opportunities
 

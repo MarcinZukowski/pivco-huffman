@@ -13,7 +13,7 @@
   // simd.dev tooltips
   html.elem("script", attrs: (src: "https://simd.dev/dist/simd-tooltips.js"))
   html.elem("style", read("style.css"))
-  // web-code.js: runtime extras (author-comments toggle today; more
+  // web-code.js: runtime extras (author-notes toggle today; more
   // later).  Inlined the same way as style.css — keeps the HTML
   // build self-contained, PDF build never sees it.
   html.elem("script", read("web-code.js"))
@@ -27,9 +27,9 @@
 #set text(font: "New Computer Modern", size: 11pt)
 #set par(justify: true)
 
-#let htmlonly(body) = {
+#let anote(body) = {
   if _html {
-    html.elem("div", attrs: (class: "htmlonly"), body)
+    html.elem("div", attrs: (class: "anote"), body)
   }
 }
 

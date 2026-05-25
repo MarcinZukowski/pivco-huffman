@@ -1,4 +1,4 @@
-#import "conf.typ": htmlonly, PH, he, mf, sym, pick-cols, todo
+#import "conf.typ": anote, PH, he, mf, sym, pick-cols, todo
 
 = Pivoting Huffman <sideways>
 
@@ -52,11 +52,12 @@ ratio due to byte-rounding.
 However, for non-trivial datasets this overhead is acceptable if this approach provides other benefits.
 
 Note that this basic tree representation is equivalent to
-_wavelet trees_ (see @wt), specifically _Huffman-shaped wavelet trees_ (e.g. @dinklage2023wt).
-However, with a very different focus, use cases, and structural changes to the tree,
-we do not use this term in this paper.
+_wavelet trees_ (see @ferragina2009myriad), specifically _Huffman-shaped wavelet trees_ (e.g. @dinklage2023wt).
+However, with a very different focus, use cases, lack of auxilliary data structures,
+and shape changes in the tree, we treat #PH as a separate solution sharing the same basic structure.
+See @wt for more discussion.
 
-#htmlonly[
+#anote[
 While working on #PH I did a lot of literature review, and for the longest time couldn't find
 anything like it.
 

@@ -1,4 +1,4 @@
-#import "conf.typ": _html, _pdf, _fmt, htmlonly, setup, PH
+#import "conf.typ": PH
 
 #heading(numbering:none, level: 1)[Appendices]
 
@@ -32,6 +32,13 @@
 )<tab-datasets>
 
 = Machines Tested
+
+= Testing methodology
+
+Whenever we test encoding/decoding bandwitdth, we use the following setup:
+We do 5 _runs_, where 1 _run_, for each algorithm, executes 10 _repetitions_ of 1MB encoding/decoding.
+Then, we take the minimum time per run.
+
 = Failed optimizations
 
 As we worked on this paper, we have tried many things that didn't pan out.

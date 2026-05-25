@@ -1,4 +1,4 @@
-#import "conf.typ": _html, _pdf, _fmt, htmlonly, setup, PH, he, sym, PHA
+#import "conf.typ": _html, _pdf, _fmt, anote, setup, PH, he, sym, PHA
 
 = Breaking the bit-barrier <ans>
 
@@ -89,7 +89,7 @@ top parts of the tree for *calgary_pic* and *dna_fasta* datasets.
 For each tree node, we report left/right skew, and the percentage of data
 covered by a given subtree.
 
-For *calgary_pic* we see how the root node has a skew of 87/13, with *H=0.554*
+For *calgary_pic* we see how the root node has a skew of 87.1/12.9, with *H=0.554*
 That means, if that *one node* was entropy-encoded, we would save *0.446* bits
 per encoded element, almost reaching the Huffman encoding gap of *0.480*.
 
@@ -97,7 +97,7 @@ per encoded element, almost reaching the Huffman encoding gap of *0.480*.
 With #sym("A C G T") symbols occupying the vast majority of the input, #sym("C G T") were assigned
 2-bit codes, but #sym("A") had to be assigned a 3-bit code to make room for
 the remaining, infrequent symbols.
-As a result, 25% of all symbols get to the parent node of #sym("A") and 94% of those go to #sym("A").
+As a result, 25% of all symbols get to the parent node of #sym("A") and 94.3% of those go to #sym("A").
 That node has *H=0.315*, so entropy-encoding would save *0.685* bits for each symbol,
 but with only 25% of the input reaching that node, it results in *0.171* average bits saved per code,
 also very close to the *0.185* bits Huffman gap.
@@ -135,9 +135,8 @@ One non-trivial cost of FSE is creation of decode tables.
 To avoid it, we use statically precomputed 50 decode tables for bitmap skew in range (50,51,..,98,99)%.
 Then, we simply choose a table based on the symbol skew during encoding/decoding.
 
-Note, we use a _tuned_ version of FSE, as we found that the default implementation
+Note, we use a _tuned_ version of FSE (_x8y1_), as we found that the default implementation
 can be significantly improved for our needs, see @tuning-fse.
-We just refer to that _*x8y1*_ version as FSE.
 See also @fuse-fse-merge for another possible optimization.
 
 == Benefits
