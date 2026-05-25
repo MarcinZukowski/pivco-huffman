@@ -27,6 +27,13 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "pivco_huffman.h"   /* PIVCO_FSE_STATS_SLOTS */
+/* The FSE stats arrays are indexed by t_id in [0, PIVCO_FSE_NUM_TABLES]
+ * (0 = reject, 1..N = pivco_fse_select_table()).  Guard against the slot
+ * count drifting behind the table count (it did once: 26 slots vs 50 tables). */
+_Static_assert(PIVCO_FSE_STATS_SLOTS >= PIVCO_FSE_NUM_TABLES + 1,
+               "PIVCO_FSE_STATS_SLOTS must cover every FSE table id (>= NUM_TABLES + 1)");
+
 /* One CTable + one DTable per pre-built distribution.  Slot 0 is
  * reserved (matches marker 0 = "no FSE").  Allocated by
  * FSE_createCTable / FSE_createDTable on first use. */
@@ -95,7 +102,7 @@ void pivco_fse_init(void)
 int pivco_fse_select_table(double p_major)
 {
     /* Largest table index whose tabulated frequency <= p_major.
-     * Linear scan top-down -- only 25 entries, no point in being
+     * Linear scan top-down -- only PIVCO_FSE_NUM_TABLES entries, no point in being
      * clever; called per non-flat internal node so it should be cheap
      * but not at the cost of code clarity. */
     for (int i = PIVCO_FSE_NUM_TABLES; i >= 1; i--) {

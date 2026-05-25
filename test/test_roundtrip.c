@@ -55,6 +55,7 @@ static int test_table_build(void)
         }
     }
 
+    pivco_huffman_build_traditional_table(&table);
     /* Verify decode table round-trips */
     for (int i = 0; i < PIVCO_MAX_SYMBOLS; i++) {
         if (table.code_len[i] == 0) continue;
@@ -104,6 +105,7 @@ static int test_single_symbol(void)
     }
 
     /* Traditional roundtrip */
+    pivco_huffman_build_traditional_table(&table);
     uint8_t trad_enc[PIVCO_BLOCK_SIZE * 2];
     size_t trad_len, trad_bits;
     rc = trad_huffman_encode(symbols, PIVCO_BLOCK_SIZE, &table,
@@ -176,6 +178,7 @@ static int test_roundtrip_dist(const char *name, const uint64_t freq[PIVCO_MAX_S
     }
 
     /* Traditional roundtrip */
+    pivco_huffman_build_traditional_table(&table);
     uint8_t trad_enc[PIVCO_BLOCK_SIZE * 4];
     size_t trad_len, trad_bits;
     rc = trad_huffman_encode(symbols, PIVCO_BLOCK_SIZE, &table,

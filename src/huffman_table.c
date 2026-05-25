@@ -368,9 +368,8 @@ int pivco_huffman_build_table(const uint64_t freq[PIVCO_MAX_SYMBOLS],
         table->first_code[1] = 0;
         table->first_sym_idx[1] = 0;
         table->sorted_symbols[0] = (uint8_t)sym;
-        /* Fill decode table */
-        memset(table->decode_sym, (uint8_t)sym, sizeof(table->decode_sym));
-        memset(table->decode_len, 1, sizeof(table->decode_len));
+        /* (decode_sym/decode_len filled on demand by
+         * pivco_huffman_build_traditional_table) */
         /* Build tree: root (internal) -> left child (leaf) */
         table->tree[0].symbol = -1;
         table->tree[0].left = 1;
@@ -596,22 +595,11 @@ int pivco_huffman_build_table(const uint64_t freq[PIVCO_MAX_SYMBOLS],
         table->first_code[len] = (min_code == 0xFFFF) ? 0 : min_code;
     }
 
-    /* Build flat decode table (2^MAX_CODE_LEN entries) */
-    for (int len = 1; len <= max_len; len++) {
-        int idx = table->first_sym_idx[len];
-        for (int i = 0; i < table->sym_count[len]; i++) {
-            uint8_t sym = table->sorted_symbols[idx + i];
-            uint16_t c = table->code[sym];
-            /* Left-align code to MAX_CODE_LEN bits */
-            int shift = PIVCO_MAX_CODE_LEN - len;
-            uint32_t base = (uint32_t)c << shift;
-            uint32_t count = (uint32_t)1 << shift;
-            for (uint32_t j = 0; j < count; j++) {
-                table->decode_sym[base + j] = sym;
-                table->decode_len[base + j] = (uint8_t)len;
-            }
-        }
-    }
+    /* The 2^MAX_CODE_LEN flat decode table (decode_sym/decode_len) is used
+     * ONLY by the traditional flat-table decoder (trad_huffman_decode*), never
+     * by the production tree-walk path.  It is built on demand via
+     * pivco_huffman_build_traditional_table() so the normal build -- and the
+     * decode-side rebuild from code lengths -- don't pay for the 2 KB fill. */
 
     /* Build canonical Huffman tree for PIVCO tree-walk.
        Insert each symbol's canonical code into the tree by walking
@@ -789,4 +777,25 @@ int pivco_huffman_build_table_from_code_lens(
     uint64_t freq[PIVCO_MAX_SYMBOLS];
     build_rank_aware_synth_freq(code_lens, rank_within_tier, freq);
     return pivco_huffman_build_table(freq, table);
+}
+
+/* Fill the 2^MAX_CODE_LEN flat decode table (decode_sym/decode_len) read by
+ * the traditional flat-table decoder (trad_huffman_decode*).  Call once after
+ * the table is built; the production tree-walk decoder does not need it, so
+ * pivco_huffman_build_table no longer fills it automatically. */
+void pivco_huffman_build_traditional_table(pivco_huffman_table_t *table)
+{
+    if (!table) return;
+    /* Defensive base fill covers any gap for incomplete codes (single sym). */
+    memset(table->decode_sym, table->prefill_sym, sizeof(table->decode_sym));
+    memset(table->decode_len, 1, sizeof(table->decode_len));
+    for (int s = 0; s < PIVCO_MAX_SYMBOLS; s++) {
+        int len = table->code_len[s];
+        if (len <= 0) continue;
+        int shift = PIVCO_MAX_CODE_LEN - len;
+        uint32_t base  = (uint32_t)table->code[s] << shift;
+        uint32_t count = (uint32_t)1 << shift;
+        memset(&table->decode_sym[base], s, count);
+        memset(&table->decode_len[base], len, count);
+    }
 }

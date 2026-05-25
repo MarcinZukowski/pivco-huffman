@@ -171,10 +171,11 @@ int  pivco_huffman_get_fse_enabled(void);
 /* ---------- FSE table-usage stats (debug instrumentation) ----------
  *
  * Per-table-id counters incremented inside the encoder every time an
- * FSE-coded bitmap is committed.  Indexed 0..25 (slot 0 = "FSE attempted
- * but did not commit"; slots 1..25 = pivco_fse_freq[] table picked).
+ * FSE-coded bitmap is committed.  Slot 0 = "FSE attempted but did not
+ * commit"; slots 1..PIVCO_FSE_NUM_TABLES = pivco_fse_freq[] table picked.
+ * MUST be >= PIVCO_FSE_NUM_TABLES + 1 (static-asserted in pivco_fse.c).
  * Not thread-safe; intended for single-threaded analysis runs. */
-#define PIVCO_FSE_STATS_SLOTS 26
+#define PIVCO_FSE_STATS_SLOTS 51
 void pivco_huffman_fse_stats_reset(void);
 void pivco_huffman_fse_stats_get(uint64_t commit_count[PIVCO_FSE_STATS_SLOTS],
                                  uint64_t attempt_count[PIVCO_FSE_STATS_SLOTS],
@@ -224,6 +225,12 @@ int pivco_huffman_build_table_from_code_lens(
     const uint8_t code_lens[PIVCO_MAX_SYMBOLS],
     const int16_t *rank_within_tier,
     pivco_huffman_table_t *table);
+
+/* Fill the 2^MAX_CODE_LEN flat decode table (decode_sym/decode_len) used only
+ * by the traditional flat-table decoder (trad_huffman_decode*).  Call after
+ * building the table; pivco_huffman_build_table no longer fills it (the
+ * production tree-walk decoder does not need it). */
+void pivco_huffman_build_traditional_table(pivco_huffman_table_t *table);
 
 /* ---------- PIVCO Huffman encode/decode (block of PIVCO_BLOCK_SIZE symbols) ---------- */
 

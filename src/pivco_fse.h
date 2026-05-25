@@ -46,7 +46,7 @@ int pivco_fse_select_table(double p_major);
  *   caller should emit the raw bitmap instead.  *out_len is undefined.
  * Otherwise: error.  *out_len is undefined.
  *
- * table_id must be in [1, 25] (selected via pivco_fse_select_table). */
+ * table_id must be in [1, PIVCO_FSE_NUM_TABLES] (via pivco_fse_select_table). */
 pivco_fse_status_t pivco_fse_compress(int table_id,
                                        const void *src, size_t src_len,
                                        void *dst, size_t dst_cap,

@@ -202,6 +202,8 @@ int main(int argc, char **argv)
             printf("%-13s ERROR: build_table returned %d\n", name, rc);
             continue;
         }
+        /* trad_huffman_decode* read the 2^L flat table, no longer auto-built */
+        pivco_huffman_build_traditional_table(table);
 
         /* Generate full 4M symbol sequence */
         uint8_t *symbols = (uint8_t *)malloc(TOTAL_SYMBOLS);

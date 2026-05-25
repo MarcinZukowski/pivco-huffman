@@ -28,6 +28,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <assert.h>
 
 /* ---------- FSE dispatch parameters ----------
  *
@@ -113,6 +114,7 @@ static inline void codec_maybe_fse_attempt(uint8_t *marker_slot,
 
     int t_id = pivco_fse_select_table(p_major);
     if (t_id < 1) return;
+    assert(t_id < PIVCO_FSE_STATS_SLOTS);  /* guards the g_pivco_fse_* indexing */
 
     int xor_flag = (n_right > n_left);
     uint8_t scratch[PIVCO_BLOCK_SIZE / 8 + 16];
