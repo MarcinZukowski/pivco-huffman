@@ -24,6 +24,56 @@ In the WT literature, this representation is used as an **index** supporting
 rank/select/access queries on text in O(log σ) per query — the core building
 block of the FM-index and r-index for substring search. Not as a stream codec.
 
+## Index vs. codec: the core distinction
+
+The sharpest way to separate pivco from the entire wavelet-tree literature:
+**wavelet trees are studied almost exclusively as a queryable *index*
+(access/rank/select in compressed space); pivco repurposes the same
+Huffman-shaped bitmap layout as a bulk *decompression codec*.** That change of
+contract flips every design axis:
+
+| axis | WT as **index** | pivco as **codec** |
+|------|-----------------|--------------------|
+| access pattern | random per-symbol rank/select queries | one linear bulk pass |
+| metric | µs / query | GB/s throughput |
+| bitmap augmentation | O(1) rank/select dict (RRR, `rrr2007`), +o(n) | none (never ranks) |
+| bitmap compression | must stay queryable → RRR | free → FSE/tANS (pha) |
+| decode direction | top-down, per symbol (`access`) | bottom-up, bulk merge |
+| hot path | queries (build is offline) | decode (encode is offline) |
+| K_right split | derivable by rank when needed | transmitted (no rank in the loop) |
+
+Every pivco design choice is a *consequence* of "codec, not index": no
+succinct rank/select structures, SIMD partition/merge, per-node FSE (only
+possible because queryability is dropped), transmitted K_right, the
+flat-subtree fast path.
+
+**Numbers (Claude/Navarro/Ordóñez IS 2015 experiments, `claude2015matrix`).**
+WT `access`/`rank`/`select` run at **~1–10 µs per query** (their Figs 7–8,
+Xeon E5620), random access, on large alphabets (σ ≈ 2¹⁵–2²³ → 15–23 rank
+ops/query). pivco bulk-decodes byte data at **~0.05–0.25 ns/byte** (GB/s). The
+~10⁴–10⁵× per-symbol gap is the **index-vs-codec model**, NOT "RRR is slow":
+RRR vs a plain (uncompressed) succinct bitmap is only ~10–40% in that same
+paper (`WT-RRR` vs `WT-CM`). Frame the speed story as *random-query index vs
+bulk-scan codec*, never as "RRR is the bottleneck."
+
+**Rebuttal to pre-empt.** A reviewer will say "decoding a WT is just n
+`access` queries — known." True, but doing it as n independent top-down random
+queries IS the µs-per-symbol path; pivco's contribution is the **bulk
+bottom-up SIMD reconstruction** that is ~10⁴× faster per symbol, plus the codec
+wire format around it. The novelty is the bulk-decode algorithm and dropping
+the index contract to unlock FSE — *not* the layout.
+
+**pivco encode *is* WT construction.** Stripped of the query concern, the two
+halves are symmetric: pivco *encode* = construct the Huffman-shaped WT bitmaps
+via top-down SIMD partition (the Kaneta 2018 / Dinklage 2023 primitive — prior
+art, no encode-side novelty); pivco *decode* = reconstruct the text via
+bottom-up SIMD merge (the inverse; absent from the WT literature). They meet at
+the partition step and diverge: the index line adds rank/select (RRR); pivco
+adds the bulk decoder + per-node FSE. pivco's partition encoder could even
+serve as a fast bitmap-build front-end for a WT *index* (then bolt on the
+rank/select layer pivco omits) — a plausible bridge, but the construction
+primitive itself is not pivco's contribution.
+
 ## SIMD construction primitives
 
 The partition kernel pivco uses (TBL / pshufb / vpcompress to split a per-
@@ -50,9 +100,33 @@ also published, applied to building wavelet trees:
   novelty against this work; the novelty stays on the BU / bulk-decode /
   flat-subtree side.
 
-Both works are strictly top-down: start at the root level, partition by the
-most-significant bit, descend. That's the same direction as pivco's TD-encode
-and TD-decode.
+- **Dinklage, Ellert, Fischer, Kurpicz, Löbel — "Practical Wavelet Tree
+  Construction"** (ACM JEA 26(1), Art. 1.8, 2021; `dinklage2021jea`) — the
+  journal consolidation of this group's construction line (sequential +
+  shared/distributed/external-memory parallel; Huffman-shaped variant in §9).
+  ⚠ **Name collision to pre-empt:** it introduces a "**bottom-up**" technique,
+  but theirs is *construction* (data-level): compute the leaf (full-character)
+  histogram once, then derive every coarser level's histogram + interval
+  positions by aggregating bit-prefix pairs (leaf → root), avoiding per-level
+  text scans, and fill the bitmaps (their Alg. 1, output "a bit vector BVℓ per
+  level"). This is the **inverse** of pivco's bottom-up, which is *decode*
+  (bitmaps → text by merging child streams up to the root). Construction only;
+  never measures decode.
+
+  Three distinct "bottom-up"s to keep straight:
+    1. classic Huffman tree build — **metadata** level (merge least-frequent
+       pairs → code lengths / tree shape).
+    2. Dinklage JEA 2021 — **data** level, bitmap **construction** (text →
+       bit vectors via leaf-histogram aggregation).
+    3. pivco — **data** level, bitmap **decode** (bit vectors → text via
+       child-stream merge).
+  pivco's table build (code lengths → canonical tree) is the metadata side and
+  is standard/separate from all three.
+
+Kaneta and Dinklage et al. (DCC 2023) are strictly top-down: start at the root
+level, partition by the most-significant bit, descend. That's the same
+direction as pivco's TD-encode and TD-decode. (Dinklage JEA 2021's bottom-up is
+construction, not decode — see the name-collision note above.)
 
 ## Closest prior decode work
 

@@ -1,4 +1,4 @@
-#import "conf.typ": anote, PH, he, mf, sym, pick-cols, todo
+#import "conf.typ": anote, PH, he, mf, sym, pick-cols, todo, h0, fair-cell
 
 = Pivoting Huffman <sideways>
 
@@ -107,9 +107,28 @@ for (i = 0; i < n; i++) {
 We measured the decoding performance of such a naive implementation on Apple M4 CPU,
 and, as expected, the performance is very sub-par.
 
-#let rows = csv("data/td-naive-vs-opt.hosts-x-decoders.csv")
-#let rows = pick-cols(rows, ("distribution", "m4_naive", "m4_huf0", "m4_naive_vs_huf0", "c8i_naive", "c8i_huf0", "c8i_naive_vs_huf0", ))
-#let data = rows.slice(1)
+// ---- TD-vs-Huff0 tables, sourced from the consolidated fair.csv ----
+// TD decoders use prebuilt-kernel throughput (dec_pb) -- these tables compare
+// decoder KERNELS, so we exclude per-call table-build overhead.  Huff0 is
+// stock HUF_decompress (dec_op); its table build is negligible at 128 KB
+// chunks, so its opaque throughput equals its prebuilt kernel.  Values in GB/s.
+#let fair = csv("data/fair.csv")
+#let _tdm = (naive: "td_naive", naive_simd: "td_nv_simd",
+             scalar: "td_scl_opt", simd: "td_simdopt")
+#let tdg(host, ds, dec) = {            // TD kernel throughput, GB/s
+  let v = fair-cell(fair, host, ds, _tdm.at(dec), "dec_pb")
+  if v == "na" { [—] } else { [#calc.round(float(v) / 1000, digits: 2)] }
+}
+#let h0g(host, ds) = {                 // Huff0 throughput, GB/s
+  let v = fair-cell(fair, host, ds, "huf0", "dec_op")
+  if v == "na" { [—] } else { [#calc.round(float(v) / 1000, digits: 2)] }
+}
+#let tdr(host, ds, dec) = {            // ratio: TD kernel / Huff0
+  let a = fair-cell(fair, host, ds, _tdm.at(dec), "dec_pb")
+  let b = fair-cell(fair, host, ds, "huf0", "dec_op")
+  if a == "na" or b == "na" { [—] } else { [#calc.round(float(a) / float(b), digits: 2)] }
+}
+
 #show table.cell.where(x: 6): strong
 #table(
   columns: 7,
@@ -117,10 +136,15 @@ and, as expected, the performance is very sub-par.
     table.cell(rowspan: 2)[*Data*],
     table.cell(colspan: 3)[*M4 Max* (GB/s)],
     table.cell(colspan: 3)[*Sapphire Rapids c8i* (GB/s)],
-    [naive], [huf0_x2], [naive/huf0],
-    [naive], [huf0_x2], [naive/huf0],
+    [naive], [#h0], [naive/#h0],
+    [naive], [#h0], [naive/#h0],
   ),
-  ..data.flatten(),
+  [proba80],
+  tdg("m4", "proba80", "naive"), h0g("m4", "proba80"), tdr("m4", "proba80", "naive"),
+  tdg("c8i", "proba80", "naive"), h0g("c8i", "proba80"), tdr("c8i", "proba80", "naive"),
+  [prose_pride],
+  tdg("m4", "prose_pride", "naive"), h0g("m4", "prose_pride"), tdr("m4", "prose_pride", "naive"),
+  tdg("c8i", "prose_pride", "naive"), h0g("c8i", "prose_pride"), tdr("c8i", "prose_pride", "naive"),
 )
 
 There are two main reasons for this:
@@ -281,9 +305,6 @@ together, further reducing ops/byte.
 
 == Impact of tree optimizations
 
-#let rows = csv("data/td-naive-vs-opt.hosts-x-decoders.csv")
-#let rows = pick-cols(rows, ("distribution", "m4_naive", "m4_scalar", "m4_huf0", "m4_scalar_vs_huf0", "c8i_naive", "c8i_scalar", "c8i_huf0", "c8i_scalar_vs_huf0"))
-#let data = rows.slice(1)
 #figure(
   table(
     columns: 9,
@@ -291,10 +312,15 @@ together, further reducing ops/byte.
       table.cell(rowspan: 2)[*Data*],
       table.cell(colspan: 4)[*M4* (GB/s)],
       table.cell(colspan: 4)[*c8i* (GB/s)],
-      [naive], [opt], [huf0_x2], [opt/huf0],
-      [naive], [opt], [huf0_x2], [opt/huf0],
+      [naive], [opt], [#h0], [opt/#h0],
+      [naive], [opt], [#h0], [opt/#h0],
     ),
-    ..data.flatten(),
+    [proba80],
+    tdg("m4", "proba80", "naive"), tdg("m4", "proba80", "scalar"), h0g("m4", "proba80"), tdr("m4", "proba80", "scalar"),
+    tdg("c8i", "proba80", "naive"), tdg("c8i", "proba80", "scalar"), h0g("c8i", "proba80"), tdr("c8i", "proba80", "scalar"),
+    [prose_pride],
+    tdg("m4", "prose_pride", "naive"), tdg("m4", "prose_pride", "scalar"), h0g("m4", "prose_pride"), tdr("m4", "prose_pride", "scalar"),
+    tdg("c8i", "prose_pride", "naive"), tdg("c8i", "prose_pride", "scalar"), h0g("c8i", "prose_pride"), tdr("c8i", "prose_pride", "scalar"),
   ),
   caption: [Combined impact of tree optimizations on performance]
 )<tab-tree-opt>
@@ -515,27 +541,19 @@ per/element cost.
 
 @ph-td-final-bw and @ph-td-final-ratio show how
 thanks to combining tree optimizations and high-performance SIMD primitives,
-this version of #PH enters the performance territory of huf0.
+this version of #PH enters the performance territory of #h0.
 We also see how with faster primitives the impact of the optimized tree shape provides
 stronger and more consistent benefits comparing to @tab-tree-opt.
 
 Notably, the performance really depends on dataset - in `proba80`, with its lower
 entropy / shorter codes, average number of operations per symbol is much smaller.
-This behaviour is unique to #PH, and allows it to decidedly beat huf0 on such
+This behaviour is unique to #PH, and allows it to decidedly beat #h0 on such
 distributions.
 
 Still, the performance is not consistently impressive - this is mostly
 impacted by the bottleneck of writes in `scatter` primitives.
 
 In the next Section we'll discuss a different approach to #PH that works around this problem.
-
-#let rows = csv("data/td-naive-vs-opt.hosts-x-decoders.csv")
-#let H = rows.first()
-#let cell(r, c) = r.at(H.position(cc => cc == c))
-#let p80   = rows.at(1)
-#let prose = rows.at(2)
-#let datarow(tree, r, cols) = (tree, ..cols.map(c => cell(r, c)))
-#let cells(r, cols) = cols.map(c => cell(r, c))
 
 #figure(
   table(
@@ -549,20 +567,18 @@ In the next Section we'll discuss a different approach to #PH that works around 
     ),
     table.cell(rowspan: 2)[proba80],
     [naive],
-    ..cells(p80, ("m4_naive","m4_naive_simd","c8i_naive","c8i_naive_simd")),
+    tdg("m4", "proba80", "naive"), tdg("m4", "proba80", "naive_simd"),
+    tdg("c8i", "proba80", "naive"), tdg("c8i", "proba80", "naive_simd"),
     [optimized],
-    cell(p80, "m4_scalar"),
-    [*#cell(p80, "m4_simd")*],
-    cell(p80, "c8i_scalar"),
-    [*#cell(p80, "c8i_simd")*],
+    tdg("m4", "proba80", "scalar"), strong(tdg("m4", "proba80", "simd")),
+    tdg("c8i", "proba80", "scalar"), strong(tdg("c8i", "proba80", "simd")),
     table.cell(rowspan: 2)[prose_pride],
     [naive],
-    ..cells(prose, ("m4_naive","m4_naive_simd","c8i_naive","c8i_naive_simd")),
+    tdg("m4", "prose_pride", "naive"), tdg("m4", "prose_pride", "naive_simd"),
+    tdg("c8i", "prose_pride", "naive"), tdg("c8i", "prose_pride", "naive_simd"),
     [optimized],
-    cell(prose, "m4_scalar"),
-    [*#cell(prose, "m4_simd")*],
-    cell(prose, "c8i_scalar"),
-    [*#cell(prose, "c8i_simd")*],
+    tdg("m4", "prose_pride", "scalar"), strong(tdg("m4", "prose_pride", "simd")),
+    tdg("c8i", "prose_pride", "scalar"), strong(tdg("c8i", "prose_pride", "simd")),
   ),
   caption: [Impact of tree and primitive optimizations (GB/s)]
 )<ph-td-final-bw>
@@ -579,21 +595,19 @@ In the next Section we'll discuss a different approach to #PH that works around 
     ),
     table.cell(rowspan: 2)[proba80],
     [naive],
-    ..cells(p80, ("m4_naive_vs_huf0","m4_naive_simd_vs_huf0","c8i_naive_vs_huf0","c8i_naive_simd_vs_huf0")),
+    tdr("m4", "proba80", "naive"), tdr("m4", "proba80", "naive_simd"),
+    tdr("c8i", "proba80", "naive"), tdr("c8i", "proba80", "naive_simd"),
     [optimized],
-    cell(p80, "m4_scalar_vs_huf0"),
-    [*#cell(p80, "m4_simd_vs_huf0")*],
-    cell(p80, "c8i_scalar_vs_huf0"),
-    [*#cell(p80, "c8i_simd_vs_huf0")*],
+    tdr("m4", "proba80", "scalar"), strong(tdr("m4", "proba80", "simd")),
+    tdr("c8i", "proba80", "scalar"), strong(tdr("c8i", "proba80", "simd")),
     table.cell(rowspan: 2)[prose_pride],
     [naive],
-    ..cells(prose, ("m4_naive_vs_huf0","m4_naive_simd_vs_huf0","c8i_naive_vs_huf0","c8i_naive_simd_vs_huf0")),
+    tdr("m4", "prose_pride", "naive"), tdr("m4", "prose_pride", "naive_simd"),
+    tdr("c8i", "prose_pride", "naive"), tdr("c8i", "prose_pride", "naive_simd"),
     [optimized],
-    cell(prose, "m4_scalar_vs_huf0"),
-    [*#cell(prose, "m4_simd_vs_huf0")*],
-    cell(prose, "c8i_scalar_vs_huf0"),
-    [*#cell(prose, "c8i_simd_vs_huf0")*],
+    tdr("m4", "prose_pride", "scalar"), strong(tdr("m4", "prose_pride", "simd")),
+    tdr("c8i", "prose_pride", "scalar"), strong(tdr("c8i", "prose_pride", "simd")),
   ),
-  caption: [Impact of tree and primitive optimizations (ratio to huf0, higher is better)]
+  caption: [Impact of tree and primitive optimizations (ratio to #h0, higher is better)]
 )<ph-td-final-ratio>
 

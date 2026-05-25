@@ -1,4 +1,4 @@
-#import "conf.typ": _html, _pdf, _fmt, anote, setup, PH, he, sym, PHA
+#import "conf.typ": _html, _pdf, _fmt, anote, setup, PH, he, sym, PHA, fair-cell, h0
 
 = Breaking the bit-barrier <ans>
 
@@ -11,7 +11,7 @@ A well known solution to this problem is arithmetic coding (AC, @arithmetic), ho
 it has not been popular due to its performance and patent controversies.
 Luckily, Jarek Duda proposed _ANS-based encoding_ (@dudaans),
 which solves both problems.
-It led to two main algorithms: tabled-ANS (*tANS*) and range-ANS (*rANS*).
+It led to two main algorithms: tabled-ANS (*tANS*) and range-ANS (*rANS* @encodesu1920).
 All these algorithms allow codes to have average lengths close to entropy-optimal.
 We will focus on tANS.
 
@@ -146,8 +146,17 @@ See also @fuse-fse-merge for another possible optimization.
 
 == Results
 
-#let rows = csv("data/fair-m4.csv")
-#let data = rows.slice(1)   // drop header
+#let fair = csv("data/fair.csv")
+#let _na(v) = if v == "na" { [—] } else { [#v] }
+#let _dsets = ("proba80", "english", "html_wiki", "prose_pride", "image_jpeg",
+               "json_api", "dna_fasta", "chinese_text", "calgary_pic")
+#let _engs = ("ph", "pha", "huf0", "fse_x8y1")
+#let _body = _dsets.map(d => {
+  ([#d],) + _engs.map(e => (
+    _na(fair-cell(fair, "m4", d, e, "ratio_op")),
+    _na(fair-cell(fair, "m4", d, e, "dec_op")),
+  )).flatten()
+}).flatten()
 #figure(
 table(
     columns: 9,
@@ -155,16 +164,17 @@ table(
     table.header(
     table.cell(rowspan: 2)[*Dataset*],
     table.cell(colspan: 2)[*ph*],   table.cell(colspan: 2)[*pha*],
-    table.cell(colspan: 2)[*huf0*], table.cell(colspan: 2)[*fse_x8y1*],
+    table.cell(colspan: 2)[*#h0*], table.cell(colspan: 2)[*fse_x8y1*],
     [ratio], [MB/s], [ratio], [MB/s], [ratio], [MB/s], [ratio], [MB/s],
     ),
-    ..data.flatten(),
+    .._body,
 ),
 caption: [M4 fair-bench: compression ratio (higher = better) and decode
-            throughput (MB/s, prebuilt table) per engine, across the MAIN
-            distributions. #PH and huf0 are plain Huffman (≈equal ratio);
-            *pha* gains ratio from ANS-coded partition bitmaps; the
+            throughput (MB/s, opaque / realistic per-call) per engine, across
+            the MAIN distributions. #PH and #h0 are plain Huffman (≈equal
+            ratio); *pha* gains ratio from ANS-coded partition bitmaps; the
             standalone *fse_x8y1* reaches the best ratio (full FSE) but is
-            the slowest. "—" = no prebuilt result.],
+            the slowest. #h0 is stock `HUF_decompress` (auto-dispatch).
+            "—" = not available.],
 )<tab-fair-m4>
 

@@ -1,4 +1,4 @@
-#import "conf.typ": anote, PH, he, mf, sym, pick-cols, todo
+#import "conf.typ": anote, PH, he, mf, sym, pick-cols, todo, fair-filter, h0
 
 = Introduction
 
@@ -18,7 +18,7 @@ In this paper we use the term "Huffman" for all versions of it.
 == Current Huffman SotA <sota>
 
 Most modern Huffman implementations
-huf0, Oodle
+#h0, Oodle
 
 Most modern Huffman decoding implementations use a _decoding table_ idea, allowing decoding
 an entire code without traversing it bit by bit.
@@ -34,27 +34,45 @@ This or similar code is used in fast Huffman decompressors like Huff0 (@fse).
 Two typical approaches to accelerating it are using multiple cursors (@giesen2014interleaved, @giesen2023oodle)
 or using a table that decodes 2 symbols instead of one.
 
-We measured various Huffman decoding implementations, and the most interesting ones we found
-were huff0 (default from @fse), huff0x2 (2 streams, 2 codes) and Oodle's Huffman decoder (@giesen2021oodle).
+We measured various Huffman decoding implementations, and the most performant ones we found
+were #h0 (from @fse) and Oodle's Huffman decoder (@giesen2021oodle).
 
-Here are decoding bandwidths on two example datasets on M4:
+Here are the measured bandwidths on two example datasets on two hosts:
 
+#let fair = csv("data/fair.csv")
+#let _na(v) = if v == "na" { [—] } else { [#v] }
+// opaque enc/dec MB/s for huff0(stock) + oodle-huffman at (host, dataset)
+#let _hp(host, ds) = {
+  let f(method) = {
+    let r = fair-filter(fair, (host: host, dataset: ds, method: method),
+                        ("enc_op", "dec_op"))
+    if r.len() == 0 { ("na", "na") } else { r.first() }
+  }
+  let hf = f("huf0")
+  let oo = f("oo_huff")
+  (_na(hf.at(0)), _na(hf.at(1)), _na(oo.at(0)), _na(oo.at(1)))
+}
 #table(
-  columns: 7,
+  columns: 6,
   inset: 5pt,
   align: (left, right, right, right, right, right, right),
   table.header(
     table.cell(rowspan: 2)[*Dataset*],
-    table.cell(colspan: 2)[*huff0*],
-    table.cell(colspan: 2)[*huff0x2*],
+    table.cell(rowspan: 2)[*Host*],
+    table.cell(colspan: 2)[*#h0*],
     table.cell(colspan: 2)[*oodle-huffman*],
     [enc MB/s],[dec MB/s],
     [enc MB/s],[dec MB/s],
-    [enc MB/s],[dec MB/s],
   ),
+  table.cell(rowspan: 2)[proba80],     [M4], .._hp("m4", "proba80"),
+                                       [c8i], .._hp("c8i", "proba80"),
+  table.cell(rowspan: 2)[prose_pride], [M4], .._hp("m4", "prose_pride"),
+                                       [c8i], .._hp("c8i", "prose_pride"),
 )<tab-huffman-perf>
 
-#todo[Decode benchmark]
+Throughput is measured in realistic per-call mode (table rebuilt per block);
+#h0 is stock `HUF_decompress`, oodle-huffman is Oodle's `OodleLZ` Huffman
+backend.
 
 This is a respectable performance.
 Still, in this paper we investigate if it could be improved by using a completely different approach.
