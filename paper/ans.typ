@@ -1,4 +1,4 @@
-#import "conf.typ": _html, _pdf, _fmt, anote, setup, PH, he, sym, PHA, fair-cell, h0
+#import "conf.typ": _html, _pdf, _fmt, anote, setup, PH, he, sym, PHA, fair-cell, h0, mf
 
 = Breaking the bit-barrier <ans>
 
@@ -11,12 +11,14 @@ A well known solution to this problem is arithmetic coding (AC, @arithmetic), ho
 it has not been popular due to its performance and patent controversies.
 Luckily, Jarek Duda proposed _ANS-based encoding_ (@dudaans),
 which solves both problems.
-It led to two main algorithms: tabled-ANS (*tANS*) and range-ANS (*rANS* @encodesu1920).
-All these algorithms allow codes to have average lengths close to entropy-optimal.
-We will focus on tANS.
+It led to two main algorithms: tabled-ANS (*tANS*) and range-ANS (*rANS* @encodesu1920),
+both allowing codes to have lengths close to entropy-optimal.
 
-The typical tANS decoding is actually very similar to an optimized
-Huffman decoding routine from @sota.
+We will focus on tANS, which is used by FSE (@fse) and Oodle TANS library (@oodle),
+ both related to the Huffman implementations we discussed in @sota.
+
+The typical tANS decoding is actually quite similar to an optimized
+Huffman decoding routine from @sota:
 
 ```c
 t = decoding_table[state];
@@ -26,7 +28,7 @@ emit_symbol(t.symbol);                  //decoded symbol
 
 While similar, the critical difference is that we see a `state` variable that
 is carried through the iterations and mutated depending on the data.
-Also, the `decoding_table` is constructed such, that for the same code
+Also, the `decoding_table` is constructed such that for the same code
 a different number of bits may be consumed.
 
 As a result, the same approach to tANS decoding as we did to Huffman in @sideways
@@ -66,18 +68,18 @@ Three datasets stand out:
 - *calgary_pic* - a mostly-white bitmap
 - *dna_fasta* - DNA dataset, mostly #sym("A C G T") letters plus some extras
 
-#he("myfig")[
+#he("gridtable")[
   #table(
     columns: (50%, 50%),
     stroke: 0pt,
     align: center,
     [#figure(
-      image("figures/skew-calgary.svg"),
+      mf("skew-calgary"),
       caption: [Skew visualization for *calgary_pic* (top part of the tree only)]
     )<fig-skew-calgary-pic>
     ],
     [#figure(
-      image("figures/skew-dna-fasta.svg"),
+      mf("skew-dna-fasta"),
       caption: [Skew visualization for *dna_fasta* (top part of the tree only)]
     )<fig-skew-dna-fasta>
     ],
@@ -150,7 +152,7 @@ See also @fuse-fse-merge for another possible optimization.
 #let _na(v) = if v == "na" { [—] } else { [#v] }
 #let _dsets = ("proba80", "english", "html_wiki", "prose_pride", "image_jpeg",
                "json_api", "dna_fasta", "chinese_text", "calgary_pic")
-#let _engs = ("ph", "pha", "huf0", "fse_x8y1")
+#let _engs = ("ph", "pha", "huf0", "fse_x8y1","oo_tans")
 #let _body = _dsets.map(d => {
   ([#d],) + _engs.map(e => (
     _na(fair-cell(fair, "m4", d, e, "ratio_op")),
@@ -159,22 +161,28 @@ See also @fuse-fse-merge for another possible optimization.
 }).flatten()
 #figure(
 table(
-    columns: 9,
+    columns: 11,
     align: (col, _) => if col == 0 { left } else { right },
     table.header(
     table.cell(rowspan: 2)[*Dataset*],
-    table.cell(colspan: 2)[*ph*],   table.cell(colspan: 2)[*pha*],
-    table.cell(colspan: 2)[*#h0*], table.cell(colspan: 2)[*fse_x8y1*],
-    [ratio], [MB/s], [ratio], [MB/s], [ratio], [MB/s], [ratio], [MB/s],
+    table.cell(colspan: 2)[*ph*],
+    table.cell(colspan: 2)[*pha*],
+    table.cell(colspan: 2)[*#h0*],
+    table.cell(colspan: 2)[*fse_x8y1*],
+    table.cell(colspan: 2)[*oo-tans*],
+    [ratio], [MB/s], [ratio], [MB/s], [ratio], [MB/s], [ratio], [MB/s], [ratio], [MB/s],
     ),
     .._body,
 ),
-caption: [M4 fair-bench: compression ratio (higher = better) and decode
-            throughput (MB/s, opaque / realistic per-call) per engine, across
-            the MAIN distributions. #PH and #h0 are plain Huffman (≈equal
+caption: [M4 #PHA benchmark: compression ratio (higher = better) and decode
+            throughput (MB/s) per engine. *ph* and #h0 are plain Huffman (≈equal
             ratio); *pha* gains ratio from ANS-coded partition bitmaps; the
-            standalone *fse_x8y1* reaches the best ratio (full FSE) but is
-            the slowest. #h0 is stock `HUF_decompress` (auto-dispatch).
-            "—" = not available.],
+            standalone *fse_x8y1* and *oo-tans* reache the best ratio (full FSE) but is
+            the slowest.],
 )<tab-fair-m4>
 
+In @tab-fair-m4 we compare the #PH (*ph*) and #PHA (*pha*) performance with other solutions, including Huff0, FSE and
+Oodle's TANS library.
+We see that for non-skewed dataset, *ph* and *pha* achieve the same performance, but for skewed datasets
+*pha* detects opportunity to _selectively_ apply FSE - this brings the compression ratio close to full FSE,
+while still achieving significantly higher decode performance.
