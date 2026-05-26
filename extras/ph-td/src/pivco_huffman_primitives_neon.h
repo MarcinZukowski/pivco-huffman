@@ -149,7 +149,7 @@ static inline void enc_init_neon(uint16_t *codes_la, int n,
  * The dispatcher pack_dN_dispatch_neon below handles the residual
  * scalar tail when overpacking isn't possible.
  *
- * For the codec.c contract, prim_pack_dN(out, codes_la, n, D, depth)
+ * For the codec.c contract, prim_enc_pack_dN(out, codes_la, n, D, depth)
  * forwards to pack_dN_dispatch_neon(out, codes_la, n, D, depth). */
 
 /* D=2: 16 codes -> 4 bytes (4 codes per byte, no byte crossings). */

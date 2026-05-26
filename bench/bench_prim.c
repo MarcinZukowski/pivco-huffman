@@ -9,8 +9,8 @@
  *   unpack    — read N D-bit codes from the packed stream -> codes[]  (flat_dN_unpack)
  *   scatter   — codes[] + c2s[2^D] -> out[]                           (NEON TBL)
  *   merge     — packed stream + c2s -> out[]  (production prim_merge_flat)
- *   pack      — codes_la[] -> packed N*D-bit stream  (production prim_pack_dN)
- *   partition — codes_la[] + depth -> bitmap + left/right split  (prim_partition)
+ *   pack      — codes_la[] -> packed N*D-bit stream  (production prim_enc_pack_dN)
+ *   partition — codes_la[] + depth -> bitmap + left/right split  (prim_enc_partition)
  *
  * unpack/scatter/merge/pack are per-depth-D; partition is a 1-bit split (one
  * representative depth).  Every SIMD variant is checked against a scalar
@@ -54,7 +54,7 @@
 #endif
 #include "pivco_huffman.h"
 #if defined(HAVE_SIMD)
-#  include "pivco_huffman_primitives.h"   /* prim_pack_dN / prim_partition /
+#  include "pivco_huffman_primitives.h"   /* prim_enc_pack_dN / prim_enc_partition /
                                              prim_merge_flat (+ NEON flat_dN) */
 #endif
 #ifndef BK
@@ -166,9 +166,9 @@ static void neon_scatter(const ctx_t *c) {
 #endif /* HAVE_NEON_KERNELS */
 
 #if defined(HAVE_SIMD)   /* pack/merge/partition: production prim_*, all backends */
-static void simd_pack (const ctx_t *c){ prim_pack_dN(c->pack_out, c->la_work, c->n, c->D, c->depth); }
+static void simd_pack (const ctx_t *c){ prim_enc_pack_dN(c->la_work, c->n, c->D, c->depth, c->pack_out); }
 static void simd_merge(const ctx_t *c){ prim_merge_flat(c->out, c->n, c->bm, c->D, c->c2s); }
-static void simd_part (const ctx_t *c){ prim_partition(c->la_work, c->n, c->depth, c->bm, c->tmp16); }
+static void simd_part (const ctx_t *c){ prim_enc_partition(c->la_work, c->n, c->depth, c->bm, c->tmp16); }
 #endif
 
 typedef enum { ST_UNPACK, ST_SCATTER, ST_PACK, ST_MERGE, ST_PART } stage_t;

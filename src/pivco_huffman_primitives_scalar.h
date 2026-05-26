@@ -39,7 +39,7 @@ static inline void enc_init_scalar(uint16_t *codes_la, int n,
 static inline int build_bitmap_partition_scalar(uint16_t *codes_la, int n,
                                                   int depth,
                                                   uint8_t *bm,
-                                                  uint16_t *tmp)
+                                                  uint16_t *right_out)
 {
     int nbytes = bitmap_bytes(n);
     memset(bm, 0, (size_t)nbytes);
@@ -53,7 +53,7 @@ static inline int build_bitmap_partition_scalar(uint16_t *codes_la, int n,
         int bit = (v >> bit_shift) & 1;
         if (bit) {
             bm[j >> 3] |= (uint8_t)(1u << (j & 7));
-            tmp[n_right++] = v;
+            right_out[n_right++] = v;
         } else {
             codes_la[n_left++] = v;
         }
@@ -175,16 +175,16 @@ PIVCO_PRIM_ALWAYS_INLINE void prim_enc_init(uint16_t *codes_la, int n,
                                               const uint16_t *code_la_lut)
 { enc_init_scalar(codes_la, n, symbols, code_la_lut); }
 
-PIVCO_PRIM_ALWAYS_INLINE int prim_partition(uint16_t *codes_la, int n,
+PIVCO_PRIM_ALWAYS_INLINE int prim_enc_partition(uint16_t *codes_la, int n,
                                                            int depth,
                                                            uint8_t *bm,
-                                                           uint16_t *tmp)
-{ return build_bitmap_partition_scalar(codes_la, n, depth, bm, tmp); }
+                                                           uint16_t *right_out)
+{ return build_bitmap_partition_scalar(codes_la, n, depth, bm, right_out); }
 
-PIVCO_PRIM_ALWAYS_INLINE void prim_pack_dN(uint8_t *out,
-                                             const uint16_t *codes_la,
-                                             int n, int D, int depth)
-{ pack_dN_scalar(out, codes_la, n, D, depth); }
+PIVCO_PRIM_ALWAYS_INLINE void prim_enc_pack_dN(const uint16_t *codes_la,
+                                             int n, int D, int depth,
+                                             uint8_t *out_packed)
+{ pack_dN_scalar(out_packed, codes_la, n, D, depth); }
 
 PIVCO_PRIM_ALWAYS_INLINE void prim_merge_flat(uint8_t *out, int n,
                                                            const uint8_t *bm, int D,

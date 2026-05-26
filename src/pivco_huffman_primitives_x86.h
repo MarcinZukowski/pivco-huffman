@@ -577,13 +577,13 @@ static inline uint8_t enc_mask8_codes_la_x86(__m128i code_vec,
 /* Stride-8 SIMD main path: load 8 left-aligned codes, build mask byte
  * via the dense movemask, partition the SAME register into left/right
  * halves using compress_tab[mask].  In-place write of the LEFT half
- * over codes_la; RIGHT half goes to tmp.  Per 8 elements: 1 vld, 3 SSE
+ * over codes_la; RIGHT half goes to right_out.  Per 8 elements: 1 vld, 3 SSE
  * mask ops, 2 vld (shuf), 2 pshufb, 2 vst.  Scalar tail handles the
  * residual 1..7 elements. */
 static inline int build_bitmap_partition_x86(uint16_t *codes_la, int n,
                                                int depth,
                                                uint8_t *bm,
-                                               uint16_t *tmp)
+                                               uint16_t *right_out)
 {
     int n_left = 0, n_right = 0;
     int j = 0;
@@ -600,7 +600,7 @@ static inline int build_bitmap_partition_x86(uint16_t *codes_la, int n,
         __m128i right  = _mm_shuffle_epi8(code_vec, shuf_r);
         __m128i left   = _mm_shuffle_epi8(code_vec, shuf_l);
         int nr = compress_popcnt[mask];
-        _mm_storeu_si128((__m128i *)(tmp      + n_right), right);
+        _mm_storeu_si128((__m128i *)(right_out      + n_right), right);
         _mm_storeu_si128((__m128i *)(codes_la + n_left ), left);
         n_right += nr;
         n_left  += (8 - nr);
@@ -622,7 +622,7 @@ static inline int build_bitmap_partition_x86(uint16_t *codes_la, int n,
         bm[j >> 3] = mask;
         for (int k = 0; k < tail; k++) {
             if (mask & (1 << k))
-                tmp[n_right++] = tail_buf[k];
+                right_out[n_right++] = tail_buf[k];
             else
                 codes_la[n_left++] = tail_buf[k];
         }
@@ -861,16 +861,16 @@ PIVCO_PRIM_ALWAYS_INLINE void prim_enc_init(uint16_t *codes_la, int n,
                                               const uint16_t *code_la_lut)
 { enc_init_x86(codes_la, n, symbols, code_la_lut); }
 
-PIVCO_PRIM_ALWAYS_INLINE int prim_partition(uint16_t *codes_la,
+PIVCO_PRIM_ALWAYS_INLINE int prim_enc_partition(uint16_t *codes_la,
                                                            int n, int depth,
                                                            uint8_t *bm,
-                                                           uint16_t *tmp)
-{ return build_bitmap_partition_x86(codes_la, n, depth, bm, tmp); }
+                                                           uint16_t *right_out)
+{ return build_bitmap_partition_x86(codes_la, n, depth, bm, right_out); }
 
-PIVCO_PRIM_ALWAYS_INLINE void prim_pack_dN(uint8_t *out,
-                                             const uint16_t *codes_la,
-                                             int n, int D, int depth)
-{ pack_dN_x86(out, codes_la, n, D, depth); }
+PIVCO_PRIM_ALWAYS_INLINE void prim_enc_pack_dN(const uint16_t *codes_la,
+                                             int n, int D, int depth,
+                                             uint8_t *out_packed)
+{ pack_dN_x86(out_packed, codes_la, n, D, depth); }
 
 PIVCO_PRIM_ALWAYS_INLINE void prim_merge_flat(uint8_t *out, int n,
                                                           const uint8_t *bm, int D,

@@ -180,7 +180,7 @@ static void codec_encode_node(const pivco_huffman_table_t *table,
     if (table->flat_depth[node_id] >= 2) {
         int D = table->flat_depth[node_id];
         int total_bytes = (n * D + 7) >> 3;
-        prim_pack_dN(*out_ptr, codes_la, n, D, depth);
+        prim_enc_pack_dN(codes_la, n, D, depth, *out_ptr);
         *out_ptr += total_bytes;
         return;
     }
@@ -201,7 +201,7 @@ static void codec_encode_node(const pivco_huffman_table_t *table,
     uint8_t *bm = *out_ptr;
     *out_ptr += nbytes;
 
-    int n_right = prim_partition(codes_la, n, depth, bm, tmp);
+    int n_right = prim_enc_partition(codes_la, n, depth, bm, tmp);
     int n_left  = n - n_right;
 
     /* Optional FSE attempt on the raw bitmap.  On commit, marker_slot

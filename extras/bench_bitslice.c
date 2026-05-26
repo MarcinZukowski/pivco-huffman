@@ -530,8 +530,8 @@ int main(int argc, char **argv)
     }
 
     /* ENCODE table -- caveat: enc-cls is naive scalar bit-pack, NOT
-     * ph's actual prim_pack_dN. */
-    printf("\nencode (ns/sym; enc-cls is NAIVE scalar -- not ph's prim_pack_dN):\n");
+     * ph's actual prim_enc_pack_dN. */
+    printf("\nencode (ns/sym; enc-cls is NAIVE scalar -- not ph's prim_enc_pack_dN):\n");
     printf("%-3s | %10s | %10s | %s\n", "D", "enc-cls", "enc-bs", "bs-vs-cls");
     printf("----+------------+------------+-----------\n");
     for (int di = 0; di < NDS; di++) {

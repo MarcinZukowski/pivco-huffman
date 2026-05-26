@@ -59,8 +59,8 @@
  *    partition bit is at position `15 - depth`, which the primitives
  *    derive from the `depth` argument they receive.
  *
- *  int prim_partition(uint16_t *codes_la, int n, int depth,
- *                                   uint8_t *bm, uint16_t *tmp);
+ *  int prim_enc_partition(uint16_t *codes_la, int n, int depth,
+ *                                   uint8_t *bm, uint16_t *right_out);
  *
  *    Build the n-bit partition bitmap from codes_la[0..n) and partition
  *    codes_la in place.  This is the only arch-specific encode-side
@@ -74,7 +74,7 @@
  *    Partitions codes_la (values unchanged -- no shift across levels):
  *
  *        - codes_la[0..n_left)  left  (bit was 0)
- *        - tmp[0..n_right)      right (bit was 1)
+ *        - right_out[0..n_right)      right (bit was 1)
  *
  *    Returns n_right (caller derives n_left = n - n_right).
  *
@@ -82,16 +82,16 @@
  *
  *        marker_slot = *out_ptr;  *marker_slot = 0;  *out_ptr += 1;
  *        bm = *out_ptr;  *out_ptr += bitmap_bytes(n);
- *        n_right = prim_partition(codes_la, n, depth, bm, tmp);
+ *        n_right = prim_enc_partition(codes_la, n, depth, bm, right_out);
  *        codec_maybe_fse_attempt(...);  // may rewrite marker + bm,
  *                                       // adjust *out_ptr on commit
  *        wire_commit_kr_header(kr_slot, n_right);
  *
- *  void prim_pack_dN(uint8_t *out, const uint16_t *codes_la, int n,
- *                     int D, int depth);
+ *  void prim_enc_pack_dN(const uint16_t *codes_la, int n, int D, int depth,
+ *                     uint8_t *out_packed);
  *
  *    Flat-subtree path.  Pack the D bits at positions [15-depth ..
- *    15-depth-D+1] of each codes_la[i] LSB-first into out[ceil(n*D/8)]
+ *    15-depth-D+1] of each codes_la[i] LSB-first into out_packed[ceil(n*D/8)]
  *    bytes.  Equivalent to a right-shift by `(16 - depth - D)` and a
  *    `(1 << D) - 1` mask before packing.
  *

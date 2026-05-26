@@ -567,7 +567,7 @@ static inline void flat_decode_to_buffer_neon(uint8_t *out, int n,
  * bitmap from codes_la[0..n) (each codes_la[i] is the per-symbol left-
  * aligned Huffman code; bit (15 - depth) is the current depth's
  * partition decision) and partitions codes_la in place: left (bit==0)
- * stays in codes_la[0..n_left), right (bit==1) moves to tmp[0..n_right).
+ * stays in codes_la[0..n_left), right (bit==1) moves to right_out[0..n_right).
  * codes_la lanes are written through to next-level recursion unchanged
  * -- the codes_la representation is depth-threaded, NOT shifted across
  * levels.
@@ -595,7 +595,7 @@ static inline uint8_t enc_mask8_codes_la_neon(uint16x8_t code_vec,
  * via the dense movmask, partition the SAME register into left/right
  * halves using compress_tab[mask].  In-place write of the LEFT half
  * over codes_la (n_left <= j invariant keeps this safe even when the
- * 16-byte store extends past the cursor); RIGHT half goes to tmp.
+ * 16-byte store extends past the cursor); RIGHT half goes to right_out.
  *
  * Per 8 elements: 1 vld, 4 NEON mask ops, 2 vld (shuf), 2 vqtbl,
  * 2 vst.  Scalar tail handles the residual 1..7 elements with the
@@ -603,7 +603,7 @@ static inline uint8_t enc_mask8_codes_la_neon(uint16x8_t code_vec,
 static inline int build_bitmap_partition_neon(uint16_t *codes_la, int n,
                                                 int depth,
                                                 uint8_t *bm,
-                                                uint16_t *tmp)
+                                                uint16_t *right_out)
 {
     int n_left = 0, n_right = 0;
     int j = 0;
@@ -621,7 +621,7 @@ static inline int build_bitmap_partition_neon(uint16_t *codes_la, int n,
         uint8x16_t right  = vqtbl1q_u8(data, shuf_r);
         uint8x16_t left   = vqtbl1q_u8(data, shuf_l);
         int nr = compress_popcnt[mask];
-        vst1q_u8((uint8_t *)(tmp      + n_right), right);
+        vst1q_u8((uint8_t *)(right_out      + n_right), right);
         vst1q_u8((uint8_t *)(codes_la + n_left ), left);
         n_right += nr;
         n_left  += (8 - nr);
@@ -643,7 +643,7 @@ static inline int build_bitmap_partition_neon(uint16_t *codes_la, int n,
         bm[j >> 3] = mask;
         for (int k = 0; k < tail; k++) {
             if (mask & (1 << k))
-                tmp[n_right++] = tail_buf[k];
+                right_out[n_right++] = tail_buf[k];
             else
                 codes_la[n_left++] = tail_buf[k];
         }
@@ -685,8 +685,8 @@ static inline void enc_init_neon(uint16_t *codes_la, int n,
  * The dispatcher pack_dN_dispatch_neon below handles the residual
  * scalar tail when overpacking isn't possible.
  *
- * For the codec.c contract, prim_pack_dN(out, codes_la, n, D, depth)
- * forwards to pack_dN_dispatch_neon(out, codes_la, n, D, depth). */
+ * For the codec.c contract, prim_enc_pack_dN(codes_la, n, D, depth, out_packed)
+ * forwards to pack_dN_neon(out_packed, codes_la, n, D, depth). */
 
 /* D=2: 16 codes -> 4 bytes (4 codes per byte, no byte crossings). */
 static inline int pack_d2_neon(uint8_t *out, const uint16_t *codes_la,
@@ -911,16 +911,16 @@ PIVCO_PRIM_ALWAYS_INLINE void prim_enc_init(uint16_t *codes_la, int n,
                                               const uint16_t *code_la_lut)
 { enc_init_neon(codes_la, n, symbols, code_la_lut); }
 
-PIVCO_PRIM_ALWAYS_INLINE int prim_partition(uint16_t *codes_la,
+PIVCO_PRIM_ALWAYS_INLINE int prim_enc_partition(uint16_t *codes_la,
                                                            int n, int depth,
                                                            uint8_t *bm,
-                                                           uint16_t *tmp)
-{ return build_bitmap_partition_neon(codes_la, n, depth, bm, tmp); }
+                                                           uint16_t *right_out)
+{ return build_bitmap_partition_neon(codes_la, n, depth, bm, right_out); }
 
-PIVCO_PRIM_ALWAYS_INLINE void prim_pack_dN(uint8_t *out,
-                                             const uint16_t *codes_la,
-                                             int n, int D, int depth)
-{ pack_dN_neon(out, codes_la, n, D, depth); }
+PIVCO_PRIM_ALWAYS_INLINE void prim_enc_pack_dN(const uint16_t *codes_la,
+                                             int n, int D, int depth,
+                                             uint8_t *out_packed)
+{ pack_dN_neon(out_packed, codes_la, n, D, depth); }
 
 PIVCO_PRIM_ALWAYS_INLINE void prim_merge_flat(uint8_t *out, int n,
                                                           const uint8_t *bm, int D,
