@@ -31,36 +31,11 @@ extern int          bench_num_distributions(void);
 extern const char  *bench_dist_name(int idx);
 extern const uint64_t *bench_dist_freq(int idx);
 
-static int compute_local_min(const pivco_huffman_table_t *t, int16_t node_id)
-{
-    const pivco_tree_node_t *n = &t->tree[node_id];
-    if (n->symbol >= 0) return 0;
-    int l = compute_local_min(t, n->left);
-    int r = compute_local_min(t, n->right);
-    return 1 + (l < r ? l : r);
-}
-
-static int compute_local_max(const pivco_huffman_table_t *t, int16_t node_id)
-{
-    const pivco_tree_node_t *n = &t->tree[node_id];
-    if (n->symbol >= 0) return 0;
-    int l = compute_local_max(t, n->left);
-    int r = compute_local_max(t, n->right);
-    return 1 + (l > r ? l : r);
-}
-
-/* Sum freq[s] over every leaf s reachable from node_id. */
-static uint64_t subtree_weight(const pivco_huffman_table_t *t,
-                                int16_t node_id,
-                                const uint64_t *freq)
-{
-    const pivco_tree_node_t *n = &t->tree[node_id];
-    if (n->symbol >= 0) return freq[n->symbol];
-    return subtree_weight(t, n->left, freq) + subtree_weight(t, n->right, freq);
-}
-
-/* Walk: at each internal node, if subtree is flat with depth >= 2, count
- * and stop recursion.  Otherwise recurse into children. */
+/* Walk: at each internal node, if it is a maximal flat-subtree root, count
+ * it and stop.  Otherwise recurse into children.  Reads the table's flat
+ * metadata (flat_depth / flat_offset / flat_code_to_sym) rather than
+ * recomputing flatness by descending the subtree -- since the flat-leaf-skip
+ * build, flat roots have no materialized children to descend into. */
 static void collect_flat(const pivco_huffman_table_t *t,
                           int16_t node_id,
                           const uint64_t *freq,
@@ -70,14 +45,14 @@ static void collect_flat(const pivco_huffman_table_t *t,
     const pivco_tree_node_t *n = &t->tree[node_id];
     if (n->symbol >= 0) return;   /* single leaf: no subtree */
 
-    int lmin = compute_local_min(t, node_id);
-    int lmax = compute_local_max(t, node_id);
-
-    if (lmin == lmax && lmin >= 2) {
-        int d = lmin;
-        if (d > 15) d = 15;
+    int D = t->flat_depth[node_id];
+    if (D >= 2) {
+        int d = D > 15 ? 15 : D;
         count_by_depth[d] += 1;
-        w_by_depth[d] += subtree_weight(t, node_id, freq);
+        uint64_t w = 0;
+        int off = t->flat_offset[node_id];
+        for (int k = 0; k < (1 << D); k++) w += freq[t->flat_code_to_sym[off + k]];
+        w_by_depth[d] += w;
         return;  /* maximal flat subtree — don't descend further */
     }
 
