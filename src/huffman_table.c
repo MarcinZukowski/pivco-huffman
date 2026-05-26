@@ -351,19 +351,30 @@ static int build_table_finish(const uint8_t lengths[PIVCO_MAX_SYMBOLS],
     for (int i = 0; i < PIVCO_MAX_SYMBOLS; i++) {
         table->code_len[i] = lengths[i];
     }
+    PROF_MARK("copy_len");
 
-    /* Count symbols per length */
-    uint8_t max_len = 0, min_len = PIVCO_MAX_CODE_LEN + 1;
+    /* Histogram code lengths.  The len>0 guard isn't about correctness
+       (sym_count[0] is an unread scratch bin) -- it keeps the unused symbols
+       from all piling onto bin 0, whose serial store-to-load-forward chain
+       was 5x slower than the (well-predicted) branch on sparse alphabets.
+       min/max are derived from the bins below, not inline here. */
     for (int i = 0; i < PIVCO_MAX_SYMBOLS; i++) {
-        if (lengths[i] > 0) {
+        if (lengths[i] > 0)
             table->sym_count[lengths[i]]++;
-            if (lengths[i] > max_len) max_len = lengths[i];
-            if (lengths[i] < min_len) min_len = lengths[i];
+    }
+    PROF_MARK("count_len");
+
+    /* Derive min/max code length from the (<=11) length bins. */
+    uint8_t max_len = 0, min_len = PIVCO_MAX_CODE_LEN + 1;
+    for (int L = 1; L <= PIVCO_MAX_CODE_LEN; L++) {
+        if (table->sym_count[L]) {
+            if (L < min_len) min_len = (uint8_t)L;
+            max_len = (uint8_t)L;
         }
     }
     table->max_len = max_len;
     table->min_len = min_len;
-    PROF_MARK("copy+count_len");
+    PROF_MARK("minmax");
 
     /* ---------- Flat-aware code assignment ----------
      *
