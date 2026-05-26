@@ -25,31 +25,6 @@ static inline double pivco_prof_now(void) {
 #define PROF_MARK(nm)
 #endif
 
-/* ---------- Flat-subtree detection ---------- */
-
-/* Shortest leaf depth below node_id (0 if node_id is itself a leaf).
-   Used only by the debug asserts in flat_mark_subtrees. */
-__attribute__((unused))
-static int flat_local_min(const pivco_tree_node_t *tree, int16_t node_id)
-{
-    const pivco_tree_node_t *n = &tree[node_id];
-    if (n->symbol >= 0) return 0;
-    int l = flat_local_min(tree, n->left);
-    int r = flat_local_min(tree, n->right);
-    return 1 + (l < r ? l : r);
-}
-
-/* Deepest leaf depth below node_id.  Debug-asserts only. */
-__attribute__((unused))
-static int flat_local_max(const pivco_tree_node_t *tree, int16_t node_id)
-{
-    const pivco_tree_node_t *n = &tree[node_id];
-    if (n->symbol >= 0) return 0;
-    int l = flat_local_max(tree, n->left);
-    int r = flat_local_max(tree, n->right);
-    return 1 + (l > r ? l : r);
-}
-
 /* ---------- Min-heap for Huffman tree construction ---------- */
 
 typedef struct {
@@ -552,39 +527,68 @@ static int build_table_finish(const uint8_t lengths[PIVCO_MAX_SYMBOLS],
 
     PROF_MARK("sorted_syms_3");
 
-    /* Build canonical Huffman tree for PIVCO tree-walk.
-       Insert each symbol's canonical code into the tree by walking
-       bits MSB-first, creating internal nodes as needed. */
+    /* Build the PIVCO tree-walk tree, one node-creating walk per chunk.
+       A flat subtree (D>=2) stops at its root: the decoder reaches its 2^D
+       symbols via flat_code_to_sym (filled here), so we never materialize
+       the 2^D leaves nor the internal nodes below the root -- a large node
+       saving on full alphabets, which also shrinks the classify and
+       max_leaf_depth passes.  Singletons (D=0) and sibling pairs (D=1)
+       build their leaves. */
     {
         int16_t nc = 0; /* node count */
-        /* Root node */
-        table->tree[nc].symbol = -1;
-        table->tree[nc].left = -1;
-        table->tree[nc].right = -1;
+        table->tree[0].symbol = -1;
+        table->tree[0].left   = -1;
+        table->tree[0].right  = -1;
         nc++;
         table->tree_root = 0;
+        uint16_t pool = 0;
 
-        for (int si = 0; si < sorted_idx; si++) {
-            uint8_t sym = table->sorted_symbols[si];
-            uint16_t c = table->code[sym];
-            int len = table->code_len[sym];
-            int16_t cur = 0; /* start at root */
+        for (int ci = 0; ci < n_chunks; ci++) {
+            int D = chunks[ci].bit;
+            int d = chunks[ci].depth;
+            uint16_t rc = chunks[ci].root_code;
+            int base = chunks[ci].sym_idx;
 
-            for (int b = len - 1; b >= 0; b--) {
-                int bit = (c >> b) & 1;
-                int16_t *child = bit ? &table->tree[cur].right
-                                     : &table->tree[cur].left;
+            /* Walk rc's d bits MSB-first, creating spine nodes as needed. */
+            int16_t cur = 0;
+            for (int b = d - 1; b >= 0; b--) {
+                int16_t *child = ((rc >> b) & 1) ? &table->tree[cur].right
+                                                 : &table->tree[cur].left;
                 if (*child < 0) {
-                    /* Create new node */
                     *child = nc;
                     table->tree[nc].symbol = -1;
-                    table->tree[nc].left = -1;
-                    table->tree[nc].right = -1;
+                    table->tree[nc].left   = -1;
+                    table->tree[nc].right  = -1;
                     nc++;
                 }
                 cur = *child;
             }
-            table->tree[cur].symbol = (int16_t)sym;
+
+            if (D >= 2) {
+                /* Flat root: mark + fill code_to_sym; no children built.
+                   Leaf i of the chunk has in-subtree code i (low D bits of
+                   its canonical code), so flat_code_to_sym[base+i] is its
+                   i-th symbol. */
+                assert(table->tree[cur].left == -1 &&
+                       table->tree[cur].right == -1);
+                table->flat_depth[cur]  = (uint8_t)D;
+                table->flat_offset[cur] = pool;
+                int n = 1 << D;
+                for (int i = 0; i < n; i++)
+                    table->flat_code_to_sym[pool + i] = flat_items[base + i].sym;
+                pool = (uint16_t)(pool + n);
+            } else if (D == 1) {
+                /* Sibling pair: two leaf children (suffix 0 -> left). */
+                table->tree[cur].left = nc;
+                table->tree[nc].symbol = (int16_t)flat_items[base].sym;
+                table->tree[nc].left = -1; table->tree[nc].right = -1; nc++;
+                table->tree[cur].right = nc;
+                table->tree[nc].symbol = (int16_t)flat_items[base + 1].sym;
+                table->tree[nc].left = -1; table->tree[nc].right = -1; nc++;
+            } else {
+                /* Singleton: cur is the leaf at depth d. */
+                table->tree[cur].symbol = (int16_t)flat_items[base].sym;
+            }
         }
         table->tree_node_count = nc;
     }
@@ -609,42 +613,6 @@ static int build_table_finish(const uint8_t lengths[PIVCO_MAX_SYMBOLS],
     }
 
     PROF_MARK("prefill");
-
-    /* Flat-subtree fast path, filled directly from the chunk decomposition.
-       A bit>=2 chunk is a maximal flat subtree of depth D=bit rooted at depth
-       (L-bit); walk its canonical root_code to the root node, mark it, and
-       fill code_to_sym from the chunk's symbols.  Leaf i of the chunk has
-       in-subtree code i (the low D bits of its canonical code), so
-       flat_code_to_sym[base+i] is the chunk's i-th symbol -- no tree walk or
-       recursion to re-derive the structure we already have.  (Pool offsets
-       are assigned in chunk order; the decoder addresses via flat_offset, so
-       the ordering is immaterial.) */
-    {
-        uint16_t pool = 0;
-        for (int ci = 0; ci < n_chunks; ci++) {
-            int D = chunks[ci].bit;
-            if (D < 2) continue;
-            int d = chunks[ci].depth;
-            uint16_t rc = chunks[ci].root_code;
-            int16_t cur = table->tree_root;
-            for (int b = d - 1; b >= 0; b--)
-                cur = ((rc >> b) & 1) ? table->tree[cur].right
-                                      : table->tree[cur].left;
-#ifndef NDEBUG
-            assert(flat_local_min(table->tree, cur) == D &&
-                   flat_local_max(table->tree, cur) == D);
-#endif
-            table->flat_depth[cur]  = (uint8_t)D;
-            table->flat_offset[cur] = pool;
-            int base = chunks[ci].sym_idx;
-            int n = 1 << D;
-            for (int i = 0; i < n; i++)
-                table->flat_code_to_sym[pool + i] = flat_items[base + i].sym;
-            pool = (uint16_t)(pool + n);
-        }
-    }
-
-    PROF_MARK("flat_pool");
 
     /* Classify each node for decode-dispatch.  Mirrors the existing
      * conditional priority in decode_node_neon:
@@ -723,7 +691,8 @@ static int build_table_finish(const uint8_t lengths[PIVCO_MAX_SYMBOLS],
             int16_t id = (int16_t)stack[--top];
             order[order_n++] = id;
             const pivco_tree_node_t *n = &table->tree[id];
-            if (n->symbol < 0) {
+            /* Flat roots have no materialized children -- treat as terminal. */
+            if (n->symbol < 0 && table->flat_depth[id] < 2) {
                 stack[top++] = n->left;
                 stack[top++] = n->right;
             }
@@ -734,6 +703,9 @@ static int build_table_finish(const uint8_t lengths[PIVCO_MAX_SYMBOLS],
             const pivco_tree_node_t *n = &table->tree[id];
             if (n->symbol >= 0) {
                 table->max_leaf_depth[id] = 0;
+            } else if (table->flat_depth[id] >= 2) {
+                /* All 2^D leaves sit D levels below this flat root. */
+                table->max_leaf_depth[id] = table->flat_depth[id];
             } else {
                 uint8_t l = table->max_leaf_depth[n->left];
                 uint8_t r = table->max_leaf_depth[n->right];
