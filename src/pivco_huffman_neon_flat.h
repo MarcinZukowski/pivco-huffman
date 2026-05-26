@@ -170,4 +170,38 @@ static inline uint8x8_t flat_d6_unpack(const uint8_t *bm_ptr)
     return vmovn_u16(masked);
 }
 
+/* D=7 unpack: 8 codes = 56 bits = 7 bytes.  Code i starts at bit 7i, i.e.
+ * byte (7i>>3) with in-byte offset (7i&7).  Each 7-bit code fits inside a
+ * 2-byte (16-bit) window starting at its byte (max in-byte offset is 7, so
+ * 7+7=14 <= 16), so we use the same uint16-lane shuffle+shift as D5/D6.
+ * Lane layout (low,high byte / right-shift):
+ *   0:(b0,b1)/0  1:(b0,b1)/7  2:(b1,b2)/6  3:(b2,b3)/5
+ *   4:(b3,b4)/4  5:(b4,b5)/3  6:(b5,b6)/2  7:(b6,b6)/1   (lane7 high byte is
+ * masked off, so it reuses b6 -- only bytes 0..6 are read).                */
+static const uint8_t flat_d7_shuf_tab[16] = {
+    0,1,  0,1,  1,2,  2,3,  3,4,  4,5,  5,6,  6,6
+};
+static const int16_t flat_d7_shift_tab[8] = {
+    0, -7, -6, -5, -4, -3, -2, -1
+};
+
+/* Unpack 8 consecutive D=7 codes from 7 bytes starting at bm_ptr.  Byte-wise
+ * vector-lane load (see flat_d5_unpack's Neoverse-V2 store-forward note). */
+static inline uint8x8_t flat_d7_unpack(const uint8_t *bm_ptr)
+{
+    uint8x16_t bm_lo = vdupq_n_u8(0);
+    bm_lo = vsetq_lane_u8(bm_ptr[0], bm_lo, 0);
+    bm_lo = vsetq_lane_u8(bm_ptr[1], bm_lo, 1);
+    bm_lo = vsetq_lane_u8(bm_ptr[2], bm_lo, 2);
+    bm_lo = vsetq_lane_u8(bm_ptr[3], bm_lo, 3);
+    bm_lo = vsetq_lane_u8(bm_ptr[4], bm_lo, 4);
+    bm_lo = vsetq_lane_u8(bm_ptr[5], bm_lo, 5);
+    bm_lo = vsetq_lane_u8(bm_ptr[6], bm_lo, 6);
+    uint8x16_t shuffled = vqtbl1q_u8(bm_lo, vld1q_u8(flat_d7_shuf_tab));
+    uint16x8_t w = vreinterpretq_u16_u8(shuffled);
+    uint16x8_t shifted = vshlq_u16(w, vld1q_s16(flat_d7_shift_tab));
+    uint16x8_t masked = vandq_u16(shifted, vdupq_n_u16(0x7F));
+    return vmovn_u16(masked);
+}
+
 #endif /* PIVCO_HUFFMAN_NEON_FLAT_H */

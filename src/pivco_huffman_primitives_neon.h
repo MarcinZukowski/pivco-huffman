@@ -493,6 +493,38 @@ static inline void flat_decode_direct_neon_inner(uint8_t *symbols, int n,
         }
         return;
     }
+    if (D == 7) {
+        /* 128-entry c2s exceeds a single TBL (vqtbl4 = 64), so use two
+         * vqtbl4 lookups: the low table covers codes 0..63, the high table
+         * codes 64..127 (indexed by code-64, which wraps <64 out of range).
+         * Each out-of-range lookup yields 0, so OR-ing the two selects the
+         * right half. */
+        uint8x16x4_t lo, hi;
+        lo.val[0]=vld1q_u8(c2s);     lo.val[1]=vld1q_u8(c2s+16);
+        lo.val[2]=vld1q_u8(c2s+32);  lo.val[3]=vld1q_u8(c2s+48);
+        hi.val[0]=vld1q_u8(c2s+64);  hi.val[1]=vld1q_u8(c2s+80);
+        hi.val[2]=vld1q_u8(c2s+96);  hi.val[3]=vld1q_u8(c2s+112);
+        int i = 0;
+        for (; i + 16 <= n; i += 16) {
+            uint8x8_t cl = flat_d7_unpack(bm + ((i      * 7) >> 3));
+            uint8x8_t ch = flat_d7_unpack(bm + (((i + 8) * 7) >> 3));
+            uint8x16_t codes = vcombine_u8(cl, ch);
+            uint8x16_t s0 = vqtbl4q_u8(lo, codes);
+            uint8x16_t s1 = vqtbl4q_u8(hi, vsubq_u8(codes, vdupq_n_u8(64)));
+            vst1q_u8(symbols + i, vorrq_u8(s0, s1));
+        }
+        for (; i + 8 <= n; i += 8) {
+            uint8x8_t codes = flat_d7_unpack(bm + ((i * 7) >> 3));
+            uint8x8_t s0 = vqtbl4_u8(lo, codes);
+            uint8x8_t s1 = vqtbl4_u8(hi, vsub_u8(codes, vdup_n_u8(64)));
+            vst1_u8(symbols + i, vorr_u8(s0, s1));
+        }
+        for (; i < n; i++) {
+            uint32_t code = extract_D_bits_neon(bm, i * D, D);
+            symbols[i] = c2s[code];
+        }
+        return;
+    }
 #endif /* PIVCO_NEON_FAST_MULTI_TBL */
     if (D == 4) {
         uint8x16_t c2s_vec = vld1q_u8(c2s);

@@ -111,6 +111,7 @@ static void neon_unpack(const ctx_t *c) {
     case 4: for (int i=0;i<n;i+=16) vst1q_u8(cd+i, flat_d4_unpack(bm + (i>>4)*8)); break;
     case 5: for (int i=0;i<n;i+= 8) vst1_u8 (cd+i, flat_d5_unpack(bm + (i>>3)*5)); break;
     case 6: for (int i=0;i<n;i+= 8) vst1_u8 (cd+i, flat_d6_unpack(bm + (i>>3)*6)); break;
+    case 7: for (int i=0;i<n;i+= 8) vst1_u8 (cd+i, flat_d7_unpack(bm + (i>>3)*7)); break;
     }
 }
 static void neon_scatter(const ctx_t *c) {
@@ -121,10 +122,20 @@ static void neon_scatter(const ctx_t *c) {
     } else if (D == 5) {
         uint8x16x2_t t = { { vld1q_u8(c->c2s), vld1q_u8(c->c2s+16) } };
         for (int i=0;i<n;i+=16) vst1q_u8(out+i, vqtbl2q_u8(t, vld1q_u8(cd+i)));
-    } else {
+    } else if (D == 6) {
         uint8x16x4_t t = { { vld1q_u8(c->c2s),    vld1q_u8(c->c2s+16),
                              vld1q_u8(c->c2s+32), vld1q_u8(c->c2s+48) } };
         for (int i=0;i<n;i+=16) vst1q_u8(out+i, vqtbl4q_u8(t, vld1q_u8(cd+i)));
+    } else { /* D == 7: 128-entry table -> two vqtbl4 (lo/hi) + OR */
+        uint8x16x4_t lo = { { vld1q_u8(c->c2s),    vld1q_u8(c->c2s+16),
+                              vld1q_u8(c->c2s+32), vld1q_u8(c->c2s+48) } };
+        uint8x16x4_t hi = { { vld1q_u8(c->c2s+64), vld1q_u8(c->c2s+80),
+                              vld1q_u8(c->c2s+96), vld1q_u8(c->c2s+112) } };
+        uint8x16_t s64 = vdupq_n_u8(64);
+        for (int i=0;i<n;i+=16) {
+            uint8x16_t k = vld1q_u8(cd+i);
+            vst1q_u8(out+i, vorrq_u8(vqtbl4q_u8(lo,k), vqtbl4q_u8(hi, vsubq_u8(k,s64))));
+        }
     }
 }
 static void neon_pack (const ctx_t *c){ prim_pack_dN(c->pack_out, c->la_work, c->n, c->D, c->depth); }
@@ -164,34 +175,36 @@ int main(int argc, char **argv) {
     uint8_t  *ref = malloc(n+16), *pack_out = malloc(n+16);
     uint16_t *la_pristine = malloc((n+16)*2), *la_work = malloc((n+16)*2),
              *tmp16 = malloc((n+16)*2), *ref16l = malloc((n+16)*2), *ref16r = malloc((n+16)*2);
-    uint8_t   c2s[64], ref_bm[ (8192/8) + 64 ];
+    uint8_t   c2s[256], ref_bm[ (8192/8) + 64 ];   /* 2^8 entries (D up to 8) */
     srand(0xC0FFEE);
     for (int i=0;i<n+16;i++){ bm[i]=(uint8_t)rand(); la_pristine[i]=(uint16_t)rand(); }
-    for (int i=0;i<64;i++) c2s[i]=(uint8_t)rand();
+    for (int i=0;i<256;i++) c2s[i]=(uint8_t)rand();
 
     for (int d=2; d<=MAXD; d++) {
         if (!want[d]) continue;
-        /* scalar + its SIMD peer adjacent per (D,stage).  NEON flat kernels
-           exist only for D<=NEON_MAXD; D7/D8 are scalar-only. */
-        int simd_ok = 0;
+        /* scalar + its SIMD peer adjacent per (D,stage).  NEON unpack now has
+           a D7 kernel (D<=7); scatter/pack/merge flat kernels still cap at D6
+           (D7 scatter needs a 128-entry table beyond TBL's reach). */
+        int simd_unpack = 0, simd_other = 0;
 #if HAVE_SIMD
-        simd_ok = (d <= NEON_MAXD);
+        simd_unpack = (d <= 7);   /* flat_d7_unpack added */
+        simd_other  = (d <= 7);   /* D7 scatter (2x vqtbl4) + prim_merge_flat/pack now handle D7 */
 #endif
         reg("scalar",ST_UNPACK, d,0,p_unpack_scalar);
 #if HAVE_SIMD
-        if (simd_ok) reg("neon",ST_UNPACK, d,0,neon_unpack);
+        if (simd_unpack) reg("neon",ST_UNPACK, d,0,neon_unpack);
 #endif
         reg("scalar",ST_SCATTER,d,0,p_scatter_scalar);
 #if HAVE_SIMD
-        if (simd_ok) reg("neon",ST_SCATTER,d,0,neon_scatter);
+        if (simd_other) reg("neon",ST_SCATTER,d,0,neon_scatter);
 #endif
         reg("scalar",ST_PACK,   d,0,p_pack_scalar);
 #if HAVE_SIMD
-        if (simd_ok) reg("neon",ST_PACK,   d,0,neon_pack);
+        if (simd_other) reg("neon",ST_PACK,   d,0,neon_pack);
 #endif
         reg("scalar",ST_MERGE,  d,0,p_merge_scalar);
 #if HAVE_SIMD
-        if (simd_ok) reg("neon",ST_MERGE,  d,0,neon_merge);
+        if (simd_other) reg("neon",ST_MERGE,  d,0,neon_merge);
 #endif
     }
     reg("scalar",ST_PART,0,1,p_part_scalar);
