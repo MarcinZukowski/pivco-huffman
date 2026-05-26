@@ -1063,11 +1063,27 @@ function buildSourceTrace(text, tree) {
  * { sourceIdx, char, bitIdx, bit } describing the bits being routed
  * at this node.  Leaves get bitmap = null.  Requires buildSourceTrace
  * to have been called first; takes the returned trace as input. */
-function annotateBitmaps(root, trace) {
+function annotateBitmaps(root, trace, showFlat) {
     function walk(node, positions, depth) {
         if (!node) return;
         node.bitmap = null;
+        node.bitmapD = 1;
         if (node.symbol >= 0 || positions.length === 0) return;
+        /* Flat subtree root (D>=2): one D-bit group per element (the
+         * in-subtree local code), not a 1-bit partition -- this is the
+         * N*D packed region the wire actually carries.  Stop here; the
+         * flat leaves are absorbed (no per-node bitmaps below). */
+        if (showFlat && node.flatD >= 2) {
+            const D = node.flatD;
+            node.bitmap = positions.map(p => ({
+                sourceIdx: p.sourceIdx,
+                char: p.char,
+                bitIdx: depth,
+                code: (p.code || '').slice(depth, depth + D),
+            }));
+            node.bitmapD = D;
+            return;
+        }
         const entries = [], left = [], right = [];
         for (const p of positions) {
             const bit = p.code[depth];
@@ -1362,11 +1378,47 @@ function renderTree(rootNode, meta) {
     // Links (straight node-to-node segments, so the flow arrowheads
     // below land exactly on the line).
     const linkGen = d => `M${d.source.x},${d.source.y}L${d.target.x},${d.target.y}`;
+    /* A "fork root" renders its leaves with a fork (vertical stub from
+     * each leaf to a horizontal bar, one line from the bar to the root)
+     * instead of individual parent->leaf links: flat subtrees (D>=2) and
+     * sibling pairs (D=1).  Mirrors reality -- one flat region / one merge,
+     * not a chain of partitions. */
+    const isForkRoot = (nd) => {
+        const d = nd.data;
+        if (d.symbol >= 0 || d._condensed) return false;
+        if (meta.showFlat && d.flatD >= 2) return true;          /* D>=2 flat */
+        if (!(meta.showFlat || meta.fuseLeaves)) return false;
+        if (meta.showFlat && d.inFlat) return false;
+        return d.left && d.right && d.left.symbol >= 0 && d.right.symbol >= 0; /* D=1 pair */
+    };
+    /* A flat region = the flat root plus its internal descendants (which
+     * we leave in the layout, so the leaves keep their natural Huffman
+     * depth, but don't draw).  Their links are replaced by the fork. */
+    const inFlatRegion = nd =>
+        meta.showFlat && (nd.data.flatD >= 2 || nd.data.inFlat);
     gWorld.selectAll('path.link')
-        .data(root.links())
+        .data(root.links().filter(l =>
+            !inFlatRegion(l.source) && !isForkRoot(l.source)))
         .enter().append('path')
             .attr('class', 'link')
             .attr('d', linkGen);
+    /* Fork: a trunk from the flat/pair root down to a bar near the leaves,
+     * then a stub to each leaf.  Leaves stay at their natural depth (D
+     * levels down) so the flat box's height grows with D -- deep flat
+     * regions read as tall boxes. */
+    root.descendants().filter(isForkRoot).forEach(fr => {
+        const kids = fr.leaves();
+        if (!kids.length) return;
+        const leafY = Math.max(...kids.map(c => c.y));
+        const barY  = (fr.y + leafY) / 2;   /* midway between root and leaves */
+        const xs = kids.map(c => c.x);
+        const x0 = Math.min(...xs), x1 = Math.max(...xs);
+        const fg = gWorld.append('g').attr('class', 'fork');
+        const seg = dpath => fg.append('path').attr('class', 'link').attr('d', dpath);
+        seg(`M${fr.x},${fr.y}L${fr.x},${barY}`);              /* trunk root -> bar */
+        if (x1 > x0) seg(`M${x0},${barY}L${x1},${barY}`);     /* bar */
+        kids.forEach(c => seg(`M${c.x},${barY}L${c.x},${c.y}`)); /* bar -> each leaf */
+    });
 
     // Flow arrows: a small arrowhead at each edge midpoint, pointing the
     // way the chosen decode mode flows -- top-down = parent->child (down),
@@ -1592,7 +1644,8 @@ function renderTree(rootNode, meta) {
     // Internal nodes: circle + skew bar (skip condensed ones — they're
     // drawn as a single info box instead).
     const internalNodes = root.descendants().filter(n =>
-        n.data.symbol < 0 && !n.data._condensed);
+        n.data.symbol < 0 && !n.data._condensed
+        && !(meta.showFlat && n.data.inFlat));
     const intG = gWorld.selectAll('g.node-internal')
         .data(internalNodes)
         .enter().append('g')
@@ -1848,7 +1901,7 @@ function renderTree(rootNode, meta) {
     if (bmActive) {
         intG.each(function(d) {
             if (!d.data.bitmap || d.data.bitmap.length === 0) return;
-            renderNodeBitmap(d3.select(this), d.data.bitmap, letterColor, meta.bitmapLabel);
+            renderNodeBitmap(d3.select(this), d.data.bitmap, letterColor, meta.bitmapLabel, d.data.bitmapD);
         });
     }
 
@@ -2239,46 +2292,80 @@ function renderSourceStrip(treeBBox, trace, letterColor, stripBottomY) {
  * subscript (b = bit-index inside that letter's code).  Positioned
  * well above the node circle so neither the circle nor the parent
  * link line crowds the labels. */
-function renderNodeBitmap(g, bitmap, letterColor, labelMode) {
+function renderNodeBitmap(g, bitmap, letterColor, labelMode, D) {
     if (!bitmap || bitmap.length === 0) return;
     labelMode = labelMode || 'nothing';
+    D = D || 1;
     const cellW = 12;
-    const w = bitmap.length * cellW;
-    const x0 = -w / 2;
     const bitY = -34;
     const idxY = -22;
     const bg = g.append('g').attr('class', 'node-bitmap');
-    /* Rounded bubble around the digits row (matches pivot view). */
-    bg.append('rect')
-        .attr('x', x0 - 2).attr('y', bitY - 10)
-        .attr('width', w + 4).attr('height', 13)
-        .attr('rx', 3)
-        .attr('fill', '#f8fafc')
-        .attr('stroke', '#cbd5e1')
-        .attr('stroke-width', 0.6);
-    bitmap.forEach((e, i) => {
-        const cx = x0 + (i + 0.5) * cellW;
-        bg.append('text')
-            .attr('x', cx).attr('y', bitY)
-            .attr('text-anchor', 'middle')
-            .style('font', '10px monospace')
-            .style('font-weight', 600)
-            .style('fill', '#222')
-            .text(e.bit);
-        /* Under-bitmap label (per-symbol colour kept in every mode). */
-        const color = letterColor.get(e.char) || '#666';
-        if (labelMode === 'code_bits') {
-            appendLetterIdxTag(bg, cx, idxY, e.char, e.bitIdx, 8, color, 500);
-        } else if (labelMode === 'symbols' || labelMode === 'indices') {
+
+    if (D <= 1) {
+        /* 1-bit partition (ordinary internal node). */
+        const w = bitmap.length * cellW;
+        const x0 = -w / 2;
+        bg.append('rect')
+            .attr('x', x0 - 2).attr('y', bitY - 10)
+            .attr('width', w + 4).attr('height', 13)
+            .attr('rx', 3).attr('fill', '#f8fafc')
+            .attr('stroke', '#cbd5e1').attr('stroke-width', 0.6);
+        bitmap.forEach((e, i) => {
+            const cx = x0 + (i + 0.5) * cellW;
             bg.append('text')
-                .attr('x', cx).attr('y', idxY)
+                .attr('x', cx).attr('y', bitY)
                 .attr('text-anchor', 'middle')
-                .style('font', '8px monospace')
-                .style('font-weight', 500)
-                .style('fill', color)
-                .text(labelMode === 'symbols' ? e.char : e.sourceIdx);
+                .style('font', '10px monospace').style('font-weight', 600)
+                .style('fill', '#222').text(e.bit);
+            const color = letterColor.get(e.char) || '#666';
+            if (labelMode === 'code_bits') {
+                appendLetterIdxTag(bg, cx, idxY, e.char, e.bitIdx, 8, color, 500);
+            } else if (labelMode === 'symbols' || labelMode === 'indices') {
+                bg.append('text')
+                    .attr('x', cx).attr('y', idxY)
+                    .attr('text-anchor', 'middle')
+                    .style('font', '8px monospace').style('font-weight', 500)
+                    .style('fill', color)
+                    .text(labelMode === 'symbols' ? e.char : e.sourceIdx);
+            }
+        });
+        return;
+    }
+
+    /* Flat region: one D-bit group per element (the in-subtree local
+     * code), with a gap between groups and the symbol/index label centred
+     * under its group so labels line up with their D bits. */
+    const GROUP_GAP = 5;
+    const groupW = D * cellW;
+    const totalW = bitmap.length * groupW + Math.max(0, bitmap.length - 1) * GROUP_GAP;
+    const x0 = -totalW / 2;
+    bitmap.forEach((e, gi) => {
+        const gx = x0 + gi * (groupW + GROUP_GAP);
+        const color = letterColor.get(e.char) || '#666';
+        bg.append('rect')
+            .attr('x', gx - 1).attr('y', bitY - 10)
+            .attr('width', groupW + 2).attr('height', 13)
+            .attr('rx', 3).attr('fill', '#f8fafc')
+            .attr('stroke', '#cbd5e1').attr('stroke-width', 0.6);
+        const code = e.code || '';
+        for (let b = 0; b < D; b++) {
+            const cx = gx + (b + 0.5) * cellW;
+            bg.append('text')
+                .attr('x', cx).attr('y', bitY)
+                .attr('text-anchor', 'middle')
+                .style('font', '10px monospace').style('font-weight', 600)
+                .style('fill', '#222')
+                .text(code[b] != null ? code[b] : '');
         }
-        /* labelMode === 'nothing' → no under-label */
+        if (labelMode === 'symbols' || labelMode === 'indices'
+            || labelMode === 'code_bits') {
+            bg.append('text')
+                .attr('x', gx + groupW / 2).attr('y', idxY)
+                .attr('text-anchor', 'middle')
+                .style('font', '8px monospace').style('font-weight', 500)
+                .style('fill', color)
+                .text(labelMode === 'indices' ? e.sourceIdx : e.char);
+        }
     });
 }
 
@@ -2825,7 +2912,7 @@ function refreshFromFreqs() {
     const needTrace = (meta.showBitmaps || meta.viewMode === 'pivot');
     if (needTrace && meta.sourceText) {
         meta.sourceTrace = buildSourceTrace(meta.sourceText, tree);
-        annotateBitmaps(tree, meta.sourceTrace);
+        annotateBitmaps(tree, meta.sourceTrace, meta.showFlat);
     } else {
         meta.sourceTrace = null;
         /* Clear any stale per-node bitmaps from a previous render. */
