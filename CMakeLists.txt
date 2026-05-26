@@ -434,6 +434,14 @@ if(BUILD_BENCH)
     target_link_libraries(pivco_bench_kr_storage pivco_huffman huf0 m)
     target_include_directories(pivco_bench_kr_storage PRIVATE ext/fse/lib)
 
+    # Isolated decode-primitive microbench (flat unpack / scatter / merge on
+    # synthetic input).  Self-contained: only needs the backend flat headers
+    # in src/.  aarch64 baseline includes NEON; x86 SIMD variants will need
+    # per-arch flags when added.
+    add_executable(pivco_bench_prim bench/bench_prim.c)
+    target_include_directories(pivco_bench_prim PRIVATE include src)
+    target_link_libraries(pivco_bench_prim pivco_huffman m)
+
     add_executable(pivco_huffman_profile_english
         bench/bench_profile_english.c
         bench/bench_distributions.c
