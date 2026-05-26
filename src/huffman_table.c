@@ -5,20 +5,16 @@
 #include <assert.h>
 
 #ifdef PIVCO_BUILD_PROFILE
-#include <time.h>
-double      pivco_prof_ns[32];
+#include <mach/mach_time.h>            /* M4-native counter; no clock syscall */
+double      pivco_prof_ticks[32];      /* accumulated raw mach ticks per phase */
 const char *pivco_prof_name[32];
 int         pivco_prof_n;
-static double pivco_prof_t0;
-static int    pivco_prof_i;
-static inline double pivco_prof_now(void) {
-    struct timespec t; clock_gettime(CLOCK_MONOTONIC_RAW, &t);
-    return t.tv_sec * 1e9 + t.tv_nsec;
-}
-#define PROF_RESET()  do { pivco_prof_t0 = pivco_prof_now(); pivco_prof_i = 0; } while (0)
-#define PROF_MARK(nm) do { double _t = pivco_prof_now();                       \
-    pivco_prof_ns[pivco_prof_i] += _t - pivco_prof_t0;                          \
-    pivco_prof_name[pivco_prof_i] = (nm); pivco_prof_t0 = _t;                   \
+static uint64_t pivco_prof_t0;
+static int      pivco_prof_i;
+#define PROF_RESET()  do { pivco_prof_t0 = mach_absolute_time(); pivco_prof_i = 0; } while (0)
+#define PROF_MARK(nm) do { uint64_t _t = mach_absolute_time();                  \
+    pivco_prof_ticks[pivco_prof_i] += (double)(_t - pivco_prof_t0);             \
+    pivco_prof_name[pivco_prof_i] = (nm); pivco_prof_t0 = _t;                    \
     if (++pivco_prof_i > pivco_prof_n) pivco_prof_n = pivco_prof_i; } while (0)
 #else
 #define PROF_RESET()
