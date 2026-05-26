@@ -349,6 +349,7 @@ table.node-table tr.in-flat { color: #b45309; }
         <button id="reset-view" type="button">reset view</button>
         <button id="reset-params" type="button">reset params</button>
         <button id="download-svg" type="button">download SVG</button>
+        <button id="download-txt" type="button">download tree text</button>
         <input type="text" id="download-filename" size="22"
                placeholder="" autocomplete="off">
         <label class="toggle" title="Crop the exported SVG's viewBox to the top fraction of the tree height (full width kept). e.g. 0.4 exports only the top 40% (root + upper levels). Empty = whole tree.">
@@ -1178,6 +1179,7 @@ function nodeTooltipHtml(n, totalN) {
 }
 
 let svg, gWorld, zoom, currentTree, currentMeta;
+let currentCodes = null, currentRawTree = null;
 let _nodeById = new Map();
 /* Per-flat-subtree-root *analysis* override.  An "unflatten" entry
  * means "treat this node as a regular internal node, not a flat
@@ -2794,6 +2796,10 @@ function refreshFromFreqs() {
     }
     walkLeaves(tree, '');
 
+    /* Stash for the text-layout export (download tree text). */
+    currentCodes = codes;
+    currentRawTree = tree;
+
     const sourceText = (_dataSource === 'text')
         ? document.getElementById('text-input').value
         : null;
@@ -2983,6 +2989,11 @@ function setupToggles() {
         const explicit = fnameEl.value.trim();
         const fname = explicit || fnameEl.placeholder || 'tree.svg';
         downloadCurrentSvg(fname);
+    });
+    document.getElementById('download-txt').addEventListener('click', () => {
+        const explicit = fnameEl.value.trim();
+        const base = (explicit || fnameEl.placeholder || 'tree.svg').replace(/\.svg$/i, '');
+        downloadText(base + '.txt', serializeTreeText());
     });
 }
 
@@ -3274,6 +3285,61 @@ function getCropTopFrac() {
     const el = document.getElementById('crop-top');
     const v = el ? parseFloat(el.value) : NaN;
     return (!isNaN(v) && v > 0 && v < 1) ? v : null;
+}
+
+/* Serialize the built tree as text, for cross-checking the JS-rendered
+ * figure against the C production builder (extras/dump_tree_text).  Two
+ * sections, both deterministic from the code lengths (toggle-invariant):
+ *   ## codes  — per-symbol (symbol, length, canonical code), sorted by symbol
+ *   ## tree   — pre-order walk (0=left,1=right): each LEAF and each maximal
+ *               FLAT subtree (D>=2), the latter with its member symbols in
+ *               local-code order.  Flat roots are not descended into, mirroring
+ *               the production tree which does not materialize flat leaves. */
+function serializeTreeText() {
+    const m = currentMeta, codes = currentCodes, tree = currentRawTree;
+    if (!m || !codes || !tree) return '';
+    const out = [];
+    const actualMaxLen = codes.reduce((mx, c) => Math.max(mx, c.len), 0);
+    out.push('# tree_viz tree layout dump');
+    out.push(`# dist=${m.name} phOpt=${m.phOpt ? 1 : 0} maxSkew=${m.maxSkew ? 1 : 0}`
+           + ` keysSort=${m.keysSort} maxLen=${actualMaxLen} nsyms=${codes.length}`);
+    out.push('## codes  (symbol length code)');
+    codes.slice().sort((a, b) => a.symbol - b.symbol).forEach(c => {
+        out.push(`${c.symbol} ${c.len} ${(c.code >>> 0).toString(2).padStart(c.len, '0')}`);
+    });
+    out.push('## tree  (path kind detail; path 0=left 1=right, "." = root)');
+    (function walk(n) {
+        if (!n) return;
+        const path = n.bitPrefix === '' ? '.' : n.bitPrefix;
+        if (n.symbol < 0 && n.flatD >= 2) {
+            const syms = [];
+            (function leaves(x) {
+                if (!x) return;
+                if (x.symbol >= 0) { syms.push(x.symbol); return; }
+                leaves(x.left); leaves(x.right);
+            })(n);
+            out.push(`${path} FLAT D=${n.flatD} syms=${syms.join(',')}`);
+            return;                       /* maximal — don't descend */
+        }
+        if (n.symbol >= 0) {
+            out.push(`${path} LEAF sym=${n.symbol} len=${n.bitPrefix.length}`);
+            return;
+        }
+        walk(n.left); walk(n.right);
+    })(tree);
+    return out.join('\n') + '\n';
+}
+
+function downloadText(filename, text) {
+    const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    a.href = url; a.download = filename || 'tree.txt';
+    a.style.display = 'none';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
 }
 
 function downloadCurrentSvg(filename) {
