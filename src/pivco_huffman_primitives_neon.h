@@ -767,33 +767,17 @@ static inline int pack_d4_neon(uint8_t *out, const uint16_t *codes_la,
 static inline int pack_d5_neon(uint8_t *out, const uint16_t *codes_la,
                                  int n, int right_shift)
 {
-    static const int64_t shifts_lo [2] = {0,   5};
-    static const int64_t shifts_mid[2] = {10, 15};
-    static const int64_t shifts_hi [2] = {20, 25};
-    static const int64_t shifts_top[2] = {30, 35};
+    static const int32_t sh4[4] = {0, 5, 10, 15};
     int i = 0;
     for (; i + 8 <= n; i += 8) {
-        uint16x8_t v = vshlq_u16(vld1q_u16(codes_la + i),
-                                  vdupq_n_s16((int16_t)-right_shift));
-        v = vandq_u16(v, vdupq_n_u16(0x1F));
-        uint32x4_t v32_lo = vmovl_u16(vget_low_u16(v));
-        uint32x4_t v32_hi = vmovl_u16(vget_high_u16(v));
-        uint64x2_t a = vshlq_u64(vmovl_u32(vget_low_u32 (v32_lo)),
-                                  vld1q_s64(shifts_lo));
-        uint64x2_t b = vshlq_u64(vmovl_u32(vget_high_u32(v32_lo)),
-                                  vld1q_s64(shifts_mid));
-        uint64x2_t c = vshlq_u64(vmovl_u32(vget_low_u32 (v32_hi)),
-                                  vld1q_s64(shifts_hi));
-        uint64x2_t d = vshlq_u64(vmovl_u32(vget_high_u32(v32_hi)),
-                                  vld1q_s64(shifts_top));
-        uint64x2_t sum = vaddq_u64(vaddq_u64(a, b), vaddq_u64(c, d));
-        uint64_t packed = vgetq_lane_u64(sum, 0) + vgetq_lane_u64(sum, 1);
-        int bi = i * 5 / 8;
-        out[bi    ] = (uint8_t)(packed       );
-        out[bi + 1] = (uint8_t)(packed >>  8 );
-        out[bi + 2] = (uint8_t)(packed >> 16);
-        out[bi + 3] = (uint8_t)(packed >> 24);
-        out[bi + 4] = (uint8_t)(packed >> 32);
+        uint16x8_t v = vandq_u16(vshlq_u16(vld1q_u16(codes_la + i),
+                                            vdupq_n_s16((int16_t)-right_shift)),
+                                  vdupq_n_u16(0x1F));
+        uint32x4_t lo = vshlq_u32(vmovl_u16(vget_low_u16 (v)), vld1q_s32(sh4));
+        uint32x4_t hi = vshlq_u32(vmovl_u16(vget_high_u16(v)), vld1q_s32(sh4));
+        uint64_t packed = (uint64_t)vaddvq_u32(lo)
+                        | ((uint64_t)vaddvq_u32(hi) << 20);
+        memcpy(out + i * 5 / 8, &packed, 5);   /* exact 5 bytes */
     }
     return i;
 }
@@ -802,71 +786,38 @@ static inline int pack_d5_neon(uint8_t *out, const uint16_t *codes_la,
 static inline int pack_d6_neon(uint8_t *out, const uint16_t *codes_la,
                                  int n, int right_shift)
 {
-    static const int64_t shifts_lo [2] = {0,   6};
-    static const int64_t shifts_mid[2] = {12, 18};
-    static const int64_t shifts_hi [2] = {24, 30};
-    static const int64_t shifts_top[2] = {36, 42};
+    static const int32_t sh4[4] = {0, 6, 12, 18};
     int i = 0;
     for (; i + 8 <= n; i += 8) {
-        uint16x8_t v = vshlq_u16(vld1q_u16(codes_la + i),
-                                  vdupq_n_s16((int16_t)-right_shift));
-        v = vandq_u16(v, vdupq_n_u16(0x3F));
-        uint32x4_t v32_lo = vmovl_u16(vget_low_u16(v));
-        uint32x4_t v32_hi = vmovl_u16(vget_high_u16(v));
-        uint64x2_t a = vshlq_u64(vmovl_u32(vget_low_u32 (v32_lo)),
-                                  vld1q_s64(shifts_lo));
-        uint64x2_t b = vshlq_u64(vmovl_u32(vget_high_u32(v32_lo)),
-                                  vld1q_s64(shifts_mid));
-        uint64x2_t c = vshlq_u64(vmovl_u32(vget_low_u32 (v32_hi)),
-                                  vld1q_s64(shifts_hi));
-        uint64x2_t d = vshlq_u64(vmovl_u32(vget_high_u32(v32_hi)),
-                                  vld1q_s64(shifts_top));
-        uint64x2_t sum = vaddq_u64(vaddq_u64(a, b), vaddq_u64(c, d));
-        uint64_t packed = vgetq_lane_u64(sum, 0) + vgetq_lane_u64(sum, 1);
-        int bi = i * 6 / 8;
-        out[bi    ] = (uint8_t)(packed       );
-        out[bi + 1] = (uint8_t)(packed >>  8 );
-        out[bi + 2] = (uint8_t)(packed >> 16);
-        out[bi + 3] = (uint8_t)(packed >> 24);
-        out[bi + 4] = (uint8_t)(packed >> 32);
-        out[bi + 5] = (uint8_t)(packed >> 40);
+        uint16x8_t v = vandq_u16(vshlq_u16(vld1q_u16(codes_la + i),
+                                            vdupq_n_s16((int16_t)-right_shift)),
+                                  vdupq_n_u16(0x3F));
+        uint32x4_t lo = vshlq_u32(vmovl_u16(vget_low_u16 (v)), vld1q_s32(sh4));
+        uint32x4_t hi = vshlq_u32(vmovl_u16(vget_high_u16(v)), vld1q_s32(sh4));
+        uint64_t packed = (uint64_t)vaddvq_u32(lo)
+                        | ((uint64_t)vaddvq_u32(hi) << 24);
+        memcpy(out + i * 6 / 8, &packed, 6);   /* exact 6 bytes */
     }
     return i;
 }
 
-/* D=7: 8 codes -> 7 bytes.  uint64 (max shift 7*7=49). */
+/* D=7: 8 codes -> 7 bytes.  Pack each half of 4 codes in uint32 lanes
+ * (4*7=28 bits < 32), horizontal-add to a scalar, then combine the two
+ * 28-bit halves in a uint64.  Avoids the uint16->uint64 widen chain. */
 static inline int pack_d7_neon(uint8_t *out, const uint16_t *codes_la,
                                  int n, int right_shift)
 {
-    static const int64_t shifts_lo [2] = {0,   7};
-    static const int64_t shifts_mid[2] = {14, 21};
-    static const int64_t shifts_hi [2] = {28, 35};
-    static const int64_t shifts_top[2] = {42, 49};
+    static const int32_t sh4[4] = {0, 7, 14, 21};
     int i = 0;
     for (; i + 8 <= n; i += 8) {
-        uint16x8_t v = vshlq_u16(vld1q_u16(codes_la + i),
-                                  vdupq_n_s16((int16_t)-right_shift));
-        v = vandq_u16(v, vdupq_n_u16(0x7F));
-        uint32x4_t v32_lo = vmovl_u16(vget_low_u16(v));
-        uint32x4_t v32_hi = vmovl_u16(vget_high_u16(v));
-        uint64x2_t a = vshlq_u64(vmovl_u32(vget_low_u32 (v32_lo)),
-                                  vld1q_s64(shifts_lo));
-        uint64x2_t b = vshlq_u64(vmovl_u32(vget_high_u32(v32_lo)),
-                                  vld1q_s64(shifts_mid));
-        uint64x2_t c = vshlq_u64(vmovl_u32(vget_low_u32 (v32_hi)),
-                                  vld1q_s64(shifts_hi));
-        uint64x2_t d = vshlq_u64(vmovl_u32(vget_high_u32(v32_hi)),
-                                  vld1q_s64(shifts_top));
-        uint64x2_t sum = vaddq_u64(vaddq_u64(a, b), vaddq_u64(c, d));
-        uint64_t packed = vgetq_lane_u64(sum, 0) + vgetq_lane_u64(sum, 1);
-        int bi = i * 7 / 8;
-        out[bi    ] = (uint8_t)(packed       );
-        out[bi + 1] = (uint8_t)(packed >>  8 );
-        out[bi + 2] = (uint8_t)(packed >> 16);
-        out[bi + 3] = (uint8_t)(packed >> 24);
-        out[bi + 4] = (uint8_t)(packed >> 32);
-        out[bi + 5] = (uint8_t)(packed >> 40);
-        out[bi + 6] = (uint8_t)(packed >> 48);
+        uint16x8_t v = vandq_u16(vshlq_u16(vld1q_u16(codes_la + i),
+                                            vdupq_n_s16((int16_t)-right_shift)),
+                                  vdupq_n_u16(0x7F));
+        uint32x4_t lo = vshlq_u32(vmovl_u16(vget_low_u16 (v)), vld1q_s32(sh4));
+        uint32x4_t hi = vshlq_u32(vmovl_u16(vget_high_u16(v)), vld1q_s32(sh4));
+        uint64_t packed = (uint64_t)vaddvq_u32(lo)
+                        | ((uint64_t)vaddvq_u32(hi) << 28);
+        memcpy(out + i * 7 / 8, &packed, 7);   /* exact 7 bytes */
     }
     return i;
 }
