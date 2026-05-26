@@ -453,6 +453,34 @@ static inline void flat_decode_direct_avx512_inner(uint8_t *symbols, int n,
         }
         return;
     }
+    if (D == 7) {
+        /* c2s has 128 entries — two zmm tables, one vpermi2b (indices 0..127
+         * pick from c2s_lo[0..63] / c2s_hi[64..127]). */
+        __m512i c2s_lo = _mm512_loadu_si512((const __m512i *)c2s);
+        __m512i c2s_hi = _mm512_loadu_si512((const __m512i *)(c2s + 64));
+        int i = 0;
+        int fast_end = n >= 16 ? n - 16 : 0;
+        for (; i + 16 <= fast_end; i += 16) {
+            __m128i codes = flat_d7_unpack_avx512_fast(bm + ((i * 7) >> 3));
+            __m512i syms = _mm512_permutex2var_epi8(c2s_lo,
+                               _mm512_castsi128_si512(codes), c2s_hi);
+            _mm_storeu_si128((__m128i *)(symbols + i),
+                             _mm512_castsi512_si128(syms));
+        }
+        if (i + 16 <= n) {
+            __m128i codes = flat_d7_unpack_avx512_safe(bm + ((i * 7) >> 3));
+            __m512i syms = _mm512_permutex2var_epi8(c2s_lo,
+                               _mm512_castsi128_si512(codes), c2s_hi);
+            _mm_storeu_si128((__m128i *)(symbols + i),
+                             _mm512_castsi512_si128(syms));
+            i += 16;
+        }
+        for (; i < n; i++) {
+            uint32_t code = extract_D_bits_avx512(bm, i * D, D);
+            symbols[i] = c2s[code];
+        }
+        return;
+    }
     if (D == 5) {
         /* c2s has 32 entries — needs vpermb over ymm. */
         __m256i c2s_vec = _mm256_loadu_si256((const __m256i *)c2s);

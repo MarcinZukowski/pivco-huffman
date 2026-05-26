@@ -133,4 +133,29 @@ static inline __m128i flat_d6_unpack_avx512_safe(const uint8_t *bm_ptr)
     return flat_d6_unpack_avx512_fast(buf);
 }
 
+/* D=7: 16 codes = 112 bits = 14 bytes.  Code i is at bit 7i.  Two 64-bit
+ * windows (input bytes 0..7 and 7..14) each hold 8 codes at offsets
+ * {0,7,14,21,28,35,42,49}; vpmultishift extracts them.  Mask to 7 bits. */
+static inline __m128i flat_d7_unpack_avx512_fast(const uint8_t *bm_ptr)
+{
+    __m128i raw = _mm_loadu_si128((const __m128i *)bm_ptr);
+    const __m128i shuf = _mm_setr_epi8(
+        0, 1, 2, 3, 4, 5, 6, 7,
+        7, 8, 9, 10, 11, 12, 13, 14);
+    __m128i data = _mm_shuffle_epi8(raw, shuf);
+    const __m128i ctrl = _mm_setr_epi8(
+        0, 7, 14, 21, 28, 35, 42, 49,
+        0, 7, 14, 21, 28, 35, 42, 49);
+    __m128i ms = _mm_multishift_epi64_epi8(ctrl, data);
+    return _mm_and_si128(ms, _mm_set1_epi8(0x7F));
+}
+
+/* D=7 safe: 14-byte memcpy for the last chunk (avoid the 16-byte over-read). */
+static inline __m128i flat_d7_unpack_avx512_safe(const uint8_t *bm_ptr)
+{
+    uint8_t buf[16] = {0};
+    memcpy(buf, bm_ptr, 14);
+    return flat_d7_unpack_avx512_fast(buf);
+}
+
 #endif /* PIVCO_HUFFMAN_AVX512_FLAT_H */
