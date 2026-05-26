@@ -236,6 +236,7 @@ table.node-table tr.in-flat { color: #b45309; }
             <select id="tree-mode">
                 <option value="top-down">top-down</option>
                 <option value="bottom-up" selected>bottom-up</option>
+                <option value="encode">encode</option>
             </select>
         </label>
         <label class="toggle">
@@ -878,6 +879,33 @@ function detectFlatSubtrees(root) {
  * off: pick the higher-frequency leaf as the "constant" side (gets C);
  * the lower-frequency leaf is S1; parent is the half variant. */
 function annotatePrimitives(root, meta) {
+    /* Encode mode: top-down partition, labelled by node_type — the same
+     * dispatch the encoder uses (prim_enc_partition_*).  Classification is
+     * purely structural (children leaf-ness) + flat detection, independent of
+     * the decode-side constant / fuse-leaves toggles.  Leaves emit nothing
+     * (the encoder returns immediately at a leaf). */
+    if (meta.mode === 'encode') {
+        const isLeafE = (n) => n && n.symbol >= 0;
+        (function ewalk(n) {
+            if (!n) return;
+            n._primitive = null;
+            n._isConstantLeaf = false;
+            if (isLeafE(n)) return;
+            if (meta.showFlat && n.flatD) {        /* flat subtree -> pack N·D bits */
+                n._primitive = 'PK' + n.flatD;     /* prim_enc_pack_dN */
+                return;                            /* descendants absorbed */
+            }
+            if (meta.showFlat && n.inFlat) { ewalk(n.left); ewalk(n.right); return; }
+            const ll = isLeafE(n.left), rl = isLeafE(n.right);
+            if (ll && rl)       n._primitive = 'EP-N';  /* BOTH_LEAVES: bitmap only   */
+            else if (ll && !rl) n._primitive = 'EP-R';  /* HALF_RIGHT: emit right side */
+            else if (!ll && rl) n._primitive = 'EP-L';  /* HALF_LEFT:  emit left side  */
+            else                n._primitive = 'EP-F';  /* INTERNAL_FULL: both sides   */
+            ewalk(n.left); ewalk(n.right);
+        })(root);
+        return;
+    }
+
     const tdMode = meta.mode !== 'bottom-up';
     const Pletter = tdMode ? 'P' : 'M';
 
@@ -3137,10 +3165,14 @@ function setupTextInput() {
 const URL_PARAM_MAP = [
     /* checkboxes: 1/0 in URL, .checked in DOM */
     { kind: 'str',  param: 'mode',           id: 'tree-mode',
-      desc: 'Decode traversal direction. Affects only which primitive letters are shown when "primitives" is on; the tree shape is identical either way.<br><br>' +
-            '<b>top-down</b> — partition input bytes left/right at each internal, scatter at leaves (P / S* primitives)<br>' +
-            '<b>bottom-up</b> — recursively merge child outputs (M / S* primitives)',
-      values: 'top-down | bottom-up' },
+      desc: 'Which traversal / set of primitives the bubbles show (with "primitives" on); the tree shape is identical in every mode.<br><br>' +
+            '<b>top-down</b> — decode: partition input bytes left/right at each internal, scatter at leaves (P / S* primitives)<br>' +
+            '<b>bottom-up</b> — decode: recursively merge child outputs (M / S* primitives)<br>' +
+            '<b>encode</b> — the encoder\'s per-node partition op, by node type: ' +
+            '<b>EP-F</b> full (both subtrees), <b>EP-R</b>/<b>EP-L</b> half (one child a leaf — emit only the subtree side), ' +
+            '<b>EP-N</b> none (both leaves — build the bitmap, no scatter), <b>PK</b>{D} pack a flat D-bit subtree. ' +
+            'Leaves emit nothing.',
+      values: 'top-down | bottom-up | encode' },
     { kind: 'bool', param: 'ph-opt',         id: 'ph-opt',
       desc: 'Order symbols by frequency-descending within each code-length tier (ph-flat-aware). Off = canonical (byte-ascending) order.',
       values: '1 | 0' },
