@@ -1,10 +1,35 @@
 #include "pivco_huffman.h"
 #include <string.h>
 #include <stdlib.h>
+#include <stddef.h>
+#include <assert.h>
+
+#ifdef PIVCO_BUILD_PROFILE
+#include <time.h>
+double      pivco_prof_ns[32];
+const char *pivco_prof_name[32];
+int         pivco_prof_n;
+static double pivco_prof_t0;
+static int    pivco_prof_i;
+static inline double pivco_prof_now(void) {
+    struct timespec t; clock_gettime(CLOCK_MONOTONIC_RAW, &t);
+    return t.tv_sec * 1e9 + t.tv_nsec;
+}
+#define PROF_RESET()  do { pivco_prof_t0 = pivco_prof_now(); pivco_prof_i = 0; } while (0)
+#define PROF_MARK(nm) do { double _t = pivco_prof_now();                       \
+    pivco_prof_ns[pivco_prof_i] += _t - pivco_prof_t0;                          \
+    pivco_prof_name[pivco_prof_i] = (nm); pivco_prof_t0 = _t;                   \
+    if (++pivco_prof_i > pivco_prof_n) pivco_prof_n = pivco_prof_i; } while (0)
+#else
+#define PROF_RESET()
+#define PROF_MARK(nm)
+#endif
 
 /* ---------- Flat-subtree detection ---------- */
 
-/* Shortest leaf depth below node_id (0 if node_id is itself a leaf). */
+/* Shortest leaf depth below node_id (0 if node_id is itself a leaf).
+   Used only by the debug asserts in flat_mark_subtrees. */
+__attribute__((unused))
 static int flat_local_min(const pivco_tree_node_t *tree, int16_t node_id)
 {
     const pivco_tree_node_t *n = &tree[node_id];
@@ -14,7 +39,8 @@ static int flat_local_min(const pivco_tree_node_t *tree, int16_t node_id)
     return 1 + (l < r ? l : r);
 }
 
-/* Deepest leaf depth below node_id. */
+/* Deepest leaf depth below node_id.  Debug-asserts only. */
+__attribute__((unused))
 static int flat_local_max(const pivco_tree_node_t *tree, int16_t node_id)
 {
     const pivco_tree_node_t *n = &tree[node_id];
@@ -23,51 +49,6 @@ static int flat_local_max(const pivco_tree_node_t *tree, int16_t node_id)
     int r = flat_local_max(tree, n->right);
     return 1 + (l > r ? l : r);
 }
-
-/* Populate code_to_sym for a flat subtree of depth D rooted at node_id.
-   For each leaf symbol reachable from this root, local_code = low D bits
-   of code[sym] (canonical Huffman codes are MSB-first; low D bits are
-   the in-subtree part).  `out_base` is the pool offset for this subtree;
-   table->flat_code_to_sym[out_base + local_code] = sym. */
-static void flat_fill_code_to_sym(pivco_huffman_table_t *t,
-                                   int16_t node_id, int D,
-                                   uint16_t out_base)
-{
-    const pivco_tree_node_t *n = &t->tree[node_id];
-    if (n->symbol >= 0) {
-        int sym = n->symbol;
-        int local_code = t->code[sym] & ((1 << D) - 1);
-        t->flat_code_to_sym[out_base + local_code] = (uint8_t)sym;
-        return;
-    }
-    flat_fill_code_to_sym(t, n->left,  D, out_base);
-    flat_fill_code_to_sym(t, n->right, D, out_base);
-}
-
-/* DFS from root.  At every internal node, if subtree is flat with depth
-   >= 2, mark node as a maximal flat-subtree root and stop (its descendants
-   are not separately flagged).  Otherwise recurse into children. */
-static void flat_mark_subtrees(pivco_huffman_table_t *t,
-                                int16_t node_id,
-                                uint16_t *pool_cursor)
-{
-    const pivco_tree_node_t *n = &t->tree[node_id];
-    if (n->symbol >= 0) return;
-    int lmin = flat_local_min(t->tree, node_id);
-    int lmax = flat_local_max(t->tree, node_id);
-    if (lmin == lmax && lmin >= 2) {
-        int D = lmin;
-        int size = 1 << D;
-        t->flat_depth[node_id]  = (uint8_t)D;
-        t->flat_offset[node_id] = *pool_cursor;
-        flat_fill_code_to_sym(t, node_id, D, *pool_cursor);
-        *pool_cursor = (uint16_t)(*pool_cursor + size);
-        return;  /* maximal — don't descend */
-    }
-    flat_mark_subtrees(t, n->left,  pool_cursor);
-    flat_mark_subtrees(t, n->right, pool_cursor);
-}
-
 
 /* ---------- Min-heap for Huffman tree construction ---------- */
 
@@ -411,6 +392,7 @@ static int build_table_finish(const uint8_t lengths[PIVCO_MAX_SYMBOLS],
     }
     table->max_len = max_len;
     table->min_len = min_len;
+    PROF_MARK("copy+count_len");
 
     /* ---------- Flat-aware code assignment ----------
      *
@@ -450,18 +432,23 @@ static int build_table_finish(const uint8_t lengths[PIVCO_MAX_SYMBOLS],
     sf_t  flat_items[PIVCO_MAX_SYMBOLS];
     int   per_len_start[PIVCO_MAX_CODE_LEN + 2];
     {
-        int cursor = 0;
+        /* Counting sort by length: prefix-sum the per-length counts, then a
+           single symbol-order pass places each symbol.  Equivalent to the
+           old nested for-L/for-s scan but O(256) instead of O(max_len*256). */
+        int acc = 0;
+        int cursor[PIVCO_MAX_CODE_LEN + 2];
         for (int L = 1; L <= max_len; L++) {
-            per_len_start[L] = cursor;
-            for (int s = 0; s < PIVCO_MAX_SYMBOLS; s++) {
-                if (lengths[s] == (uint8_t)L) {
-                    flat_items[cursor].sym = (uint8_t)s;
-                    cursor++;
-                }
-            }
+            per_len_start[L] = acc;
+            cursor[L] = acc;
+            acc += table->sym_count[L];
         }
-        per_len_start[max_len + 1] = cursor;
+        per_len_start[max_len + 1] = acc;
+        for (int s = 0; s < PIVCO_MAX_SYMBOLS; s++) {
+            uint8_t L = lengths[s];
+            if (L) flat_items[cursor[L]++].sym = (uint8_t)s;
+        }
     }
+    PROF_MARK("gather_2a");
 
     /* Decompose each c_L into chunks (one chunk per set bit). */
     typedef struct {
@@ -469,6 +456,7 @@ static int build_table_finish(const uint8_t lengths[PIVCO_MAX_SYMBOLS],
         uint16_t bit;       /* 0..PIVCO_MAX_CODE_LEN */
         uint16_t depth;     /* tree-depth of chunk root */
         uint16_t n_syms;    /* 1 << bit */
+        uint16_t root_code; /* canonical code of the chunk root (depth bits) */
         int      sym_idx;   /* index into flat_items */
     } chunk_t;
     chunk_t chunks[PIVCO_MAX_SYMBOLS];   /* upper bound: one chunk per symbol */
@@ -499,6 +487,8 @@ static int build_table_finish(const uint8_t lengths[PIVCO_MAX_SYMBOLS],
         }
     }
 
+    PROF_MARK("decompose_2b");
+
     /* Sort chunks by depth asc (stable; ties keep their natural order
        which is L asc by length, larger-bit-first within length). */
     for (int i = 1; i < n_chunks; i++) {
@@ -511,6 +501,8 @@ static int build_table_finish(const uint8_t lengths[PIVCO_MAX_SYMBOLS],
         chunks[j + 1] = cur;
     }
 
+    PROF_MARK("sort_2c");
+
     /* Canonical-assign codes to chunks (chunk-level Kraft sum = 1).
        Each chunk gets a code prefix of length `chunk.depth`.  Within
        the chunk, symbol i takes suffix i for i in [0, 2^bit). */
@@ -520,6 +512,7 @@ static int build_table_finish(const uint8_t lengths[PIVCO_MAX_SYMBOLS],
         for (int ci = 0; ci < n_chunks; ci++) {
             int d = chunks[ci].depth;
             if (d > prev_depth) code <<= (d - prev_depth);
+            chunks[ci].root_code = (uint16_t)code;
             int bit = chunks[ci].bit;
             int n   = chunks[ci].n_syms;
             for (int i = 0; i < n; i++) {
@@ -531,23 +524,23 @@ static int build_table_finish(const uint8_t lengths[PIVCO_MAX_SYMBOLS],
         }
     }
 
+    PROF_MARK("assign_2d");
+
     /* Populate sorted_symbols / first_sym_idx / first_code from the
        new code assignment.  These fields are not used by runtime
        decoders (only by the tree-walk pass below), but we keep them
        in length-asc order for compatibility with anyone inspecting
        the table. */
-    int sorted_idx = 0;
+    int sorted_idx = per_len_start[max_len + 1];
+    for (int i = 0; i < sorted_idx; i++)
+        table->sorted_symbols[i] = flat_items[i].sym;
     for (int len = 1; len <= max_len; len++) {
-        table->first_sym_idx[len] = (uint16_t)sorted_idx;
+        table->first_sym_idx[len] = (uint16_t)per_len_start[len];
         uint16_t min_code = 0xFFFF;
-        int seg_start = sorted_idx;
-        for (int s = 0; s < PIVCO_MAX_SYMBOLS; s++) {
-            if (lengths[s] == (uint8_t)len) {
-                if (table->code[s] < min_code) min_code = table->code[s];
-                table->sorted_symbols[sorted_idx++] = (uint8_t)s;
-            }
+        for (int i = per_len_start[len]; i < per_len_start[len + 1]; i++) {
+            uint16_t c = table->code[flat_items[i].sym];
+            if (c < min_code) min_code = c;
         }
-        (void)seg_start;
         table->first_code[len] = (min_code == 0xFFFF) ? 0 : min_code;
     }
 
@@ -556,6 +549,8 @@ static int build_table_finish(const uint8_t lengths[PIVCO_MAX_SYMBOLS],
      * by the production tree-walk path.  It is built on demand via
      * pivco_huffman_build_traditional_table() so the normal build -- and the
      * decode-side rebuild from code lengths -- don't pay for the 2 KB fill. */
+
+    PROF_MARK("sorted_syms_3");
 
     /* Build canonical Huffman tree for PIVCO tree-walk.
        Insert each symbol's canonical code into the tree by walking
@@ -594,17 +589,14 @@ static int build_table_finish(const uint8_t lengths[PIVCO_MAX_SYMBOLS],
         table->tree_node_count = nc;
     }
 
+    PROF_MARK("tree_build_4");
+
     /* Find the most frequent symbol (shortest code) for prefill.
        Walk the tree to find its node ID. */
     {
-        uint8_t best_sym = 0;
-        uint8_t best_len = 255;
-        for (int s = 0; s < PIVCO_MAX_SYMBOLS; s++) {
-            if (table->code_len[s] > 0 && table->code_len[s] < best_len) {
-                best_len = table->code_len[s];
-                best_sym = (uint8_t)s;
-            }
-        }
+        /* Most-frequent symbol = shortest code = smallest-index symbol at
+           min_len, which is the first entry of min_len's symbol-order run. */
+        uint8_t best_sym = flat_items[per_len_start[min_len]].sym;
         table->prefill_sym = best_sym;
         /* Find the tree node for this symbol */
         table->prefill_node = -1;
@@ -616,16 +608,43 @@ static int build_table_finish(const uint8_t lengths[PIVCO_MAX_SYMBOLS],
         }
     }
 
-    /* Flat-subtree detection.  Mark every internal node that is the root
-       of a maximal flat subtree with depth >= 2 and fill its
-       code_to_sym lookup.  The root itself is eligible — when the whole
-       tree is flat with depth >= 2, the root gets flat_depth = max_len
-       and the decoder handles the whole block directly via its
-       INTERNAL_FLAT dispatch arm. */
+    PROF_MARK("prefill");
+
+    /* Flat-subtree fast path, filled directly from the chunk decomposition.
+       A bit>=2 chunk is a maximal flat subtree of depth D=bit rooted at depth
+       (L-bit); walk its canonical root_code to the root node, mark it, and
+       fill code_to_sym from the chunk's symbols.  Leaf i of the chunk has
+       in-subtree code i (the low D bits of its canonical code), so
+       flat_code_to_sym[base+i] is the chunk's i-th symbol -- no tree walk or
+       recursion to re-derive the structure we already have.  (Pool offsets
+       are assigned in chunk order; the decoder addresses via flat_offset, so
+       the ordering is immaterial.) */
     {
-        uint16_t pool_cursor = 0;
-        flat_mark_subtrees(table, table->tree_root, &pool_cursor);
+        uint16_t pool = 0;
+        for (int ci = 0; ci < n_chunks; ci++) {
+            int D = chunks[ci].bit;
+            if (D < 2) continue;
+            int d = chunks[ci].depth;
+            uint16_t rc = chunks[ci].root_code;
+            int16_t cur = table->tree_root;
+            for (int b = d - 1; b >= 0; b--)
+                cur = ((rc >> b) & 1) ? table->tree[cur].right
+                                      : table->tree[cur].left;
+#ifndef NDEBUG
+            assert(flat_local_min(table->tree, cur) == D &&
+                   flat_local_max(table->tree, cur) == D);
+#endif
+            table->flat_depth[cur]  = (uint8_t)D;
+            table->flat_offset[cur] = pool;
+            int base = chunks[ci].sym_idx;
+            int n = 1 << D;
+            for (int i = 0; i < n; i++)
+                table->flat_code_to_sym[pool + i] = flat_items[base + i].sym;
+            pool = (uint16_t)(pool + n);
+        }
     }
+
+    PROF_MARK("flat_pool");
 
     /* Classify each node for decode-dispatch.  Mirrors the existing
      * conditional priority in decode_node_neon:
@@ -666,6 +685,8 @@ static int build_table_finish(const uint8_t lengths[PIVCO_MAX_SYMBOLS],
         }
     }
 
+    PROF_MARK("classify");
+
     /* Populate code_la (left-aligned code) for the dense tree-walk
      * encoder.  Bit-d of the canonical code lives at position 15-d of
      * code_la (for d < code_len[sym]). */
@@ -675,6 +696,8 @@ static int build_table_finish(const uint8_t lengths[PIVCO_MAX_SYMBOLS],
             ? (uint16_t)(table->code[s] << (16 - len))
             : 0;
     }
+
+    PROF_MARK("code_la");
 
     /* Populate max_leaf_depth[node] for every internal node.  Used by
      * the encoder to detect when a subtree's remaining bits fit in a
@@ -718,6 +741,7 @@ static int build_table_finish(const uint8_t lengths[PIVCO_MAX_SYMBOLS],
             }
         }
     }
+    PROF_MARK("max_leaf_depth");
 
     return PIVCO_OK;
 }
@@ -732,11 +756,22 @@ int pivco_huffman_build_table_from_code_lens(
     pivco_huffman_table_t *table)
 {
     if (!code_lens || !table) return PIVCO_ERR_NULL;
-    memset(table, 0, sizeof(*table));
+    PROF_RESET();
+    /* Clear everything except the 4 KB decode_sym/decode_len pair: those are
+     * filled independently by pivco_huffman_build_traditional_table() and are
+     * never read by the bulk decoder, so zeroing them here is wasted work. */
+    {
+        size_t skip_end = offsetof(pivco_huffman_table_t, decode_len)
+                        + sizeof(table->decode_len);
+        memset(table, 0, offsetof(pivco_huffman_table_t, decode_sym));
+        memset((char *)table + skip_end, 0, sizeof(*table) - skip_end);
+    }
+    PROF_MARK("memset");
 
     int n_used = 0, last = 0;
     for (int i = 0; i < PIVCO_MAX_SYMBOLS; i++)
         if (code_lens[i] > 0) { n_used++; last = i; }
+    PROF_MARK("count_used");
     if (n_used == 0) return PIVCO_ERR_EMPTY;
     table->num_symbols = (uint16_t)n_used;
 
