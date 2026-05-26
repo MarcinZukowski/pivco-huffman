@@ -27,6 +27,75 @@
 #if defined(PIVCO_HAS_AVX2)
 #include <immintrin.h>
 
+/* D=2 AVX2 unpack: 16 codes from 4 bytes.  Broadcast the 4-byte window to all
+ * eight 32-bit lanes; two vpsrlvd groups (shifts {0,2,..,14} and {16,..,30})
+ * drop codes 0-7 and 8-15 into their lanes' low bits.  Low byte of each lane
+ * gathered to contiguous, the two halves interleaved into 16 bytes. */
+static inline __m128i flat_d2_unpack_avx2(const uint8_t *bm_ptr)
+{
+    uint32_t packed; memcpy(&packed, bm_ptr, 4);
+    __m256i v = _mm256_set1_epi32((int)packed);
+    const __m256i s0 = _mm256_setr_epi32(0, 2, 4, 6, 8, 10, 12, 14);
+    const __m256i s1 = _mm256_setr_epi32(16, 18, 20, 22, 24, 26, 28, 30);
+    const __m256i m  = _mm256_set1_epi32(0x3);
+    __m256i v0 = _mm256_and_si256(_mm256_srlv_epi32(v, s0), m);
+    __m256i v1 = _mm256_and_si256(_mm256_srlv_epi32(v, s1), m);
+    const __m256i bshuf = _mm256_setr_epi8(
+        0,4,8,12, -1,-1,-1,-1, -1,-1,-1,-1, -1,-1,-1,-1,
+        0,4,8,12, -1,-1,-1,-1, -1,-1,-1,-1, -1,-1,-1,-1);
+    __m256i p0 = _mm256_shuffle_epi8(v0, bshuf);
+    __m256i p1 = _mm256_shuffle_epi8(v1, bshuf);
+    __m128i c0 = _mm_unpacklo_epi32(_mm256_castsi256_si128(p0),
+                                    _mm256_extracti128_si256(p0, 1)); /* codes 0-7  */
+    __m128i c1 = _mm_unpacklo_epi32(_mm256_castsi256_si128(p1),
+                                    _mm256_extracti128_si256(p1, 1)); /* codes 8-15 */
+    return _mm_unpacklo_epi64(c0, c1);
+}
+
+/* D=5 AVX2 unpack: 8 codes from 5 bytes.  A D=5 code at sub-offset s ≤ 7
+ * spans at most 2 bytes (s+5 ≤ 12 < 16), so each lane is filled with a
+ * 2-byte window starting at the code's start-byte (gathered via pshufb from
+ * a broadcast 16-byte load), then vpsrlvd by the sub-offset isolates it. */
+static inline __m128i flat_d5_unpack_avx2(const uint8_t *bm_ptr)
+{
+    __m128i raw128 = _mm_loadu_si128((const __m128i *)bm_ptr);
+    __m256i src = _mm256_broadcastsi128_si256(raw128);
+    /* lane j (32-bit) gets bytes {start_byte_j, start_byte_j+1}; rest zeroed. */
+    const __m256i byteidx = _mm256_setr_epi8(
+        0,1,-1,-1, 0,1,-1,-1, 1,2,-1,-1, 1,2,-1,-1,   /* lanes 0-3 */
+        2,3,-1,-1, 3,4,-1,-1, 3,4,-1,-1, 4,5,-1,-1);  /* lanes 4-7 */
+    __m256i bytes = _mm256_shuffle_epi8(src, byteidx);
+    const __m256i sub = _mm256_setr_epi32(0, 5, 2, 7, 4, 1, 6, 3);
+    __m256i v = _mm256_and_si256(_mm256_srlv_epi32(bytes, sub),
+                                 _mm256_set1_epi32(0x1F));
+    const __m256i bshuf = _mm256_setr_epi8(
+        0,4,8,12, -1,-1,-1,-1, -1,-1,-1,-1, -1,-1,-1,-1,
+        0,4,8,12, -1,-1,-1,-1, -1,-1,-1,-1, -1,-1,-1,-1);
+    __m256i p = _mm256_shuffle_epi8(v, bshuf);
+    return _mm_unpacklo_epi32(_mm256_castsi256_si128(p),
+                              _mm256_extracti128_si256(p, 1));
+}
+
+/* D=6 AVX2 unpack: 8 codes from 6 bytes.  Same 2-byte-window scheme as D=5. */
+static inline __m128i flat_d6_unpack_avx2(const uint8_t *bm_ptr)
+{
+    __m128i raw128 = _mm_loadu_si128((const __m128i *)bm_ptr);
+    __m256i src = _mm256_broadcastsi128_si256(raw128);
+    const __m256i byteidx = _mm256_setr_epi8(
+        0,1,-1,-1, 0,1,-1,-1, 1,2,-1,-1, 2,3,-1,-1,   /* lanes 0-3 */
+        3,4,-1,-1, 3,4,-1,-1, 4,5,-1,-1, 5,6,-1,-1);  /* lanes 4-7 */
+    __m256i bytes = _mm256_shuffle_epi8(src, byteidx);
+    const __m256i sub = _mm256_setr_epi32(0, 6, 4, 2, 0, 6, 4, 2);
+    __m256i v = _mm256_and_si256(_mm256_srlv_epi32(bytes, sub),
+                                 _mm256_set1_epi32(0x3F));
+    const __m256i bshuf = _mm256_setr_epi8(
+        0,4,8,12, -1,-1,-1,-1, -1,-1,-1,-1, -1,-1,-1,-1,
+        0,4,8,12, -1,-1,-1,-1, -1,-1,-1,-1, -1,-1,-1,-1);
+    __m256i p = _mm256_shuffle_epi8(v, bshuf);
+    return _mm_unpacklo_epi32(_mm256_castsi256_si128(p),
+                              _mm256_extracti128_si256(p, 1));
+}
+
 /* D=3 AVX2 unpack: 8 codes from 3 bytes.  Code i is at bit 3i of the packed
  * LSB-first stream, so broadcasting the 4-byte window and doing a per-lane
  * variable right-shift by {0,3,..,21} (vpsrlvd) drops each code into its

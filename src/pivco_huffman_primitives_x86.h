@@ -441,6 +441,23 @@ static inline void flat_decode_direct_x86_inner(uint8_t *symbols, int n,
         return;
     }
 #ifdef PIVCO_HAS_AVX2
+    if (D == 2) {
+        /* 16 codes/iter: vpsrlvd unpack + 4-entry pshufb scatter.  Unpack reads
+         * a 4-byte window; stop the fast loop a few groups early. */
+        __m128i c2s_vec = _mm_loadl_epi64((const __m128i *)c2s);  /* 4 entries */
+        int i = 0;
+        int fast_end = n >= 16 ? n - 16 : 0;
+        for (; i + 16 <= fast_end; i += 16) {
+            __m128i codes = flat_d2_unpack_avx2(bm + ((i * 2) >> 3));
+            __m128i syms  = _mm_shuffle_epi8(c2s_vec, codes);
+            _mm_storeu_si128((__m128i *)(symbols + i), syms);
+        }
+        for (; i < n; i++) {
+            uint32_t code = extract_D_bits_x86(bm, i * 2, 2);
+            symbols[i] = c2s[code];
+        }
+        return;
+    }
     if (D == 3) {
         /* 8 codes/iter: vpsrlvd unpack + 8-entry pshufb scatter.  The unpack
          * reads a 4-byte window (3 used + 1 slop), so stop the fast loop one
@@ -459,6 +476,65 @@ static inline void flat_decode_direct_x86_inner(uint8_t *symbols, int n,
         }
         return;
     }
+    if (D == 5) {
+        /* 8 codes/iter: 2-byte-window unpack + 2-table pshufb scatter (codes
+         * 0-31).  pshufb on either table uses code&15; blend by bit 4.  16-byte
+         * loadu in the unpack over-reads, so keep a generous scalar tail. */
+        __m128i lo = _mm_loadu_si128((const __m128i *)c2s);        /* c2s[0..15]  */
+        __m128i hi = _mm_loadu_si128((const __m128i *)(c2s + 16)); /* c2s[16..31] */
+        const __m128i b4 = _mm_set1_epi8(0x10);
+        int i = 0;
+        int fast_end = n >= 24 ? n - 24 : 0;
+        for (; i + 8 <= fast_end; i += 8) {
+            __m128i codes = flat_d5_unpack_avx2(bm + ((i * 5) >> 3));
+            __m128i rlo = _mm_shuffle_epi8(lo, codes);
+            __m128i rhi = _mm_shuffle_epi8(hi, codes);
+            __m128i sel = _mm_cmpeq_epi8(_mm_and_si128(codes, b4), b4);
+            __m128i syms = _mm_blendv_epi8(rlo, rhi, sel);
+            _mm_storel_epi64((__m128i *)(symbols + i), syms);
+        }
+        for (; i < n; i++) {
+            uint32_t code = extract_D_bits_x86(bm, i * 5, 5);
+            symbols[i] = c2s[code];
+        }
+        return;
+    }
+    if (D == 6) {
+        /* 8 codes/iter: 2-byte-window unpack + 4-table pshufb scatter (codes
+         * 0-63).  Four pshufb (code&15 into each quarter) then a 2-level blend
+         * by bits 5,4 selects the right quarter. */
+        __m128i t0 = _mm_loadu_si128((const __m128i *)c2s);
+        __m128i t1 = _mm_loadu_si128((const __m128i *)(c2s + 16));
+        __m128i t2 = _mm_loadu_si128((const __m128i *)(c2s + 32));
+        __m128i t3 = _mm_loadu_si128((const __m128i *)(c2s + 48));
+        const __m128i b4 = _mm_set1_epi8(0x10);
+        const __m128i b5 = _mm_set1_epi8(0x20);
+        int i = 0;
+        int fast_end = n >= 24 ? n - 24 : 0;
+        for (; i + 8 <= fast_end; i += 8) {
+            __m128i codes = flat_d6_unpack_avx2(bm + ((i * 6) >> 3));
+            __m128i r0 = _mm_shuffle_epi8(t0, codes);
+            __m128i r1 = _mm_shuffle_epi8(t1, codes);
+            __m128i r2 = _mm_shuffle_epi8(t2, codes);
+            __m128i r3 = _mm_shuffle_epi8(t3, codes);
+            __m128i s4 = _mm_cmpeq_epi8(_mm_and_si128(codes, b4), b4);
+            __m128i s5 = _mm_cmpeq_epi8(_mm_and_si128(codes, b5), b5);
+            __m128i a = _mm_blendv_epi8(r0, r1, s4);  /* bit5=0: t0/t1 */
+            __m128i b = _mm_blendv_epi8(r2, r3, s4);  /* bit5=1: t2/t3 */
+            __m128i syms = _mm_blendv_epi8(a, b, s5);
+            _mm_storel_epi64((__m128i *)(symbols + i), syms);
+        }
+        for (; i < n; i++) {
+            uint32_t code = extract_D_bits_x86(bm, i * 6, 6);
+            symbols[i] = c2s[code];
+        }
+        return;
+    }
+    /* D=7 has no x86 SIMD path: pshufb is only 16-wide, so the 128-entry
+     * scatter needs 8 sub-tables + a 3-level blend tree that measures no
+     * faster than the scalar-unrolled inner (~0.38 ns/elem on Zen 3).  Unlike
+     * NEON (vqtbl4) and AVX-512 (vpermi2b), x86 has no cheap wide table lookup.
+     * Falls through to the scalar X86_FLAT_UNPACK_SWITCH below. */
 #endif
 #define DST_DIRECT(k) symbols[k]
     X86_FLAT_UNPACK_SWITCH(DST_DIRECT)
