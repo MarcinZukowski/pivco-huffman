@@ -300,7 +300,11 @@ table.node-table tr.in-flat { color: #b45309; }
             <input type="checkbox" id="show-primitives">
             primitives
         </label>
-        <label class="toggle">
+        <label class="toggle" title="Show the input strip above the tree: the source characters with their codes / symbols (needs a text source).">
+            <input type="checkbox" id="input-bitmap">
+            input bitmap
+        </label>
+        <label class="toggle" title="Show the per-node bitmaps inside the tree (needs a text source).">
             <input type="checkbox" id="show-bitmaps">
             show bitmaps
         </label>
@@ -1895,9 +1899,11 @@ function renderTree(rootNode, meta) {
      * a 3-row source-trace strip on top of the tree.  Active only when
      * we have a text source to trace.  letterColor maps each input
      * character to a stable colour from a small palette. */
-    const bmActive    = !!(meta.showBitmaps && meta.sourceTrace);
-    const bmNeedsText = !!(meta.showBitmaps && !meta.sourceTrace);
-    const letterColor = bmActive ? buildLetterColors(meta.sourceTrace) : null;
+    const bmActive    = !!(meta.showBitmaps && meta.sourceTrace);   /* per-node bitmaps */
+    const inputActive = !!(meta.inputBitmap && meta.sourceTrace);   /* top input strip */
+    const bmNeedsText = !!((meta.showBitmaps || meta.inputBitmap) && !meta.sourceTrace);
+    const letterColor = (bmActive || inputActive)
+        ? buildLetterColors(meta.sourceTrace) : null;
     if (bmActive) {
         intG.each(function(d) {
             if (!d.data.bitmap || d.data.bitmap.length === 0) return;
@@ -1919,7 +1925,7 @@ function renderTree(rootNode, meta) {
             ? meta.showLabels.split(',').map(s => s.trim()).filter(Boolean)
             : [];
         const hasLabels = labelKeys.length > 0 && meta.stats;
-        const hasStrip  = bmActive && meta.sourceTrace.length > 0;
+        const hasStrip  = inputActive && meta.sourceTrace.length > 0;
         const labelLineH = 14;
         const gapToTree  = hasStrip ? 22 : 8;   /* more breathing room
                                                   when strip is shown */
@@ -2000,7 +2006,7 @@ function renderTree(rootNode, meta) {
                 .style('font', '12px sans-serif')
                 .style('font-weight', 500)
                 .style('fill', '#b91c1c')
-                .text('"show bitmaps" needs a text source (type into the text input above)');
+                .text('"input bitmap" / "show bitmaps" need a text source (type into the text input above)');
         }
     }
 
@@ -2825,6 +2831,7 @@ function refreshFromFreqs() {
     const showSplitting = document.getElementById('splitting').checked;
     const showPrimitives = document.getElementById('show-primitives').checked;
     const showBitmaps = document.getElementById('show-bitmaps').checked;
+    const inputBitmap = document.getElementById('input-bitmap').checked;
     const bitmapLabel = document.getElementById('bitmap-label').value;
     const titleText = document.getElementById('title-input').value;
     const showLabels = document.getElementById('show-labels').value;
@@ -2893,7 +2900,7 @@ function refreshFromFreqs() {
     const meta = {
         name: _name, isMain: _isMain, totalN: _totalN,
         phOpt, maxSkew, showFlat, condenseFlat, noOverlap, showSplitting,
-        showPrimitives, showBitmaps, bitmapLabel, mode, viewMode,
+        showPrimitives, showBitmaps, inputBitmap, bitmapLabel, mode, viewMode,
         constantDetect, fuseLeaves,
         titleText, showLabels, sourceText,
         showLeafDetails, showSkew, showBitPrefix, showLeafCode,
@@ -2909,7 +2916,7 @@ function refreshFromFreqs() {
      * "show bitmaps" overlay (tree view) or the pivot view.  Both
      * require an actual input string, not just a frequency
      * distribution. */
-    const needTrace = (meta.showBitmaps || meta.viewMode === 'pivot');
+    const needTrace = (meta.showBitmaps || meta.inputBitmap || meta.viewMode === 'pivot');
     if (needTrace && meta.sourceText) {
         meta.sourceTrace = buildSourceTrace(meta.sourceText, tree);
         annotateBitmaps(tree, meta.sourceTrace, meta.showFlat);
@@ -3050,6 +3057,7 @@ function setupToggles() {
     document.getElementById('splitting').addEventListener('change', refreshAndUrl);
     document.getElementById('show-primitives').addEventListener('change', refreshAndUrl);
     document.getElementById('show-bitmaps').addEventListener('change', refreshAndUrl);
+    document.getElementById('input-bitmap').addEventListener('change', refreshAndUrl);
     document.getElementById('bitmap-label').addEventListener('change', refreshAndUrl);
     document.getElementById('view-mode').addEventListener('change', refreshAndUrl);
     document.getElementById('tree-mode').addEventListener('change', refreshAndUrl);
@@ -3161,10 +3169,16 @@ const URL_PARAM_MAP = [
             '<b>tree</b> — the full Huffman tree with optional primitives, bitmaps, and decode-time annotations.<br><br>' +
             '<b>pivot</b> — the ph "pivot" view: each input byte\'s code laid out per row, an arrow, then the same bits pivoted into the per-internal-node bitmaps that ph actually emits.  Requires a text data source.',
       values: 'tree | pivot' },
+    { kind: 'bool', param: 'input-bitmap',   id: 'input-bitmap',
+      desc: 'Show the input strip above the tree: each source character with ' +
+            'its binary code, plus a colored <b>letter_index</b> tag under each bit.<br><br>' +
+            'Requires a "text" data source.',
+      values: '1 | 0' },
     { kind: 'bool', param: 'show-bitmaps',   id: 'show-bitmaps',
-      desc: 'Trace the source string\'s bits through the tree.<br><br>' +
-            'Above the tree: each input character with its binary code, plus a colored <b>letter_index</b> tag under each bit.<br><br>' +
-            'Above each internal node: the bitmap entering that node (the bits being routed at that depth), with the same letter_index tags so you can follow individual source bits through the tree.<br><br>' +
+      desc: 'Show the per-node bitmaps inside the tree: above each internal ' +
+            'node, the bitmap entering it (the bits routed at that depth), with ' +
+            'letter_index tags so you can follow individual source bits through ' +
+            'the tree.<br><br>' +
             'Requires a "text" data source — shows an error if a dataset (frequency-only) is selected.',
       values: '1 | 0' },
     { kind: 'str',  param: 'bmlabel',        id: 'bitmap-label',
