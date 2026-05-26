@@ -2919,7 +2919,11 @@ function refreshFromFreqs() {
     const needTrace = (meta.showBitmaps || meta.inputBitmap || meta.viewMode === 'pivot');
     if (needTrace && meta.sourceText) {
         meta.sourceTrace = buildSourceTrace(meta.sourceText, tree);
-        annotateBitmaps(tree, meta.sourceTrace, meta.showFlat);
+        /* Flat-absorb (D-bit grouped bitmap on flat roots) is a tree-view
+         * rendering; the pivot view needs the full per-depth binary bitmaps,
+         * including those inside flat subtrees. */
+        annotateBitmaps(tree, meta.sourceTrace,
+                        meta.showFlat && meta.viewMode !== 'pivot');
     } else {
         meta.sourceTrace = null;
         /* Clear any stale per-node bitmaps from a previous render. */
