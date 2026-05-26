@@ -122,9 +122,8 @@
 
 @misc{fse,
   author    = {Collet, Yann},
-  title     = {FiniteStateEntropy: a {C} library for {tANS} entropy
-              coding (used in zstd's huf0 path)},
-  howpublished = {\url{https://github.com/cyan4973/FiniteStateEntropy}},
+  title     = {FiniteStateEntropy: New Generation Entropy coders)},
+  url       = {https://github.com/cyan4973/FiniteStateEntropy},
   year      = {2025},
   note      = {ph vendors this at ext/fse/ for the per-node skewed-
               bitmap path.  bench_fse_xy_micro.c benchmarks both
@@ -138,7 +137,7 @@
 @misc{giesen2014alias,
   author    = {Giesen, Fabian},
   title     = {From the archives: alias {Huffman} coding},
-  howpublished = {\url{https://fgiesen.wordpress.com/2014/12/09/from-the-archives-alias-huffman-coding/}},
+  url       = {https://fgiesen.wordpress.com/2014/12/09/from-the-archives-alias-huffman-coding/},
   year      = {2014},
   note      = {Alias-method Huffman: unified decode table sized by
               symbol count instead of code length, branch-free per
@@ -149,7 +148,7 @@
 @misc{giesen2021oodle,
   author    = {Giesen, Fabian},
   title     = {Entropy coding in {Oodle Data}: {Huffman} coding},
-  howpublished = {\url{https://fgiesen.wordpress.com/2021/08/30/entropy-coding-in-oodle-data-huffman-coding/}},
+  url       = {https://fgiesen.wordpress.com/2021/08/30/entropy-coding-in-oodle-data-huffman-coding/},
   year      = {2021},
   note      = {ryg's writeup of Oodle's Huffman wire format and
               tuner.  Explains why huff6 (6-stream) is the right
@@ -160,7 +159,7 @@
   author    = {Giesen, Fabian},
   title     = {Entropy decoding in {Oodle Data}: {x86-64} 6-stream
               {Huffman} decoders},
-  howpublished = {\url{https://fgiesen.wordpress.com/2023/10/29/entropy-decoding-in-oodle-data-x86-64-6-stream-huffman-decoders/}},
+  url       = {https://fgiesen.wordpress.com/2023/10/29/entropy-decoding-in-oodle-data-x86-64-6-stream-huffman-decoders/},
   year      = {2023},
   note      = {Detailed x86 ASM walkthrough of Oodle's 6-stream
               decoders.  Quoted ~1.3--1.5 cycles/symbol asymptote
@@ -511,7 +510,7 @@
   author    = {Lemire, Daniel},
   title     = {Stream {VByte}: breaking new speed records for
               integer compression},
-  howpublished = {\url{https://lemire.me/blog/2017/09/27/stream-vbyte-breaking-new-speed-records-for-integer-compression/}},
+  url       = {https://lemire.me/blog/2017/09/27/stream-vbyte-breaking-new-speed-records-for-integer-compression/},
   year      = {2017},
   note      = {Stream VByte: a SIMD-friendly variant of VByte that
               separates the per-integer length-control bytes from
@@ -594,8 +593,8 @@
   author    = {Collet, Yann and others},
   title     = {{zstd}: A real-time lossless data compression
               library},
-  howpublished = {\url{https://github.com/cyan4973/FiniteStateEntropy}},
-  year      = {2025},
+  url       = {https://github.com/facebook/zstd},
+  year      = {2026},
   note      = {The huf0 path inside zstd is the main fast-CPU
               Huffman comparison point in ph's bench tables.}
 }
@@ -618,7 +617,7 @@
 @misc{brotli,
   author    = {{Google}},
   title     = {Brotli compression algorithm reference implementation},
-  howpublished = {\url{https://github.com/google/brotli}},
+  url       = {https://github.com/google/brotli},
   year      = {2025},
   note      = {Cited as a high-ratio comparison point in
               extras/bench_brotli.c.  Different design point —

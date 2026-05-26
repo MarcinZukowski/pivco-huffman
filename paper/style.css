@@ -134,6 +134,7 @@ code, pre, kbd, samp {
     font-family: "JetBrains Mono", "Fira Code", "Menlo", "Consolas",
                  monospace;
     font-size: 0.92em;
+    text-align: left;
 }
 
 code {
@@ -298,9 +299,14 @@ table {
 
 th, td {
     padding: 0.45em 0.85em;
-    border-bottom: 1px solid #d8d2bf;
+    border: 1px solid #d8d2bf;
     text-align: left;
     vertical-align: top;
+}
+
+.gridtable td, .gridtable th {
+    border: 0px;
+    background: none;
 }
 
 .myfig td {

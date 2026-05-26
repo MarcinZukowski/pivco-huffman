@@ -9,35 +9,69 @@ despite the introduction of better-compressing encodings (e.g. @arithmetic or @d
 
 Note: formally, most modern systems don't necessarily use the _exact_ encoding proposed in @huff,
 but rather "canonical" coding from @schwartz1964canonical.
-In this paper we use the term "Huffman" for all versions of it.
 
 == Classical Huffman tree
 
+#he("gridtable")[
+#table(
+  columns: (50%, 50%),
+  stroke: 0pt,
+  align: center,
+  [#figure(
+    image("figures/huf-tree.svg"),
+    caption: [Classical Huffman tree for the word "huffman"]
+   )<fig-huf-tree>],
+  [#figure(
+    [```js
+    node = root
 
+    while not is_leaf(node)
+      if read_bit() == 1:
+        node = node->right
+      else:
+        node = node->left
+    return node.symbol
+      ```
+    ],
+    caption: [Naive Huffman decoding for one symbol]
+  )<fig-huf-decode>
+  ]
+)
+]
 
-== Current Huffman SotA <sota>
+In classical Huffman coding, each symbol is encoded using a code (a sequence of bits),
+with more frequent bits getting shorter codes.
+@fig-huf-tree shows a Huffman tree for the word "huffman", and @fig-huf-decode
+shows a naive decoding algorithm for decoding one symbol.
+For example, to decode symbol #sym("h"), we traverse tree using bits #sym("1 0 1") to get
+to the proper leaf node representing that symbol.
 
-Most modern Huffman implementations
-#h0, Oodle
+== Modern Huffman solutions <sota>
 
-Most modern Huffman decoding implementations use a _decoding table_ idea, allowing decoding
-an entire code without traversing it bit by bit.
-The size of supported code lengths is typically constrained, e.g. to L=11 bits.
-Then a table of 2^L is created, allowing the following code:
+Implementation from @fig-huf-decode is not very performant, as it uses a lot of opereations
+and is not friendly for modern CPUs.
+Instead, modern Huffman decoding implementations use a _decoding table_, which allows decoding
+an entire symbol without traversing its code bit by bit.
+The size of supported code lengths is typically constrained, e.g. to _L=11_ bits.
+Then a table of _2^L_ is created, allowing the following implementation:
 ```c
-  code = peek_bits(L);
-  emit_symbol(decoding_table[code].symbol);
-  skip_bits(decoding_table[code].numBits);
+  code_bits = peek_bits(L);
+  emit_symbol(decoding_table[code_bits].symbol);
+  skip_bits(decoding_table[code_bits].numBits);
 ```
 
-This or similar code is used in fast Huffman decompressors like Huff0 (@fse).
-Two typical approaches to accelerating it are using multiple cursors (@giesen2014interleaved, @giesen2023oodle)
-or using a table that decodes 2 symbols instead of one.
+Such code can be further accelerated by using multiple cursors (@giesen2014interleaved, @giesen2023oodle),
+or by building a table that decodes 2 symbols in one iteration instead of one.
 
-We measured various Huffman decoding implementations, and the most performant ones we found
-were #h0 (from @fse) and Oodle's Huffman decoder (@giesen2021oodle).
+We measured various Huffman decoding implementations, and the most performant solutions we found were:
 
-Here are the measured bandwidths on two example datasets on two hosts:
+- *#h0* - part of the open source FSE (@fse) library, which is also a building block of the popular zstd compression (@zstd).
+  Implemented in pure C, permissive license.
+- *oodle-huffman* - Huffman decoder from Ooodle (@giesen2021oodle) - a proprietary compression library by RAD Game Tools.
+  Implemented in C with a lot of assembly optimizations.
+  Oodle requires a license for most uses.
+
+Here are the measured bandwidths on two example datasets on two hosts (see @testing-method for more info):
 
 #let fair = csv("data/fair.csv")
 #let _na(v) = if v == "na" { [—] } else { [#v] }
@@ -70,56 +104,33 @@ Here are the measured bandwidths on two example datasets on two hosts:
                                        [c8i], .._hp("c8i", "prose_pride"),
 )<tab-huffman-perf>
 
-Throughput is measured in realistic per-call mode (table rebuilt per block);
-#h0 is stock `HUF_decompress`, oodle-huffman is Oodle's `OodleLZ` Huffman
-backend.
-
-This is a respectable performance.
-Still, in this paper we investigate if it could be improved by using a completely different approach.
+This is an impressive performance.
+Still, in this paper we investigate if it could be further improved by using a completely different approach.
 
 == Motivating Example: Hash Join in Databases <hj>
 
 Hash table lookup is one of the most performance-intensive operations in many systems, including
 databases.
-Below, we can see the pseudocode of a simple linear-hashing lookup, and its relation to Huffman decoding.
+Below, we can see the pseudocode of a simple linear-hashing lookup:
 
-#table(
-  columns: (50%, 50%),
-  inset: 10pt,
-  align: horizon,
-  table.header(
-    [*Huffman symbol decoding*], [*Hash table lookup*]
-  ),
-  [```js
-    state = root
+```js
+  hash = compute_hash(key)
+  pos = hash_table_first(hash)
+  while not hash_table_empty(pos)
+    val = hash_table_value(pos)
+    if val == key:
+      return true
+    pos = hash_table_next(pos)
+  return false
+```
 
-    while not is_leaf(state)
-      if read_bit() == 1:
-        state = state->right
-      else:
-        state = state->left
-    return state
-    ```
-  ],
-  [```js
-    hash = compute_hash(key)
-    pos = hash_table_first(hash)
-    while not hash_table_empty(pos)
-      val = hash_table_value(pos)
-      if val == key:
-        return true
-      pos = hash_table_next(pos)
-    return false
-    ```
-  ],
-)
-
-Both problems can be seen as a state-machine traversal, and in both, data dependencies in the loop and unpredictable branching prevent the CPU from achieving high performance.
+Just like Huffman decoding from @fig-huf-decode, this problem can be seen as a state-machine traversal.
+In both cases, data dependencies in the loop and unpredictable branching prevent the CPU from achieving high performance.
 Hash join additionally performs an expensive memory lookup causing additional stalls.
 
-In @zuk09, Section 5.3.3.2, the author proposed an alternative hash table lookup approach based on the idea of going through
+@zuk09 (Section 5.3.3.2) proposed an alternative hash table lookup approach based on the idea of going through
 each node in the state machine not for one, but for a _vector_ of records,
-presented in this simplified pseudocode:
+presented in this pseudocode:
 
 ```js
 misses = []                          // miss input positions
@@ -141,9 +152,9 @@ while not active.empty():            // if we still have work to do
 ```
 
 This approach, while more complex and seemingly labor-intensive (definitely issues more CPU instructions),
-in each phase exposes to CPUs a lot of simple, independent operations and avoids any data or control dependencies.
+in each phase exposes to CPUs a lot of simple, independent operations, avoids any data or control dependencies,
+and allows overlapping memory accesses.
 As a result, it achieves a significant performance benefit (even >10x) over the _scalar_ approach.
-
 
 #anote[
 So I've been trying to apply this general approach to a few different problems, including compression, but also

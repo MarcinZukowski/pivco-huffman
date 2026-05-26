@@ -115,13 +115,48 @@
       "params": {
         "title": "Pivoted \"huffman\" tree",
         "text": "huffman",
+        "mode": "top-down",
         "ph-opt": 0,
         "show-flat": 0,
         "fuse-leaves": 0,
         "constant": 0,
         "leaf-details": 1,
         "show-bitmaps": 1,
-        "bmlabel": "indices"
+        "bmlabel": "indices",
+        "input-bitmap": 1
+      }
+    },
+    {
+      "title": "Bottom-up huffman tree",
+      "name": "bu-tree",
+      "tool": "tree_viz",
+      "params": {
+        "text": "huffman",
+        "mode": "bottom-up",
+        "ph-opt": 0,
+        "show-flat": 0,
+        "fuse-leaves": 1,
+        "constant": 1,
+        "leaf-details": 1,
+        "show-bitmaps": 1,
+        "bmlabel": "symbols",
+        "input-bitmap": 1
+      }
+    },
+    {
+      "name": "huf-tree",
+      "tool": "tree_viz",
+      "params": {
+        "text": "huffman",
+        "mode": "top-down",
+        "ph-opt": 0,
+        "show-flat": 0,
+        "fuse-leaves": 0,
+        "constant": 0,
+        "leaf-details": 1,
+        "show-bitmaps": 0,
+        "show-bits": 1,
+        "input-bitmap": 1
       }
     },
     {

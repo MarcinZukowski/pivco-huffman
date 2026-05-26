@@ -1,6 +1,6 @@
 #import "conf.typ": anote, PH, he, mf, sym, pick-cols, todo
 
-= Going Bottom-Up
+= Going Bottom-Up<bottom-up>
 
 The "natural" solution presented in @sideways, while achieving decent performance,
 is heavily penalized by the high number of scattered writes.

@@ -20,7 +20,19 @@
 #set align(left)
 
 = Abstract
-Blablalbasd
+Huffman encodig has been an _enduring_ techique for 70+ years,
+ubiquitous in compression algorithms since its invention.
+In this paper we propose a new approach to Huffman
+coding, based on a data structure from _wavelet trees_.
+Resulting _pivoted coding_ (*#PH*) allows utilizing high performance
+encoding and decoding operations, providing
+significant performance improvements.
+Additionally, we show how ANS-coding can be _selectively_
+applied to this structure when it is actually useful.
+The end result is a novel algorithm that consistently beats
+performance of the state of the art Huffman encoders,
+while providing compression
+ratios close to ANS-based encoders.
 
 #if _html { outline() }
 
@@ -29,8 +41,8 @@ Blablalbasd
 #anote[
 This document is mostly a verbatim copy of the arXiv paper.
 
-However, in boxes like this you'll see some additional thoughts that might not be fitting
-a scientific paper.
+However, in boxes like this you'll see some additional author's
+thoughts that might not be fitting a scientific paper.
 
 Oh well, maybe one day reviewers will have a sense of humor...
 ]

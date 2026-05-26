@@ -6,8 +6,9 @@ Following the example from @hj, it should be possible to create a
 Huffman decoder using similar principles.
 However, for each node in the Huffman tree to have access to relevant
 bits from the stream, a different data layout is needed.
+We found a great solution for this in the _wavelet tree_ structure @grossi2003wt.
 
-#he("myfig")[
+#he("gridtable")[
   #table(
     columns: (50%, 50%),
     stroke: 0pt,
@@ -38,7 +39,7 @@ bits from the stream, a different data layout is needed.
 
 // #mf("pivot-bitmaps")
 
-@fig-pivot shows how the encoded word "huffman" can be represented differently.
+@fig-pivot shows an alternative representation of the encoded word "huffman".
 Instead of a code-after-code stream, we divide all the stream bits
 by their (possibly empty) prefix.
 @fig-pivot-tree shows how this layout maps onto the Huffman tree when decoding
@@ -46,16 +47,21 @@ data.
 Each node receives all the bits of the codes that pass through it, and navigates
 these codes to its children, where another bitmap is used for the next step.
 
-While logically this representation contains the same information, since bitmaps
-are typically stored byte-aligned, it might result in a _marginally worse_ compression
-ratio due to byte-rounding.
+Note, that while logically this representation contains the same information as standar Huffman coding,
+it typically stores bitmaps byte-aligned.
+This might lead to a _marginally worse_ compression ratio due to byte-padding.
 However, for non-trivial datasets this overhead is acceptable if this approach provides other benefits.
 
-Note that this basic tree representation is equivalent to
-_wavelet trees_ (see @ferragina2009myriad), specifically _Huffman-shaped wavelet trees_ (e.g. @dinklage2023wt).
-However, with a very different focus, use cases, lack of auxilliary data structures,
-and shape changes in the tree, we treat #PH as a separate solution sharing the same basic structure.
-See @wt for more discussion.
+This data representation and tree traversal are the basis for *_pivot-coded Huffman_ (#PH)* presented in this paper.
+In this section we present the _initial_ implementation of this approach, which is actually
+_not_ used in the final solution.
+Still, since it is a more _natural_ approach, we describe it first, and use it to introduce
+a set of optimizations and implementation techniques.
+In @bottom-up, we will propose the final, more performant solution.
+
+As mentioned, the tree representation used is equivalent to _wavelet trees_,
+specifically _Huffman-shaped wavelet trees_ (e.g. @dinklage2023wt).
+However, we treat #PH as a related, but separate solution - see @wt for more discussion.
 
 #anote[
 While working on #PH I did a lot of literature review, and for the longest time couldn't find
@@ -66,7 +72,7 @@ Close to the end of the research/experimental work, Claude found Wavelet trees.
 Initially I was in panic (a few weeks of life lost?), but the deeper review showed that
 it's really quite different.
 
-So here we go. I will still call it #PH. Sue me :)
+So here we go. I will still call it #PH.
 ]
 
 == Naive implementation <naive>
@@ -74,7 +80,7 @@ So here we go. I will still call it #PH. Sue me :)
 With a defined Huffman tree, and data stored in per-node bitmaps, we can traverse
 the tree top-down.
 Note, as we do it, we need to know which output elements we are decoding.
-For that, we also carry an `indices` list (the root node does not need it).
+For that, we carry an additional `indices` list (the root node does not need it).
 In our implementation we use 16-bit values for indices, as we decode data in small
 blocks (e.g. 8KB).
 With that, #PH tree traversal boils down to applying two operations:
@@ -169,6 +175,7 @@ In @treeopt-naive we see our starting point - a basic tree with
 @treeopt-symbols translates symbols used in figures in this section
 to the actual compute primitives.
 
+#he("gridtable")[
 #table(
   columns:2,
   stroke: 0pt,
@@ -196,7 +203,7 @@ to the actual compute primitives.
     )<treeopt-symbols>
   ],
 )
-
+]
 === Merging leaves
 
 One simple approach of reducing the number of operations is
@@ -211,7 +218,7 @@ for (i = 0; i < n; i++) {
 }
 ```
 
-@treeopt-fuse shows the benefit in reduced operations per node.
+@treeopt-fuse shows the benefit in reduced operations per decoded byte going from 4.071 to 3.286.
 
 === Frequent symbol optimization
 
@@ -292,9 +299,7 @@ which share the same code lengths, but are not decoded together.
 We can reorganize the canonical Huffman tree to make it more amenable to the "flat subtree"
 optimization by making sure that codes with the same length are grouped as much as
 possible.
-To achieve that, after building an initial Huffman tree, we sort the codes
-by their length.
-Then, within each length-group, we combine the largest _power of two_ number of nodes
+To achieve that, after determining code lengths, within each length-group, we combine the largest _power of two_ number of nodes
 into a single node with a combined frequency.
 We repeat the process, with one length-group possibly creating multiple such nodes (of different depth).
 

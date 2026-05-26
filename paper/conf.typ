@@ -80,9 +80,11 @@
   if _pdf {
     base = URLBASE
   }
+  he("myfig",
   link(
       base + "figures/fig-web.html?" + figname,
       image("figures/" + figname + ".svg"))
+  )
 }
 
 #let sym(t) = { [*#raw("\"" + t + "\"")*] }

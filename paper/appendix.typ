@@ -31,9 +31,27 @@
             code length, code-length min/max, and source. Available #link("https://github.com/MarcinZukowski/pivco-huffman/blob/main/extras/datasets/README.md")[in #PH repo] ],
 )<tab-datasets>
 
-= Machines Tested
+= Machines Tested <machines>
 
-= Testing methodology
+// Test machines used for the benchmarks.  CPU strings verified from the
+// hosts: M4 = `sysctl machdep.cpu.brand_string`; EC2 = `lscpu` model name.
+// AWS instances are .large (2 vCPU).
+#table(
+  columns: 5,
+  inset: 5pt,
+  align: (left, left, left, left, right),
+  table.header(
+    [*Symbol*], [*Machine type*], [*Arch*], [*CPU family*], [*CPU year*],
+  ),
+  [M4],  [Apple MacBook Pro (Mac16,6)], [aarch64], [Apple M4 Max],                  [2024],
+  [c8g], [AWS EC2 c8g.large],           [aarch64], [AWS Graviton4 (Neoverse V2)],   [2024],
+  [c8i], [AWS EC2 c8i.large],           [x86-64],  [Intel Xeon 6 (Granite Rapids)], [2024],
+  [c6a], [AWS EC2 c6a.large],           [x86-64],  [AMD EPYC 7R13 (Milan, Zen 3)],  [2021],
+)<tab-machines>
+
+= Testing methodology <testing-method>
+
+In our testing we use datasets from @datasets an machines from @machines.
 
 Whenever we test encoding/decoding bandwitdth, we use the following setup:
 We do 5 _runs_, where 1 _run_, for each algorithm, executes 10 _repetitions_ of 1MB encoding/decoding.
