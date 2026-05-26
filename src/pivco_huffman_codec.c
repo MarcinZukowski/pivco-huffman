@@ -201,7 +201,21 @@ static void codec_encode_node(const pivco_huffman_table_t *table,
     uint8_t *bm = *out_ptr;
     *out_ptr += nbytes;
 
-    int n_right = prim_enc_partition(codes_la, n, depth, bm, tmp);
+    /* Pick the partition variant by node_type, mirroring the decode-side
+     * dispatch.  The bitmap (and thus the wire bytes) is identical across
+     * variants; only the encode-internal scatter work differs — a leaf child
+     * never reads its scattered side, so HALF/BOTH_LEAVES skip that scatter. */
+    int n_right;
+    switch ((pivco_node_type_t)table->node_type[node_id]) {
+    case PIVCO_NODE_BOTH_LEAVES:
+        n_right = prim_enc_partition_none(codes_la, n, depth, bm);        break;
+    case PIVCO_NODE_HALF_RIGHT:
+        n_right = prim_enc_partition_right(codes_la, n, depth, bm, tmp);  break;
+    case PIVCO_NODE_HALF_LEFT:
+        n_right = prim_enc_partition_left(codes_la, n, depth, bm);        break;
+    default:
+        n_right = prim_enc_partition_full(codes_la, n, depth, bm, tmp);   break;
+    }
     int n_left  = n - n_right;
 
     /* Optional FSE attempt on the raw bitmap.  On commit, marker_slot

@@ -591,29 +591,33 @@ static inline uint8_t enc_mask8_codes_la_neon(uint16x8_t code_vec,
     return (uint8_t)vaddvq_u16(weighted);
 }
 
-/* Stride-8 SIMD main path: load 8 left-aligned codes, build mask byte
- * via the dense movmask, partition the SAME register into left/right
- * halves using compress_tab[mask].  In-place write of the LEFT half
- * over codes_la (n_left <= j invariant keeps this safe even when the
- * 16-byte store extends past the cursor); RIGHT half goes to right_out.
- *
- * Per 8 elements: 1 vld, 4 NEON mask ops, 2 vld (shuf), 2 vqtbl,
- * 2 vst.  Scalar tail handles the residual 1..7 elements with the
- * same logic in plain C. */
-static inline int build_bitmap_partition_neon(uint16_t *codes_la, int n,
-                                                int depth,
-                                                uint8_t *bm,
-                                                uint16_t *right_out)
+/* part_core_neon — the single shared partition loop.  Parameterized by
+ * compile-time-constant flags so each always-inline wrapper folds to a
+ * specialized branch-free loop with no dead stores:
+ *   BUILD=1  build the bitmap from codes_la's depth bit (fused, encode)
+ *   BUILD=0  read the mask from bm_in (from-bitmap; future TD-decode share)
+ *   EMIT_RIGHT/EMIT_LEFT  scatter that half (full=1,1 right=1,0 left=0,1 none=0,0)
+ * The stride-8 scatter (the "partition8" step) is inlined here rather than
+ * factored into a helper — a helper-call boundary cost the FULL path ~9% on
+ * M4 because the compiler stopped folding the cursor math.  LEFT is written in
+ * place over codes_la (n_left <= j keeps the 16-byte store safe); RIGHT goes to
+ * right_out.  Returns n_right. */
+/* build_bitmap_partition_full_neon — the FULL (both-sides) fused partition,
+ * kept hand-written.  The generic part_core_neon below (with EMIT_RIGHT=
+ * EMIT_LEFT=1) is logically identical but schedules ~8% slower on M4 for this
+ * specific 1,1,1 case — and FULL is the hot common path, so it stays
+ * specialized.  part_core handles every other variant (right/left/none and
+ * the from-bitmap share) where the generic form matches hand-written speed. */
+static inline int build_bitmap_partition_full_neon(uint16_t *codes_la, int n,
+                                                    int depth, uint8_t *bm,
+                                                    uint16_t *right_out)
 {
-    int n_left = 0, n_right = 0;
-    int j = 0;
+    int n_left = 0, n_right = 0, j = 0;
     int neg_shift_d = -(15 - depth);
-
     for (; j + 8 <= n; j += 8) {
         uint16x8_t code_vec = vld1q_u16(codes_la + j);
         uint8_t mask = enc_mask8_codes_la_neon(code_vec, neg_shift_d);
         bm[j >> 3] = mask;
-
         const uint8_t *tab = compress_tab[mask];
         uint8x16_t shuf_r = vld1q_u8(tab);
         uint8x16_t shuf_l = vld1q_u8(tab + 16);
@@ -621,31 +625,64 @@ static inline int build_bitmap_partition_neon(uint16_t *codes_la, int n,
         uint8x16_t right  = vqtbl1q_u8(data, shuf_r);
         uint8x16_t left   = vqtbl1q_u8(data, shuf_l);
         int nr = compress_popcnt[mask];
-        vst1q_u8((uint8_t *)(right_out      + n_right), right);
-        vst1q_u8((uint8_t *)(codes_la + n_left ), left);
+        vst1q_u8((uint8_t *)(right_out + n_right), right);
+        vst1q_u8((uint8_t *)(codes_la  + n_left ), left);
         n_right += nr;
         n_left  += (8 - nr);
     }
-
-    /* Scalar tail.  Read all tail codes into a temporary before writing
-     * back, since the in-place left write can overlap the read when
-     * n_left + 8 > j (always true once we drop below a full group). */
     if (j < n) {
-        int tail = n - j;
+        int tail = n - j, shift_d = 15 - depth;
         uint16_t tail_buf[8];
         for (int k = 0; k < tail; k++) tail_buf[k] = codes_la[j + k];
         uint8_t mask = 0;
-        int shift_d = 15 - depth;
-        for (int k = 0; k < tail; k++) {
-            int bit = (tail_buf[k] >> shift_d) & 1;
-            mask |= (uint8_t)(bit << k);
-        }
+        for (int k = 0; k < tail; k++)
+            mask |= (uint8_t)(((tail_buf[k] >> shift_d) & 1) << k);
         bm[j >> 3] = mask;
         for (int k = 0; k < tail; k++) {
-            if (mask & (1 << k))
-                right_out[n_right++] = tail_buf[k];
-            else
-                codes_la[n_left++] = tail_buf[k];
+            if (mask & (1 << k)) right_out[n_right++] = tail_buf[k];
+            else                 codes_la[n_left++]   = tail_buf[k];
+        }
+    }
+    return n_right;
+}
+
+__attribute__((always_inline)) static inline
+int part_core_neon(uint16_t *codes_la, int n, int depth,
+                                  uint8_t *bm, const uint8_t *bm_in,
+                                  uint16_t *right_out,
+                                  int BUILD, int EMIT_RIGHT, int EMIT_LEFT)
+{
+    int n_left = 0, n_right = 0, j = 0;
+    int neg_shift_d = -(15 - depth);
+    for (; j + 8 <= n; j += 8) {
+        uint16x8_t code_vec = vld1q_u16(codes_la + j);
+        uint8_t mask;
+        if (BUILD) { mask = enc_mask8_codes_la_neon(code_vec, neg_shift_d); bm[j >> 3] = mask; }
+        else         mask = bm_in[j >> 3];
+        const uint8_t *tab = compress_tab[mask];
+        uint8x16_t data = vreinterpretq_u8_u16(code_vec);
+        if (EMIT_RIGHT) vst1q_u8((uint8_t *)(right_out + n_right),
+                                 vqtbl1q_u8(data, vld1q_u8(tab)));
+        if (EMIT_LEFT)  vst1q_u8((uint8_t *)(codes_la + n_left),
+                                 vqtbl1q_u8(data, vld1q_u8(tab + 16)));
+        int nr = compress_popcnt[mask];
+        n_right += nr;
+        n_left  += 8 - nr;
+    }
+    if (j < n) {
+        int tail = n - j, shift_d = 15 - depth;
+        uint16_t tail_buf[8];
+        for (int k = 0; k < tail; k++) tail_buf[k] = codes_la[j + k];
+        uint8_t mask;
+        if (BUILD) {
+            mask = 0;
+            for (int k = 0; k < tail; k++)
+                mask |= (uint8_t)(((tail_buf[k] >> shift_d) & 1) << k);
+            bm[j >> 3] = mask;
+        } else mask = bm_in[j >> 3];
+        for (int k = 0; k < tail; k++) {
+            if (mask & (1 << k)) { if (EMIT_RIGHT) right_out[n_right] = tail_buf[k]; n_right++; }
+            else                 { if (EMIT_LEFT)  codes_la[n_left]   = tail_buf[k]; n_left++;  }
         }
     }
     return n_right;
@@ -911,11 +948,27 @@ PIVCO_PRIM_ALWAYS_INLINE void prim_enc_init(uint16_t *codes_la, int n,
                                               const uint16_t *code_la_lut)
 { enc_init_neon(codes_la, n, symbols, code_la_lut); }
 
-PIVCO_PRIM_ALWAYS_INLINE int prim_enc_partition(uint16_t *codes_la,
-                                                           int n, int depth,
-                                                           uint8_t *bm,
-                                                           uint16_t *right_out)
-{ return build_bitmap_partition_neon(codes_la, n, depth, bm, right_out); }
+PIVCO_PRIM_ALWAYS_INLINE int prim_enc_partition_full(uint16_t *codes_la,
+                                                      int n, int depth,
+                                                      uint8_t *bm,
+                                                      uint16_t *right_out)
+{ return build_bitmap_partition_full_neon(codes_la, n, depth, bm, right_out); }
+
+PIVCO_PRIM_ALWAYS_INLINE int prim_enc_partition_right(uint16_t *codes_la,
+                                                      int n, int depth,
+                                                      uint8_t *bm,
+                                                      uint16_t *right_out)
+{ return part_core_neon(codes_la, n, depth, bm, NULL, right_out, 1, 1, 0); }
+
+PIVCO_PRIM_ALWAYS_INLINE int prim_enc_partition_left(uint16_t *codes_la,
+                                                     int n, int depth,
+                                                     uint8_t *bm)
+{ return part_core_neon(codes_la, n, depth, bm, NULL, NULL, 1, 0, 1); }
+
+PIVCO_PRIM_ALWAYS_INLINE int prim_enc_partition_none(uint16_t *codes_la,
+                                                     int n, int depth,
+                                                     uint8_t *bm)
+{ return part_core_neon(codes_la, n, depth, bm, NULL, NULL, 1, 0, 0); }
 
 PIVCO_PRIM_ALWAYS_INLINE void prim_enc_pack_dN(const uint16_t *codes_la,
                                              int n, int D, int depth,

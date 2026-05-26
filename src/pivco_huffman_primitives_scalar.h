@@ -36,27 +36,29 @@ static inline void enc_init_scalar(uint16_t *codes_la, int n,
  *
  * codes_la is not mutated across recursion levels; the current-depth
  * partition bit lives at position `15 - depth` of each codes_la[j]. */
-static inline int build_bitmap_partition_scalar(uint16_t *codes_la, int n,
-                                                  int depth,
-                                                  uint8_t *bm,
-                                                  uint16_t *right_out)
+/* part_core_scalar — parameterized partition core shared by the fused
+ * (BUILD=1: build bitmap from the depth bit) and from-bitmap (BUILD=0: read
+ * bm_in) families, across full/right/left/none (EMIT flags).  LEFT is written
+ * in place over codes_la (n_left <= j); RIGHT goes to right_out.  Values are
+ * left UNSHIFTED so children read their own depth's bit from the same lane. */
+static inline int part_core_scalar(uint16_t *codes_la, int n, int depth,
+                                    uint8_t *bm, const uint8_t *bm_in,
+                                    uint16_t *right_out,
+                                    int BUILD, int EMIT_RIGHT, int EMIT_LEFT)
 {
-    int nbytes = bitmap_bytes(n);
-    memset(bm, 0, (size_t)nbytes);
-    int bit_shift = 15 - depth;
-
-    /* Partition codes_la in place; values are left UNSHIFTED so children
-     * read their own depth's partition bit from the same codes_la lane. */
-    int n_left = 0, n_right = 0;
+    if (BUILD) memset(bm, 0, (size_t)bitmap_bytes(n));
+    int bit_shift = 15 - depth, n_left = 0, n_right = 0;
     for (int j = 0; j < n; j++) {
         uint16_t v = codes_la[j];
-        int bit = (v >> bit_shift) & 1;
-        if (bit) {
-            bm[j >> 3] |= (uint8_t)(1u << (j & 7));
-            right_out[n_right++] = v;
+        int bit;
+        if (BUILD) {
+            bit = (v >> bit_shift) & 1;
+            if (bit) bm[j >> 3] |= (uint8_t)(1u << (j & 7));
         } else {
-            codes_la[n_left++] = v;
+            bit = (bm_in[j >> 3] >> (j & 7)) & 1;
         }
+        if (bit) { if (EMIT_RIGHT) right_out[n_right] = v; n_right++; }
+        else     { if (EMIT_LEFT)  codes_la[n_left]   = v; n_left++;  }
     }
     return n_right;
 }
@@ -175,11 +177,23 @@ PIVCO_PRIM_ALWAYS_INLINE void prim_enc_init(uint16_t *codes_la, int n,
                                               const uint16_t *code_la_lut)
 { enc_init_scalar(codes_la, n, symbols, code_la_lut); }
 
-PIVCO_PRIM_ALWAYS_INLINE int prim_enc_partition(uint16_t *codes_la, int n,
-                                                           int depth,
-                                                           uint8_t *bm,
-                                                           uint16_t *right_out)
-{ return build_bitmap_partition_scalar(codes_la, n, depth, bm, right_out); }
+PIVCO_PRIM_ALWAYS_INLINE int prim_enc_partition_full(uint16_t *codes_la, int n,
+                                                      int depth, uint8_t *bm,
+                                                      uint16_t *right_out)
+{ return part_core_scalar(codes_la, n, depth, bm, NULL, right_out, 1, 1, 1); }
+
+PIVCO_PRIM_ALWAYS_INLINE int prim_enc_partition_right(uint16_t *codes_la, int n,
+                                                      int depth, uint8_t *bm,
+                                                      uint16_t *right_out)
+{ return part_core_scalar(codes_la, n, depth, bm, NULL, right_out, 1, 1, 0); }
+
+PIVCO_PRIM_ALWAYS_INLINE int prim_enc_partition_left(uint16_t *codes_la, int n,
+                                                     int depth, uint8_t *bm)
+{ return part_core_scalar(codes_la, n, depth, bm, NULL, NULL, 1, 0, 1); }
+
+PIVCO_PRIM_ALWAYS_INLINE int prim_enc_partition_none(uint16_t *codes_la, int n,
+                                                     int depth, uint8_t *bm)
+{ return part_core_scalar(codes_la, n, depth, bm, NULL, NULL, 1, 0, 0); }
 
 PIVCO_PRIM_ALWAYS_INLINE void prim_enc_pack_dN(const uint16_t *codes_la,
                                              int n, int D, int depth,

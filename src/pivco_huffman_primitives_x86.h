@@ -630,6 +630,53 @@ static inline int build_bitmap_partition_x86(uint16_t *codes_la, int n,
     return n_right;
 }
 
+/* part_core_x86 — shared partition loop for the right/left/none variants (and
+ * the from-bitmap BUILD=0 form, kept for a future TD-decode share).  FULL stays
+ * hand-written in build_bitmap_partition_x86 (matching the NEON rationale:
+ * the generic 1,1,1 form can schedule worse on the hot common path).
+ * always_inline + compile-time-constant flags => each wrapper specializes. */
+__attribute__((always_inline)) static inline
+int part_core_x86(uint16_t *codes_la, int n, int depth,
+                  uint8_t *bm, const uint8_t *bm_in, uint16_t *right_out,
+                  int BUILD, int EMIT_RIGHT, int EMIT_LEFT)
+{
+    int n_left = 0, n_right = 0, j = 0;
+    __m128i shift_count = _mm_cvtsi32_si128(depth);
+    for (; j + 8 <= n; j += 8) {
+        __m128i code_vec = _mm_loadu_si128((const __m128i *)(codes_la + j));
+        uint8_t mask;
+        if (BUILD) { mask = enc_mask8_codes_la_x86(code_vec, shift_count); bm[j >> 3] = mask; }
+        else         mask = bm_in[j >> 3];
+        const uint8_t *tab = compress_tab[mask];
+        if (EMIT_RIGHT)
+            _mm_storeu_si128((__m128i *)(right_out + n_right),
+                             _mm_shuffle_epi8(code_vec, _mm_load_si128((const __m128i *)tab)));
+        if (EMIT_LEFT)
+            _mm_storeu_si128((__m128i *)(codes_la + n_left),
+                             _mm_shuffle_epi8(code_vec, _mm_load_si128((const __m128i *)(tab + 16))));
+        int nr = compress_popcnt[mask];
+        n_right += nr;
+        n_left  += 8 - nr;
+    }
+    if (j < n) {
+        int tail = n - j, shift_d = 15 - depth;
+        uint16_t tail_buf[8];
+        for (int k = 0; k < tail; k++) tail_buf[k] = codes_la[j + k];
+        uint8_t mask;
+        if (BUILD) {
+            mask = 0;
+            for (int k = 0; k < tail; k++)
+                mask |= (uint8_t)(((tail_buf[k] >> shift_d) & 1) << k);
+            bm[j >> 3] = mask;
+        } else mask = bm_in[j >> 3];
+        for (int k = 0; k < tail; k++) {
+            if (mask & (1 << k)) { if (EMIT_RIGHT) right_out[n_right] = tail_buf[k]; n_right++; }
+            else                 { if (EMIT_LEFT)  codes_la[n_left]   = tail_buf[k]; n_left++;  }
+        }
+    }
+    return n_right;
+}
+
 /* ---------- Encode primitives (init) ---------- */
 
 /* enc_init_x86 — gather per-symbol left-aligned codes into codes_la.
@@ -861,11 +908,27 @@ PIVCO_PRIM_ALWAYS_INLINE void prim_enc_init(uint16_t *codes_la, int n,
                                               const uint16_t *code_la_lut)
 { enc_init_x86(codes_la, n, symbols, code_la_lut); }
 
-PIVCO_PRIM_ALWAYS_INLINE int prim_enc_partition(uint16_t *codes_la,
-                                                           int n, int depth,
-                                                           uint8_t *bm,
-                                                           uint16_t *right_out)
+PIVCO_PRIM_ALWAYS_INLINE int prim_enc_partition_full(uint16_t *codes_la,
+                                                      int n, int depth,
+                                                      uint8_t *bm,
+                                                      uint16_t *right_out)
 { return build_bitmap_partition_x86(codes_la, n, depth, bm, right_out); }
+
+PIVCO_PRIM_ALWAYS_INLINE int prim_enc_partition_right(uint16_t *codes_la,
+                                                      int n, int depth,
+                                                      uint8_t *bm,
+                                                      uint16_t *right_out)
+{ return part_core_x86(codes_la, n, depth, bm, NULL, right_out, 1, 1, 0); }
+
+PIVCO_PRIM_ALWAYS_INLINE int prim_enc_partition_left(uint16_t *codes_la,
+                                                     int n, int depth,
+                                                     uint8_t *bm)
+{ return part_core_x86(codes_la, n, depth, bm, NULL, NULL, 1, 0, 1); }
+
+PIVCO_PRIM_ALWAYS_INLINE int prim_enc_partition_none(uint16_t *codes_la,
+                                                     int n, int depth,
+                                                     uint8_t *bm)
+{ return part_core_x86(codes_la, n, depth, bm, NULL, NULL, 1, 0, 0); }
 
 PIVCO_PRIM_ALWAYS_INLINE void prim_enc_pack_dN(const uint16_t *codes_la,
                                              int n, int D, int depth,

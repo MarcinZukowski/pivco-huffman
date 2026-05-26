@@ -168,10 +168,21 @@ static void neon_scatter(const ctx_t *c) {
 #if defined(HAVE_SIMD)   /* pack/merge/partition: production prim_*, all backends */
 static void simd_pack (const ctx_t *c){ prim_enc_pack_dN(c->la_work, c->n, c->D, c->depth, c->pack_out); }
 static void simd_merge(const ctx_t *c){ prim_merge_flat(c->out, c->n, c->bm, c->D, c->c2s); }
-static void simd_part (const ctx_t *c){ prim_enc_partition(c->la_work, c->n, c->depth, c->bm, c->tmp16); }
+static void simd_part (const ctx_t *c){ prim_enc_partition_full(c->la_work, c->n, c->depth, c->bm, c->tmp16); }
 #endif
 
-typedef enum { ST_UNPACK, ST_SCATTER, ST_PACK, ST_MERGE, ST_PART } stage_t;
+#if defined(HAVE_NEON_KERNELS)   /* partition family + unfused comparison (NEON only) */
+/* production fused variants */
+static void simd_bmbuild (const ctx_t *c){ prim_enc_partition_none(c->la_work, c->n, c->depth, c->bm); }
+static void simd_fusedhalf(const ctx_t *c){ prim_enc_partition_right(c->la_work, c->n, c->depth, c->bm, c->tmp16); }
+/* non-fused (from prebuilt bm) via the same shared core, BUILD=0 — for the
+   unfusing-cost comparison only; not used in production. */
+static void simd_partbm  (const ctx_t *c){ part_core_neon(c->la_work, c->n, c->depth, NULL, c->bm, c->tmp16, 0, 1, 1); }
+static void simd_parthalf(const ctx_t *c){ part_core_neon(c->la_work, c->n, c->depth, NULL, c->bm, c->tmp16, 0, 1, 0); }
+#endif
+
+typedef enum { ST_UNPACK, ST_SCATTER, ST_PACK, ST_MERGE, ST_PART,
+               ST_BMBUILD, ST_PARTBM, ST_PARTHALF, ST_FUSEDHALF } stage_t;
 typedef struct {
     const char *variant; stage_t stage; int D; int inplace; void (*run)(const ctx_t *);
 } prim_t;
@@ -181,7 +192,10 @@ static void reg(const char *v, stage_t s, int D, int ip, void (*fn)(const ctx_t 
 }
 static const char *stage_name(stage_t s){
     switch(s){case ST_UNPACK:return"unpack";case ST_SCATTER:return"scatter";
-              case ST_PACK:return"pack";case ST_MERGE:return"merge";default:return"partition";}
+              case ST_PACK:return"pack";case ST_MERGE:return"merge";
+              case ST_BMBUILD:return"bm_build";case ST_PARTBM:return"part_bm";
+              case ST_PARTHALF:return"part_half";case ST_FUSEDHALF:return"fused_half";
+              default:return"partition";}
 }
 
 int main(int argc, char **argv) {
@@ -237,6 +251,14 @@ int main(int argc, char **argv) {
 #if defined(HAVE_SIMD)
     reg(BK,      ST_PART,0,1,simd_part);
 #endif
+#if defined(HAVE_NEON_KERNELS)
+    /* Unfused decomposition: fused part == bm_build + part_bm (re-read cost).
+       part_half == HALF-node saving (one-sided scatter). */
+    reg(BK, ST_BMBUILD, 0,0, simd_bmbuild);
+    reg(BK, ST_PARTBM,  0,1, simd_partbm);
+    reg(BK, ST_PARTHALF,0,0, simd_parthalf);
+    reg(BK, ST_FUSEDHALF,0,0, simd_fusedhalf);
+#endif
 
     printf("bench_prim: n=%d elems, best-of-9 x %d reps, partition depth=%d\n",
            n, reps, PART_DEPTH);
@@ -264,7 +286,27 @@ int main(int argc, char **argv) {
             scalar_unpack(codes,bm,n,p->D); scalar_scatter(ref,codes,c2s,n);
             memset(out,0,n); p->run(&cx);
             if (memcmp(out,ref,n)) chk="FAIL";
-        } else { /* partition */
+        } else if (p->stage == ST_BMBUILD) {
+            scalar_partition(la_pristine,n,PART_DEPTH,ref_bm,ref16l,ref16r);
+            memcpy(la_work,la_pristine,(size_t)n*2); p->run(&cx);
+            if (memcmp(bm,ref_bm,(n+7)>>3)) chk="FAIL";
+        } else if (p->stage == ST_PARTBM) {
+            int nr_ref = scalar_partition(la_pristine,n,PART_DEPTH,ref_bm,ref16l,ref16r);
+            int nl_ref = n - nr_ref;
+            memcpy(bm,ref_bm,(size_t)((n+7)>>3));        /* prebuilt bitmap */
+            memcpy(la_work,la_pristine,(size_t)n*2); p->run(&cx);
+            if (memcmp(la_work,ref16l,(size_t)nl_ref*2)
+                || memcmp(tmp16,ref16r,(size_t)nr_ref*2)) chk="FAIL";
+        } else if (p->stage == ST_PARTHALF) {
+            int nr_ref = scalar_partition(la_pristine,n,PART_DEPTH,ref_bm,ref16l,ref16r);
+            memcpy(bm,ref_bm,(size_t)((n+7)>>3));        /* prebuilt bitmap */
+            memcpy(la_work,la_pristine,(size_t)n*2); p->run(&cx);
+            if (memcmp(tmp16,ref16r,(size_t)nr_ref*2)) chk="FAIL";
+        } else if (p->stage == ST_FUSEDHALF) {
+            int nr_ref = scalar_partition(la_pristine,n,PART_DEPTH,ref_bm,ref16l,ref16r);
+            memcpy(la_work,la_pristine,(size_t)n*2); p->run(&cx);
+            if (memcmp(bm,ref_bm,(n+7)>>3) || memcmp(tmp16,ref16r,(size_t)nr_ref*2)) chk="FAIL";
+        } else { /* partition (fused) */
             int nr_ref = scalar_partition(la_pristine,n,PART_DEPTH,ref_bm,ref16l,ref16r);
             memcpy(la_work,la_pristine,(size_t)n*2); p->run(&cx);
             /* prim writes left->la_work, right->tmp16, bm->bm; scalar variant
@@ -292,7 +334,7 @@ int main(int argc, char **argv) {
 
         if (p->D!=prevD || p->stage!=prevS) printf("\n");
         prevD=p->D; prevS=p->stage;
-        char dbuf[8]; if (p->stage==ST_PART) strcpy(dbuf,"-"); else snprintf(dbuf,8,"%d",p->D);
+        char dbuf[8]; if (p->D==0) strcpy(dbuf,"-"); else snprintf(dbuf,8,"%d",p->D);
         printf("%-10s %-4s %-7s %10.3g  %s\n", stage_name(p->stage), dbuf, p->variant, best, chk);
     }
     (void)sink;

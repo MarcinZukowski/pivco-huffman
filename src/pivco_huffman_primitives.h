@@ -59,33 +59,83 @@
  *    partition bit is at position `15 - depth`, which the primitives
  *    derive from the `depth` argument they receive.
  *
- *  int prim_enc_partition(uint16_t *codes_la, int n, int depth,
- *                                   uint8_t *bm, uint16_t *right_out);
+ *  ENCODE PARTITION FAMILY  (prim_enc_partition_{full,left,right,none})
  *
- *    Build the n-bit partition bitmap from codes_la[0..n) and partition
- *    codes_la in place.  This is the only arch-specific encode-side
- *    operation; everything around it (marker byte, optional FSE attempt
- *    that may rewrite the marker+bitmap region) is handled in codec.c.
+ *    Every non-flat internal node builds the same n-bit partition bitmap
+ *    from codes_la[0..n); the four members differ only in how many code
+ *    halves they additionally scatter.  Building the bitmap is mandatory
+ *    (it goes on the wire); the scatter outputs feed further recursion,
+ *    so a side is scattered ONLY when that child is itself a subtree.
+ *    The codec picks the member by node_type, mirroring the decode-side
+ *    prim_merge_* family 1:1:
  *
- *    Writes ceil(n/8) bytes into bm.  Bit j (for j in [0..n)) is bit
- *    (15 - depth) of codes_la[j] at the moment of call; ends up at bit
- *    (j & 7) of byte bm[j >> 3].
+ *      node_type        primitive                     scatters   outputs
+ *      INTERNAL_FULL    prim_enc_partition_full        both       left->codes_la,
+ *                                                                 right->right_out
+ *      HALF_RIGHT       prim_enc_partition_right       right only right->right_out
+ *      HALF_LEFT        prim_enc_partition_left        left only  left->left_out
+ *      BOTH_LEAVES      prim_enc_partition_none        neither    (bitmap only)
  *
- *    Partitions codes_la (values unchanged -- no shift across levels):
+ *    SUFFIX CONVENTION: the suffix names the NON-TRIVIAL child subtree —
+ *    the side whose codes are emitted for further recursion — identical
+ *    to the HALF_* node_type meaning (HALF_RIGHT's right child is the
+ *    subtree, left is a leaf, so prim_enc_partition_right emits the right
+ *    codes).  `_none` = zero CODE outputs (both children leaves); it still
+ *    writes the bitmap, so it is exactly the bitmap-build step.
  *
- *        - codes_la[0..n_left)  left  (bit was 0)
- *        - right_out[0..n_right)      right (bit was 1)
+ *    Common contract (all four):
+ *      Writes ceil(n/8) bytes into bm.  Bit j (j in [0..n)) is bit
+ *      (15 - depth) of codes_la[j]; lands at bit (j & 7) of bm[j >> 3].
+ *      codes_la values are unchanged across levels (depth-threaded, no
+ *      shift) — a scattered side carries the full uint16 codes onward.
  *
- *    Returns n_right (caller derives n_left = n - n_right).
+ *    Signatures:
+ *      int  prim_enc_partition_full (uint16_t *codes_la, int n, int depth,
+ *                                    uint8_t *bm, uint16_t *right_out);
+ *           // left stays in codes_la[0..n_left); right->right_out[0..n_right)
+ *      int  prim_enc_partition_right(uint16_t *codes_la, int n, int depth,
+ *                                    uint8_t *bm, uint16_t *right_out);
+ *           // emits right_out[0..n_right); left side not produced
+ *      int  prim_enc_partition_left (uint16_t *codes_la, int n, int depth,
+ *                                    uint8_t *bm);
+ *           // left compacted IN PLACE into codes_la[0..n_left); right not produced
+ *      int  prim_enc_partition_none (uint16_t *codes_la, int n,
+ *                                    int depth, uint8_t *bm);
+ *           // bitmap only (no scatter)
+ *    All four return n_right (caller derives n_left = n - n_right).  _left
+ *    keeps its codes in place in codes_la, matching _full, so the codec's
+ *    left child recurses on codes_la either way; _right emits to right_out
+ *    (codes_la untouched); _none emits no codes.
  *
- *    codec.c wraps this primitive at every non-flat internal node:
+ *    SHARED SCATTER CORE: the compress-table scatter used here is the
+ *    same operation the top-down decoder needs (read bitmap + scatter vs.
+ *    build bitmap + scatter).  Keep the scatter core factored so a future
+ *    prim_dec_partition_* family (TD decode, once ph-td is de-forked) can
+ *    reuse it rather than re-implementing — that reuse is the main reason
+ *    to land the half/none split as named members now.
+ *
+ *    codec.c wraps the chosen member at every non-flat internal node:
  *
  *        marker_slot = *out_ptr;  *marker_slot = 0;  *out_ptr += 1;
  *        bm = *out_ptr;  *out_ptr += bitmap_bytes(n);
- *        n_right = prim_enc_partition(codes_la, n, depth, bm, right_out);
+ *        n_right = prim_enc_partition_<m>(codes_la, n, depth, bm, ...);
  *        codec_maybe_fse_attempt(...);  // may rewrite marker + bm,
  *                                       // adjust *out_ptr on commit
  *        wire_commit_kr_header(kr_slot, n_right);
+ *
+ *    IMPLEMENTATION (2026-05-26): all four members live in every backend.
+ *    _right/_left/_none share one parameterized core (part_core_<backend>,
+ *    BUILD + EMIT_RIGHT/EMIT_LEFT compile-time flags) that also covers the
+ *    from-bitmap (BUILD=0) form for the future TD-decode share.  _full stays
+ *    HAND-WRITTEN (build_bitmap_partition_<backend>) because the generic
+ *    core's 1,1,1 specialization scheduled ~8% slower on the hot common path
+ *    (measured on M4).  bench_prim numbers that motivated the split (M4/NEON):
+ *    _none (bitmap only) ~-54% vs _full, fused build+half (_right/_left) ~-26%
+ *    vs _full — the *unfused* "build then partition-half" route is a wash
+ *    (the re-read eats the one-sided-scatter saving), so _right/_left are
+ *    fused build+scatter.  End-to-end encode gain lands on skewed dists
+ *    (AVX-512 calgary/proba80 +16-18%, dna +8%; smaller on NEON/SSE); balanced
+ *    inputs (english) are flat.
  *
  *  void prim_enc_pack_dN(const uint16_t *codes_la, int n, int D, int depth,
  *                     uint8_t *out_packed);
