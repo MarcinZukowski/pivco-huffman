@@ -651,8 +651,12 @@ static inline int pack_d8_sse_x86(uint8_t *out, const uint16_t *codes_la,
     for (; i + 16 <= n; i += 16) {
         __m128i v0 = _mm_loadu_si128((const __m128i *)(codes_la + i    ));
         __m128i v1 = _mm_loadu_si128((const __m128i *)(codes_la + i + 8));
-        v0 = _mm_srli_epi16(v0, right_shift);
-        v1 = _mm_srli_epi16(v1, right_shift);
+        /* Mask to 8 bits before the *saturating* packus: codes_la may carry
+         * the flat-root prefix in the bits above the D=8 code (depth>0), and
+         * packus would clamp those to 255 instead of dropping them (NEON's
+         * vmovn truncates).  The mask matches the truncate semantics. */
+        v0 = _mm_and_si128(_mm_srli_epi16(v0, right_shift), _mm_set1_epi16(0x00FF));
+        v1 = _mm_and_si128(_mm_srli_epi16(v1, right_shift), _mm_set1_epi16(0x00FF));
         __m128i bytes = _mm_packus_epi16(v0, v1);
         _mm_storeu_si128((__m128i *)(out + i), bytes);
     }
