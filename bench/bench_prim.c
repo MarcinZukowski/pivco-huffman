@@ -25,20 +25,45 @@
 #include <string.h>
 #include <time.h>
 
+/* Backend select (matches the codec's per-tier OBJECT libs).  Compile with
+ * -march=native: aarch64 -> NEON; x86 with AVX-512 VBMI2 -> AVX512; else SSE/
+ * AVX2.  pack/merge/partition are benched via the production prim_* (exist on
+ * every backend); the standalone unpack/scatter kernels are NEON-only. */
 #if defined(__aarch64__)
 #  define PIVCO_BACKEND_NEON 1
 #  define HAVE_SIMD 1
+#  define HAVE_NEON_KERNELS 1
+#  define BK "neon"
+#elif defined(__x86_64__)
+#  if defined(__SSE4_1__)
+#    define PIVCO_HAS_SSE4 1
+#  endif
+#  if defined(__AVX2__)
+#    define PIVCO_HAS_AVX2 1
+#  endif
+#  if defined(__AVX512VBMI2__)
+#    define PIVCO_HAS_AVX512 1
+#    define PIVCO_BACKEND_AVX512 1
+#    define BK "avx512"
+#    define HAVE_SIMD 1
+#  elif defined(__SSE4_1__)
+#    define PIVCO_BACKEND_X86 1
+#    define BK "sse/avx2"
+#    define HAVE_SIMD 1
+#  endif
 #endif
 #include "pivco_huffman.h"
 #if defined(HAVE_SIMD)
 #  include "pivco_huffman_primitives.h"   /* prim_pack_dN / prim_partition /
-                                             prim_merge_flat / flat_dN_unpack */
+                                             prim_merge_flat (+ NEON flat_dN) */
+#endif
+#ifndef BK
+#  define BK "scalar-only"
 #endif
 
-#define MAXD 8         /* D7/D8 are scalar-only: no NEON flat kernels exist
-                          (production caps NEON flat at D<=6; D7/8 live in the
-                          AVX-512 bitslice path) */
-#define NEON_MAXD 6
+#define MAXD 8         /* pack/merge/partition use prim_* (SIMD where the
+                          backend supports D, scalar fallback otherwise). The
+                          NEON standalone unpack/scatter kernels go to D7. */
 #define PART_DEPTH 3   /* representative split depth for the partition bench */
 
 static double now_ns(void) {
@@ -102,7 +127,7 @@ static void p_part_scalar   (const ctx_t *c){
     memcpy(c->la_work, lbuf, (size_t)(c->n - 0) * 2); /* keep left in place like the prim */
 }
 
-#if HAVE_SIMD
+#if defined(HAVE_NEON_KERNELS)   /* standalone unpack/scatter: NEON intrinsics */
 static void neon_unpack(const ctx_t *c) {
     int n = c->n; uint8_t *cd = c->codes; const uint8_t *bm = c->bm;
     switch (c->D) {
@@ -138,9 +163,12 @@ static void neon_scatter(const ctx_t *c) {
         }
     }
 }
-static void neon_pack (const ctx_t *c){ prim_pack_dN(c->pack_out, c->la_work, c->n, c->D, c->depth); }
-static void neon_merge(const ctx_t *c){ prim_merge_flat(c->out, c->n, c->bm, c->D, c->c2s); }
-static void neon_part (const ctx_t *c){ prim_partition(c->la_work, c->n, c->depth, c->bm, c->tmp16); }
+#endif /* HAVE_NEON_KERNELS */
+
+#if defined(HAVE_SIMD)   /* pack/merge/partition: production prim_*, all backends */
+static void simd_pack (const ctx_t *c){ prim_pack_dN(c->pack_out, c->la_work, c->n, c->D, c->depth); }
+static void simd_merge(const ctx_t *c){ prim_merge_flat(c->out, c->n, c->bm, c->D, c->c2s); }
+static void simd_part (const ctx_t *c){ prim_partition(c->la_work, c->n, c->depth, c->bm, c->tmp16); }
 #endif
 
 typedef enum { ST_UNPACK, ST_SCATTER, ST_PACK, ST_MERGE, ST_PART } stage_t;
@@ -168,8 +196,8 @@ int main(int argc, char **argv) {
     n &= ~15;
     if (!any) for (int d=2;d<=MAXD;d++) want[d]=1;
 
-#if HAVE_SIMD
-    codec_init_neon();   /* build compress_tab/expand_tab for partition */
+#if defined(HAVE_SIMD)
+    prim_codec_init();   /* build the backend's partition/merge tables */
 #endif
     uint8_t  *bm = malloc(n+16), *codes = malloc(n+16), *out = malloc(n+16);
     uint8_t  *ref = malloc(n+16), *pack_out = malloc(n+16);
@@ -185,31 +213,29 @@ int main(int argc, char **argv) {
         /* scalar + its SIMD peer adjacent per (D,stage).  NEON unpack now has
            a D7 kernel (D<=7); scatter/pack/merge flat kernels still cap at D6
            (D7 scatter needs a 128-entry table beyond TBL's reach). */
-        int simd_unpack = 0, simd_other = 0;
-#if HAVE_SIMD
-        simd_unpack = (d <= 7);   /* flat_d7_unpack added */
-        simd_other  = (d <= 7);   /* D7 scatter (2x vqtbl4) + prim_merge_flat/pack now handle D7 */
-#endif
+        /* unpack/scatter: standalone NEON kernels (D2..7).  pack/merge: the
+           production prim_* on every backend (SIMD where the backend handles
+           D, scalar fallback otherwise) -- so registered for all D. */
         reg("scalar",ST_UNPACK, d,0,p_unpack_scalar);
-#if HAVE_SIMD
-        if (simd_unpack) reg("neon",ST_UNPACK, d,0,neon_unpack);
+#if defined(HAVE_NEON_KERNELS)
+        if (d <= 7) reg(BK,ST_UNPACK, d,0,neon_unpack);
 #endif
         reg("scalar",ST_SCATTER,d,0,p_scatter_scalar);
-#if HAVE_SIMD
-        if (simd_other) reg("neon",ST_SCATTER,d,0,neon_scatter);
+#if defined(HAVE_NEON_KERNELS)
+        if (d <= 7) reg(BK,ST_SCATTER,d,0,neon_scatter);
 #endif
         reg("scalar",ST_PACK,   d,0,p_pack_scalar);
-#if HAVE_SIMD
-        if (simd_other) reg("neon",ST_PACK,   d,0,neon_pack);
+#if defined(HAVE_SIMD)
+        reg(BK,ST_PACK,   d,0,simd_pack);
 #endif
         reg("scalar",ST_MERGE,  d,0,p_merge_scalar);
-#if HAVE_SIMD
-        if (simd_other) reg("neon",ST_MERGE,  d,0,neon_merge);
+#if defined(HAVE_SIMD)
+        reg(BK,ST_MERGE,  d,0,simd_merge);
 #endif
     }
     reg("scalar",ST_PART,0,1,p_part_scalar);
-#if HAVE_SIMD
-    reg("neon",  ST_PART,0,1,neon_part);
+#if defined(HAVE_SIMD)
+    reg(BK,      ST_PART,0,1,simd_part);
 #endif
 
     printf("bench_prim: n=%d elems, best-of-9 x %d reps, partition depth=%d\n",
