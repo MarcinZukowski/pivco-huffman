@@ -22,7 +22,31 @@
 #endif
 
 #include <stdint.h>
+#include <string.h>
 #include <smmintrin.h>
+#if defined(PIVCO_HAS_AVX2)
+#include <immintrin.h>
+
+/* D=3 AVX2 unpack: 8 codes from 3 bytes.  Code i is at bit 3i of the packed
+ * LSB-first stream, so broadcasting the 4-byte window and doing a per-lane
+ * variable right-shift by {0,3,..,21} (vpsrlvd) drops each code into its
+ * lane's low bits -- no shuffle-into-windows needed.  Returns the 8 codes in
+ * the low 8 bytes of the result. */
+static inline __m128i flat_d3_unpack_avx2(const uint8_t *bm_ptr)
+{
+    uint32_t packed; memcpy(&packed, bm_ptr, 4);   /* 3 used + 1 slop byte */
+    __m256i v = _mm256_set1_epi32((int)packed);
+    const __m256i sh = _mm256_setr_epi32(0, 3, 6, 9, 12, 15, 18, 21);
+    v = _mm256_and_si256(_mm256_srlv_epi32(v, sh), _mm256_set1_epi32(0x7));
+    /* low byte of each 32-bit lane -> contiguous; lanes 0-3 then 4-7 */
+    const __m256i bshuf = _mm256_setr_epi8(
+        0,4,8,12, -1,-1,-1,-1, -1,-1,-1,-1, -1,-1,-1,-1,
+        0,4,8,12, -1,-1,-1,-1, -1,-1,-1,-1, -1,-1,-1,-1);
+    __m256i s = _mm256_shuffle_epi8(v, bshuf);
+    return _mm_unpacklo_epi32(_mm256_castsi256_si128(s),
+                              _mm256_extracti128_si256(s, 1));
+}
+#endif /* PIVCO_HAS_AVX2 */
 
 /* D=4 SSE4.1 unpack: 16 codes from 8 bytes of bm.
  * 8 bytes loaded, duplicated to 16 bytes via pshufb: [b0,b0,b1,b1,..].

@@ -440,6 +440,26 @@ static inline void flat_decode_direct_x86_inner(uint8_t *symbols, int n,
         }
         return;
     }
+#ifdef PIVCO_HAS_AVX2
+    if (D == 3) {
+        /* 8 codes/iter: vpsrlvd unpack + 8-entry pshufb scatter.  The unpack
+         * reads a 4-byte window (3 used + 1 slop), so stop the fast loop one
+         * group early and let the scalar tail finish without over-reading. */
+        __m128i c2s_vec = _mm_loadl_epi64((const __m128i *)c2s);  /* 8 entries */
+        int i = 0;
+        int fast_end = n >= 8 ? n - 8 : 0;
+        for (; i + 8 <= fast_end; i += 8) {
+            __m128i codes = flat_d3_unpack_avx2(bm + ((i * 3) >> 3));
+            __m128i syms  = _mm_shuffle_epi8(c2s_vec, codes);
+            _mm_storel_epi64((__m128i *)(symbols + i), syms);
+        }
+        for (; i < n; i++) {
+            uint32_t code = extract_D_bits_x86(bm, i * 3, 3);
+            symbols[i] = c2s[code];
+        }
+        return;
+    }
+#endif
 #define DST_DIRECT(k) symbols[k]
     X86_FLAT_UNPACK_SWITCH(DST_DIRECT)
 #undef DST_DIRECT
