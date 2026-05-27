@@ -181,6 +181,17 @@ caption: [M4 #PHA benchmark: compression ratio (higher = better) and decode
             the slowest.],
 )<tab-fair-m4>
 
+#figure(
+  [
+    #image("plots/dec-bw-m4.svg", width: 100%)
+
+    #image("plots/dec-bw-c8i.svg", width: 100%)
+  ],
+  caption: [Decode throughput per engine, M4 (top) and c8i (bottom) — the bandwidth
+    columns of @tab-fair-m4. Bars above the axis cap are clipped, with the true value
+    labelled (e.g. #PH on proba80).],
+)<fig-dec-bw>
+
 In @tab-fair-m4 we compare the #PH (*ph*) and #PHA (*pha*) performance with other solutions, including Huff0, FSE and
 Oodle's TANS library.
 We see that for non-skewed dataset, *ph* and *pha* achieve the same performance, but for skewed datasets

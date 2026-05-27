@@ -90,6 +90,17 @@ caption: [Encoding performance on M4 and c8i (MB/s).
 For #PH, we report both "end-to-end" and "prebuilt tree" results],
 )<tab-enc>]
 
+#figure(
+  [
+    #image("plots/enc-bars-m4.svg", width: 100%)
+
+    #image("plots/enc-bars-c8i.svg", width: 100%)
+  ],
+  caption: [Encoding throughput, M4 (top) and c8i (bottom) — the data of @tab-enc.
+    #PH end-to-end (`ph-op`) and prebuilt-tree (`ph-pb`) vs #h0 and Oodle-Huffman.
+    On c8i the `ph-pb` proba80 bar exceeds the axis cap and is clipped (true value labelled).],
+)<fig-enc-bars>
+
 @tab-enc shows the encoding performance on various datasets and hosts.
 End-to-end results show a fair comparison with other solutions.
 #PH's performance is hindered here by the Huffman-code creation time,
