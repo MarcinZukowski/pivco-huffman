@@ -53,7 +53,7 @@ extern void         bench_generate_symbols(int dist_idx, uint8_t *symbols,
 #define TOTAL      (1 << 20)            /* 1 MB working buffer */
 #define BLK        PIVCO_BLOCK_SIZE     /* ph decode sub-block (4-8 KB) */
 #define HUF_CHUNK  (128 * 1024)         /* huf0 hard cap; FSE controlled chunk */
-#define RUNS       5
+#define RUNS       10
 #define REPEATS    10
 #define SEED       0xBEEFCAFE12345678ULL
 #define MAXLOG     12                   /* FSE tableLog (tANS state-table log) */

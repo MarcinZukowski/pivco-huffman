@@ -3930,3 +3930,24 @@ certainty:
    - Keep `docs/PREFIX_RADIX.md` as historical record (already banner'd as
      superseded).
    - Update README.md / CLAUDE.md to reflect deletion.
+
+---
+
+## OPEN / PARKED: Graviton4 (Neoverse V2) flat-unpack weakness (2026-05-26)
+
+On c8g (Graviton4 / Neoverse V2) the flat-decode **unpack** is 3–5.5× slower
+than Apple M4 for odd/high D (ns/elem unpack: D3 0.143 vs 0.042, D5 0.185 vs
+0.039, D6 0.212 vs 0.040, D7 0.236 vs 0.043).  The **scatter** half is fine
+(c8g 0.024–0.06 vs M4 0.015–0.03), so the fused `merge` inherits the unpack
+penalty (c8g merge D5–7 = 0.19–0.33 vs M4 0.04–0.07).
+
+Cause: the unpack repositions cross-byte D-bit fields with NEON variable
+shifts + `vqtbl`; M4 has a very wide NEON backend (high TBL/shift throughput),
+V2 is narrower on exactly those ports.  Even D's (2,4 — byte/nibble aligned)
+are cheaper and lag less.
+
+This is a uarch port-throughput limit, not an algorithmic gap.  A V2-tuned
+unpack (trade `vqtbl`/variable-shift for more immediate `ushr`/`sli`, fewer
+table lookups) might shave ~20–40% on c8g odd-D but is unlikely to reach M4
+parity, and only c8g benefits.  Lower ROI than other open items; parked.
+Numbers: results/bench_prim-allhosts-20260526-abf79af.md.
