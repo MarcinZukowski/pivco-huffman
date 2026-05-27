@@ -14,7 +14,7 @@ We found a great solution for this in the _wavelet tree_ structure @grossi2003wt
     stroke: 0pt,
     align: center,
     [#figure(
-      image("figures/pivot-bitmaps.svg"),
+      mf("pivot-bitmaps"),
       caption: [
         Example of pivoting a Huffman-encoded string.
         All bits sharing the same prefix (noted in quotes)
@@ -26,7 +26,7 @@ We found a great solution for this in the _wavelet tree_ structure @grossi2003wt
     )<fig-pivot>
     ],
     [#figure(
-      image("figures/pivot-tree.svg"),
+      mf("pivot-tree"),
       caption: [
       Example of a Huffman tree with "pivoted" data traversing
       it, reusing the previous example.

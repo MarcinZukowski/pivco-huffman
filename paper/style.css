@@ -300,7 +300,7 @@ table {
 th, td {
     padding: 0.45em 0.85em;
     border: 1px solid #d8d2bf;
-    text-align: left;
+    text-align: right;
     vertical-align: top;
 }
 
@@ -317,10 +317,22 @@ th {
     border-bottom-width: 2px;
     font-weight: 700;
     color: #1a1a1a;
+    text-align: center
 }
 
 tr:hover td {
     background: rgba(0, 0, 0, 0.02);
+}
+
+.tab-enc td:nth-child(1) {
+    text-align: left;
+}
+
+.enc-symbols td:nth-child(1) {
+    text-align: center;
+}
+.enc-symbols td:nth-child(2) {
+    text-align: left;
 }
 
 /* ---------- Block quotes ---------- */

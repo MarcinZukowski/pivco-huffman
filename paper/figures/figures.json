@@ -101,6 +101,19 @@
       }
     },
     {
+      "name": "enc-ops",
+      "tool": "tree_viz",
+      "params": {
+        "text":         "coconut-papaya",
+        "ph-opt":       0,
+        "show-flat":    1,
+        "primitives":   1,
+        "title":        "coconut-papaya — encode",
+        "labels":       "",
+        "mode":         "encode"
+      }
+    },
+    {
       "name": "pivot-bitmaps",
       "tool": "tree_viz",
       "params": {
