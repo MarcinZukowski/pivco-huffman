@@ -282,6 +282,7 @@ int pivco_huffman_build_table(const uint64_t freq[PIVCO_MAX_SYMBOLS],
                               pivco_huffman_table_t *table)
 {
     if (!freq || !table) return PIVCO_ERR_NULL;
+    PROF_RESET();   /* the freq (encode) path was previously un-instrumented */
 
     memset(table, 0, sizeof(*table));
 
@@ -341,6 +342,7 @@ int pivco_huffman_build_table(const uint64_t freq[PIVCO_MAX_SYMBOLS],
     /* Limit code lengths to PIVCO_MAX_CODE_LEN */
     limit_code_lengths(lengths, PIVCO_MAX_SYMBOLS, PIVCO_MAX_CODE_LEN);
 
+    PROF_MARK("huff_heap");   /* freq->lengths: heap tree build + extract + limit */
     return build_table_finish(lengths, table);
 }
 
