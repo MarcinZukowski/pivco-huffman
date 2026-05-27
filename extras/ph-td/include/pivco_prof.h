@@ -62,6 +62,16 @@ typedef enum {
     PROF_ENC_FLAT_SIMD_ELEMS,
     PROF_ENC_FLAT_TAIL_ELEMS,
 
+    /* BU primitive slots — referenced by the shared (main-repo)
+     * pivco_huffman_primitives_neon.h that TD now includes.  TD never calls
+     * the BU primitives, but the slot identifiers must exist to compile. */
+    PROF_BU_POPCOUNT_K,
+    PROF_BU_TREE_MERGE,
+    PROF_BU_TREE_MERGE_BCAST_LEFT,
+    PROF_BU_TREE_MERGE_BCAST_RIGHT,
+    PROF_BU_MERGE_BOTH_CONST,
+    PROF_BU_FLAT_DECODE,
+
     PROF_NR_SLOTS,
     PROF_COUNT = PROF_NR_SLOTS
 } pivco_prof_slot_t;

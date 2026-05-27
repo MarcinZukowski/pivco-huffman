@@ -547,10 +547,11 @@ static inline void flat_decode_direct_neon(uint8_t *symbols, int n,
 }
 
 /* Encode-side SIMD primitives -- enc_mask8_codes_la_neon, the SIMD
- * bitmap+partition kernel (build_bitmap_partition_neon), the per-D
+ * bitmap+partition kernel (prim_enc_partition_full), the per-D
  * flat-pack helpers (pack_d2_neon..pack_d8_neon + pack_dN_neon
- * dispatcher) -- all live in pivco_huffman_primitives_neon.h so the
- * codec.c-compiled-as-NEON object library shares them. */
+ * dispatcher) -- all live in pivco_huffman_primitives_neon.h (now the
+ * SHARED main-repo header, not a forked copy) so TD uses the current
+ * primitives. */
 #include "pivco_huffman_primitives_neon.h"
 static inline void pack_D_bits_dense(uint8_t *out, int n, int D, int depth,
                                       const uint16_t *codes_la)
@@ -602,7 +603,7 @@ static void encode_node_neon(const pivco_huffman_table_t *table,
     *out_ptr += nbytes;
 
     PROF_TIC();
-    int n_right = build_bitmap_partition_neon(codes_la, n, depth, bm, tmp);
+    int n_right = prim_enc_partition_full(codes_la, n, depth, bm, tmp);
     int n_left  = n - n_right;
     PROF_TOC(PROF_ENC_NODE_FULL, n);
 

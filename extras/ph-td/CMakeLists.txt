@@ -1,14 +1,16 @@
-# Standalone build for the historical top-down (TD) NEON decoder.
+# Standalone build for the top-down (TD) decoder slice.
 #
-# Extracted at SHA 31cbf75 (2026-05-14, just before TD entry points
-# were retired from the public API).  See README.md for context.
+# Originally extracted at SHA 31cbf75; as of the 2026-05-26 consolidation the
+# slice no longer forks the primitive/table/flat headers — it pulls them from
+# the parent repo's src/ + include/ (so TD tracks the current primitives).
+# Only the TD-unique sources (TD decode walk, naive build, dispatcher) live
+# here.  This build therefore DEPENDS on the parent tree (../../src, ../../
+# include, ../../ext/fse).
 #
 # Build:
 #   cmake -B build -DCMAKE_BUILD_TYPE=Release
 #   cmake --build build
 #   ./build/ph_td_test
-#
-# Self-contained — does not depend on the parent project.
 
 cmake_minimum_required(VERSION 3.16)
 project(ph_td C)
@@ -74,7 +76,7 @@ add_compile_definitions(PIVCO_PROF=1)
 if(PH_TD_HAVE_NEON)
     list(APPEND PH_TD_SOURCES
         src/pivco_huffman_neon.c
-        src/pivco_huffman_neon_tables.c)
+        ${CMAKE_CURRENT_SOURCE_DIR}/../../src/pivco_huffman_neon_tables.c)  # shared
 endif()
 if(PH_TD_HAVE_AVX512)
     list(APPEND PH_TD_SOURCES
@@ -82,7 +84,12 @@ if(PH_TD_HAVE_AVX512)
 endif()
 
 add_library(ph_td STATIC ${PH_TD_SOURCES})
-target_include_directories(ph_td PUBLIC include PRIVATE src)
+# Fork-unique headers (TD API, prof) from include/+src/ first; the shared
+# primitive/table/flat headers fall through to the parent repo.
+target_include_directories(ph_td PUBLIC include
+    PRIVATE src
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../src
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../include)
 
 # Per-source flags for the AVX-512 TU (everyone else stays plain -O3).
 if(PH_TD_HAVE_AVX512)

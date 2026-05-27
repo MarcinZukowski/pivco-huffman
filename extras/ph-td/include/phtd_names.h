@@ -41,6 +41,10 @@
 #define compress_popcnt                           phtd_compress_popcnt
 #define compress_table_ready                      phtd_compress_table_ready
 #define expand_tab                                phtd_expand_tab
+#define expand_popcnt                             phtd_expand_popcnt
+#define expand_tab_pre                            phtd_expand_tab_pre
+#define expand_table_ready                        phtd_expand_table_ready
+#define init_expand_table                         phtd_init_expand_table
 #define pivco_prof_dump                           phtd_prof_dump
 #define pivco_prof_name                           phtd_prof_name
 #define pivco_prof_reset                          phtd_prof_reset

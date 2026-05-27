@@ -326,7 +326,7 @@ if(BUILD_BENCH)
     if(CMAKE_SYSTEM_PROCESSOR MATCHES "arm64|aarch64")
         list(APPEND PHTD_SOURCES
             ${PHTD_DIR}/src/pivco_huffman_neon.c
-            ${PHTD_DIR}/src/pivco_huffman_neon_tables.c)
+            ${CMAKE_SOURCE_DIR}/src/pivco_huffman_neon_tables.c)   # shared (was forked copy)
         set(PHTD_DEFS PIVCO_HAS_NEON=1)
         set(PHTD_SIMD_DEF PIVCO_HAS_NEON=1)
     elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64|AMD64")
@@ -348,7 +348,11 @@ if(BUILD_BENCH)
         set(PHTD_DEFS PIVCO_BLOCK_SIZE=8192)
     endif()
     add_library(ph_td STATIC ${PHTD_SOURCES})
-    target_include_directories(ph_td PUBLIC ${PHTD_DIR}/include PRIVATE ${PHTD_DIR}/src)
+    # Fork-unique headers (TD API struct, prof) resolve from ph-td first; the
+    # shared primitive/table/flat headers (deleted from the fork) fall through
+    # to the main src/ + include/ so TD uses the CURRENT primitives.
+    target_include_directories(ph_td PUBLIC ${PHTD_DIR}/include
+        PRIVATE ${PHTD_DIR}/src ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/include)
     target_compile_definitions(ph_td PRIVATE ${PHTD_DEFS})
     # ph-td was designed without the per-node FSE path (raw bitmaps); the
     # main project's global -DPIVCO_HAS_FSE must be undone for this lib so
