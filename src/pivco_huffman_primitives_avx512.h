@@ -56,6 +56,7 @@
 #include "pivco_huffman_common.h"
 #include "pivco_huffman_x86_tables.h"      /* expand_tab for BU tail */
 #include "pivco_huffman_avx512_flat.h"     /* flat_d{2,3,4,5,6}_unpack_avx512* */
+#include "pivco_huffman_pack_bmi2.h"       /* pack_dN_bmi2 (pext pack) */
 #include "pivco_prof.h"
 
 #include <immintrin.h>
@@ -874,6 +875,13 @@ static inline void pack_dN_avx512(uint8_t *out, const uint16_t *codes_la,
     int right_shift = 16 - depth - D;
 
     int i = 0;
+#if defined(__BMI2__)
+    /* BMI2 pext pack beats the vector spread (no cross-lane reduce) for the
+     * sub-byte D's; D=8 stays on the byte-narrow path. */
+    if (D >= 2 && D <= 7) {
+        i = pack_dN_bmi2(out, codes_la, n, D, right_shift);
+    } else
+#endif
     switch (D) {
     case 2: i = pack_d2_avx512(out, codes_la, n, right_shift); break;
     case 3: i = pack_d3_avx512(out, codes_la, n, right_shift); break;

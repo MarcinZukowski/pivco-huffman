@@ -849,6 +849,10 @@ static inline void pack_dN_x86(uint8_t *out, const uint16_t *codes_la,
     if (total_bytes > 0) out[total_bytes - 1] = 0;
     int right_shift = 16 - depth - D;
 
+    /* NB: BMI2 pext pack is NOT used here.  pext is microcoded-slow on AMD
+     * pre-Zen4 (measured 2x worse than the AVX2 spread on c6a/Zen3), and the
+     * x86 backend runs on those parts.  pext pack is gated to the AVX-512
+     * backend instead (Intel Xeon + AMD Zen4, both fast-pext). */
     int i = 0;
     switch (D) {
     case 2: i = pack_d2_sse_x86(out, codes_la, n, right_shift); break;
