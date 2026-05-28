@@ -70,3 +70,6 @@ dist: $(PDF) $(HTML)
 	  open('out/figures/fig-web.html','w').write( \
 	    html.replace('const CFG = null;', \
 	                 'const CFG = ' + json.dumps(cfg) + ';'))"
+
+zip: out dist
+	cd out && zip -r ../ph.zip .
