@@ -67,8 +67,11 @@
 #let URLBASE="githubpages/blalba/paper"
 
 // HTML element with a provided class name
-#let he(cname, body) = {
+#let he(cname, style:none, body) = {
   if _html {
+    if (style != none) {
+      html.elem("style", style);
+    }
     html.elem("div", attrs: (class: cname), body)
   } else {
     body

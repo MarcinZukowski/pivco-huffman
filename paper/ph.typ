@@ -43,8 +43,6 @@ This document is mostly a verbatim copy of the arXiv paper.
 
 However, in boxes like this you'll see some additional author's
 thoughts that might not be fitting a scientific paper.
-
-Oh well, maybe one day reviewers will have a sense of humor...
 ]
 
 #include "intro.typ"
@@ -61,14 +59,6 @@ Oh well, maybe one day reviewers will have a sense of humor...
 == Contributions
 In this paper
 
-== Open questions
-While interesting and possibly promising, PivCo-Huffman still has some problems and exposes multiple improvement opportunities.
-
-- getting a performant implementation in languages that do not expose SIMD is very hard
-- due to its nature, it doesn't work well for very small datasets
-- Huffman encoding is rarely applied by itself, so integrating it with an actual compression library (like @lz4) is an interesting option
-- further improvements of compute primitives are surely possible
-- porting #PH to GPUs and possibly FPGAs is a natural next step
 
 == AI disclosure
 

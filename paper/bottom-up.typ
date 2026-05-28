@@ -2,33 +2,38 @@
 
 = Going Bottom-Up<bottom-up>
 
-The "natural" solution presented in @sideways, while achieving decent performance,
-is heavily penalized by the high number of scattered writes.
+In @sideways we process the tree *top-down*,
+ which is a very natural way, directly translating to the "textbook" Huffman decoding.
+Still, while achieving decent performance,
+ it is heavily penalized by the high number of scattered writes.
 
-When exploring solutions to this problem, we explored
+When exploring solutions to this problem, we looked at
 an idea of first traversing the tree to identify index-symbol positions,
 then merging index positions back into a contiguous sequence,
 and then using that for a scatter-free writing of symbols.
-That idea was dropped due to a high cost of merging added to already significant
+During the merging phase, we would need to carry per-position _symbols_
+together with the _indices_ all the way back to the root.
+That particular idea was quickly dropped due to a high cost of merging added to already significant
 cost of tree traversal.
 
-However, it led to another realization. So far we were processing the tree *top-down*,
-which is a very natural way, directly translating to the "textbook" Huffman decoding.
-However, we can also process it *bottom-up*.
-This idea led to a new variant of #PH, which is now the actual proposed
-solution.
+However, it led to another realization.
+We can use the idea of *bottom-up* merging without the first partitioning stage at all.
+This idea led to a new variant of #PH, which is the actual proposed solution.
+The process is as follows:
 
-When going top-down, our key operation was *bitmap-based partitioning*. In many problems,
-e.g. in sorting, _partitioning_ can be replaced with _merging_.
-This is the idea we apply here. The process is as follows.
+When going top-down, our key operation was
+This is the idea we apply here.
 
 Imagine every tree node produces the values for all output positions with symbols
-that traverse a given node - these were the indices in top-down traversal.
+that traverse a given node - these were the indices in the top-down traversal.
 For leaves, all these values are constants.
 For non-leaf nodes, we can construct the output using children symbols, and the same
-bitmap we used for partitioning using *bitmap-based merging*.
-This process proceeds all the way to the top, resulting in the _dense_ sequence
-of codes, which is the entire expected output.
+bitmaps we used for *bitmap-based partitioning*, but now using *bitmap-based merging*.
+This process proceeds all the way to the top, resulting in the final sequence
+of codes equal to the complete expected output.
+
+#footnote[Note that a similar symmetry of _partitioning_ vs _merging_ can be found
+in other places, e.g. sorting or joins in databases].
 
 This approach has some very interesting properties:
 - leaf nodes don't require any processing, as they just produce a constant value.

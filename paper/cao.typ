@@ -54,3 +54,17 @@ other strategies are possible.
 For example, specialized bitmap compressions methods
 could provide an interesting design point
 in a performance/compression ratio space.
+
+== Impact on LZ-codecs
+
+Huffman and other entropy-codecs are rarely applied standalone,
+they are most commonly used as a step after LZ-family or similar compressors.
+They often change the data distribution dramatically, resulting
+in #PH's benefits possibly difeferent.
+
+== Primivites optimization
+
+While primitives we used provide decent performance,
+they certainly are not all optimal.
+Optimizing them further, to either existing or different
+architectures can make #PH's performance even better.
