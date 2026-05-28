@@ -6,7 +6,7 @@
 // partition_8_sse_right/left, scatter_write_sse).
 //
 // All variants use heap buffers + capture-by-value of pointers
-// (see extras/LEMIRE-NOTES.md for why).
+// (see docs/LEMIRE-NOTES.md for why).
 //
 // Run with sudo or sysctl kernel.perf_event_paranoid=0.
 

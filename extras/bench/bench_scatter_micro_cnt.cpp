@@ -8,7 +8,7 @@
 // limited, not store-port limited at 0.27 stores/cyc).
 //
 // All variants use heap (std::vector) buffers + capture-by-value of
-// pointers, dodging both gotchas in extras/LEMIRE-NOTES.md.
+// pointers, dodging both gotchas in docs/LEMIRE-NOTES.md.
 //
 // Reports per CALL (which processes N indices, i.e. N stores).
 //
@@ -215,7 +215,7 @@ int main(int argc, char **argv) {
     params.min_repeat = 50;
     params.min_time_ns = 200000000;
 
-    // Capture pointers by value (see extras/LEMIRE-NOTES.md gotcha #1).
+    // Capture pointers by value (see docs/LEMIRE-NOTES.md gotcha #1).
     uint8_t        *symp = symbols.data();
     const uint16_t *idxp = indices.data();
     const uint8_t  *bmp  = bm.data();

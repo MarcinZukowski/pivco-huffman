@@ -5,7 +5,7 @@
 // partition_32_right/left, scatter_write_avx512).
 //
 // All variants use heap buffers + capture-by-value of pointers
-// (see extras/LEMIRE-NOTES.md for why).
+// (see docs/LEMIRE-NOTES.md for why).
 //
 // Run with sudo or sysctl kernel.perf_event_paranoid=0.
 
