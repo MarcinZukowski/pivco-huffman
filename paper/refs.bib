@@ -586,6 +586,61 @@
               paths depend on; gates VBMI2-host detection.}
 }
 
+@article{stephens2017sve,
+  author    = {Stephens, Nigel and Biles, Stuart and Boettcher, Matthias
+              and Eapen, Jacob and Eyole, Mbou and Gabrielli, Giacomo
+              and Horsnell, Matt and Magklis, Grigorios and Martinez,
+              Alejandro and Premillieu, Nathanael and Reid, Alastair
+              and Rico, Alejandro and Walker, Paul},
+  title     = {The {ARM} {Scalable} {Vector} {Extension}},
+  journal   = {IEEE Micro},
+  volume    = {37},
+  number    = {2},
+  pages     = {26--39},
+  year      = {2017},
+  url       = {https://ieeexplore.ieee.org/document/7924233},
+  note      = {Original SVE paper.  Introduces the vector-length-
+              agnostic model: the same binary runs on any
+              implementation with VL $\in \{128, 256, ..., 2048\}$
+              bits.  This is the structural reason a future
+              Graviton with wider SVE2 datapaths could lift ph's
+              NEON path the way AVX-512 VBMI2 did on x86 — no ISA
+              change needed, just a wider register file.}
+}
+
+@misc{arm-sve2,
+  author    = {{Arm Limited}},
+  title     = {{Arm} {A64} instruction set architecture: {SVE2}},
+  url       = {https://developer.arm.com/documentation/ddi0602/latest/SVE-Instructions},
+  year      = {2025},
+  note      = {SVE2 instruction set reference (2019 extension of
+              SVE with integer/DSP/media ops, retaining the
+              vector-length-agnostic model).  Currently shipping
+              implementations are all 128-bit (Neoverse V2 /
+              Graviton 4, NVIDIA Grace, Apple M4 with SME-256 but
+              SVE2-128 only).  Fujitsu A64FX shipped 512-bit SVE
+              (pre-SVE2) — proof the architecture supports wider
+              VL physically.  Section "future work" cites this as
+              the most plausible next ph step-function on ARM.}
+}
+
+@misc{arm-neoverse-v1,
+  author    = {{Arm Limited}},
+  title     = {{Neoverse} {V1} platform},
+  url       = {https://www.arm.com/products/silicon-ip-cpu/neoverse/neoverse-v1},
+  year      = {2021},
+  note      = {ARM Neoverse V1 (codename "Zeus") platform brief.
+              First widely-deployed ARM core with VL $>$ 128:
+              SVE-256 datapaths (two 256-bit FP/SIMD pipes).
+              Powers AWS Graviton 3 (c7g, test-c7g in our sweep) and
+              the Isambard 2 supercomputer.  Cited as the existence
+              proof that wider SVE on ARM has already shipped at
+              hyperscale — extrapolating to an SVE2-256 successor
+              is a straight line, not a leap.  V1 only supports
+              SVE (not SVE2), so the integer/DSP ops ph would
+              actually use are not yet exposed at 256-bit.}
+}
+
 % ============================================================
 %  7. Production codecs and reference benchmarks
 % ============================================================

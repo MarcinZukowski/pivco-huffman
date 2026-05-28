@@ -170,6 +170,15 @@ def main():
     out = os.path.join(results_dir, f"ph_vs_huf0_by_year_{metric}.svg")
     fig.savefig(out)
     print(f"wrote {out}")
+    # also drop a stable-named copy in paper/plots/ for typst to include.
+    # typst rejects ".." in include paths, so we can't reach results/ from
+    # paper/*.typ — keep the canonical archive under results/<date>/ and
+    # mirror the latest here.
+    paper_plots = os.path.join(HERE, "..", "..", "paper", "plots")
+    os.makedirs(paper_plots, exist_ok=True)
+    mirror = os.path.join(paper_plots, f"sweep_uarch_{metric}.svg")
+    fig.savefig(mirror)
+    print(f"wrote {mirror}")
 
 if __name__ == "__main__":
     main()
