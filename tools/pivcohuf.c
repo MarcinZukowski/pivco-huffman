@@ -164,22 +164,43 @@ static void print_stats(const char *op, size_t in_bytes, size_t out_bytes,
             (int)(bw_in + 0.5), (int)(bw_out + 0.5));
 }
 
-static void usage(void) {
-    fprintf(stderr,
+/* Detailed per-phase breakdown (ms).  io/malloc are measured by the CLI;
+ * freq/build/codec come from the library's pivcohuf_timing_t.  malloc folds
+ * the CLI's output-buffer alloc with the codec's internal scratch.  freq is
+ * the symbol histogram (compress only) -- separate from build (tree/codes),
+ * since a caller with known frequencies skips it. */
+static void print_phases(const char *codec_label, double io_read_ms,
+                         double io_write_ms, double cli_malloc_ms,
+                         const pivcohuf_timing_t *tm) {
+    double malloc_ms = cli_malloc_ms + tm->malloc_ns / 1.0e6;
+    fprintf(stderr, "           phases: io(rd=%.2f wr=%.2f) malloc=%.2f",
+            io_read_ms, io_write_ms, malloc_ms);
+    if (tm->freq_ns > 0.0)
+        fprintf(stderr, " freq=%.2f", tm->freq_ns / 1.0e6);
+    fprintf(stderr, " build=%.2f %s=%.2f  (ms)\n",
+            tm->build_ns / 1.0e6, codec_label, tm->codec_ns / 1.0e6);
+}
+
+static void usage(FILE *out) {
+    fprintf(out,
         "Usage:\n"
         "  pivcohuf c IN [OUT]   compress (default OUT = IN" EXT ")\n"
         "  pivcohuf d IN [OUT]   decompress (default OUT = IN with " EXT " stripped)\n"
         "  pivcohuf c -          stdin/stdout\n"
         "Flags:\n"
+        "  -a, --ans             compress with PHA (ANS-coded bitmaps; better\n"
+        "                        ratio on skewed data).  decompress auto-detects.\n"
         "  -f                    overwrite OUT if it exists\n"
         "  -r N                  re-run codec N times into the same buffer\n"
-        "                        (no extra I/O); reports per-iter timing\n");
+        "                        (no extra I/O); reports per-iter timing\n"
+        "  -h, --help            show this help and exit\n");
 }
 
 int main(int argc, char **argv)
 {
     int force = 0;
     int repeat = 1;
+    int use_ans = 0;   /* -a / --ans : compress with #PHA (ANS-coded bitmaps) */
     /* First pass: pluck flags anywhere on the command line. */
     const char *positionals[4] = {0};
     int npos = 0;
@@ -187,16 +208,32 @@ int main(int argc, char **argv)
         if (argv[i][0] == '-' && argv[i][1] != '\0' && argv[i][2] == '\0'
             && argv[i][1] == 'f') {
             force = 1;
+        } else if ((argv[i][0] == '-' && argv[i][1] == 'a' && argv[i][2] == '\0')
+                   || strcmp(argv[i], "--ans") == 0) {
+            use_ans = 1;
         } else if (argv[i][0] == '-' && argv[i][1] == 'r' && argv[i][2] == '\0'
                    && i + 1 < argc) {
             repeat = atoi(argv[i + 1]);
             if (repeat < 1) repeat = 1;
             i++;   /* skip the N */
+        } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
+            usage(stdout);
+            return 0;
+        } else if (argv[i][0] == '-' && argv[i][1] != '\0') {
+            /* Any other dash-prefixed token is an unknown option.  ("-" alone
+             * is the stdin/stdout sentinel and falls through to positionals.) */
+            fprintf(stderr, "pivcohuf: unknown option '%s'\n", argv[i]);
+            usage(stderr);
+            return 1;
         } else if (npos < (int)(sizeof positionals / sizeof positionals[0])) {
             positionals[npos++] = argv[i];
+        } else {
+            fprintf(stderr, "pivcohuf: too many arguments ('%s')\n", argv[i]);
+            usage(stderr);
+            return 1;
         }
     }
-    if (npos < 2) { usage(); return 1; }
+    if (npos < 2) { usage(stderr); return 1; }
     const char *cmd = positionals[0];
     const char *in_path = positionals[1];
     char default_out[4096];
@@ -220,7 +257,7 @@ int main(int argc, char **argv)
         }
         out_path = default_out;
     } else {
-        usage(); return 1;
+        usage(stderr); return 1;
     }
 
     /* Total wall covers the whole user-visible operation: read input,
@@ -230,28 +267,36 @@ int main(int argc, char **argv)
 
     uint8_t *in_buf = NULL;
     size_t in_len = 0;
+    double _rd0 = now_sec();
     if (read_all(in_path, &in_buf, &in_len) != 0) return 2;
+    double io_read_ms = (now_sec() - _rd0) * 1000.0;
 
     if (cmd[0] == 'c') {
         size_t bound = pivcohuf_compress_bound(in_len);
+        double _m0 = now_sec();
         uint8_t *out_buf = (uint8_t *)xmalloc(bound);
+        double cli_malloc_ms = (now_sec() - _m0) * 1000.0;
         size_t out_len = bound;
+        pivcohuf_timing_t tm;
         double t0 = now_sec();
-        int rc = pivcohuf_compress(in_buf, in_len, out_buf, &out_len);
+        int rc = pivcohuf_compress_timed(in_buf, in_len, out_buf, &out_len, use_ans, &tm);
         double t1 = now_sec();
         if (rc != PIVCOHUF_OK) {
             fprintf(stderr, "pivcohuf: compress failed: %s\n", err_msg(rc));
             return 2;
         }
+        double _w0 = now_sec();
         if (write_all(out_path, out_buf, out_len, force) != 0) return 2;
+        double io_write_ms = (now_sec() - _w0) * 1000.0;
         double t_total_end = now_sec();
-        print_stats("compress", in_len, out_len, t1 - t0, t_total_end - t_total_start);
+        print_stats(use_ans ? "compress (pha)" : "compress", in_len, out_len, t1 - t0, t_total_end - t_total_start);
+        print_phases("encode", io_read_ms, io_write_ms, cli_malloc_ms, &tm);
         if (repeat > 1) {
             fprintf(stderr, "  -- replaying compress %d more times into same buffer --\n", repeat - 1);
             for (int r = 1; r < repeat; r++) {
                 size_t rep_out_len = bound;
                 double rt0 = now_sec();
-                pivcohuf_compress(in_buf, in_len, out_buf, &rep_out_len);
+                pivcohuf_compress_ex(in_buf, in_len, out_buf, &rep_out_len, use_ans);
                 double rt1 = now_sec();
                 int ms = (int)((rt1 - rt0) * 1000.0 + 0.5);
                 fprintf(stderr, "  iter %2d: comp:%dms  comp_bw in=%d MB/s out=%d MB/s\n",
@@ -273,22 +318,28 @@ int main(int argc, char **argv)
             fprintf(stderr, "pivcohuf: cannot peek header: %s\n", err_msg(rc));
             return 2;
         }
+        double _m0 = now_sec();
         uint8_t *out_buf = (uint8_t *)xmalloc(uncomp_size > 0 ? uncomp_size : 1);
+        double cli_malloc_ms = (now_sec() - _m0) * 1000.0;
         size_t out_len = uncomp_size;
         /* madvise WILLNEED on the output buffer: hints the kernel to
          * populate pages so the codec doesn't take minor page faults
          * inside its timed loop.  ~2% wall improvement on 1 GB. */
         madvise(out_buf, uncomp_size, MADV_WILLNEED);
+        pivcohuf_timing_t tm;
         double t0 = now_sec();
-        rc = pivcohuf_decompress(in_buf, in_len, out_buf, &out_len);
+        rc = pivcohuf_decompress_timed(in_buf, in_len, out_buf, &out_len, &tm);
         double t1 = now_sec();
         if (rc != PIVCOHUF_OK) {
             fprintf(stderr, "pivcohuf: decompress failed: %s\n", err_msg(rc));
             return 2;
         }
+        double _w0 = now_sec();
         if (write_all(out_path, out_buf, out_len, force) != 0) return 2;
+        double io_write_ms = (now_sec() - _w0) * 1000.0;
         double t_total_end = now_sec();
         print_stats("decompress", in_len, out_len, t1 - t0, t_total_end - t_total_start);
+        print_phases("decode", io_read_ms, io_write_ms, cli_malloc_ms, &tm);
         if (repeat > 1) {
             fprintf(stderr, "  -- replaying decompress %d more times into same buffer --\n", repeat - 1);
             for (int r = 1; r < repeat; r++) {
@@ -310,7 +361,7 @@ int main(int argc, char **argv)
 #endif
         free(out_buf);
     } else {
-        usage(); return 1;
+        usage(stderr); return 1;
     }
     free(in_buf);
     return 0;

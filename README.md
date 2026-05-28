@@ -1477,6 +1477,46 @@ cmake --build build
 ./build/pivco_huffman_bench --tdbu      # only pivco_n + pivco_bu (TD/BU compare)
 ```
 
+### Try it on your own data
+
+PIVCO-Huffman is usable as a library — you don't have to adopt our file format
+to measure it.  Three ways, easiest first:
+
+**CLI** — `pivcohuf` compresses a file and prints size / ratio / time / bandwidth:
+```sh
+./build/pivcohuf c  yourfile         # PH   -> yourfile.ph
+./build/pivcohuf c -a yourfile       # PHA  (ANS-coded bitmaps; better ratio on skewed data)
+./build/pivcohuf d  yourfile.ph      # decompress (auto-detects PH vs PHA)
+```
+
+**Example** — `examples/try.c` (CMake target `pivco_try`) compresses one file
+with both PH and PHA and reports ratio + encode/decode throughput:
+```sh
+./build/pivco_try yourfile
+#   yourfile (2000000 bytes)   [ratio = in/out, higher = better]
+#     ph    6.28x  (2000000 -> 318379)   enc 704 MB/s   dec 5405 MB/s   roundtrip ok
+#     pha   8.44x  (2000000 -> 236833)   enc 495 MB/s   dec 3578 MB/s   roundtrip ok
+```
+
+**Library** — link `libpivco_huffman.a` and call the buffer API in
+[`include/pivcohuf_file.h`](include/pivcohuf_file.h) (no wire-format knowledge
+needed):
+```c
+#include "pivcohuf_file.h"
+size_t cap = pivcohuf_compress_bound(in_len);
+uint8_t *out = malloc(cap); size_t out_len = cap;
+pivcohuf_compress_ex(in, in_len, out, &out_len, /*use_ans=*/1);   // PHA; 0 = PH
+
+size_t usz; pivcohuf_peek_uncompressed_size(out, out_len, &usz);
+uint8_t *dec = malloc(usz); size_t dlen = usz;
+pivcohuf_decompress(out, out_len, dec, &dlen);                    // auto-detects PH/PHA
+```
+To embed the codec in *your own* container/framing, use the block primitives in
+[`include/pivco_huffman.h`](include/pivco_huffman.h)
+(`pivco_huffman_build_table` then `pivco_huffman_encode`/`pivco_huffman_decode`
+over `PIVCO_BLOCK_SIZE`-symbol blocks; call `pivco_huffman_set_fse_enabled(1)`
+for PHA).
+
 Custom block size:
 ```sh
 cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_FLAGS="-DPIVCO_BLOCK_SIZE=16384"

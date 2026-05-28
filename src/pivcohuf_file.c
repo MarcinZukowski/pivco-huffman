@@ -8,6 +8,18 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
+
+/* Monotonic wall-clock in nanoseconds, for the *_timed phase breakdown.
+ * Coarse (phase-level, never inside hot inner loops), so always-on cost is
+ * a handful of clock_gettime calls per compress/decompress. */
+static double now_ns(void) {
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (double)t.tv_sec * 1e9 + (double)t.tv_nsec;
+}
+#define TIC(t)        ((t) ? now_ns() : 0.0)
+#define TOC(t, fld, s) do { if (t) (t)->fld += now_ns() - (s); } while (0)
 
 /* ============================================================
  * XXH32 -- 32-bit xxHash, tiny self-contained implementation.
@@ -111,8 +123,9 @@ size_t pivcohuf_compress_bound(size_t in_len)
          + nblocks * worst_per_block;
 }
 
-int pivcohuf_compress(const uint8_t *in, size_t in_len,
-                      uint8_t *out, size_t *out_len)
+static int pivcohuf_compress_impl(const uint8_t *in, size_t in_len,
+                                  uint8_t *out, size_t *out_len,
+                                  pivcohuf_timing_t *tm)
 {
     if (!in && in_len > 0) return PIVCOHUF_ERR_NULL;
     if (!out || !out_len) return PIVCOHUF_ERR_NULL;
@@ -131,7 +144,7 @@ int pivcohuf_compress(const uint8_t *in, size_t in_len,
      * uint64 globals every 256 MB keeps a single bucket from
      * overflowing uint32 on files > 4 GB. */
     uint64_t real_freq[256] = {0};
-    { PROF_TIC();
+    { PROF_TIC(); double _t = TIC(tm);
       const size_t CHUNK = (size_t)256 << 20;   /* 256 MiB */
       uint32_t h0[256] = {0}, h1[256] = {0}, h2[256] = {0}, h3[256] = {0};
       size_t off2 = 0;
@@ -154,24 +167,24 @@ int pivcohuf_compress(const uint8_t *in, size_t in_len,
           off2 = end;
       }
       if (in_len == 0) real_freq[0] = 1;
-      PROF_TOC(PROF_FILE_HISTOGRAM, in_len); }
+      PROF_TOC(PROF_FILE_HISTOGRAM, in_len); TOC(tm, freq_ns, _t); }
 
     pivco_huffman_table_t real_table;
-    { PROF_TIC();
+    { PROF_TIC(); double _t = TIC(tm);
       if (pivco_huffman_build_table(real_freq, &real_table) != PIVCO_OK)
           return PIVCOHUF_ERR_INTERNAL;
-      PROF_TOC(PROF_FILE_BUILD_TABLE_REAL, 1); }
+      PROF_TOC(PROF_FILE_BUILD_TABLE_REAL, 1); TOC(tm, build_ns, _t); }
 
     /* Rebuild the encode-time table via the code-lens builder, so encode
      * uses the exact table the decoder reconstructs from the wire.  The tree
      * is fully determined by the code lengths (within-tier order is symbol-
      * value), so nothing beyond the lengths is transmitted. */
     pivco_huffman_table_t table;
-    { PROF_TIC();
+    { PROF_TIC(); double _t = TIC(tm);
       if (pivco_huffman_build_table_from_code_lens(real_table.code_len,
                                                     &table) != PIVCO_OK)
           return PIVCOHUF_ERR_INTERNAL;
-      PROF_TOC(PROF_FILE_BUILD_TABLE_SYN, 1); }
+      PROF_TOC(PROF_FILE_BUILD_TABLE_SYN, 1); TOC(tm, build_ns, _t); }
 
     /* Pad with prefill_sym (the most-frequent symbol -- always has the
      * shortest code).  Padding with arbitrary bytes can hit pathological
@@ -202,8 +215,11 @@ int pivcohuf_compress(const uint8_t *in, size_t in_len,
 
     /* === Encode block-by-block. === */
     size_t off = 0;
+    double _tm = TIC(tm);
     uint8_t *block_buf = (uint8_t *)malloc(B);
+    TOC(tm, malloc_ns, _tm);
     if (!block_buf) return PIVCOHUF_ERR_INTERNAL;
+    double _te = TIC(tm);
     while (off < in_len) {
         size_t blk_in = in_len - off;
         const uint8_t *blk_src;
@@ -232,6 +248,7 @@ int pivcohuf_compress(const uint8_t *in, size_t in_len,
           p += enc_len;
           PROF_TOC(PROF_FILE_BLOCK_ENCODE, (uint64_t)B); }
     }
+    TOC(tm, codec_ns, _te);
     free(block_buf);
 
     size_t body_len = (size_t)(p - body);
@@ -248,6 +265,41 @@ int pivcohuf_compress(const uint8_t *in, size_t in_len,
 
     *out_len = (size_t)(p - out);
     return PIVCOHUF_OK;
+}
+
+/* pha (#PHA): same wire/decoder, but per-block bitmaps may be ANS(FSE)-coded.
+ * The FSE path is selected by a process-global flag; save/set/restore it
+ * around the whole compress so the caller's setting is not disturbed.
+ * Decompress needs no flag — it auto-detects FSE markers per block. */
+static int compress_dispatch(const uint8_t *in, size_t in_len,
+                             uint8_t *out, size_t *out_len,
+                             int use_ans, pivcohuf_timing_t *tm)
+{
+    if (tm) memset(tm, 0, sizeof(*tm));
+    int prev = pivco_huffman_get_fse_enabled();
+    pivco_huffman_set_fse_enabled(use_ans);
+    int r = pivcohuf_compress_impl(in, in_len, out, out_len, tm);
+    pivco_huffman_set_fse_enabled(prev);
+    return r;
+}
+
+int pivcohuf_compress_ex(const uint8_t *in, size_t in_len,
+                         uint8_t *out, size_t *out_len, int use_ans)
+{
+    return compress_dispatch(in, in_len, out, out_len, use_ans, NULL);
+}
+
+int pivcohuf_compress(const uint8_t *in, size_t in_len,
+                      uint8_t *out, size_t *out_len)
+{
+    return compress_dispatch(in, in_len, out, out_len, 0, NULL);
+}
+
+int pivcohuf_compress_timed(const uint8_t *in, size_t in_len,
+                            uint8_t *out, size_t *out_len,
+                            int use_ans, pivcohuf_timing_t *timing)
+{
+    return compress_dispatch(in, in_len, out, out_len, use_ans, timing);
 }
 
 /* ============================================================
@@ -278,8 +330,9 @@ int pivcohuf_peek_uncompressed_size(const uint8_t *in, size_t in_len,
     return PIVCOHUF_OK;
 }
 
-int pivcohuf_decompress(const uint8_t *in, size_t in_len,
-                        uint8_t *out, size_t *out_len)
+static int pivcohuf_decompress_impl(const uint8_t *in, size_t in_len,
+                                    uint8_t *out, size_t *out_len,
+                                    pivcohuf_timing_t *tm)
 {
     if (!in || !out || !out_len) return PIVCOHUF_ERR_NULL;
     uint64_t body_len_u64;
@@ -309,10 +362,10 @@ int pivcohuf_decompress(const uint8_t *in, size_t in_len,
     }
 
     pivco_huffman_table_t table;
-    { PROF_TIC();
+    { PROF_TIC(); double _t = TIC(tm);
       if (pivco_huffman_build_table_from_code_lens(code_lens, &table) != PIVCO_OK)
           return PIVCOHUF_ERR_INTERNAL;
-      PROF_TOC(PROF_FILE_BUILD_TABLE_SYN, 1); }
+      PROF_TOC(PROF_FILE_BUILD_TABLE_SYN, 1); TOC(tm, build_ns, _t); }
     /* Sanity check: rebuilt code lengths must match. */
     for (int s = 0; s < 256; s++) {
         if (table.code_len[s] != code_lens[s]) {
@@ -322,12 +375,15 @@ int pivcohuf_decompress(const uint8_t *in, size_t in_len,
 
     /* Decode blocks.  block_buf is on heap (avoids large stack frames; also
      * sized B which is read from the file). */
+    double _tm = TIC(tm);
     uint8_t *block_buf = (uint8_t *)malloc(B);
+    TOC(tm, malloc_ns, _tm);
     if (!block_buf) return PIVCOHUF_ERR_INTERNAL;
     const uint8_t *p = body + 10 + 128;
     const uint8_t *body_end = body + body_len;
     size_t written = 0;
     int err = 0;
+    double _td = TIC(tm);
     while (p < body_end && written < uncomp_size) {
         uint32_t blk_enc_len;
         uint8_t *blk_out;
@@ -355,10 +411,25 @@ int pivcohuf_decompress(const uint8_t *in, size_t in_len,
         }
         p += blk_enc_len;
     }
+    TOC(tm, codec_ns, _td);
     free(block_buf);
     if (err) return err;
 
     if (written != uncomp_size) return PIVCOHUF_ERR_INTERNAL;
     *out_len = uncomp_size;
     return PIVCOHUF_OK;
+}
+
+int pivcohuf_decompress(const uint8_t *in, size_t in_len,
+                        uint8_t *out, size_t *out_len)
+{
+    return pivcohuf_decompress_impl(in, in_len, out, out_len, NULL);
+}
+
+int pivcohuf_decompress_timed(const uint8_t *in, size_t in_len,
+                              uint8_t *out, size_t *out_len,
+                              pivcohuf_timing_t *timing)
+{
+    if (timing) memset(timing, 0, sizeof(*timing));
+    return pivcohuf_decompress_impl(in, in_len, out, out_len, timing);
 }

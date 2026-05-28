@@ -67,9 +67,17 @@ typedef enum {
 size_t pivcohuf_compress_bound(size_t in_len);
 
 /* Compress in[0..in_len) into out (capacity *out_len).  On success,
- * sets *out_len to the actual encoded length and returns PIVCOHUF_OK. */
+ * sets *out_len to the actual encoded length and returns PIVCOHUF_OK.
+ * Plain Huffman (#PH). */
 int pivcohuf_compress(const uint8_t *in, size_t in_len,
                       uint8_t *out, size_t *out_len);
+
+/* As pivcohuf_compress, but `use_ans != 0` selects #PHA: per-block partition
+ * bitmaps may be ANS(FSE)-coded for a better ratio on skewed data, at some
+ * decode cost.  Same wire format and decoder — pivcohuf_decompress auto-detects
+ * the ANS-coded blocks, so pha and ph streams decompress identically. */
+int pivcohuf_compress_ex(const uint8_t *in, size_t in_len,
+                         uint8_t *out, size_t *out_len, int use_ans);
 
 /* Decompress in[0..in_len) into out (capacity *out_len).  Verifies
  * header and body checksums.  On success, sets *out_len to the actual
@@ -81,6 +89,28 @@ int pivcohuf_decompress(const uint8_t *in, size_t in_len,
  * Used to allocate the output buffer before calling decompress. */
 int pivcohuf_peek_uncompressed_size(const uint8_t *in, size_t in_len,
                                      size_t *uncompressed_size);
+
+/* Per-phase wall-clock breakdown (nanoseconds) filled by the *_timed
+ * variants.  Phases not relevant to the call stay 0 (e.g. freq_ns on
+ * decompress).  freq_ns and build_ns are distinct: a caller who already
+ * has symbol frequencies can skip the histogram (freq_ns) and build the
+ * table directly via the block API in pivco_huffman.h.  Timing is coarse
+ * (never inside hot inner loops); pass NULL to skip it entirely. */
+typedef struct {
+    double freq_ns;    /* build frequencies (symbol histogram) -- compress only */
+    double build_ns;   /* build codes/tree (Huffman table) */
+    double codec_ns;   /* encode (compress) or decode (decompress) block loop */
+    double malloc_ns;  /* internal scratch allocations */
+} pivcohuf_timing_t;
+
+/* As pivcohuf_compress_ex / pivcohuf_decompress, but fill *timing (nullable)
+ * with the per-phase breakdown above.  The struct is zeroed on entry. */
+int pivcohuf_compress_timed(const uint8_t *in, size_t in_len,
+                            uint8_t *out, size_t *out_len,
+                            int use_ans, pivcohuf_timing_t *timing);
+int pivcohuf_decompress_timed(const uint8_t *in, size_t in_len,
+                              uint8_t *out, size_t *out_len,
+                              pivcohuf_timing_t *timing);
 
 #ifdef __cplusplus
 }

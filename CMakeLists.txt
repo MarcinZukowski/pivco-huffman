@@ -287,6 +287,11 @@ target_include_directories(pivco_huffman PUBLIC include)
 add_executable(pivcohuf tools/pivcohuf.c)
 target_link_libraries(pivcohuf pivco_huffman)
 
+# Minimal library-usage demo (examples/try.c): compress a file with ph + pha,
+# verify roundtrip, print ratio + encode/decode MB/s.
+add_executable(pivco_try examples/try.c)
+target_link_libraries(pivco_try pivco_huffman)
+
 # Tests
 option(BUILD_TESTS "Build tests" ON)
 if(BUILD_TESTS)
