@@ -1,0 +1,17 @@
+# Per-uarch test host inventory for the "ph vs huf0 over the years" sweep.
+# Columns: alias  instance_type  arch    family    year  uarch                   region     existing
+test-m3   m3.large    x86_64  intel       2012  SandyBridge-EP         us-west-2  no
+test-c3   c3.large    x86_64  intel       2013  IvyBridge-EP           us-west-1  yes
+test-c4   c4.large    x86_64  intel       2015  Haswell-EP             us-west-1  yes
+test-c5   c5.large    x86_64  intel       2017  Skylake-SP             us-west-1  yes
+test-c6i  c6i.large   x86_64  intel       2021  IceLake-SP             us-west-2  no
+test-c7i  c7i.large   x86_64  intel       2023  SapphireRapids         us-west-2  no
+test-c8i  c8i.large   x86_64  intel       2025  GraniteRapids          us-west-1  yes
+test-c5a  c5a.large   x86_64  amd         2020  Zen2                   us-west-2  no
+test-c6a  c6a.large   x86_64  amd         2021  Zen3                   us-west-1  yes
+test-c7a  c7a.large   x86_64  amd         2023  Zen4                   us-west-2  no
+test-c8a  c8a.large   x86_64  amd         2024  Zen5                   us-west-2  yes
+test-a1   a1.large    arm64   graviton    2018  Gv1-CortexA72          us-west-2  no
+test-c6g  c6g.large   arm64   graviton    2020  Gv2-NeoverseN1         us-west-1  yes
+test-c7g  c7g.large   arm64   graviton    2022  Gv3-NeoverseV1         us-west-2  no
+test-c8g  c8g.large   arm64   graviton    2024  Gv4-NeoverseV2         us-west-1  yes

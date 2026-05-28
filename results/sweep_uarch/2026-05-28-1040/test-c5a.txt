@@ -1,0 +1,115 @@
+=== host: test-c5a  date: 2026-05-28T17:40:19Z ===
+gcc (GCC) 11.5.0 20240719 (Red Hat 11.5.0-5)
+cmake version 3.22.2
+fair-bench: 1 MB-class buffer = 1024 KB, best of 10x10, ph table-G=128 KB, BLK=4096
+columns: enc(opaque prebuilt)  dec(opaque prebuilt)  MB/s | ratio(op pb) | builds/1MB
+
+== proba80          ==        enc_op  enc_pb   dec_op  dec_pb |  r_op  r_pb | blds
+ph       |     508    1089 |    5872    6208 |  6.22  6.25 |   8
+pha      |     437     806 |    2532    2598 |  8.18  8.23 |   8
+td_naive |     202     258 |     251     251 |  6.35  6.39 |   8
+td_scl_opt |     201     306 |     585     585 |  6.29  6.32 |   8
+td_nv_simd   (n/a)
+td_simdopt   (n/a)
+huf0     |     773     -   |    1383     -   |  6.40   -   |   8
+huf0_4x2 |     773    1212 |    1414    1449 |  6.40  6.40 |   8
+fse_stk  |     436     562 |     483     484 |  8.86  8.86 |   8
+fse_x8y1 |     277     562 |     469     488 |  8.86  8.86 |   8
+
+== english          ==        enc_op  enc_pb   dec_op  dec_pb |  r_op  r_pb | blds
+ph       |     475     630 |    1775    1826 |  1.85  1.85 |   8
+pha      |     474     628 |    1779    1847 |  1.85  1.85 |   8
+td_naive |      37      37 |      47      47 |  1.87  1.88 |   8
+td_scl_opt |      77      81 |      86      86 |  1.86  1.87 |   8
+td_nv_simd   (n/a)
+td_simdopt   (n/a)
+huf0     |     859     -   |    1335     -   |  1.88   -   |   8
+huf0_4x2 |     860    1210 |    1336    1386 |  1.88  1.88 |   8
+fse_stk  |     470     561 |     593     610 |  1.89  1.89 |   8
+fse_x8y1 |     398     582 |     876     948 |  1.89  1.89 |   8
+
+== html_wiki        ==        enc_op  enc_pb   dec_op  dec_pb |  r_op  r_pb | blds
+ph       |     376     512 |    1139    1139 |  1.40  1.39 |   8
+pha      |     375     509 |    1140    1141 |  1.40  1.39 |   8
+td_naive |      28      29 |      36      36 |  1.40  1.40 |   8
+td_scl_opt |      59      63 |      62      63 |  1.41  1.40 |   8
+td_nv_simd   (n/a)
+td_simdopt   (n/a)
+huf0     |     844     -   |    1143     -   |  1.44   -   |   8
+huf0_4x2 |     846    1206 |    1068    1120 |  1.44  1.44 |   8
+fse_stk  |     468     560 |     589     609 |  1.45  1.46 |   8
+fse_x8y1 |     417     584 |     872     946 |  1.45  1.46 |   8
+
+== prose_pride      ==        enc_op  enc_pb   dec_op  dec_pb |  r_op  r_pb | blds
+ph       |     409     553 |    1214    1342 |  1.70  1.70 |   8
+pha      |     396     529 |    1217    1343 |  1.70  1.70 |   8
+td_naive |      34      35 |      43      44 |  1.73  1.72 |   8
+td_scl_opt |      57      59 |      61      61 |  1.72  1.72 |   8
+td_nv_simd   (n/a)
+td_simdopt   (n/a)
+huf0     |     850     -   |    1259     -   |  1.74   -   |   8
+huf0_4x2 |     850    1212 |    1247    1298 |  1.74  1.74 |   8
+fse_stk  |     467     563 |     591     610 |  1.76  1.76 |   8
+fse_x8y1 |     407     584 |     875     949 |  1.76  1.76 |   8
+
+== image_jpeg       ==        enc_op  enc_pb   dec_op  dec_pb |  r_op  r_pb | blds
+ph       |     407     567 |    1135    1118 |  1.00  1.00 |   8
+pha      |     408     569 |    1139    1118 |  1.00  1.00 |   8
+td_naive |      20      20 |      25      25 |  1.00  1.00 |   8
+td_scl_opt |      77      79 |      88      81 |  1.00  1.00 |   8
+td_nv_simd   (n/a)
+td_simdopt   (n/a)
+huf0     |     820     -   |     861     -   |  1.01   -   |   8
+huf0_4x2 |     819    1207 |     707     722 |  1.01  1.01 |   8
+fse_stk  |     467     560 |     590     607 |  1.01  1.01 |   8
+fse_x8y1 |     422     583 |     870     949 |  1.01  1.01 |   8
+
+== json_api         ==        enc_op  enc_pb   dec_op  dec_pb |  r_op  r_pb | blds
+ph       |     379     496 |    1073    1107 |  1.49  1.49 |   8
+pha      |     372     483 |    1077    1107 |  1.49  1.49 |   8
+td_naive |      30      30 |      38      38 |  1.51  1.51 |   8
+td_scl_opt |      55      58 |      58      59 |  1.51  1.51 |   8
+td_nv_simd   (n/a)
+td_simdopt   (n/a)
+huf0     |     858     -   |    1201     -   |  1.53   -   |   8
+huf0_4x2 |     857    1210 |    1140    1191 |  1.53  1.53 |   8
+fse_stk  |     468     560 |     588     606 |  1.53  1.54 |   8
+fse_x8y1 |     416     584 |     873     947 |  1.54  1.54 |   8
+
+== dna_fasta        ==        enc_op  enc_pb   dec_op  dec_pb |  r_op  r_pb | blds
+ph       |     551     817 |    3216    3348 |  3.46  3.47 |   8
+pha      |     526     760 |    2472    2551 |  3.72  3.73 |   8
+td_naive |      72      75 |      93      93 |  3.51  3.52 |   8
+td_scl_opt |      92      98 |     115     115 |  3.49  3.49 |   8
+td_nv_simd   (n/a)
+td_simdopt   (n/a)
+huf0     |     826     -   |    1366     -   |  3.53   -   |   8
+huf0_4x2 |     822    1212 |    1403    1444 |  3.53  3.53 |   8
+fse_stk  |     453     562 |     591     611 |  3.83  3.83 |   8
+fse_x8y1 |     405     584 |     874     953 |  3.83  3.83 |   8
+
+== chinese_text     ==        enc_op  enc_pb   dec_op  dec_pb |  r_op  r_pb | blds
+ph       |     399     526 |    1198    1183 |  1.33  1.31 |   8
+pha      |     391     495 |    1198    1128 |  1.33  1.32 |   8
+td_naive |      27      27 |      34      34 |  1.34  1.33 |   8
+td_scl_opt |      61      61 |      65      62 |  1.34  1.33 |   8
+td_nv_simd   (n/a)
+td_simdopt   (n/a)
+huf0     |     851     -   |    1061     -   |  1.36   -   |   8
+huf0_4x2 |     852    1209 |     945     972 |  1.36  1.36 |   8
+fse_stk  |     469     561 |     590     608 |  1.37  1.37 |   8
+fse_x8y1 |     416     583 |     872     945 |  1.37  1.37 |   8
+
+== calgary_pic      ==        enc_op  enc_pb   dec_op  dec_pb |  r_op  r_pb | blds
+ph       |     392     811 |    2211    2442 |  4.46  4.43 |   8
+pha      |     357     673 |    1606    1722 |  5.83  5.78 |   8
+td_naive |     124     153 |     161     161 |  4.63  4.59 |   8
+td_scl_opt |     155     216 |     308     320 |  4.60  4.58 |   8
+td_nv_simd   (n/a)
+td_simdopt   (n/a)
+huf0     |     739     -   |    1329     -   |  4.79   -   |   8
+huf0_4x2 |     739    1212 |    1363    1426 |  4.79  4.78 |   8
+fse_stk  |     427     562 |     479     485 |  6.42  6.50 |   8
+fse_x8y1 |     265     562 |     466     490 |  6.49  6.50 |   8
+
+=== done: test-c5a  date: 2026-05-28T17:43:41Z ===
