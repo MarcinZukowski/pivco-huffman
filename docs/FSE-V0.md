@@ -1,5 +1,7 @@
 # FSE for pivco-huffman — v0 plan
 
+> **Last content review:** _NEVER_
+
 Goal: get FSE coding of skewed partition bitmaps into the codec for
 real, end-to-end, with measurable speed cost and ratio gain.  Targets
 the per-internal-node bitmap stream; flat-subtree packing stays as-is.

@@ -1,5 +1,7 @@
 # PIVCO-Huffman Decode Ideas
 
+> **Last content review:** _NEVER_
+
 > **Prior art note:** the bitmap-per-Huffman-node wire format
 > matches the Huffman-shaped wavelet tree (Grossi-Gupta-Vitter
 > SODA 2003, Mäkinen-Navarro); SIMD partition primitives match

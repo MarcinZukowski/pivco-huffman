@@ -1,5 +1,7 @@
 # Gemini's PIVCO-Huffman Optimizations
 
+> **Last content review:** _NEVER_
+
 This document details the performance improvements implemented for the PIVCO-Huffman decoder, specifically targeting high-entropy distributions on ARM64 (NEON).
 
 ## 1. 8-way Parallel Scalar Placement (Phase 4)

@@ -1,5 +1,7 @@
 # TANS Investigation — 2026-05-13
 
+> **Last content review:** _NEVER_
+
 Investigation log for the "PIVoted-COding tANS" idea sketched in
 `pivco-tans.md`: per-internal-node TANS-coding of partition bitmaps,
 keeping the flat-subtree fast path.  Goal of this session was to bound

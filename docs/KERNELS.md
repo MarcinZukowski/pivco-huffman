@@ -1,5 +1,7 @@
 # PIVCO-Huffman NEON Kernel Walkthroughs
 
+> **Last content review:** _NEVER_
+
 Step-by-step traces of the SIMD micro-kernels that consume most of
 PIVCO-Huffman's decode time on Apple M4.  Each kernel section shows:
 

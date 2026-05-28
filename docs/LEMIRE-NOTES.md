@@ -1,5 +1,7 @@
 # Notes for Daniel Lemire on counters/bench
 
+> **Last content review:** _NEVER_
+
 Findings from porting [lemire/counters](https://github.com/lemire/counters) v4.1.0 into pivco-huffman to time NEON `partition_8` on Apple M4. **The framework is correct;** these are user-side gotchas worth documenting in the README.
 
 Reproducer: `extras/bench/bench_lemire_compare.cpp` (commit `a46b0e1`).

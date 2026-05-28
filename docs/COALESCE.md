@@ -1,5 +1,7 @@
 # Partition store coalescing — investigation log
 
+> **Last content review:** _NEVER_
+
 A multi-day investigation into whether `partition_8`'s two `vst1q_u8`
 stores per iteration could be reduced — and the conclusion that on
 Apple M4 they cannot, with the data and reasoning to back it up.

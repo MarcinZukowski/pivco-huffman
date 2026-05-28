@@ -1,5 +1,7 @@
 # Prefix-radix decoder
 
+> **Last content review:** _NEVER_
+
 > **Status (as of `8754347`, 2026-04-24):** the flat-tree special case
 > described in §2-3 of this document has been **superseded** by the
 > *flat-subtree fast path* landed in April 2026 (commit `a275d05` and

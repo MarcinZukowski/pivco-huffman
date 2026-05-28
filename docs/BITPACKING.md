@@ -1,5 +1,7 @@
 # Bit-packing layout investigation — flat-subtree decode
 
+> **Last content review:** _NEVER_
+
 Investigation into faster D-bit unpacking for the flat-subtree decode path.
 Three candidate layouts, with worked examples, microbenches, end-to-end
 A/B numbers, and a profile-driven assessment of how much it actually

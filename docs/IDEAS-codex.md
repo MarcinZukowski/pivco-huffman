@@ -1,5 +1,7 @@
 # Codex Notes: Performance Ideas
 
+> **Last content review:** _NEVER_
+
 These are follow-up ideas after reviewing the current docs and source.  This
 file supersedes the older NEON-only note: several items there were written
 before the flat-subtree fast path, flat-aware tree assignment, and AVX-512

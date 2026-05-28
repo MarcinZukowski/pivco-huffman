@@ -1,3 +1,7 @@
+# PIVCO-Huffman: Program Notes
+
+> **Last content review:** _NEVER_
+
 Use the idea from ../pivco-varint for Huffman encoding.
 
 Similarly to that, test various SotA implementations, benchmark etc

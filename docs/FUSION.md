@@ -1,5 +1,7 @@
 # Cross-Block Fusion: Investigation Log
 
+> **Last content review:** _NEVER_
+
 Comprehensive record of the cross-block fusion experiment — what we tried,
 what worked, what didn't, and the end-to-end numbers we landed on. Parked
 2026-05-09 with a clear understanding that microbench predictions

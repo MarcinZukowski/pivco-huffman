@@ -1,5 +1,7 @@
 # Prior Art: Huffman-Shaped Wavelet Trees
 
+> **Last content review:** _NEVER_
+
 The pivco-huffman bitmap-per-Huffman-internal-node wire format is structurally
 identical to a **Huffman-shaped wavelet tree** — an established data structure
 from the succinct-data-structures literature (2003+). This document records
