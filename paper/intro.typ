@@ -18,7 +18,7 @@ but rather "canonical" coding from @schwartz1964canonical.
   stroke: 0pt,
   align: center,
   [#figure(
-    image("figures/huf-tree.svg"),
+    mf("huf-tree"),
     caption: [Classical Huffman tree for the word "huffman"]
    )<fig-huf-tree>],
   [#figure(

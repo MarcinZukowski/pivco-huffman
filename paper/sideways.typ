@@ -235,6 +235,7 @@ cost is negligible.
 Note that as a result we introduce a new operation called `PH` - `partition_half`,
 similar to `partition`, but only producing one of the output index lists.
 
+#he("gridtable")[
 #table(
   columns:2,
   stroke: 0pt,
@@ -251,6 +252,7 @@ similar to `partition`, but only producing one of the output index lists.
     )<treeopt-constant>
   ],
 )
+]
 
 === Flat Subtrees
 
@@ -273,6 +275,7 @@ for (i = 0; i < n; i++) {
 }
 ```
 
+#he("gridtable")[
 #table(
   columns:2,
   stroke: 0pt,
@@ -289,6 +292,7 @@ for (i = 0; i < n; i++) {
     )<treeopt-opt>
   ],
 )
+]
 
 === Non-Canonical Subtrees
 

@@ -14,7 +14,7 @@
     \
  ]
 #text(size: 10pt)[
-  _v.0.1, built on #datetime.today().display()_
+  _v.0.5, built on #datetime.today().display()_
 ]
 
 #set align(left)
@@ -43,6 +43,11 @@ This document is mostly a verbatim copy of the arXiv paper.
 
 However, in boxes like this you'll see some additional author's
 thoughts that might not be fitting a scientific paper.
+
+The HTML version has some nice QoL features:
+- clicking the tree images takes the reader to a visualizer
+- simd code has intrinsics tooltips via simd.dev
+- active ToC
 ]
 
 #include "intro.typ"

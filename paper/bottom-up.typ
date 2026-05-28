@@ -21,17 +21,13 @@ We can use the idea of *bottom-up* merging without the first partitioning stage 
 This idea led to a new variant of #PH, which is the actual proposed solution.
 The process is as follows:
 
-When going top-down, our key operation was
-This is the idea we apply here.
-
-Imagine every tree node produces the values for all output positions with symbols
+Every tree node produces the values for all output positions with symbols
 that traverse a given node - these were the indices in the top-down traversal.
 For leaves, all these values are constants.
 For non-leaf nodes, we can construct the output using children symbols, and the same
 bitmaps we used for *bitmap-based partitioning*, but now using *bitmap-based merging*.
 This process proceeds all the way to the top, resulting in the final sequence
 of codes equal to the complete expected output.
-
 #footnote[Note that a similar symmetry of _partitioning_ vs _merging_ can be found
 in other places, e.g. sorting or joins in databases].
 
@@ -43,7 +39,7 @@ This approach has some very interesting properties:
 
 #figure(
   mf("bu-tree"),
-  caption: [Upside-down "huffman" tree (_flat trees_ off). See how each node produces a dense list of symbols.]
+  caption: [Bottom-up traversed "huffman" tree (_flat trees_ off). See how each node produces a dense list of symbols.]
 )<fig-bu-tree>
 
 This results in the approach presented in @fig-bu-tree.

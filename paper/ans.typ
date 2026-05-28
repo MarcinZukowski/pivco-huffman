@@ -26,7 +26,7 @@ state = t.newX + read_bits(t.numBits);  //state transition
 emit_symbol(t.symbol);                  //decoded symbol
 ```
 
-While similar, the critical difference is that we see a `state` variable that
+While similar, the critical difference is that we see a `state` variable which
 is carried through the iterations and mutated depending on the data.
 Also, the `decoding_table` is constructed such that for the same code
 a different number of bits may be consumed.
@@ -112,7 +112,7 @@ The analysis above suggests, that for most datasets applying ANS-based encoding 
 This is consistent with what e.g. @fse does - the literal stream is only Huffman compressed, but the significantly
 skewed length/offset data is tANS-compressed.
 
-Additionally, we see how for the dataset where ANS-encoding _would_ be useful, the vast majority of benefit
+Additionally, we see how for datasets where ANS-encoding _would_ be useful, the vast majority of benefit
 often comes from just a few (usually one, sometimes two) nodes in the Huffman tree.
 To exploit that, #PH was extended with _applying ANS-based encoding only for the nodes where it matters_.
 This means, that for most datasets, no ANS-overhead is paid, and if it's applied, it's only paid for a small subset of data.
@@ -126,7 +126,7 @@ A concrete implementation of which node should be FSE-selected is currently as f
   node at depth 5 (so already 5-bits long) is probably not worth it.
 
 Note, that we know all the above information purely from the symbol frequencies used to construct the Huffman tree,
-we do not need to gather any additional data statistics.
+we do not need to gather any additional data statistics. We _know_ when ANS will help.
 
 When we decide to compress a particular bitmap with ANS, today we use FSE (@fse).
 Note, that we compress the bitmap as _bytes_, not as bits.
@@ -143,8 +143,12 @@ See also @fuse-fse-merge for another possible optimization.
 
 == Benefits
 
-* FSE is slow, but we do "1 bit of 8 tokens" at a time.
-* only applied for nodes where it actually matters (mostly highly skewed)
+The selective FSE application has the following benefits:
+- FSE is slower than Huffman, but since each FSE-symbol we decode covers 8 Huffman-symbols from our main tree, we pay only 1/8th of the cost
+  per bitmap
+- it can be only applied for nodes where it actually matters (mostly highly skewed)
+- compression ratio vs performance can actually be _tuned_ (slightly) depending on the actual FSE-triggering
+  strategy
 
 == Results
 
