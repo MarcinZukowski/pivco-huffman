@@ -132,10 +132,20 @@ if(TARGET_ARCH STREQUAL "arm64" OR TARGET_ARCH STREQUAL "aarch64")
     list(APPEND PIVCO_SOURCES
         src/pivco_huffman_neon_tables.c)
     add_compile_definitions(PIVCO_HAS_NEON=1)
-    # Note: SVE backend exists (pivco_huffman_sve.c) but svcompact at
-    # 128-bit SVE (Graviton 4) is slower than NEON TBL because it only
-    # handles 4 × uint32 per instruction vs TBL's 8 × uint16. SVE would
-    # help at 256-bit+ vector lengths (e.g. Fujitsu A64FX).
+    # Note: SVE backend exists (pivco_huffman_sve.c) but is disabled and
+    # stale (pre-unified-codec).  Empirically confirmed loss vs NEON at
+    # BOTH 128-bit SVE (Graviton 4 / Neoverse V2) and 256-bit SVE
+    # (Graviton 3 / Neoverse V1).  Partition microbench on c7g
+    # (extras/sve_probe/partition_probe.c) measured SVE-256 at 0.26x
+    # NEON-128 — i.e. 4x slower, not faster.  Structural reasons:
+    #   (1) svcompact only operates on 32/64-bit elements; widening
+    #       uint16 codes costs more than the compress saves;
+    #   (2) SVE has no efficient "8-bit mask -> 8-lane predicate" path
+    #       (5+ ops vs NEON's single compress_tab[mask] load);
+    #   (3) NEON vqtbl1q_u8 on V1 is 4/cycle, hard to beat.
+    # AVX-512 VBMI2's vpcompressb is byte-granular and has no current
+    # ARM analogue (SVE2's bdep_u8 is bit-deposit, not byte-compress).
+    # See extras/sve_probe/ and IDEAS.md "SVE / SVE2 partition".
 elseif(TARGET_ARCH STREQUAL "x86_64" OR TARGET_ARCH STREQUAL "amd64")
     # Three-tier x86 SIMD dispatch:
     #   AVX-512 VBMI2     (Ice Lake / Sapphire Rapids / Zen 4)

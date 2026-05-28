@@ -3333,6 +3333,35 @@ These already appear explored or unlikely to pay off:
 - **SVE at 128-bit width**
   - already slower than NEON on Graviton4.
 
+- **SVE at 256-bit width — measured 2026-05-28, also a loss**
+  - `extras/sve_probe/partition_probe.c` on c7g (Neoverse V1, SVE-256):
+    SVE-256 partition = **0.26× NEON-128 (~4× slower)**, not faster.
+  - `extras/sve_probe/probe.c` on c7g, D=5 flat-decode primitive:
+    SVE-256 = 1.05× NEON-128 — wash.
+  - The hopeful CMakeLists comment "SVE would help at 256-bit+" is
+    empirically wrong; updated 2026-05-28.
+  - **Structural reasons (paper-worthy)**:
+    1. `svcompact` only operates on 32/64-bit elements; widening
+       uint16 codes → uint32 → narrowing back costs more than the
+       compress saves.
+    2. SVE has no efficient "8-bit mask → 8-lane predicate"
+       primitive — building it takes 5+ ops (`svindex`+`svdup`+
+       `svlsl`+`svand`+`svcmpne`) vs NEON's single `compress_tab[mask]`
+       load.
+    3. NEON's `vqtbl1q_u8` is 1 cycle / 4 per cycle on V1; svcompact
+       can't compete on raw throughput.
+    4. V1 has 4 NEON pipes but only 2 SVE pipes, so SVE-256 has the
+       same total bytes/cycle as 2× NEON-128 — no width advantage.
+  - **SVE2 doesn't fix this either.**  SVE2 added `bdep_u8`
+    (byte-granular bit-deposit) but that's not the same primitive as
+    AVX-512 VBMI2's `vpcompressb`.  `vpcompressb` is byte-granular
+    compress — currently the only commercial ISA with this op.
+  - **Implication for the paper**: ph's NEON partition kernel
+    (compress_tab + vqtbl1q_u8) is structurally optimal for the
+    ARM ecosystem; the "Ice Lake VBMI2 moment" doesn't have an
+    ARM analogue, and won't until ARM ships a byte-granular
+    compress instruction.
+
 ## D=7 NEON TBL flat-subtree path — not done, not worth much
 
 D=2..6 all got TBL-accelerated flat-subtree paths in
