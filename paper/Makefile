@@ -52,3 +52,21 @@ watchh: | $(OUT)
 
 clean:
 	rm -rf $(OUT)
+
+dist: $(PDF) $(HTML)
+	mkdir -p out/figures
+	cp ../figures/tree_viz.html ../figures/tree_viz_data.js out/figures/
+	# Bake figures.json into fig-web.html (replaces `const CFG = null;`
+	# with a literal const CFG = {...};) so the dist HTML is self-contained
+	# and the figures.json fetch is skipped.  json.dumps does the JS-safe
+	# encoding for us; doing this with sed mishandles "/" and "&".
+	# Paths: fig-web.html + figures.json live in paper/figures/; tree_viz.*
+	# files (copied above) live at project-root figures/.
+	python3 -c "import json; \
+	  cfg = json.load(open('figures/figures.json')); \
+	  html = open('figures/fig-web.html').read(); \
+	  assert html.count('const CFG = null;') == 1, \
+	    'fig-web.html: expected exactly one CFG sentinel'; \
+	  open('out/figures/fig-web.html','w').write( \
+	    html.replace('const CFG = null;', \
+	                 'const CFG = ' + json.dumps(cfg) + ';'))"

@@ -28,10 +28,18 @@
 </details>
 
 <script>
-/* fig-web.html lives at paper/figures/.  figures.json paths are
- * project-root-relative, so we prepend "../../" to resolve them
- * relative to this page. */
-const ROOT_PREFIX = '../../';
+/* ROOT_PREFIX is prepended to figures.json's project-root-relative
+ * tool.web paths (e.g. "figures/tree_viz.html").  Two modes:
+ *
+ *   dev:  fig-web.html lives at paper/figures/, fetches figures.json
+ *         at runtime, walks "../../" back to the project root.
+ *   dist: paper/Makefile's `dist` target overwrites the CFG sentinel
+ *         below with the inlined contents of figures.json and copies
+ *         both this file and the tool viewers into out/figures/.
+ *         "../" walks to out/ which then plays the role of the
+ *         project root for tool.web resolution. */
+const CFG = null;
+const ROOT_PREFIX = CFG ? '../' : '../../';
 
 const status = document.getElementById('status');
 const help   = document.getElementById('help');
@@ -47,12 +55,14 @@ async function main() {
     const q = new URLSearchParams(window.location.search);
     const name = q.get('name');
 
-    let cfg;
-    try {
-        cfg = await (await fetch('figures.json')).json();
-    } catch (e) {
-        setError(`failed to load figures.json: ${e}`);
-        return;
+    let cfg = CFG;
+    if (cfg === null) {
+        try {
+            cfg = await (await fetch('figures.json')).json();
+        } catch (e) {
+            setError(`failed to load figures.json: ${e}`);
+            return;
+        }
     }
 
     /* Always populate the help list. */
