@@ -10,11 +10,11 @@
 They give me headaches. ]
 
 Wavelet trees, introduced in @grossi2003wt, are a popular structure used in
-many different applications, typically succint-indices, full-text indexing,
+many different applications, typically succinct indexing, full-text indexing,
 and even compression (see @ferragina2009myriad).
 
-#PH reuses the idea of a "tree of bitmaps" from wavelet trees, but to author's knowledge,
-most other aspects of the solutions are quite different, see @tab-wavelet for comparison.
+#PH reuses the idea of a "tree of bitmaps" from wavelet trees, but to the author's knowledge,
+most other aspects of the solutions are quite different; see @tab-wavelet for comparison.
 Still, there is definitely some interesting overlap, especially around wavelet-tree creation, suggesting
 that ideas from wavelet-trees research could be applied to #PH and the other way around.
 For example, @dinklage2021jea proposes a _bottom-up building_ of wavelet trees,
@@ -50,7 +50,7 @@ table(
     [Navigate query positions through levels],
     [Reconstruct whole dense output stream],
   [Node bitmap constraints],
-    [Often must remain rank/select-friend, e.g. use RRR @rrr2007],
+    [Often must remain rank/select-friendly, e.g. use RRR @rrr2007],
     [Can use decode-friendly encodings, including FSE/ANS],
   [Tree shape],
     [Fixed/balanced, Huffman-shaped, wavelet matrix variants, etc.],
@@ -62,7 +62,7 @@ table(
     [Often whole sequence/static text index],
     [Block codec, streaming possible]
 ),
-caption: [Comparision of wavelet trees and  #PH]
+caption: [Comparison of wavelet trees and #PH]
 )<tab-wavelet>
 ]
 

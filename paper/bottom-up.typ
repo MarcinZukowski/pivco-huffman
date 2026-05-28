@@ -2,8 +2,8 @@
 
 = Going Bottom-Up<bottom-up>
 
-In @sideways we process the tree *top-down*,
- which is a very natural way, directly translating to the "textbook" Huffman decoding.
+In @sideways we processed the tree *top-down*,
+ which is a very natural approach, directly translating to "textbook" Huffman decoding.
 Still, while achieving decent performance,
  it is heavily penalized by the high number of scattered writes.
 
@@ -33,9 +33,9 @@ in other places, e.g. sorting or joins in databases].
 
 This approach has some very interesting properties:
 - leaf nodes don't require any processing, as they just produce a constant value.
-  This is different than in the top-down approach, where we had to apply a `scatter` primitive
+  This is different from the top-down approach, where we had to apply a `scatter` primitive.
 - inputs and output of each node are _dense_, alleviating the scatter problem.
-- most of the tree optimizations from @naive can be applied
+- most of the tree optimizations from @naive can be applied.
 
 #figure(
   mf("bu-tree"),
@@ -43,7 +43,7 @@ This approach has some very interesting properties:
 )<fig-bu-tree>
 
 This results in the approach presented in @fig-bu-tree.
-Note, that this tree is symmetrical to @fig-pivot-tree, with just data travelling in the opposite direction,
+Note that this tree is symmetrical to @fig-pivot-tree, with just data traveling in the opposite direction,
  and different data flowing with the bitmaps (symbols vs indices).
 
 == Bottom-up tree operations
@@ -61,7 +61,7 @@ Note, that this tree is symmetrical to @fig-pivot-tree, with just data travellin
 
     [`P`],  [`M`], [`merge` is symmetrical to `partition`],
     [`PR`], [`M`], [`merge` for the root node is identical to other cases],
-    [`PH`], [`MC`], [`merge_constant` - special `merge` variants where one input is constant],
+    [`PH`], [`MC`], [`merge_constant` - special `merge` variant where one input is constant],
     [`C`],  [--], [Note that in bottom-up multiple leaves can be "constant"],
     [`S1`], [--],  [No operation needed for leaves when going bottom up],
     [`S2`], [`M2`],   [`merge_two` - merges two constant symbols into output],
@@ -73,7 +73,7 @@ caption: [Primitives used in bottom-up processing and their top-down equivalents
 @fig-bu-ops shows the example tree we used before, but this time with operations used for the bottom-up processing.
 Again, it is straightforwardly symmetrical to @treeopt-flat.
 
-Note, that the _most frequent symbol_ optimization from the top-down approach is not applicable
+Note that the _most frequent symbol_ optimization from the top-down approach is not applicable
 when going bottom-up.
 This is because the final merge operation in root will always write the entire output sequence anyway.
 The other tree optimizations apply directly.

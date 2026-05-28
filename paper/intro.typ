@@ -40,7 +40,7 @@ but rather "canonical" coding from @schwartz1964canonical.
 ]
 
 In classical Huffman coding, each symbol is encoded using a code (a sequence of bits),
-with more frequent bits getting shorter codes.
+with more frequent symbols getting shorter codes.
 @fig-huf-tree shows a Huffman tree for the word "huffman", and @fig-huf-decode
 shows a naive decoding algorithm for decoding one symbol.
 For example, to decode symbol #sym("h"), we traverse tree using bits #sym("1 0 1") to get
@@ -48,12 +48,12 @@ to the proper leaf node representing that symbol.
 
 == Modern Huffman solutions <sota>
 
-Implementation from @fig-huf-decode is not very performant, as it uses a lot of opereations
+Implementation from @fig-huf-decode is not very performant, as it uses a lot of operations
 and is not friendly for modern CPUs.
 Instead, modern Huffman decoding implementations use a _decoding table_, which allows decoding
 an entire symbol without traversing its code bit by bit.
 The size of supported code lengths is typically constrained, e.g. to _L=11_ bits.
-Then a table of _2^L_ is created, allowing the following implementation:
+Then a table of size _2^L_ is created, allowing the following implementation:
 ```c
   code_bits = peek_bits(L);
   emit_symbol(decoding_table[code_bits].symbol);
@@ -61,13 +61,13 @@ Then a table of _2^L_ is created, allowing the following implementation:
 ```
 
 Such code can be further accelerated by using multiple cursors (@giesen2014interleaved, @giesen2023oodle),
-or by building a table that decodes 2 symbols in one iteration instead of one.
+or by building a table that decodes two symbols in one iteration instead of one.
 
 We measured various Huffman decoding implementations, and the most performant solutions we found were:
 
-- *#h0* - part of the open source FSE (@fse) library, which is also a building block of the popular zstd compression (@zstd).
+- *#h0* - part of the open-source FSE (@fse) library, which is also a building block of the popular zstd compression library (@zstd).
   Implemented in pure C, permissive license.
-- *oodle-huffman* - Huffman decoder from Ooodle (@giesen2021oodle) - a proprietary compression library by RAD Game Tools.
+- *oodle-huffman* - Huffman decoder from Oodle (@giesen2021oodle) - a proprietary compression library by RAD Game Tools.
   Implemented in C with a lot of assembly optimizations.
   Oodle requires a license for most uses.
 
@@ -144,7 +144,7 @@ while not active.empty():            // if we still have work to do
   vals = hash_table_vals(active)
   // compute comparisons
   comp_results = compare(vals, keys, active)
-  // split into hits if equal, active if not - those needs more work
+  // split into hits if equal, active if not - those need more work
   split_on_equality(comp_results, &active, &hits)
   // get all the next positions for all still active records
   active = hash_table_next(active)

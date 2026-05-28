@@ -47,12 +47,12 @@ data.
 Each node receives all the bits of the codes that pass through it, and navigates
 these codes to its children, where another bitmap is used for the next step.
 
-Note, that while logically this representation contains the same information as standar Huffman coding,
+Note that while logically this representation contains the same information as standard Huffman coding,
 it typically stores bitmaps byte-aligned.
 This might lead to a _marginally worse_ compression ratio due to byte-padding.
 However, for non-trivial datasets this overhead is acceptable if this approach provides other benefits.
 
-This data representation and tree traversal are the basis for *_pivot-coded Huffman_ (#PH)* presented in this paper.
+This data representation and tree traversal are the basis for *_pivot-coded Huffman_ (#PH)*, presented in this paper.
 In this section we present the _initial_ implementation of this approach, which is actually
 _not_ used in the final solution.
 Still, since it is a more _natural_ approach, we describe it first, and use it to introduce
@@ -156,8 +156,8 @@ and, as expected, the performance is very sub-par.
 There are two main reasons for this:
 
 - for each decoded symbol, we perform multiple operations: we run `partition` for each bit in the code,
-  followed by the final `scatter` for each leaf (`len(code)+1` operations in total).
-- the decoding partitions as written are not efficient
+  followed by a final `scatter` at each leaf (`len(code)+1` operations in total).
+- the `partition` and `scatter` primitives, as written, are not efficient.
 
 In the following two sections we will discuss how to address both problems.
 
@@ -334,8 +334,8 @@ together, further reducing ops/byte.
   caption: [Combined impact of tree optimizations on performance]
 )<tab-tree-opt>
 
-@tab-tree-opt shows that applying all optimizations above allows improving #PH performance
-by up to factor two.
+@tab-tree-opt shows that applying all the optimizations above allows improving #PH performance
+by up to a factor of two.
 However, as we will demonstrate later, these optimizations are even more important
 with faster compute primitives.
 
@@ -434,10 +434,10 @@ How it works:
 - the next iteration needs to adjust both output pointers based on `n_right`
   (`n_left` is simply `8 - n_right`)
 
-Note that this code is fully branch free, and with just a few instructions we process 8 16-bit input indices.
+Note that this code is fully branch-free, and with just a few instructions we process 8 16-bit input indices.
 We can apply a similar strategy on other architectures.
-For example, on AVX-512 one can decode even 32 16-bit index values in a few steps like that.
-The results in @prim-td-opt show how the performance of `partition` primitive
+For example, on AVX-512 one can partition even 32 16-bit index values in a few steps like that.
+The results in @prim-td-opt show how the performance of the `partition` primitive
 improved by a factor of *6x* on *m4* and *25-70x* (!) on *c8i*.
 
 === `scatter` primitives <scatter>
@@ -479,9 +479,9 @@ arithmetic and a precomputed delta between `symbol0` and `symbol1`.
   output[indices[i+7]] = vget_lane_u8(vals, 7);
 ```
 
-For `scatter_flat_D` we get an D-bit packed bitmap.
+For `scatter_flat_D` we get a D-bit packed bitmap.
 The first step is to unpack it, using an optimized unpacking kernel.
-#footnote[The performance of the used unpacking code is decent, but not as optimized as e.g. @fastlanes].
+#footnote[Our unpacking code is decent, but not as optimized as e.g. @fastlanes.].
 Then each unpacked value can be used to lookup an actual symbol to write from a table.
 For up to 64 elements, on ARM this can be done with `vqtbl*` instructions.
 For example, here's an implementation for D=5:
@@ -510,8 +510,8 @@ The second problem is the actual writing of the symbols. It boils down to the fo
 Note that with indices being ordered, but not contiguous, this results in a lot of
 individual writes.
 All 3 versions of `scatter` use this approach.
-This tends to saturate the CPUs load/store units, and limits further performance improvements.
-The author does not know of an efficient solution to this on either x86 or ARM architectures.
+This tends to saturate the CPU's load/store units, and limits further performance improvements.
+The author does not know of an efficient solution to this problem on either x86 or ARM architectures.
 Only AVX-512 provides _scatter_ instructions, but they do not seem applicable here,
 as they only work with 32- and 64-bit values.
 
@@ -532,15 +532,15 @@ as they only work with 32- and 64-bit values.
   caption: [Performance of SIMD optimized primitive implementations (ns/code)]
 )<prim-td-opt>
 
-@prim-td-opt demonstrates the memory writes problem.
+@prim-td-opt demonstrates the memory-writes problem.
 You can see even the seemingly trivial `simd_s1_scatter` taking 2-5x more time per element
 than `simd_partition`.
-We also see that SIMD optimizations only improved scatter performance by up to factor 2x
-comparing to @prim-td-naive.
+We also see that SIMD optimizations only improved scatter performance by up to a factor of 2x
+compared to @prim-td-naive.
 
 Note that per-dataset numbers vary due to different cardinalities.
 In particular, `proba80` has very few elements reaching `simd_s2_scatter_both`, causing a high
-per/element cost.
+per-element cost.
 
 #todo[weird c8i scatter numbers, slower than naive]
 
@@ -548,19 +548,19 @@ per/element cost.
 
 == Results
 
-@ph-td-final-bw and @ph-td-final-ratio show how
+@ph-td-final-bw and @ph-td-final-ratio show how,
 thanks to combining tree optimizations and high-performance SIMD primitives,
 this version of #PH enters the performance territory of #h0.
-We also see how with faster primitives the impact of the optimized tree shape provides
-stronger and more consistent benefits comparing to @tab-tree-opt.
+We also see how, with faster primitives, the impact of the optimized tree shape provides
+stronger and more consistent benefits compared to @tab-tree-opt.
 
-Notably, the performance really depends on dataset - in `proba80`, with its lower
-entropy / shorter codes, average number of operations per symbol is much smaller.
-This behaviour is unique to #PH, and allows it to decidedly beat #h0 on such
+Notably, the performance depends heavily on the dataset - on `proba80`, with its lower
+entropy and shorter codes, the average number of operations per symbol is much smaller.
+This behavior is unique to #PH, and allows it to decidedly beat #h0 on such
 distributions.
 
 Still, the performance is not consistently impressive - this is mostly
-impacted by the bottleneck of writes in `scatter` primitives.
+due to the write bottleneck in the `scatter` primitives.
 
 In the next Section we'll discuss a different approach to #PH that works around this problem.
 

@@ -63,13 +63,13 @@
 ]
 = Testing methodology <testing-method>
 
-In our testing we use datasets from @datasets an machines from @machines.
+In our testing we use datasets from @datasets and machines from @machines.
 
 Unless stated otherwise, we compute the time that _includes_ the setup time.
 
-Whenever we test encoding/decoding bandwitdth, we use the following setup:
-We do 10 _runs_, where one _run_, for each algorithm, executes 10 _repetitions_ of 1MB encoding/decoding.
-Then, we take the minimum time from all runs.
+Whenever we test encoding/decoding bandwidth, we use the following setup:
+We do 10 _runs_, each _run_ does 10 _repetitions_ of 1MB encoding/decoding.
+Then, we take the best time across the runs.
 
 = Failed optimizations
 

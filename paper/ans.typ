@@ -2,12 +2,12 @@
 
 = Breaking the bit-barrier <ans>
 
-Huffman encoding, while ubiquitous, has one well known, key limitation.
-The code lengths are limited to full bits.
+Huffman encoding, while ubiquitous, has one well-known, key limitation:
+its code lengths are constrained to whole bits.
 That means, for some distributions, it is further from entropy-optimal
 than desired.
 
-A well known solution to this problem is arithmetic coding (AC, @arithmetic), however,
+A well-known solution to this problem is arithmetic coding (AC, @arithmetic); however,
 it has not been popular due to its performance and patent controversies.
 Luckily, Jarek Duda proposed _ANS-based encoding_ (@dudaans),
 which solves both problems.
@@ -28,8 +28,8 @@ emit_symbol(t.symbol);                  //decoded symbol
 
 While similar, the critical difference is that we see a `state` variable which
 is carried through the iterations and mutated depending on the data.
-Also, the `decoding_table` is constructed such that for the same code
-a different number of bits may be consumed.
+Also, the `decoding_table` is constructed such that, for the same symbol,
+a different number of bits may be consumed depending on the current `state`.
 
 As a result, the same approach to tANS decoding as we did to Huffman in @sideways
 is not directly applicable.
@@ -106,7 +106,7 @@ also very close to the *0.185* bits Huffman gap.
 Note that the sibling node of #sym("A") has an even stronger skew, but with only 1.4% of data reaching it,
 optimizing it is not worth it.
 
-== Pivco-Huffman+ANS implementation
+== #PHA implementation
 
 The analysis above suggests, that for most datasets applying ANS-based encoding is not worth additional complexity.
 This is consistent with what e.g. @fse does - the literal stream is only Huffman compressed, but the significantly
@@ -114,8 +114,8 @@ skewed length/offset data is tANS-compressed.
 
 Additionally, we see how for datasets where ANS-encoding _would_ be useful, the vast majority of benefit
 often comes from just a few (usually one, sometimes two) nodes in the Huffman tree.
-To exploit that, #PH was extended with _applying ANS-based encoding only for the nodes where it matters_.
-This means, that for most datasets, no ANS-overhead is paid, and if it's applied, it's only paid for a small subset of data.
+To exploit that, #PH was extended with _selective ANS encoding — applied only to the nodes where it matters_.
+This means that for most datasets no ANS overhead is paid, and when it is applied, it is only paid for a small subset of the data.
 
 A concrete implementation of which node should be FSE-selected is currently as follows:
 - node needs to have at least `PIVCO_FSE_MIN_BITMAP_BYTES` (32 bytes/ 256 bits default)
@@ -125,12 +125,12 @@ A concrete implementation of which node should be FSE-selected is currently as f
   The motivation here is that while saving e.g. 0.2 bits for a root-node makes sense, doing it for a
   node at depth 5 (so already 5-bits long) is probably not worth it.
 
-Note, that we know all the above information purely from the symbol frequencies used to construct the Huffman tree,
+Note that we know all of the above information purely from the symbol frequencies used to construct the Huffman tree;
 we do not need to gather any additional data statistics. We _know_ when ANS will help.
 
 When we decide to compress a particular bitmap with ANS, today we use FSE (@fse).
-Note, that we compress the bitmap as _bytes_, not as bits.
-This means, that for each symbol decoded with FSE, we cover _8 symbols_.
+Note that we compress the bitmap as _bytes_, not as bits.
+This means that for each symbol decoded with FSE, we cover _8 symbols_ of the original bitmap.
 This, combined with applying FSE selectively, is critical to making #PHA efficient.
 
 One non-trivial cost of FSE is creation of decode tables.
@@ -181,7 +181,7 @@ table(
 caption: [M4 #PHA benchmark: compression ratio (higher = better) and decode
             throughput (MB/s) per engine. *ph* and #h0 are plain Huffman (≈equal
             ratio); *pha* gains ratio from ANS-coded partition bitmaps; the
-            standalone *fse_x8y1* and *oo-tans* reache the best ratio (full FSE) but is
+            standalone *fse_x8y1* and *oo-tans* reach the best ratio (full FSE) but are
             the slowest.],
 )<tab-fair-m4>
 
@@ -198,6 +198,6 @@ caption: [M4 #PHA benchmark: compression ratio (higher = better) and decode
 
 In @tab-fair-m4 we compare the #PH (*ph*) and #PHA (*pha*) performance with other solutions, including Huff0, FSE and
 Oodle's TANS library.
-We see that for non-skewed dataset, *ph* and *pha* achieve the same performance, but for skewed datasets
-*pha* detects opportunity to _selectively_ apply FSE - this brings the compression ratio close to full FSE,
+We see that for non-skewed datasets, *ph* and *pha* achieve the same performance, but for skewed datasets
+*pha* detects an opportunity to _selectively_ apply FSE - this brings the compression ratio close to full FSE,
 while still achieving significantly higher decode performance.

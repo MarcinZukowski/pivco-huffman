@@ -29,7 +29,7 @@ and follows the same pattern of tree traversal with high-performance SIMD primit
           [`EP-N`], [`enc_partition_none` - both children are leaves, only produce bitmap],
           [`PKN`], [`packN` - pack codes into N-bits sequence, used for flat subtrees],
         ),
-        caption: [Primitives used in bottom-up processing and their top-down equivalents]
+        caption: [Primitives used in encoding]
       )<enc-symbols>
       ]
     ]
@@ -104,7 +104,7 @@ For #PH, we report both "end-to-end" and "prebuilt tree" results],
 @tab-enc shows the encoding performance on various datasets and hosts.
 End-to-end results show a fair comparison with other solutions.
 #PH's performance is hindered here by the Huffman-code creation time,
-dominated by sybol frequency counting.
+dominated by symbol frequency counting.
 The "prebuilt-tree" results show the actual encoding performance,
 showing e.g. how highly-skewed datasets can achieve
 very high "raw" encoding performance.
