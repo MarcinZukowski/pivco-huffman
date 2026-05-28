@@ -696,7 +696,7 @@ int part_core_neon(uint16_t *codes_la, int n, int depth,
  * Today this is a straight scalar loop; the compiler often auto-
  * vectorises it via vqtbl1q_u8 over a 256-entry LUT, but the codegen
  * is fragile and the LSU is the bottleneck in either form (microbench
- * at extras/bench_enc_init.c established the NEON TBL pattern buys
+ * at extras/bench/bench_enc_init.c established the NEON TBL pattern buys
  * only ~11% over the scalar loop on M4 -- not worth the source
  * complexity).  Kept here as a primitive so AVX-512's actual SIMD
  * win via vpermi2w (commit 7c08c19) has a contract slot to fill. */

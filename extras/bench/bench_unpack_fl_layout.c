@@ -1,4 +1,4 @@
-/* extras/bench_unpack_fl_layout.c — D-bit unpack throughput, three layouts.
+/* extras/bench/bench_unpack_fl_layout.c — D-bit unpack throughput, three layouts.
  *
  * Variants per D ∈ {2..7}:
  *   flat_dX          : current production layout (row-major bit-packed),
@@ -13,7 +13,7 @@
  * Block = 1024 codes (FastLanes "vector"); we run 8 blocks per call so
  * N = 8192, matching pivco's block size.
  *
- * Build: cc -O3 -o bench_unpack_fl_layout extras/bench_unpack_fl_layout.c
+ * Build: cc -O3 -o bench_unpack_fl_layout extras/bench/bench_unpack_fl_layout.c
  */
 #include <arm_neon.h>
 #include <stdio.h>
@@ -22,7 +22,7 @@
 #include <string.h>
 #include <time.h>
 
-#include "../src/pivco_huffman_neon_flat.h"
+#include "../../src/pivco_huffman_neon_flat.h"
 
 #define BLOCK 1024
 #define BLOCKS 8

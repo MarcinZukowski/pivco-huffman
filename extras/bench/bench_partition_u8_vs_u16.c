@@ -63,7 +63,7 @@ static void init_tables_local(void) {
 }
 
 #ifdef __aarch64__
-#include "pivco_huffman_neon_common.h"   /* compress_tab[256][32] + compress_popcnt[256] */
+#include "../pivco_huffman_neon_common.h"   /* compress_tab[256][32] + compress_popcnt[256] */
 #include <arm_neon.h>
 
 static __attribute__((noinline))

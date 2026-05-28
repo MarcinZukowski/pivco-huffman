@@ -4,7 +4,7 @@ A multi-day investigation into whether `partition_8`'s two `vst1q_u8`
 stores per iteration could be reduced — and the conclusion that on
 Apple M4 they cannot, with the data and reasoning to back it up.
 
-Working code in [`extras/bench_coalesce.c`](extras/bench_coalesce.c).
+Working code in [`extras/bench/bench_coalesce.c`](extras/bench/bench_coalesce.c).
 Raw results in
 [`results/coalesce-m4_max-20260426.txt`](results/coalesce-m4_max-20260426.txt).
 Build via `cmake --build build --target pivco_bench_coalesce`, run
@@ -68,7 +68,7 @@ we'd issue ~1 store per iter on average — a theoretical 50% saving.
 
 Two pieces of data collected before writing any prototypes, both via
 [`bench_micro.c`](bench/bench_micro.c) and
-[`bench_partition_skew.c`](extras/bench_partition_skew.c):
+[`bench_partition_skew.c`](extras/bench/bench_partition_skew.c):
 
 ### M4 SIMD throughput probes
 
@@ -323,7 +323,7 @@ chain.  Reducing latency doesn't help when throughput is the limit.
 ## AVX-512 (Xeon Sapphire Rapids)
 
 A separate AVX-512 port lives at
-[`extras/bench_coalesce_avx512.c`](extras/bench_coalesce_avx512.c) —
+[`extras/bench/bench_coalesce_avx512.c`](extras/bench/bench_coalesce_avx512.c) —
 32-wide partition (instead of 8-wide on NEON) using `vpcompressw`.
 Three variants:
 
@@ -382,7 +382,7 @@ Remaining candidate:
 If anyone re-runs these on a different platform, the standalone benches
 reproduce the cross-platform numbers in ~30 seconds:
 - ARM64: `./build/pivco_bench_coalesce`
-- AVX-512: `cc -O3 -march=native extras/bench_coalesce_avx512.c -o ...`
+- AVX-512: `cc -O3 -march=native extras/bench/bench_coalesce_avx512.c -o ...`
 
 ## Conclusion
 
@@ -408,13 +408,13 @@ Everything has already been done that can be done.
 
 ## Files
 
-- [`extras/bench_coalesce.c`](extras/bench_coalesce.c) — six variants
+- [`extras/bench/bench_coalesce.c`](extras/bench/bench_coalesce.c) — six variants
   + two baselines, self-contained.
 - [`results/coalesce-m4_max-20260426-tree.txt`](results/coalesce-m4_max-20260426-tree.txt)
   — final M4 measurements (full set).
 - [`results/coalesce-graviton4-20260426.txt`](results/coalesce-graviton4-20260426.txt)
   — Graviton 4 measurements (full set).
-- [`extras/bench_partition_skew.c`](extras/bench_partition_skew.c) —
+- [`extras/bench/bench_partition_skew.c`](extras/bench/bench_partition_skew.c) —
   per-distribution skewness histogram tool used in the pre-experiment
   analysis.
 - [`bench/bench_micro.c`](bench/bench_micro.c) — TBL/vext throughput

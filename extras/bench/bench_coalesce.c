@@ -1,4 +1,4 @@
-/* extras/bench_coalesce.c — store-coalescing experiments for partition_8.
+/* extras/bench/bench_coalesce.c — store-coalescing experiments for partition_8.
  *
  * Three variants tested, all losers on M4.  See docs/COALESCE.md at the
  * project root for the full investigation log.  This file is the
@@ -18,7 +18,7 @@
  *                   state.  Stores 2 × 16 bytes per side per macro-block.
  *
  * Build (standalone):
- *   cc -O2 -o bench_coalesce extras/bench_coalesce.c
+ *   cc -O2 -o bench_coalesce extras/bench/bench_coalesce.c
  * Or via cmake target `pivco_bench_coalesce`.
  */
 

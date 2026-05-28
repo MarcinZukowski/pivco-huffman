@@ -190,7 +190,7 @@ Same compression ratio (both layouts pack at exactly N×D bits), but
 
 ## Microbench results — pure D-bit unpack
 
-`extras/bench_unpack_fl_layout.c` — N=8192 codes, output GB/s
+`extras/bench/bench_unpack_fl_layout.c` — N=8192 codes, output GB/s
 (one byte per code, no c2s lookup so the unpack itself is the
 work measured).
 
@@ -285,7 +285,7 @@ end-to-end speedup ≈ 1 / (1 − 0.054) − 1 ≈ +5.7%
 Round to **+5–6% on real-text decode**. Bigger on Graviton 4 because
 of the 22× D=5/D=6 microbench multiplier, but only on subtrees that
 actually use D=5/D=6 (need to check distribution histogram —
-`extras/bench_flat_subtree_stats` should have it).
+`extras/bench/bench_flat_subtree_stats` should have it).
 
 ## Findings
 
@@ -381,12 +381,12 @@ throughput).
 
 ## Files
 
-- `extras/bench_unpack_dN.c` — pure-unpack microbench, current `flat_dX`
+- `extras/bench/bench_unpack_dN.c` — pure-unpack microbench, current `flat_dX`
   vs FL-natural for D=2..6.
-- `extras/bench_unpack_fl_layout.c` — adds FL-layout (FastLanes
+- `extras/bench/bench_unpack_fl_layout.c` — adds FL-layout (FastLanes
   transposed) for D=2..7. Lift of FastLanes' published NEON unpack
   reference impls.
-- `extras/bench_fl_unpack.c` — the original D=2-only experiment that
+- `extras/bench/bench_fl_unpack.c` — the original D=2-only experiment that
   kicked this off.
 - `results/unpack_dN-m4_max-20260426.txt`
 - `results/unpack_fl_layout-m4_max-20260426.txt`

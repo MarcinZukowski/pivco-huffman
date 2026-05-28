@@ -165,7 +165,7 @@ exactly the distributions PIVCO currently loses on.
 
 ## 4. Multi-stage analysis
 
-`bench/bench_multi_stage_stats.c` measures: after a single-stage radix
+`extras/bench/bench_multi_stage_stats.c` measures: after a single-stage radix
 at `M_top = table->min_len`, what fraction of elements would land in
 non-leaf subtree bins whose **local minimum code length ≥ 2** (i.e.,
 where applying another radix at the subtree root would save more work)?
@@ -410,7 +410,7 @@ avoid.  Reverted.
   a fast direct permutation; non-flat case is 8-way-parallel in phases
   2 + 4 but still slower than `pivco_n` pending the TBL bucket work
   described in §6.
-- `bench/bench_multi_stage_stats.c` — per-distribution applicability
+- `extras/bench/bench_multi_stage_stats.c` — per-distribution applicability
   analyser used in §4.
 - `bench/bench_prefix_profile.c` — per-phase profiler used in §5
   (`./build/pivco_prefix_profile [distribution]`).  Times each of the

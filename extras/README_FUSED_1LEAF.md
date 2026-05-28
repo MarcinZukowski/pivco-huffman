@@ -38,7 +38,7 @@ round-trip entirely.  Rough counting per 8 parent elements:
 - **Pay:** some form of dispatch (0–8 stores per chunk depending on
   popcount).
 
-The one-leaf-stats analyzer (`bench/bench_one_leaf_stats.c`) confirmed
+The one-leaf-stats analyzer (`extras/bench/bench_one_leaf_stats.c`) confirmed
 the shape is common on the distributions where PIVCO already wins:
 proba80 hits the non-prefill one-leaf path for **99.2%** of all non-root
 partition work, proba50 for 99.9%, geometric for 95.8%.  English / zipfian

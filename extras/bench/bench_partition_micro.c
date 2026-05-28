@@ -22,7 +22,7 @@
 #include <stdint.h>
 
 #ifdef __aarch64__
-#include "pivco_huffman_neon_common.h"
+#include "../pivco_huffman_neon_common.h"
 #include <arm_neon.h>
 
 static inline int micro_partition_8(const uint16_t *src, uint8_t mask,

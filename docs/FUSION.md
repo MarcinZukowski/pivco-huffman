@@ -8,7 +8,7 @@ over-promise vs. real-decoder gains by 2–5×.
 **Status: in-source fusion code removed; preserved as `extras/fusion.diff`.**
 Apply that patch on top of pre-fusion `bcc092b` to restore the working
 fusion implementation (NEON: full coverage; SSE: LEAF-only). The
-microbenches in `extras/bench_fusion_v{3,4,5}_*_cnt.cpp` are kept in tree
+microbenches in `extras/bench/bench_fusion_v{3,4,5}_*_cnt.cpp` are kept in tree
 as standalone research artifacts — they don't depend on the production
 fusion API.
 
@@ -63,7 +63,7 @@ typedef struct {
 } pivco_la_neon_t;
 ```
 
-Caller pattern (see `extras/bench_dual_decode_test.c`):
+Caller pattern (see `extras/bench/bench_dual_decode_test.c`):
 ```c
 g_pivco_fusion_enabled = 1;
 for (each block N) {
@@ -112,7 +112,7 @@ blocks of a stream, so root-shape is fixed).
 We went through **five versions** of microbench. Each fixed a specific
 flaw the previous one had.
 
-### v1/v2 (`extras/bench_fusion_micro_cnt.cpp`, `_v2_cnt.cpp`)
+### v1/v2 (`extras/bench/bench_fusion_micro_cnt.cpp`, `_v2_cnt.cpp`)
 Earliest probes. Sketched the partition-vs-scatter overlap question
 without representative element counts.
 
@@ -328,11 +328,11 @@ Files modified for fusion:
 - `include/pivco_prof.h` + `src/pivco_prof.c`:
   - PROF_*_FUSED counter IDs (separate timing for fused vs plain primitives)
   - PROF_ROOT_BOTH_LEAVES (for the dedicated root both-leaves path)
-- `bench/bench_profile_english.c`:
+- `extras/bench/bench_profile_english.c`:
   - Two-pass profiler (NO FUSION + FUSED) so per-primitive deltas are visible
-- `extras/bench_dual_decode_test.c` and `_x86.c`:
+- `extras/bench/bench_dual_decode_test.c` and `_x86.c`:
   - Correctness + perf test for fusion (2-block decode, fusion on/off)
-- `extras/bench_fusion_v4_*.cpp`, `bench_fusion_v5_real_kernel_cnt.cpp`:
+- `extras/bench/bench_fusion_v4_*.cpp`, `bench_fusion_v5_real_kernel_cnt.cpp`:
   - Block-realistic + real-kernel microbenches (NEON, SSE, AVX-512)
 
 `g_pivco_fusion_enabled` defaults to **0**. Fusion is opt-in via the
@@ -376,14 +376,14 @@ SSE backend's structure) — not as a perf win.
 
 ## Cross-references
 
-- `extras/bench_fusion_v3_cnt.cpp` — original microbench (over-predicted)
-- `extras/bench_fusion_v4_cnt.cpp` — block-realistic microbench
-- `extras/bench_fusion_v5_real_kernel_cnt.cpp` — real-kernel microbench (definitive)
-- `extras/bench_dual_decode_test.c` — NEON correctness + perf
-- `extras/bench_dual_decode_test_x86.c` — SSE correctness + perf
-- `bench/bench_profile_english.c` — prof comparison (NO FUSION vs FUSED)
+- `extras/bench/bench_fusion_v3_cnt.cpp` — original microbench (over-predicted)
+- `extras/bench/bench_fusion_v4_cnt.cpp` — block-realistic microbench
+- `extras/bench/bench_fusion_v5_real_kernel_cnt.cpp` — real-kernel microbench (definitive)
+- `extras/bench/bench_dual_decode_test.c` — NEON correctness + perf
+- `extras/bench/bench_dual_decode_test_x86.c` — SSE correctness + perf
+- `extras/bench/bench_profile_english.c` — prof comparison (NO FUSION vs FUSED)
 - `IDEAS.md` — broader optimization ideas list
-- `KERNELS.md` — NEON kernel walkthroughs
+- `docs/KERNELS.md` — NEON kernel walkthroughs
 
 ## Recovery
 
@@ -394,7 +394,7 @@ To resurrect the implementation:
 git checkout bcc092b -- src/pivco_huffman_neon.c src/pivco_huffman_x86.c \
                         src/pivco_huffman.c include/pivco_huffman.h \
                         include/pivco_prof.h src/pivco_prof.c \
-                        bench/bench_profile_english.c
+                        extras/bench/bench_profile_english.c
 git apply extras/fusion.diff
 ```
 

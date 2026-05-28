@@ -20,7 +20,7 @@ already powered the full-tree flat path.
 # Prerequisites (first time only)
 git clone --depth 1 https://github.com/cyan4973/FiniteStateEntropy.git ext/fse
 git clone --depth 1 https://github.com/rygorous/ryg_rans.git ext/ryg_rans
-git clone --depth 1 https://github.com/google/brotli.git ext/brotli  # optional, for extras/bench_brotli
+git clone --depth 1 https://github.com/google/brotli.git ext/brotli  # optional, for extras/bench/bench_brotli
 
 # Build
 cmake -B build -DCMAKE_BUILD_TYPE=Release
@@ -106,13 +106,13 @@ five phases ending 2026-05-14; before that, each backend had its own
 - `extras/legacy_td/README.md` — git-archaeology pointer for the retired top-down decoders
 - `bench/bench_main.c` — benchmark harness (4M × repeats methodology)
 - `bench/bench_micro.c` — per-primitive microbench (scatter, partition, flat decode, TBL/vext throughput probes, store-port topology)
-- `extras/bench_flat_subtree_stats.c` — flat-subtree applicability analyzer
-- `extras/bench_partition_skew.c` — per-distribution partition-skewness histogram
-- `extras/bench_multicore.c` — multi-threaded decode scaling vs huf0_x2
-- `extras/bench_coalesce.c` + `bench_coalesce_avx512.c` — store-coalescing experiments (all losers)
+- `extras/bench/bench_flat_subtree_stats.c` — flat-subtree applicability analyzer
+- `extras/bench/bench_partition_skew.c` — per-distribution partition-skewness histogram
+- `extras/bench/bench_multicore.c` — multi-threaded decode scaling vs huf0_x2
+- `extras/bench/bench_coalesce.c` + `bench_coalesce_avx512.c` — store-coalescing experiments (all losers)
 - `extras/profile_m4.sh` + `profile_xctrace_parse.py` — one-line xctrace Time Profiler capture + per-source-line aggregator
 - `README.md` — benchmark results, analysis, primary project doc
-- `KERNELS.md` — step-by-step NEON kernel walkthroughs (worked examples per intrinsic)
+- `docs/KERNELS.md` — step-by-step NEON kernel walkthroughs (worked examples per intrinsic)
 - `IDEAS.md` — full optimization-ideas log (shipped / discarded / open)
 - `docs/COALESCE.md` — partition store-coalescing investigation log
 - `docs/PREFIX_RADIX.md` — historical design record of the prefix-radix path

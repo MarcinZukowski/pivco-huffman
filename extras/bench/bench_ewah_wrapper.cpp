@@ -1,6 +1,6 @@
 /* bench_ewah_wrapper — C-callable shim around Daniel Lemire's EWAH
  * library (https://github.com/lemire/EWAHBoolArray, vendored at
- * ext/ewah).  Used by extras/bench_golomb.c to add an EWAH column
+ * ext/ewah).  Used by extras/bench/bench_golomb.c to add an EWAH column
  * to the Rice vs FSE microbench.
  *
  * Two entry points, both matching the signatures of the Rice

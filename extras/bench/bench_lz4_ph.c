@@ -27,7 +27,7 @@
 #include "lz4hc.h"
 #include "zstd.h"
 
-#include "lz4_split.h"
+#include "../lz4_split.h"
 
 #include <math.h>
 #include <stdint.h>

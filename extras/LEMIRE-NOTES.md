@@ -2,7 +2,7 @@
 
 Findings from porting [lemire/counters](https://github.com/lemire/counters) v4.1.0 into pivco-huffman to time NEON `partition_8` on Apple M4. **The framework is correct;** these are user-side gotchas worth documenting in the README.
 
-Reproducer: `extras/bench_lemire_compare.cpp` (commit `a46b0e1`).
+Reproducer: `extras/bench/bench_lemire_compare.cpp` (commit `a46b0e1`).
 
 ## Gotcha 1 — `[&]` capture reloads `vector::data()` every iteration
 

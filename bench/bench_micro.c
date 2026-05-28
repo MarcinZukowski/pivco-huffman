@@ -382,7 +382,7 @@ static void bench_vext_throughput(int reps)
  */
 /* Store-coalescing prototypes (per-iter switch / per-iter TBL / 4-iter
  * macro-block) lived here briefly; all three lost to baseline on M4
- * (38–78% slower).  They're moved to extras/bench_coalesce.c with a
+ * (38–78% slower).  They're moved to extras/bench/bench_coalesce.c with a
  * full discussion in docs/COALESCE.md.  Keeping only the throughput probes
  * and store-port topology probe here. */
 #if 0
@@ -596,7 +596,7 @@ static void bench_partition_coalesce(const uint16_t *src, const uint8_t *bitmap,
         if (so_far_r > 0) vst1q_u8(right_bytes + n_right_bytes, accum_r);
     }
 }
-#endif /* 0 — coalesce variants moved to extras/bench_coalesce.c */
+#endif /* 0 — coalesce variants moved to extras/bench/bench_coalesce.c */
 
 /* Helper: fill a bitmap with `pct_full` percent of bytes = 0xFF
  * (popcount 8 → advance 8, no overlap) and the rest = 0x1F
@@ -1772,7 +1772,7 @@ int main(void)
            ns_per_elem, 1.0 / ns_per_elem);
 
     /* Coalesce-store partition prototypes were tested here; all three
-     * lost to baseline on M4.  Code moved to extras/bench_coalesce.c
+     * lost to baseline on M4.  Code moved to extras/bench/bench_coalesce.c
      * with the full investigation in docs/COALESCE.md. */
 
     /* Memset */

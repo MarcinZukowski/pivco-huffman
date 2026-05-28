@@ -396,7 +396,7 @@ static int build_table_finish(const uint8_t lengths[PIVCO_MAX_SYMBOLS],
      * length, where the partition-path savings are deepest).
      *
      * See IDEAS.md "Flat-aware Huffman tree restructurer" for the gap
-     * analysis (extras/bench_flat_optimal.c).
+     * analysis (extras/bench/bench_flat_optimal.c).
      */
 
     /* Per-length: collect symbols in symbol-value order.

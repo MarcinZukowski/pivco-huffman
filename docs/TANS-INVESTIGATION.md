@@ -5,7 +5,7 @@ Investigation log for the "PIVoted-COding tANS" idea sketched in
 keeping the flat-subtree fast path.  Goal of this session was to bound
 the achievable upside (ratio-wise) before committing to a prototype.
 
-Tool: `extras/bench_tans_bound.c`, builds `build/pivco_tans_bound`.
+Tool: `extras/bench/bench_tans_bound.c`, builds `build/pivco_tans_bound`.
 Modes added during the session:
 
 ```
@@ -595,7 +595,7 @@ decode than on uniform-ish data.
 
 ## Tooling additions in this session
 
-- `extras/bench_tans_bound.c` — three modes:
+- `extras/bench/bench_tans_bound.c` — three modes:
   - default / `--dist` / `--dist-all`: per-histogram huff vs
     huff_flat vs shannon (entropy-only, no sampling).
   - `<file> [<file>...]`: per-block on real files (same metrics).

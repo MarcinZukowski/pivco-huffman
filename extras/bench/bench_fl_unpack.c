@@ -1,4 +1,4 @@
-/* extras/bench_fl_unpack.c — FastLanes-style D-bit unpack vs our
+/* extras/bench/bench_fl_unpack.c — FastLanes-style D-bit unpack vs our
  * flat_dN_unpack helpers.
  *
  * Investigation: FastLanes (cwida/FastLanes) uses a *transposed* layout
@@ -18,7 +18,7 @@
  *   flat_direct_d2_fl       : FL-style (1 load + 4 shift+mask groups +
  *                             4 c2s TBLs + 1 vst4q, 64 codes/iter).
  *
- * Build:  cc -O3 -o bench_fl_unpack extras/bench_fl_unpack.c
+ * Build:  cc -O3 -o bench_fl_unpack extras/bench/bench_fl_unpack.c
  */
 #include <arm_neon.h>
 #include <stdio.h>

@@ -27,8 +27,8 @@ Plus the supporting per-backend TD-only helpers (`decode_node_*`,
 
 Two bench programs that A/B-compared TD against BU also retired:
 
-  - `extras/bench_bu_decoder.c`     (NEON A/B)
-  - `extras/bench_bu_decoder_x86.c` (x86 A/B)
+  - `extras/bench/bench_bu_decoder.c`     (NEON A/B)
+  - `extras/bench/bench_bu_decoder_x86.c` (x86 A/B)
 
 ## Where to find them
 

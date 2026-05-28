@@ -40,7 +40,7 @@
 int main(void) { puts("bench_encode_split: NEON only"); return 0; }
 #else
 
-#include "pivco_huffman_neon_common.h"
+#include "../pivco_huffman_neon_common.h"
 #include <arm_neon.h>
 
 #define BLK 8192

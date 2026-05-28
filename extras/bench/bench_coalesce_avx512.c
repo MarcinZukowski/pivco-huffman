@@ -1,4 +1,4 @@
-/* extras/bench_coalesce_avx512.c — AVX-512 store-coalescing experiment.
+/* extras/bench/bench_coalesce_avx512.c — AVX-512 store-coalescing experiment.
  *
  * Same idea as bench_coalesce.c but for the AVX-512 32-wide partition
  * (production: src/pivco_huffman_avx512.c).  Three variants:
@@ -17,7 +17,7 @@
  *
  * Build (Xeon AVX-512 VBMI2):
  *   cc -O3 -march=native -o bench_coalesce_avx512 \
- *     extras/bench_coalesce_avx512.c
+ *     extras/bench/bench_coalesce_avx512.c
  *
  * The AVX-512 production backend already exists in
  * src/pivco_huffman_avx512.c — this bench reproduces its store

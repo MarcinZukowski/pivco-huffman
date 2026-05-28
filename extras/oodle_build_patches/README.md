@@ -26,7 +26,7 @@ The recipe deliberately builds **only** `liboodle-data-static.a`:
 
 ```sh
 # Assumes ext/oodle is a symlink to your OodleUE clone (see
-# extras/bench_oodle_wrapper.h for the symlink-setup recipe).
+# extras/bench/bench_oodle_wrapper.h for the symlink-setup recipe).
 cp build-CMakeLists.txt    ext/oodle/build/CMakeLists.txt
 cp data-CMakeLists.txt     ext/oodle/build/data/CMakeLists.txt
 cp data-Build.cmake        ext/oodle/build/data/Build.cmake

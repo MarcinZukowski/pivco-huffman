@@ -40,7 +40,7 @@
 #include <time.h>
 
 /* Lemire's EWAH (Enhanced Word-Aligned Hybrid) — vendored at ext/ewah,
- * wrapped via extras/bench_ewah_wrapper.cpp.  Built in when CMake
+ * wrapped via extras/bench/bench_ewah_wrapper.cpp.  Built in when CMake
  * detects ext/ewah; otherwise the EWAH columns just stay empty. */
 #ifdef PIVCO_HAS_EWAH
 extern size_t ewah_encode(const uint8_t *bm, size_t n_bits,
@@ -250,7 +250,7 @@ static int rice_decode(const uint8_t *enc, size_t enc_len,
 
 /* ============================================================
  *  FSE x=8 (wide-cursor) encode + decode.  Lifted from
- *  extras/bench_fse_xy_micro.c — the "fast FSE" the IDEAS entry
+ *  extras/bench/bench_fse_xy_micro.c — the "fast FSE" the IDEAS entry
  *  benchmarks against.  Stock FSE library ships x=2 in
  *  FSE_compress/FSE_decompress; the wide-cursor microbench shows
  *  x=8 closes most of the per-node decode gap to huf0_x2.

@@ -309,7 +309,7 @@ if(BUILD_BENCH)
     add_executable(pivco_huffman_bench
         bench/bench_main.c
         bench/bench_distributions.c
-        bench/bench_rans.cpp
+        extras/bench/bench_rans.cpp
     )
     target_link_libraries(pivco_huffman_bench pivco_huffman huf0 m)
     target_include_directories(pivco_huffman_bench PRIVATE ext/fse/lib ext/ryg_rans)
@@ -374,20 +374,20 @@ if(BUILD_BENCH)
         bench/bench_distributions.c
     )
     target_link_libraries(pivco_fair_bench pivco_huffman huf0 m ph_td)
-    target_include_directories(pivco_fair_bench PRIVATE include src ext/fse/lib extras ${PHTD_DIR}/include)
+    target_include_directories(pivco_fair_bench PRIVATE include src ext/fse/lib extras extras/bench ${PHTD_DIR}/include)
     if(PHTD_SIMD_DEF)
         target_compile_definitions(pivco_fair_bench PRIVATE ${PHTD_SIMD_DEF})
     endif()
 
     add_executable(pivco_fse_tune
-        bench/bench_fse_tune.c
+        extras/bench/bench_fse_tune.c
         bench/bench_distributions.c
     )
     target_link_libraries(pivco_fse_tune pivco_huffman huf0 m)
-    target_include_directories(pivco_fse_tune PRIVATE include src ext/fse/lib extras)
+    target_include_directories(pivco_fse_tune PRIVATE include src ext/fse/lib extras extras/bench)
 
     add_executable(pivco_huffman_bench_encode
-        bench/bench_encode.c
+        extras/bench/bench_encode.c
         bench/bench_distributions.c
     )
     target_link_libraries(pivco_huffman_bench_encode pivco_huffman huf0 m)
@@ -400,7 +400,7 @@ if(BUILD_BENCH)
     # comparison stays reproducible if libjxl/brotli ever change.
     if(HAVE_BROTLI_HUFFMAN)
         add_executable(pivco_bench_brotli
-            extras/bench_brotli.c
+            extras/bench/bench_brotli.c
             bench/bench_distributions.c
         )
         target_link_libraries(pivco_bench_brotli
@@ -415,13 +415,13 @@ if(BUILD_BENCH)
 
     if(TARGET_ARCH STREQUAL "arm64" OR TARGET_ARCH STREQUAL "aarch64")
         add_executable(pivco_encode_split_micro
-            extras/bench_encode_split.c
+            extras/bench/bench_encode_split.c
         )
         target_link_libraries(pivco_encode_split_micro pivco_huffman m)
         target_include_directories(pivco_encode_split_micro PRIVATE src)
 
         add_executable(pivco_enc_init_micro
-            extras/bench_enc_init.c
+            extras/bench/bench_enc_init.c
         )
         target_link_libraries(pivco_enc_init_micro pivco_huffman m)
     endif()
@@ -429,7 +429,7 @@ if(BUILD_BENCH)
     # Partition u8 vs u16 microbench: works on any tier (each ISA is
     # #ifdef-gated inside the source).
     add_executable(pivco_partition_u8_vs_u16
-        extras/bench_partition_u8_vs_u16.c
+        extras/bench/bench_partition_u8_vs_u16.c
     )
     target_link_libraries(pivco_partition_u8_vs_u16 pivco_huffman m)
     target_include_directories(pivco_partition_u8_vs_u16 PRIVATE src)
@@ -437,7 +437,7 @@ if(BUILD_BENCH)
     # K_right wire-format storage analyzer (still useful after the
     # K_right format landed -- analyzes per-dist storage cost).
     add_executable(pivco_bench_kr_storage
-        extras/bench_kr_storage.c
+        extras/bench/bench_kr_storage.c
         bench/bench_distributions.c
     )
     target_link_libraries(pivco_bench_kr_storage pivco_huffman huf0 m)
@@ -452,25 +452,25 @@ if(BUILD_BENCH)
     target_link_libraries(pivco_bench_prim pivco_huffman m)
 
     add_executable(pivco_huffman_profile_english
-        bench/bench_profile_english.c
+        extras/bench/bench_profile_english.c
         bench/bench_distributions.c
     )
     target_link_libraries(pivco_huffman_profile_english pivco_huffman m)
 
     add_executable(pivco_one_leaf_stats
-        bench/bench_one_leaf_stats.c
+        extras/bench/bench_one_leaf_stats.c
         bench/bench_distributions.c
     )
     target_link_libraries(pivco_one_leaf_stats pivco_huffman m)
 
     add_executable(pivco_multi_stage_stats
-        bench/bench_multi_stage_stats.c
+        extras/bench/bench_multi_stage_stats.c
         bench/bench_distributions.c
     )
     target_link_libraries(pivco_multi_stage_stats pivco_huffman m)
 
     add_executable(pivco_flat_subtree_stats
-        extras/bench_flat_subtree_stats.c
+        extras/bench/bench_flat_subtree_stats.c
         bench/bench_distributions.c
     )
     target_link_libraries(pivco_flat_subtree_stats pivco_huffman m)
@@ -480,7 +480,7 @@ if(BUILD_BENCH)
     # which nodes / which entropy-coding strategy.
     if(PIVCO_FSE)
         add_executable(pivco_entropy_breakdown
-            extras/bench_entropy_breakdown.c
+            extras/bench/bench_entropy_breakdown.c
             bench/bench_distributions.c
         )
         target_link_libraries(pivco_entropy_breakdown pivco_huffman m)
@@ -507,7 +507,7 @@ if(BUILD_BENCH)
     # Offline TANS-routing ratio bound: real files (per-block) or
     # MAIN bench distributions (per-histogram).
     add_executable(pivco_tans_bound
-        extras/bench_tans_bound.c
+        extras/bench/bench_tans_bound.c
         bench/bench_distributions.c
     )
     target_link_libraries(pivco_tans_bound pivco_huffman m)
@@ -515,7 +515,7 @@ if(BUILD_BENCH)
     # 4-way codec comparison: ph / phe / huf0 / fse on the same data.
     if(PIVCO_FSE)
         add_executable(pivco_bench_4way
-            extras/bench_4way.c
+            extras/bench/bench_4way.c
             bench/bench_distributions.c
         )
         target_link_libraries(pivco_bench_4way pivco_huffman huf0 m)
@@ -523,37 +523,37 @@ if(BUILD_BENCH)
 
         # Per-FSE-table-id usage histogram dumper.
         add_executable(pivco_bench_fse_table_use
-            extras/bench_fse_table_use.c
+            extras/bench/bench_fse_table_use.c
         )
         target_link_libraries(pivco_bench_fse_table_use pivco_huffman m)
     endif()
 
     add_executable(pivco_dist_stats
-        extras/bench_dist_stats.c
+        extras/bench/bench_dist_stats.c
         bench/bench_distributions.c
     )
     target_link_libraries(pivco_dist_stats pivco_huffman m)
 
     add_executable(pivco_partition_skew
-        extras/bench_partition_skew.c
+        extras/bench/bench_partition_skew.c
         bench/bench_distributions.c
     )
     target_link_libraries(pivco_partition_skew pivco_huffman m)
 
     add_executable(pivco_dense_runs
-        extras/bench_dense_runs.c
+        extras/bench/bench_dense_runs.c
         bench/bench_distributions.c
     )
     target_link_libraries(pivco_dense_runs pivco_huffman m)
 
     add_executable(pivco_mask_pair_degeneracy
-        extras/bench_mask_pair_degeneracy.c
+        extras/bench/bench_mask_pair_degeneracy.c
         bench/bench_distributions.c
     )
     target_link_libraries(pivco_mask_pair_degeneracy pivco_huffman m)
 
     add_executable(pivco_partition_micro
-        extras/bench_partition_micro.c
+        extras/bench/bench_partition_micro.c
     )
     target_link_libraries(pivco_partition_micro pivco_huffman m)
     target_include_directories(pivco_partition_micro PRIVATE src)
@@ -563,84 +563,84 @@ if(BUILD_BENCH)
     # miss per call.  Needs sudo on macOS or perf_event_paranoid=0 on Linux.
     if(TARGET_ARCH STREQUAL "arm64" OR TARGET_ARCH STREQUAL "aarch64")
         add_executable(pivco_partition_micro_cnt
-            extras/bench_partition_micro_cnt.cpp
+            extras/bench/bench_partition_micro_cnt.cpp
         )
         target_link_libraries(pivco_partition_micro_cnt
             pivco_huffman counters::counters m)
         target_include_directories(pivco_partition_micro_cnt PRIVATE src)
 
         add_executable(pivco_lemire_compare
-            extras/bench_lemire_compare.cpp
+            extras/bench/bench_lemire_compare.cpp
         )
         target_link_libraries(pivco_lemire_compare
             pivco_huffman counters::counters m)
         target_include_directories(pivco_lemire_compare PRIVATE src)
 
         add_executable(pivco_scatter_micro_cnt
-            extras/bench_scatter_micro_cnt.cpp
+            extras/bench/bench_scatter_micro_cnt.cpp
         )
         target_link_libraries(pivco_scatter_micro_cnt
             pivco_huffman counters::counters m)
         target_include_directories(pivco_scatter_micro_cnt PRIVATE src)
 
         add_executable(pivco_fusion_micro_cnt
-            extras/bench_fusion_micro_cnt.cpp
+            extras/bench/bench_fusion_micro_cnt.cpp
         )
         target_link_libraries(pivco_fusion_micro_cnt
             pivco_huffman counters::counters m)
         target_include_directories(pivco_fusion_micro_cnt PRIVATE src)
 
         add_executable(pivco_scatter_split_cnt
-            extras/bench_scatter_split_cnt.cpp
+            extras/bench/bench_scatter_split_cnt.cpp
         )
         target_link_libraries(pivco_scatter_split_cnt
             pivco_huffman counters::counters m)
         target_include_directories(pivco_scatter_split_cnt PRIVATE src)
 
         add_executable(pivco_p8_dual_cnt
-            extras/bench_p8_dual_cnt.cpp
+            extras/bench/bench_p8_dual_cnt.cpp
         )
         target_link_libraries(pivco_p8_dual_cnt
             pivco_huffman counters::counters m)
         target_include_directories(pivco_p8_dual_cnt PRIVATE src)
 
         add_executable(pivco_fusion_v2_cnt
-            extras/bench_fusion_v2_cnt.cpp
+            extras/bench/bench_fusion_v2_cnt.cpp
         )
         target_link_libraries(pivco_fusion_v2_cnt
             pivco_huffman counters::counters m)
         target_include_directories(pivco_fusion_v2_cnt PRIVATE src)
 
         add_executable(pivco_fusion_v3_cnt
-            extras/bench_fusion_v3_cnt.cpp
+            extras/bench/bench_fusion_v3_cnt.cpp
         )
         target_link_libraries(pivco_fusion_v3_cnt
             pivco_huffman counters::counters m)
         target_include_directories(pivco_fusion_v3_cnt PRIVATE src)
 
         add_executable(pivco_fusion_v4_cnt
-            extras/bench_fusion_v4_cnt.cpp
+            extras/bench/bench_fusion_v4_cnt.cpp
         )
         target_link_libraries(pivco_fusion_v4_cnt
             pivco_huffman counters::counters m)
         target_include_directories(pivco_fusion_v4_cnt PRIVATE src)
 
         add_executable(pivco_fusion_v5_real_kernel_cnt
-            extras/bench_fusion_v5_real_kernel_cnt.cpp
+            extras/bench/bench_fusion_v5_real_kernel_cnt.cpp
         )
         target_link_libraries(pivco_fusion_v5_real_kernel_cnt
             pivco_huffman counters::counters m)
         target_include_directories(pivco_fusion_v5_real_kernel_cnt PRIVATE src)
 
         add_executable(pivco_primitives_neon_cnt
-            extras/bench_primitives_neon_cnt.cpp
+            extras/bench/bench_primitives_neon_cnt.cpp
         )
         target_link_libraries(pivco_primitives_neon_cnt
             pivco_huffman counters::counters m)
         target_include_directories(pivco_primitives_neon_cnt PRIVATE src)
 
         add_executable(pivco_tree_merge_neon_cnt
-            extras/bench_tree_merge_neon_cnt.cpp
+            extras/bench/bench_tree_merge_neon_cnt.cpp
         )
         target_link_libraries(pivco_tree_merge_neon_cnt
             counters::counters m)
@@ -651,7 +651,7 @@ if(BUILD_BENCH)
     # corresponding kernels are compiled.
     if(TARGET_ARCH STREQUAL "x86_64" OR TARGET_ARCH STREQUAL "amd64")
         add_executable(pivco_micro_sse_cnt
-            extras/bench_micro_sse_cnt.cpp
+            extras/bench/bench_micro_sse_cnt.cpp
         )
         target_link_libraries(pivco_micro_sse_cnt
             pivco_huffman counters::counters m)
@@ -660,21 +660,21 @@ if(BUILD_BENCH)
         if(COMPILER_HAS_AVX512_VBMI2 AND CPU_HAS_AVX512
                                     AND NOT CPU_HAS_AVX512 STREQUAL "0")
             add_executable(pivco_micro_avx512_cnt
-                extras/bench_micro_avx512_cnt.cpp
+                extras/bench/bench_micro_avx512_cnt.cpp
             )
             target_link_libraries(pivco_micro_avx512_cnt
                 pivco_huffman counters::counters m)
             target_include_directories(pivco_micro_avx512_cnt PRIVATE src)
 
             add_executable(pivco_fusion_v3_avx512_cnt
-                extras/bench_fusion_v3_avx512_cnt.cpp
+                extras/bench/bench_fusion_v3_avx512_cnt.cpp
             )
             target_link_libraries(pivco_fusion_v3_avx512_cnt
                 pivco_huffman counters::counters m)
             target_include_directories(pivco_fusion_v3_avx512_cnt PRIVATE src)
 
             add_executable(pivco_fusion_v4_avx512_cnt
-                extras/bench_fusion_v4_avx512_cnt.cpp
+                extras/bench/bench_fusion_v4_avx512_cnt.cpp
             )
             target_link_libraries(pivco_fusion_v4_avx512_cnt
                 pivco_huffman counters::counters m)
@@ -683,28 +683,28 @@ if(BUILD_BENCH)
             # Bit-sliced (transposed) packing layout microbench --
             # classic LSB bit-pack vs bit-sliced layout for D in {3,5,7}.
             # Standalone; AVX-512 VBMI2 only.
-            add_executable(pivco_bench_bitslice extras/bench_bitslice.c)
+            add_executable(pivco_bench_bitslice extras/bench/bench_bitslice.c)
             target_compile_options(pivco_bench_bitslice PRIVATE
                 -mavx512f -mavx512bw -mavx512vbmi -mavx512vbmi2)
             target_include_directories(pivco_bench_bitslice PRIVATE src)
         endif()
 
         add_executable(pivco_fusion_v3_sse_cnt
-            extras/bench_fusion_v3_sse_cnt.cpp
+            extras/bench/bench_fusion_v3_sse_cnt.cpp
         )
         target_link_libraries(pivco_fusion_v3_sse_cnt
             pivco_huffman counters::counters m)
         target_include_directories(pivco_fusion_v3_sse_cnt PRIVATE src)
 
         add_executable(pivco_fusion_v4_sse_cnt
-            extras/bench_fusion_v4_sse_cnt.cpp
+            extras/bench/bench_fusion_v4_sse_cnt.cpp
         )
         target_link_libraries(pivco_fusion_v4_sse_cnt
             pivco_huffman counters::counters m)
         target_include_directories(pivco_fusion_v4_sse_cnt PRIVATE src)
 
         add_executable(pivco_primitives_x86_cnt
-            extras/bench_primitives_x86_cnt.cpp
+            extras/bench/bench_primitives_x86_cnt.cpp
         )
         target_compile_options(pivco_primitives_x86_cnt PRIVATE -mbmi2 -mavx2)
         target_link_libraries(pivco_primitives_x86_cnt
@@ -712,7 +712,7 @@ if(BUILD_BENCH)
         target_include_directories(pivco_primitives_x86_cnt PRIVATE src)
 
         add_executable(pivco_tree_merge_x86_cnt
-            extras/bench_tree_merge_x86_cnt.cpp
+            extras/bench/bench_tree_merge_x86_cnt.cpp
         )
         target_compile_options(pivco_tree_merge_x86_cnt PRIVATE
             -msse4.1 -mavx2 -mbmi2)
@@ -727,27 +727,27 @@ if(BUILD_BENCH)
     endif()
 
     if(TARGET_ARCH STREQUAL "arm64" OR TARGET_ARCH STREQUAL "aarch64")
-        add_executable(pivco_bench_coalesce extras/bench_coalesce.c)
+        add_executable(pivco_bench_coalesce extras/bench/bench_coalesce.c)
     endif()
     # bench_bu_decoder{,_x86} retired with the TD decoder (2026-05-14) --
     # they existed to A/B BU against TD; BU has been the production
     # decoder for weeks.
 
     add_executable(pivco_bench_multicore
-        extras/bench_multicore.c
+        extras/bench/bench_multicore.c
         bench/bench_distributions.c
     )
     target_link_libraries(pivco_bench_multicore pivco_huffman huf0 pthread m)
     target_include_directories(pivco_bench_multicore PRIVATE ext/fse/lib)
 
     add_executable(pivco_flat_optimal
-        extras/bench_flat_optimal.c
+        extras/bench/bench_flat_optimal.c
         bench/bench_distributions.c
     )
     target_link_libraries(pivco_flat_optimal pivco_huffman m)
 
     add_executable(pivco_tree_viz
-        extras/bench_tree_viz.c
+        extras/bench/bench_tree_viz.c
         bench/bench_distributions.c
     )
     target_link_libraries(pivco_tree_viz pivco_huffman m)
@@ -765,7 +765,7 @@ if(BUILD_BENCH)
 
         # Optional Oodle reference comparison.  Auto-enables iff the
         # user has symlinked ext/oodle -> a built OodleUE clone.
-        # See extras/bench_oodle_wrapper.h for setup instructions.
+        # See extras/bench/bench_oodle_wrapper.h for setup instructions.
         set(OODLE_ROOT "${CMAKE_SOURCE_DIR}/ext/oodle/Engine/Source/Runtime/OodleDataCompression/Sdks/2.9.16")
         # OODLE_LIB_VARIANT=source links our from-source build-out lib
         # (so the build patches' ASM wiring is what's measured);
@@ -794,8 +794,8 @@ if(BUILD_BENCH)
 
         if(OODLE_DETECTED)
             add_executable(pivco_fse_xy_micro
-                extras/bench_fse_xy_micro.c
-                extras/bench_oodle_wrapper.cpp
+                extras/bench/bench_fse_xy_micro.c
+                extras/bench/bench_oodle_wrapper.cpp
             )
             target_link_libraries(pivco_fse_xy_micro pivco_huffman huf0 m
                 "${OODLE_STATIC_LIB}")
@@ -809,13 +809,13 @@ if(BUILD_BENCH)
             # Oodle headers require OODLE_IMPORT_LIB when consuming
             # the built static lib (matches OODLE_BUILDING_LIB used
             # to build it).
-            set_source_files_properties(extras/bench_oodle_wrapper.cpp
+            set_source_files_properties(extras/bench/bench_oodle_wrapper.cpp
                 PROPERTIES COMPILE_DEFINITIONS OODLE_IMPORT_LIB)
-            set_source_files_properties(extras/bench_oodle_wrapper.cpp
+            set_source_files_properties(extras/bench/bench_oodle_wrapper.cpp
                 PROPERTIES COMPILE_FLAGS "-std=c++20 -w")
 
             # fair-bench also gets the Oodle opaque-only reference columns
-            target_sources(pivco_fair_bench PRIVATE extras/bench_oodle_wrapper.cpp)
+            target_sources(pivco_fair_bench PRIVATE extras/bench/bench_oodle_wrapper.cpp)
             target_link_libraries(pivco_fair_bench "${OODLE_STATIC_LIB}")
             target_include_directories(pivco_fair_bench PRIVATE
                 "${OODLE_ROOT}/src/oodle2/core"
@@ -825,7 +825,7 @@ if(BUILD_BENCH)
             target_compile_definitions(pivco_fair_bench PRIVATE PIVCO_HAS_OODLE=1)
         else()
             add_executable(pivco_fse_xy_micro
-                extras/bench_fse_xy_micro.c
+                extras/bench/bench_fse_xy_micro.c
             )
             target_link_libraries(pivco_fse_xy_micro pivco_huffman huf0 m)
             target_include_directories(pivco_fse_xy_micro PRIVATE src ext/fse/lib)
@@ -842,7 +842,7 @@ if(BUILD_BENCH)
         if(LZ4_LIB AND LZ4_INC)
             message(STATUS "LZ4 detected at ${LZ4_LIB} — enabling pivco_bench_lz4_split")
             add_executable(pivco_bench_lz4_split
-                extras/bench_lz4_split.c
+                extras/bench/bench_lz4_split.c
             )
             target_link_libraries(pivco_bench_lz4_split pivco_huffman huf0 m
                 "${LZ4_LIB}")
@@ -856,7 +856,7 @@ if(BUILD_BENCH)
             if(ZSTD_LIB AND ZSTD_INC AND EXISTS ${CMAKE_SOURCE_DIR}/ext/lz4/lib/lz4hc.c)
                 message(STATUS "zstd + vendored LZ4 detected — enabling pivco_bench_lz4_ph")
                 add_executable(pivco_bench_lz4_ph
-                    extras/bench_lz4_ph.c
+                    extras/bench/bench_lz4_ph.c
                     extras/lz4hc_split.c
                     extras/lz4_split_decode.c
                     ext/lz4/lib/lz4.c
@@ -912,7 +912,7 @@ if(BUILD_BENCH)
         endif()
 
         # Rice (Golomb power-of-2 M) vs fast-FSE vs Lemire's EWAH on
-        # skewed bitmaps.  See extras/bench_golomb.c header for the
+        # skewed bitmaps.  See extras/bench/bench_golomb.c header for the
         # design.  EWAH support pulled in via a C++ wrapper around
         # ext/ewah (header-only library); if ext/ewah isn't cloned the
         # EWAH columns just stay empty in the output.
@@ -926,17 +926,17 @@ if(BUILD_BENCH)
 
         if(PIVCO_HAS_EWAH)
             add_executable(pivco_bench_golomb
-                extras/bench_golomb.c
-                extras/bench_ewah_wrapper.cpp
+                extras/bench/bench_golomb.c
+                extras/bench/bench_ewah_wrapper.cpp
             )
             target_compile_definitions(pivco_bench_golomb PRIVATE PIVCO_HAS_EWAH=1)
             target_include_directories(pivco_bench_golomb PRIVATE
                 src ext/fse/lib ext/ewah/include)
-            set_source_files_properties(extras/bench_ewah_wrapper.cpp
+            set_source_files_properties(extras/bench/bench_ewah_wrapper.cpp
                 PROPERTIES COMPILE_FLAGS "-std=c++17 -w")
         else()
             add_executable(pivco_bench_golomb
-                extras/bench_golomb.c
+                extras/bench/bench_golomb.c
             )
             target_include_directories(pivco_bench_golomb PRIVATE src ext/fse/lib)
         endif()

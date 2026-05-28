@@ -467,7 +467,7 @@ int pivco_huffman_build_table(const uint64_t freq[PIVCO_MAX_SYMBOLS],
      * length, where the partition-path savings are deepest).
      *
      * See IDEAS.md "Flat-aware Huffman tree restructurer" for the gap
-     * analysis (extras/bench_flat_optimal.c).
+     * analysis (extras/bench/bench_flat_optimal.c).
      */
 
     /* Per-length: collect symbols sorted by frequency desc (ties by

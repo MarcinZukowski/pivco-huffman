@@ -1,4 +1,4 @@
-/* extras/bench_partition_root_iota.c — A/B microbench for the root
+/* extras/bench/bench_partition_root_iota.c — A/B microbench for the root
  * partition's index-synthesis op (NEON).
  *
  * The non-root partition_8 reads its 8 source uint16 indices from
@@ -25,7 +25,7 @@
  * vld1q_u8 vs vdup+vadd).  See IDEAS.md "iota-table for partition_root".
  *
  * Build:  cc -O3 -o bench_partition_root_iota \
- *           extras/bench_partition_root_iota.c
+ *           extras/bench/bench_partition_root_iota.c
  */
 #include <arm_neon.h>
 #include <stdio.h>

@@ -21,7 +21,7 @@ found a 3-4× decode penalty on FSE-firing nodes.  That number was
 the basis for the "FSE-on stays a tunable knob, not a default"
 ratio/speed tradeoff story.
 
-The 2026-05-15 microbench (`extras/bench_fse_xy_micro.c`) shows
+The 2026-05-15 microbench (`extras/bench/bench_fse_xy_micro.c`) shows
 that penalty is not fundamental — it comes from FSE choosing
 x=2 instead of more cursors.  At the same bitstream + table,
 swapping the decoder shape to x=10..16 cursors with y=1..4
@@ -196,7 +196,7 @@ does this for wavelet-tree-shaped data.
 
 After (or alongside) the FSE wide-cursor microbench: same fixture
 generator, just add a `golomb_decode_xy(M, ...)` variant under
-`extras/bench_fse_xy_micro.c`.  Compare per-call cost on the same
+`extras/bench/bench_fse_xy_micro.c`.  Compare per-call cost on the same
 skewed test vectors at the same bitmap sizes.  If Golomb-x4 lands at
 or below FSE-x8 cost on M4 / Granite Rapids / Zen, ship it as the
 default speed-biased entropy coder and keep FSE for the
@@ -204,7 +204,7 @@ wide-compression-bias path.
 
 ### 2026-05-16 update: first Rice vs fast-FSE microbench landed
 
-`extras/bench_golomb.c` (with `pivco_bench_golomb` CMake target)
+`extras/bench/bench_golomb.c` (with `pivco_bench_golomb` CMake target)
 runs the comparison on 1024 B bitmaps across p ∈ {0.50, 0.55, ...,
 0.95, 0.99}.  Full sweep saved to
 `results/bench_golomb-m4-20260516-1951-*.txt`.  Headline on M4:
@@ -387,7 +387,7 @@ re-derive the option space.
 reverted.  Genuine per-byte fusion confirmed in the microbench but does
 not beat the shipped wide-cursor path.  Interesting analysis for the
 paper, not a production change.**  Microbench kept at
-`extras/bench_fuse_fse_merge.c`; integration commit reverted.
+`extras/bench/bench_fuse_fse_merge.c`; integration commit reverted.
 
 Premise: the per-node bitmap path runs FSE-decode then merge *serially*
 (`wire_read_bitmap` fills a scratch buffer, then `prim_merge*` reads it).
@@ -648,13 +648,13 @@ variant, neither of which exists in its wire format.
 
 ### What landed
 
-1. **`extras/bench_oodle_wrapper.cpp`** — C++ wrapper that
+1. **`extras/bench/bench_oodle_wrapper.cpp`** — C++ wrapper that
    exposes C-callable `oodle_huff_encode` / `oodle_huff_decode`.
    Uses `newLZ_put_array_huff` (tuner) with lambda=1.0 and
    `entropy_flags = NEWLZ_ARRAY_FLAG_ALLOW_HUFF6` (bit 0) — the
    latter is critical, the tuner returns huff3 unconditionally
    without it.
-2. **`extras/bench_fse_xy_micro.c`** — gated `oodle` decode +
+2. **`extras/bench/bench_fse_xy_micro.c`** — gated `oodle` decode +
    encode column on `PIVCO_HAS_OODLE`.
 3. **`CMakeLists.txt`** — auto-detects `ext/oodle/build-out/ar/
    liboodle-data-static.a` and enables the column.
@@ -1245,7 +1245,7 @@ prior art -- novel.  Closest conceptual relative: alias-Huffman.
 - **Gap arrays for multicore intra-stream decode** (Yamamoto et al.,
   ICPP 2020).  Auxiliary bit-offset array at fixed-symbol intervals
   enables parallel decode within one stream (skip self-sync scan).
-  Relevant for our `extras/bench_multicore.c` if we want multi-core
+  Relevant for our `extras/bench/bench_multicore.c` if we want multi-core
   decode of huge streams someday.
   https://dl.acm.org/doi/10.1145/3404397.3404429
 
@@ -1537,7 +1537,7 @@ for (int i = 0; i < N; i++) codes_la[i] = table->code_la[symbols[i]];
 
 256 × uint16 = 512-byte LUT.  M4 NEON microbench established this is
 LSU-bound (3 loads/cycle, output 10.4 GB/s ≈ 65% of the scalar-store
-ceiling; NEON_TBL only buys 11% per `extras/bench_enc_init.c`).
+ceiling; NEON_TBL only buys 11% per `extras/bench/bench_enc_init.c`).
 
 **Why AVX-512 might do better than NEON could:**
 
@@ -1825,7 +1825,7 @@ trick exists short of the format change.
 **Status (2026-04-25):** SHIPPED.  `pivco_huffman_build_table` now
 produces flat-aware tree shapes; same code-length multiset (=
 identical compression).  Analyzer:
-[`extras/bench_flat_optimal.c`](extras/bench_flat_optimal.c).
+[`extras/bench/bench_flat_optimal.c`](extras/bench/bench_flat_optimal.c).
 
 **Headline wins (pivco_n M/s, before → after):**
 
@@ -1930,7 +1930,7 @@ The decoder side requires no changes (it already routes via
 > `0d9ed64` (root-flat unified into the same mechanism), `7c3238b`
 > (ported to x86 SSE4.1 and AVX-512), `0a92fe3` (libm link fix for
 > Linux).  Measurement analyzer:
-> [`extras/bench_flat_subtree_stats.c`](extras/bench_flat_subtree_stats.c).
+> [`extras/bench/bench_flat_subtree_stats.c`](extras/bench/bench_flat_subtree_stats.c).
 > Four-platform sweep:
 > [`results/20260424-204720-0a92fe3-flat-subtree-sweep.md`](results/20260424-204720-0a92fe3-flat-subtree-sweep.md).
 > Full-grid numbers in README.md §"Tested and adopted" /
@@ -1970,7 +1970,7 @@ of bits otherwise.
 
 ### Measured applicability
 
-`extras/bench_flat_subtree_stats.c` counts elements that would land in
+`extras/bench/bench_flat_subtree_stats.c` counts elements that would land in
 *maximal* flat subtrees (flat AND parent not flat, so each element is
 counted once).  Results on the standard bench distributions:
 
@@ -2080,7 +2080,7 @@ ratio (X2 / X1) on the real-text cluster (`prose_pride`, `english`,
 
 ### Why it didn't pay off
 
-A focused microbench (`extras/bench_partition_micro.c`, removed with
+A focused microbench (`extras/bench/bench_partition_micro.c`, removed with
 this commit but recoverable from git) tested `partition_8` /
 `partition_32` in three loop shapes — stride-8, stride-16 (2-way
 unroll, serial counter chain), paired (independent counter chains) —
@@ -2301,7 +2301,7 @@ two methodology errors in the microbench:
      (real-decoder leaves get sorted indices because partition
      preserves order)
 
-A corrected microbench (`extras/bench_fusion_v3_*_cnt.cpp`) sweeping
+A corrected microbench (`extras/bench/bench_fusion_v3_*_cnt.cpp`) sweeping
 PpS (partition calls per scatter chunk) ∈ {1,2,4,8} with sorted
 ascending scatter indices shows fusion is a substantial win on every
 platform — biggest at the realistic PpS=4 or PpS=8:
@@ -2326,9 +2326,9 @@ Graviton/Zen 5 have even more headroom (S_only at 0.99/cyc) so wins
 are bigger.
 
 Reproducer:
-  - `extras/bench_fusion_v3_cnt.cpp`        (NEON)
-  - `extras/bench_fusion_v3_sse_cnt.cpp`    (SSE4.1)
-  - `extras/bench_fusion_v3_avx512_cnt.cpp` (AVX-512)
+  - `extras/bench/bench_fusion_v3_cnt.cpp`        (NEON)
+  - `extras/bench/bench_fusion_v3_sse_cnt.cpp`    (SSE4.1)
+  - `extras/bench/bench_fusion_v3_avx512_cnt.cpp` (AVX-512)
   - sweep saved at
     `results/microbench-20260509-fusion-v3-all-platforms.txt`
 
@@ -2344,7 +2344,7 @@ Driver: `pivco_huffman_decode_dual_neon` decodes blocks A then B with
 lookahead during A's scatters covering B's root partition.
 
 Source: `src/pivco_huffman_neon.c`, public API in `pivco_huffman.h`.
-Test/bench: `extras/bench_dual_decode_test.c`.
+Test/bench: `extras/bench/bench_dual_decode_test.c`.
 
 End-to-end results on M4 (200K iters per distribution, K swept 2/4/8/16):
 
@@ -2423,7 +2423,7 @@ end-to-end before generalising.
 
 ### Original parked microbench notes (kept for diagnostic trail)
 
-Built a 6-platform microbench sweep (`extras/bench_micro_{sse,avx512}_cnt.cpp`
+Built a 6-platform microbench sweep (`extras/bench/bench_micro_{sse,avx512}_cnt.cpp`
 and the existing NEON ones) measuring whether running `partition_8`/`p32`
 in the same inner loop body as a 16-elem `scatter_sym` saves cycles vs.
 running them serially.  Hypothesis: partition's store-port slack (it's
@@ -2463,8 +2463,8 @@ case matrix.
 
 If the platform mix changes — e.g. Zen 5 becomes the dominant target,
 or we add a "tiered" backend with explicit per-arch fast paths — this
-is back on the table.  Reproducer is `extras/bench_micro_sse_cnt.cpp`
-and `extras/bench_micro_avx512_cnt.cpp`; raw sweep at
+is back on the table.  Reproducer is `extras/bench/bench_micro_sse_cnt.cpp`
+and `extras/bench/bench_micro_avx512_cnt.cpp`; raw sweep at
 `results/microbench-20260508-x86.txt` and
 `results/microbench-20260508-c8g.txt`.
 
@@ -2588,8 +2588,8 @@ accumulate variable-sized contributions into a register and flush
 only when a full 16-byte chunk is ready, halving the store rate.
 
 Six NEON variants + three AVX-512 variants tested
-([extras/bench_coalesce.c](extras/bench_coalesce.c) /
-[extras/bench_coalesce_avx512.c](extras/bench_coalesce_avx512.c),
+([extras/bench/bench_coalesce.c](extras/bench/bench_coalesce.c) /
+[extras/bench/bench_coalesce_avx512.c](extras/bench/bench_coalesce_avx512.c),
 full investigation in [docs/COALESCE.md](docs/COALESCE.md)).  Best result per
 platform:
 
@@ -2980,7 +2980,7 @@ to validate the 1.4× claim.  If real, the design pivots from
 partition+scatter to BU-reconstruct + sequential c2s with runtime
 backend selection per architecture.
 
-### Related microbench primitives (`extras/bench_primitives_*_cnt.cpp`)
+### Related microbench primitives (`extras/bench/bench_primitives_*_cnt.cpp`)
 
 Standalone benches for the four bit-manipulation primitives that came
 up during this exploration:
@@ -3102,7 +3102,7 @@ port choke the analysis predicted.
 **Two implementation findings worth recording:**
 
 1. **Inline beat sidecar by another 10–20% on x86.**  The sidecar
-   experiment in `extras/bench_kr_storage.c` had the value in a
+   experiment in `extras/bench/bench_kr_storage.c` had the value in a
    separate region; inline (immediately before the bitmap) lets the
    L1 prefetcher pull `K_right` into cache as part of the bitmap
    fetch, so the load is free at the LSU.
@@ -3340,7 +3340,7 @@ was skipped because:
 - **No single TBL covers 128 entries.**  Would need 2× `vqtbl4q_u8` and
   a mask-based merge on the code's high bit, or a blend via
   `vbslq_u8`.  Extra NEON ops on the inner loop.
-- **Coverage is small.**  From `extras/bench_flat_subtree_stats.c`:
+- **Coverage is small.**  From `extras/bench/bench_flat_subtree_stats.c`:
   - bell_s80 (M=7–9): D≥7 = 0.0% — top distribution unaffected.
   - zipfian: D≥7 = 11.2% — only meaningful real-world share.
   - flat_M7: D=7 root-flat — currently 5086 M/s at 1.43× vs huf0
@@ -3371,8 +3371,8 @@ the marginal EV is low.
 **Status (2026-04-27): investigated.  Full write-up in
 [`docs/BITPACKING.md`](docs/BITPACKING.md).**
 
-Three layouts compared in `extras/bench_unpack_dN.c` and
-`extras/bench_unpack_fl_layout.c`:
+Three layouts compared in `extras/bench/bench_unpack_dN.c` and
+`extras/bench/bench_unpack_fl_layout.c`:
 1. **current** (`flat_dN_unpack`, dup-tbl + var-shift + and + vst1q)
 2. **FL-natural** (same wire format, shift-imm + and + `vstKq`,
    only D ∈ {2,4})
@@ -3454,7 +3454,7 @@ via `vdupq_n_u16(base) + vaddq_u16(off)` (2 SIMD ops).  Variant:
 replace synthesis with a `vld1q_u8` from a precomputed
 `uint16_t static_iota_tab[N]` (1 SIMD op).
 
-Standalone bench: [`extras/bench_partition_root_iota.c`](extras/bench_partition_root_iota.c).
+Standalone bench: [`extras/bench/bench_partition_root_iota.c`](extras/bench/bench_partition_root_iota.c).
 M4 Max:
 - `partition_root`            (vdup+vadd): 14.5 GB/s
 - `partition_root_iota`       (vld1q_u8) : 15.6 GB/s  (**+8%**)
@@ -3522,7 +3522,7 @@ work tracked in docs/BITPACKING.md (~30 GB/s on G4 in microbench).
 `PIVCO_NEON_FAST_MULTI_TBL=0`, but the SIMD unpack itself is still
 broken on Neoverse-V2.**
 
-`extras/bench_unpack_fl_layout.c` (today's microbench) shows the
+`extras/bench/bench_unpack_fl_layout.c` (today's microbench) shows the
 current `flat_d{5,6}_unpack` running at **1.3 GB/s on Graviton 4**
 vs **25 GB/s on M4** — a ~20× cliff with the same source.  M4 and G4
 microbenches saved as
@@ -3924,8 +3924,8 @@ certainty:
    - Drop the `pivco_p` column from `bench/bench_main.c`.
    - Delete `bench/bench_prefix_profile.c` and its `CMakeLists.txt`
      entry.
-   - Keep `bench/bench_multi_stage_stats.c` and
-     `extras/bench_flat_subtree_stats.c` (they read tree structure, not
+   - Keep `extras/bench/bench_multi_stage_stats.c` and
+     `extras/bench/bench_flat_subtree_stats.c` (they read tree structure, not
      the retired backend).
    - Keep `docs/PREFIX_RADIX.md` as historical record (already banner'd as
      superseded).

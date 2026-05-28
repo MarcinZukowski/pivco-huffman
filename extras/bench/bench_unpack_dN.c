@@ -1,4 +1,4 @@
-/* extras/bench_unpack_dN.c — pure D-bit unpack throughput bench.
+/* extras/bench/bench_unpack_dN.c — pure D-bit unpack throughput bench.
  *
  * For each D in {2,3,4,5,6}, measure GB/s of OUTPUT bytes produced when
  * unpacking N*(D bits) of packed input into N*(8 bits) of unpacked
@@ -12,7 +12,7 @@
  *             groups produced via shr+and, output via vstKq_u8 interleave.
  *
  * Build:
- *   cc -O3 -o bench_unpack_dN extras/bench_unpack_dN.c
+ *   cc -O3 -o bench_unpack_dN extras/bench/bench_unpack_dN.c
  *
  * Reports GB/s of OUTPUT bytes (1 byte per code).
  */
@@ -23,7 +23,7 @@
 #include <string.h>
 #include <time.h>
 
-#include "../src/pivco_huffman_neon_flat.h"
+#include "../../src/pivco_huffman_neon_flat.h"
 
 #define N    8192
 #define REPS 200000
