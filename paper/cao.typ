@@ -62,9 +62,19 @@ they are most commonly used as a step after LZ-family or similar compressors.
 They often change the data distribution dramatically, resulting
 in #PH's benefits possibly difeferent.
 
-== Primivites optimization
+== CPU development trends
 
-While primitives we used provide decent performance,
-they certainly are not all optimal.
-Optimizing them further, to either existing or different
-architectures can make #PH's performance even better.
+#figure(
+  image("plots/sweep_uarch_dec_op.svg"),
+  caption: [#PH performance over Huff0 on 3 CPU families on AWS (across datasets from @datasets)]
+)<fig-trends>
+
+While the presented #PH performance focuses on the recent CPUs,
+it is interesting to see how it performes on older hardware.
+@fig-trends shows that #PH provides consistent benefits on all these architectures,
+even going back to 2012, but the benefit _increases_ with newer CPU types.
+The main reason for that is the improvement in SIMD capabilities and performance.
+Additionally, #PH presents a lot of simple, predictable code that utilizes
+ modern wide out-of-order CPUs better.
+If that trend continues, e.g. with the possible introduction of SVE-256 (@arm-neoverse-v1),
+ the benefits of #PH _might_ be even more valuable in the future.

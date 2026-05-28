@@ -470,7 +470,7 @@ arithmetic and a precomputed delta between `symbol0` and `symbol1`.
 
   // Performed for each bitmap byte
   // convert 8-bits into 8 00/FF bytes
-  uint8x8_t bits = vtst_u8(vdup_n_u8(bm[i >> 3]), vbit_pos);
+  uint8x8_t bits = vtst_u8(vdup_n_u8(bitmap[i >> 3]), vbit_pos);
   // set 8 symbols to either sym0 or sym1 (=sym0^delta)
   uint8x8_t vals = veor_u8(vsym0, vand_u8(vdelta, bits));
   // write 8 symbols
@@ -495,8 +495,8 @@ For example, here's an implementation for D=5:
   c2s_vec.val[1] = vld1q_u8(c2s + 16);
 
   // Performed for each group of 8 packed values
-  uint8x8_t codes = flat_d5_unpack(bm + ((i * 5) >> 3));  // unpack
-  uint8x8_t vals  = vqtbl2_u8(c2s_vec, codes);            // lookup
+  uint8x8_t codes = flat_d5_unpack(bitmap + ((i * 5) >> 3));  // unpack
+  uint8x8_t vals  = vqtbl2_u8(c2s_vec, codes);                // lookup
   // ... write 8 symbols - identical as in scatter_two
 ```
 
