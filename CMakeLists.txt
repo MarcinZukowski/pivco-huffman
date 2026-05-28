@@ -495,6 +495,15 @@ if(BUILD_BENCH)
     )
     target_link_libraries(pivco_dump_distributions pivco_huffman m)
 
+    # Dump the production C-built decode tree in the same text format as the
+    # "download tree text" button in figures/tree_viz.html, so the two can be
+    # diff'd to confirm the figure reflects the real codec's tree.
+    add_executable(pivco_dump_tree_text
+        extras/dump_tree_text.c
+        bench/bench_distributions.c
+    )
+    target_link_libraries(pivco_dump_tree_text pivco_huffman m)
+
     # Offline TANS-routing ratio bound: real files (per-block) or
     # MAIN bench distributions (per-histogram).
     add_executable(pivco_tans_bound
