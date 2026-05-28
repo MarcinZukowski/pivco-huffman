@@ -273,14 +273,13 @@ static inline void merge_both_const_neon(const uint8_t *bm, int K,
  * resulting bytes to out[0..n).  Output is dense / sequential -- the
  * BU codec calls this when it hits a PIVCO_NODE_INTERNAL_FLAT.
  *
- * Per-D SIMD specialisations (D=2..6) live below; D=7..8 and any
- * D > 6 fall through to the NEON_FLAT_UNPACK_SWITCH scalar tail.
- * The per-D unpack helpers (flat_d{2,3,4,5,6}_unpack) come from
- * pivco_huffman_neon_flat.h.
+ * One static-inline per supported D (2..8); flat_decode_to_buffer_neon
+ * is a switch dispatcher.  The per-D unpack helpers
+ * (flat_d{2,3,4,5,6,7}_unpack) come from pivco_huffman_neon_flat.h.
  */
 
 /* Extract D bits at bit position `bit_pos` from `in`.  D <= 16.  Used
- * by NEON_FLAT_UNPACK_SWITCH's scalar tail. */
+ * by each per-D function's non-aligned scalar tail. */
 static inline uint32_t extract_D_bits_neon(const uint8_t *in,
                                              int bit_pos, int D)
 {
@@ -292,272 +291,209 @@ static inline uint32_t extract_D_bits_neon(const uint8_t *in,
     return (val >> bit_off) & ((1u << D) - 1);
 }
 
-/* Per-D switch shared by anyone unpacking D-bit codes into a byte
- * stream.  `DST(k)` is the destination expression for output element k. */
-#define NEON_FLAT_UNPACK_SWITCH(DST)                                          \
-    int i = 0;                                                                \
-    switch (D) {                                                              \
-    case 2:                                                                   \
-        for (; i + 4 <= n; i += 4) {                                          \
-            uint8_t b = bm[i >> 2];                                           \
-            DST(i    ) = c2s[(b     ) & 3];                                   \
-            DST(i + 1) = c2s[(b >> 2) & 3];                                   \
-            DST(i + 2) = c2s[(b >> 4) & 3];                                   \
-            DST(i + 3) = c2s[(b >> 6) & 3];                                   \
-        } break;                                                              \
-    case 3:                                                                   \
-        for (; i + 8 <= n; i += 8) {                                          \
-            const uint8_t *p = bm + ((i * 3) >> 3);                           \
-            uint32_t w = (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16); \
-            DST(i    ) = c2s[(w      ) & 7];                                  \
-            DST(i + 1) = c2s[(w >>  3) & 7];                                  \
-            DST(i + 2) = c2s[(w >>  6) & 7];                                  \
-            DST(i + 3) = c2s[(w >>  9) & 7];                                  \
-            DST(i + 4) = c2s[(w >> 12) & 7];                                  \
-            DST(i + 5) = c2s[(w >> 15) & 7];                                  \
-            DST(i + 6) = c2s[(w >> 18) & 7];                                  \
-            DST(i + 7) = c2s[(w >> 21) & 7];                                  \
-        } break;                                                              \
-    case 4:                                                                   \
-        for (; i + 2 <= n; i += 2) {                                          \
-            uint8_t b = bm[i >> 1];                                           \
-            DST(i    ) = c2s[b & 0x0F];                                       \
-            DST(i + 1) = c2s[b >> 4];                                         \
-        } break;                                                              \
-    case 5:                                                                   \
-        for (; i + 8 <= n; i += 8) {                                          \
-            const uint8_t *p = bm + ((i * 5) >> 3);                           \
-            uint64_t w = (uint64_t)p[0] | ((uint64_t)p[1] << 8)               \
-                       | ((uint64_t)p[2] << 16) | ((uint64_t)p[3] << 24)      \
-                       | ((uint64_t)p[4] << 32);                              \
-            DST(i    ) = c2s[(w      ) & 0x1F];                               \
-            DST(i + 1) = c2s[(w >>  5) & 0x1F];                               \
-            DST(i + 2) = c2s[(w >> 10) & 0x1F];                               \
-            DST(i + 3) = c2s[(w >> 15) & 0x1F];                               \
-            DST(i + 4) = c2s[(w >> 20) & 0x1F];                               \
-            DST(i + 5) = c2s[(w >> 25) & 0x1F];                               \
-            DST(i + 6) = c2s[(w >> 30) & 0x1F];                               \
-            DST(i + 7) = c2s[(w >> 35) & 0x1F];                               \
-        } break;                                                              \
-    case 6:                                                                   \
-        for (; i + 4 <= n; i += 4) {                                          \
-            const uint8_t *p = bm + ((i * 6) >> 3);                           \
-            uint32_t w = (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16); \
-            DST(i    ) = c2s[(w      ) & 0x3F];                               \
-            DST(i + 1) = c2s[(w >>  6) & 0x3F];                               \
-            DST(i + 2) = c2s[(w >> 12) & 0x3F];                               \
-            DST(i + 3) = c2s[(w >> 18) & 0x3F];                               \
-        } break;                                                              \
-    case 7:                                                                   \
-        for (; i + 8 <= n; i += 8) {                                          \
-            const uint8_t *p = bm + ((i * 7) >> 3);                           \
-            uint64_t w = (uint64_t)p[0] | ((uint64_t)p[1] << 8)               \
-                       | ((uint64_t)p[2] << 16) | ((uint64_t)p[3] << 24)      \
-                       | ((uint64_t)p[4] << 32) | ((uint64_t)p[5] << 40)      \
-                       | ((uint64_t)p[6] << 48);                              \
-            DST(i    ) = c2s[(w      ) & 0x7F];                               \
-            DST(i + 1) = c2s[(w >>  7) & 0x7F];                               \
-            DST(i + 2) = c2s[(w >> 14) & 0x7F];                               \
-            DST(i + 3) = c2s[(w >> 21) & 0x7F];                               \
-            DST(i + 4) = c2s[(w >> 28) & 0x7F];                               \
-            DST(i + 5) = c2s[(w >> 35) & 0x7F];                               \
-            DST(i + 6) = c2s[(w >> 42) & 0x7F];                               \
-            DST(i + 7) = c2s[(w >> 49) & 0x7F];                               \
-        } break;                                                              \
-    case 8:                                                                   \
-        for (; i < n; i++) DST(i) = c2s[bm[i]];                               \
-        break;                                                                \
-    }                                                                          \
-    for (; i < n; i++) {                                                       \
-        uint32_t code = extract_D_bits_neon(bm, i * D, D);                     \
-        DST(i) = c2s[code];                                                    \
-    }
-
-/* uarch gate: D=5/D=6 flat-subtree TBL paths -- historical relic from
- * the TD scatter path (since retired).  The legacy comment:
- *
- *   "vqtbl2/vqtbl4 over a 32/64-byte source register pair are fast on
- *    Apple M-series (single-cycle per 16 lanes), but on Neoverse-V2
- *    (Graviton 4) they are slow enough that the per-element scalar
- *    lookup in NEON_FLAT_UNPACK_SWITCH wins."
- *
- * The BU direct-path below IGNORES the gate per the legacy
- * pivco_huffman_neon.c comment: n in the BU path is a contiguous
- * flat-subtree count (typically the full block size 8192 for root-flat
- * distributions like flat_M5), large enough to amortise the
- * vqtbl{2,4} setup even on Neoverse-V2 -- on Graviton 4 the SIMD path
- * beats scalar 3x for flat_M5 (9121 vs 2845 M/s, measured 2026-05-14
- * after this code was briefly gated and regressed in the unify-
- * framework refactor).  Override the gate value at build time with
- * -DPIVCO_NEON_FAST_MULTI_TBL=0/1 only if a future scatter-path
- * variant resurfaces; today it has no callers. */
-#ifndef PIVCO_NEON_FAST_MULTI_TBL
-#  define PIVCO_NEON_FAST_MULTI_TBL 1
-#endif
-
-/* flat_decode_direct_neon — write n D-bit symbols contiguously to
- * out[].  Internal dispatcher: SIMD per-D specialisation for D=2..6,
- * scalar tail for D=7..8 and any unhandled D. */
-static inline void flat_decode_direct_neon_inner(uint8_t *symbols, int n,
-                                                   const uint8_t *bm, int D,
-                                                   const uint8_t *c2s)
+/* D=2: 4 packed bits per byte -> 16 codes (uint8x16_t), 1 vqtbl1q_u8. */
+static inline void flat_decode_direct_neon_d2(uint8_t *symbols, int n,
+                                                const uint8_t *bm,
+                                                const uint8_t *c2s)
 {
-    if (D == 2) {
-        uint8x16_t c2s_vec = vld1q_u8(c2s);
-        int i = 0;
-        for (; i + 16 <= n; i += 16) {
-            uint8x16_t codes = flat_d2_unpack(bm + (i >> 2));
-            uint8x16_t syms  = vqtbl1q_u8(c2s_vec, codes);
-            vst1q_u8(symbols + i, syms);
-        }
-        for (; i + 4 <= n; i += 4) {
-            uint8_t b = bm[i >> 2];
-            symbols[i    ] = c2s[(b     ) & 3];
-            symbols[i + 1] = c2s[(b >> 2) & 3];
-            symbols[i + 2] = c2s[(b >> 4) & 3];
-            symbols[i + 3] = c2s[(b >> 6) & 3];
-        }
-        for (; i < n; i++) {
-            uint32_t code = extract_D_bits_neon(bm, i * D, D);
-            symbols[i] = c2s[code];
-        }
-        return;
+    uint8x16_t c2s_vec = vld1q_u8(c2s);
+    int i = 0;
+    for (; i + 16 <= n; i += 16) {
+        uint8x16_t codes = flat_d2_unpack(bm + (i >> 2));
+        uint8x16_t syms  = vqtbl1q_u8(c2s_vec, codes);
+        vst1q_u8(symbols + i, syms);
     }
-    if (D == 3) {
-        uint8x16_t c2s_vec = vld1q_u8(c2s);
-        int i = 0;
-        for (; i + 16 <= n; i += 16) {
-            uint8x8_t codes_lo = flat_d3_unpack(bm + ((i      * 3) >> 3));
-            uint8x8_t codes_hi = flat_d3_unpack(bm + (((i + 8) * 3) >> 3));
-            uint8x16_t codes = vcombine_u8(codes_lo, codes_hi);
-            uint8x16_t syms  = vqtbl1q_u8(c2s_vec, codes);
-            vst1q_u8(symbols + i, syms);
-        }
-        for (; i + 8 <= n; i += 8) {
-            uint8x8_t codes = flat_d3_unpack(bm + ((i * 3) >> 3));
-            uint8x8_t syms  = vqtbl1_u8(c2s_vec, codes);
-            vst1_u8(symbols + i, syms);
-        }
-        for (; i < n; i++) {
-            uint32_t code = extract_D_bits_neon(bm, i * D, D);
-            symbols[i] = c2s[code];
-        }
-        return;
+    for (; i + 4 <= n; i += 4) {
+        uint8_t b = bm[i >> 2];
+        symbols[i    ] = c2s[(b     ) & 3];
+        symbols[i + 1] = c2s[(b >> 2) & 3];
+        symbols[i + 2] = c2s[(b >> 4) & 3];
+        symbols[i + 3] = c2s[(b >> 6) & 3];
     }
-#if PIVCO_NEON_FAST_MULTI_TBL
-    if (D == 5) {
-        uint8x16x2_t c2s_vec;
-        c2s_vec.val[0] = vld1q_u8(c2s);
-        c2s_vec.val[1] = vld1q_u8(c2s + 16);
-        int i = 0;
-        for (; i + 16 <= n; i += 16) {
-            uint8x8_t codes_lo = flat_d5_unpack(bm + ((i      * 5) >> 3));
-            uint8x8_t codes_hi = flat_d5_unpack(bm + (((i + 8) * 5) >> 3));
-            uint8x16_t codes = vcombine_u8(codes_lo, codes_hi);
-            uint8x16_t syms  = vqtbl2q_u8(c2s_vec, codes);
-            vst1q_u8(symbols + i, syms);
-        }
-        for (; i + 8 <= n; i += 8) {
-            uint8x8_t codes = flat_d5_unpack(bm + ((i * 5) >> 3));
-            uint8x8_t syms  = vqtbl2_u8(c2s_vec, codes);
-            vst1_u8(symbols + i, syms);
-        }
-        for (; i < n; i++) {
-            uint32_t code = extract_D_bits_neon(bm, i * D, D);
-            symbols[i] = c2s[code];
-        }
-        return;
+    for (; i < n; i++) {
+        uint32_t code = extract_D_bits_neon(bm, i * 2, 2);
+        symbols[i] = c2s[code];
     }
-    if (D == 6) {
-        uint8x16x4_t c2s_vec;
-        c2s_vec.val[0] = vld1q_u8(c2s);
-        c2s_vec.val[1] = vld1q_u8(c2s + 16);
-        c2s_vec.val[2] = vld1q_u8(c2s + 32);
-        c2s_vec.val[3] = vld1q_u8(c2s + 48);
-        int i = 0;
-        for (; i + 16 <= n; i += 16) {
-            uint8x8_t codes_lo = flat_d6_unpack(bm + ((i      * 6) >> 3));
-            uint8x8_t codes_hi = flat_d6_unpack(bm + (((i + 8) * 6) >> 3));
-            uint8x16_t codes = vcombine_u8(codes_lo, codes_hi);
-            uint8x16_t syms  = vqtbl4q_u8(c2s_vec, codes);
-            vst1q_u8(symbols + i, syms);
-        }
-        for (; i + 8 <= n; i += 8) {
-            uint8x8_t codes = flat_d6_unpack(bm + ((i * 6) >> 3));
-            uint8x8_t syms  = vqtbl4_u8(c2s_vec, codes);
-            vst1_u8(symbols + i, syms);
-        }
-        for (; i < n; i++) {
-            uint32_t code = extract_D_bits_neon(bm, i * D, D);
-            symbols[i] = c2s[code];
-        }
-        return;
-    }
-    if (D == 7) {
-        /* 128-entry c2s exceeds a single TBL (vqtbl4 = 64), so use two
-         * vqtbl4 lookups: the low table covers codes 0..63, the high table
-         * codes 64..127 (indexed by code-64, which wraps <64 out of range).
-         * Each out-of-range lookup yields 0, so OR-ing the two selects the
-         * right half. */
-        uint8x16x4_t lo, hi;
-        lo.val[0]=vld1q_u8(c2s);     lo.val[1]=vld1q_u8(c2s+16);
-        lo.val[2]=vld1q_u8(c2s+32);  lo.val[3]=vld1q_u8(c2s+48);
-        hi.val[0]=vld1q_u8(c2s+64);  hi.val[1]=vld1q_u8(c2s+80);
-        hi.val[2]=vld1q_u8(c2s+96);  hi.val[3]=vld1q_u8(c2s+112);
-        int i = 0;
-        for (; i + 16 <= n; i += 16) {
-            uint8x8_t cl = flat_d7_unpack(bm + ((i      * 7) >> 3));
-            uint8x8_t ch = flat_d7_unpack(bm + (((i + 8) * 7) >> 3));
-            uint8x16_t codes = vcombine_u8(cl, ch);
-            uint8x16_t s0 = vqtbl4q_u8(lo, codes);
-            uint8x16_t s1 = vqtbl4q_u8(hi, vsubq_u8(codes, vdupq_n_u8(64)));
-            vst1q_u8(symbols + i, vorrq_u8(s0, s1));
-        }
-        for (; i + 8 <= n; i += 8) {
-            uint8x8_t codes = flat_d7_unpack(bm + ((i * 7) >> 3));
-            uint8x8_t s0 = vqtbl4_u8(lo, codes);
-            uint8x8_t s1 = vqtbl4_u8(hi, vsub_u8(codes, vdup_n_u8(64)));
-            vst1_u8(symbols + i, vorr_u8(s0, s1));
-        }
-        for (; i < n; i++) {
-            uint32_t code = extract_D_bits_neon(bm, i * D, D);
-            symbols[i] = c2s[code];
-        }
-        return;
-    }
-#endif /* PIVCO_NEON_FAST_MULTI_TBL */
-    if (D == 4) {
-        uint8x16_t c2s_vec = vld1q_u8(c2s);
-        int i = 0;
-        for (; i + 16 <= n; i += 16) {
-            uint8x16_t codes = flat_d4_unpack(bm + (i >> 1));
-            uint8x16_t syms  = vqtbl1q_u8(c2s_vec, codes);
-            vst1q_u8(symbols + i, syms);
-        }
-        for (; i + 2 <= n; i += 2) {
-            uint8_t b = bm[i >> 1];
-            symbols[i    ] = c2s[b & 0x0F];
-            symbols[i + 1] = c2s[b >> 4];
-        }
-        for (; i < n; i++) {
-            uint32_t code = extract_D_bits_neon(bm, i * D, D);
-            symbols[i] = c2s[code];
-        }
-        return;
-    }
-#define DST_DIRECT(k) symbols[k]
-    NEON_FLAT_UNPACK_SWITCH(DST_DIRECT)
-#undef DST_DIRECT
 }
 
-/* flat_decode_to_buffer_neon — D-bit flat-subtree decode into a
- * contiguous output buffer.  Calls the dispatcher above. */
+/* D=3: 3 bytes -> 8 codes (uint8x8_t).  16-elem chunk: two unpacks +
+ * vcombine + vqtbl1q_u8; 8-elem chunk: one unpack + vqtbl1_u8. */
+static inline void flat_decode_direct_neon_d3(uint8_t *symbols, int n,
+                                                const uint8_t *bm,
+                                                const uint8_t *c2s)
+{
+    uint8x16_t c2s_vec = vld1q_u8(c2s);
+    int i = 0;
+    for (; i + 16 <= n; i += 16) {
+        uint8x8_t codes_lo = flat_d3_unpack(bm + ((i      * 3) >> 3));
+        uint8x8_t codes_hi = flat_d3_unpack(bm + (((i + 8) * 3) >> 3));
+        uint8x16_t codes = vcombine_u8(codes_lo, codes_hi);
+        uint8x16_t syms  = vqtbl1q_u8(c2s_vec, codes);
+        vst1q_u8(symbols + i, syms);
+    }
+    for (; i + 8 <= n; i += 8) {
+        uint8x8_t codes = flat_d3_unpack(bm + ((i * 3) >> 3));
+        uint8x8_t syms  = vqtbl1_u8(c2s_vec, codes);
+        vst1_u8(symbols + i, syms);
+    }
+    for (; i < n; i++) {
+        uint32_t code = extract_D_bits_neon(bm, i * 3, 3);
+        symbols[i] = c2s[code];
+    }
+}
+
+/* D=4: 2 nibbles per byte -> 16 codes (uint8x16_t), 1 vqtbl1q_u8. */
+static inline void flat_decode_direct_neon_d4(uint8_t *symbols, int n,
+                                                const uint8_t *bm,
+                                                const uint8_t *c2s)
+{
+    uint8x16_t c2s_vec = vld1q_u8(c2s);
+    int i = 0;
+    for (; i + 16 <= n; i += 16) {
+        uint8x16_t codes = flat_d4_unpack(bm + (i >> 1));
+        uint8x16_t syms  = vqtbl1q_u8(c2s_vec, codes);
+        vst1q_u8(symbols + i, syms);
+    }
+    for (; i + 2 <= n; i += 2) {
+        uint8_t b = bm[i >> 1];
+        symbols[i    ] = c2s[b & 0x0F];
+        symbols[i + 1] = c2s[b >> 4];
+    }
+    for (; i < n; i++) {
+        uint32_t code = extract_D_bits_neon(bm, i * 4, 4);
+        symbols[i] = c2s[code];
+    }
+}
+
+/* D=5: c2s is 32 bytes (2 regs), TBL via vqtbl2.  Note: on Neoverse-V2
+ * (Graviton 4) vqtbl2 is measurably slower than on Apple Silicon, but
+ * at the n that BU's contiguous flat-subtree path produces (typically
+ * thousands of elements) the SIMD path still wins -- on Graviton 4
+ * flat_M5 measured 9121 vs 2845 M/s SIMD-vs-scalar 2026-05-14. */
+static inline void flat_decode_direct_neon_d5(uint8_t *symbols, int n,
+                                                const uint8_t *bm,
+                                                const uint8_t *c2s)
+{
+    uint8x16x2_t c2s_vec;
+    c2s_vec.val[0] = vld1q_u8(c2s);
+    c2s_vec.val[1] = vld1q_u8(c2s + 16);
+    int i = 0;
+    for (; i + 16 <= n; i += 16) {
+        uint8x8_t codes_lo = flat_d5_unpack(bm + ((i      * 5) >> 3));
+        uint8x8_t codes_hi = flat_d5_unpack(bm + (((i + 8) * 5) >> 3));
+        uint8x16_t codes = vcombine_u8(codes_lo, codes_hi);
+        uint8x16_t syms  = vqtbl2q_u8(c2s_vec, codes);
+        vst1q_u8(symbols + i, syms);
+    }
+    for (; i + 8 <= n; i += 8) {
+        uint8x8_t codes = flat_d5_unpack(bm + ((i * 5) >> 3));
+        uint8x8_t syms  = vqtbl2_u8(c2s_vec, codes);
+        vst1_u8(symbols + i, syms);
+    }
+    for (; i < n; i++) {
+        uint32_t code = extract_D_bits_neon(bm, i * 5, 5);
+        symbols[i] = c2s[code];
+    }
+}
+
+/* D=6: c2s is 64 bytes (4 regs), TBL via vqtbl4. */
+static inline void flat_decode_direct_neon_d6(uint8_t *symbols, int n,
+                                                const uint8_t *bm,
+                                                const uint8_t *c2s)
+{
+    uint8x16x4_t c2s_vec;
+    c2s_vec.val[0] = vld1q_u8(c2s);
+    c2s_vec.val[1] = vld1q_u8(c2s + 16);
+    c2s_vec.val[2] = vld1q_u8(c2s + 32);
+    c2s_vec.val[3] = vld1q_u8(c2s + 48);
+    int i = 0;
+    for (; i + 16 <= n; i += 16) {
+        uint8x8_t codes_lo = flat_d6_unpack(bm + ((i      * 6) >> 3));
+        uint8x8_t codes_hi = flat_d6_unpack(bm + (((i + 8) * 6) >> 3));
+        uint8x16_t codes = vcombine_u8(codes_lo, codes_hi);
+        uint8x16_t syms  = vqtbl4q_u8(c2s_vec, codes);
+        vst1q_u8(symbols + i, syms);
+    }
+    for (; i + 8 <= n; i += 8) {
+        uint8x8_t codes = flat_d6_unpack(bm + ((i * 6) >> 3));
+        uint8x8_t syms  = vqtbl4_u8(c2s_vec, codes);
+        vst1_u8(symbols + i, syms);
+    }
+    for (; i < n; i++) {
+        uint32_t code = extract_D_bits_neon(bm, i * 6, 6);
+        symbols[i] = c2s[code];
+    }
+}
+
+/* D=7: 128-entry c2s exceeds a single TBL (vqtbl4 = 64), so use two
+ * vqtbl4 lookups -- low table covers codes 0..63, high table codes
+ * 64..127 (indexed by code-64, which wraps <64 out of range).  Each
+ * out-of-range lookup yields 0, so OR-ing the two selects the right
+ * half. */
+static inline void flat_decode_direct_neon_d7(uint8_t *symbols, int n,
+                                                const uint8_t *bm,
+                                                const uint8_t *c2s)
+{
+    uint8x16x4_t lo, hi;
+    lo.val[0] = vld1q_u8(c2s);       lo.val[1] = vld1q_u8(c2s + 16);
+    lo.val[2] = vld1q_u8(c2s + 32);  lo.val[3] = vld1q_u8(c2s + 48);
+    hi.val[0] = vld1q_u8(c2s + 64);  hi.val[1] = vld1q_u8(c2s + 80);
+    hi.val[2] = vld1q_u8(c2s + 96);  hi.val[3] = vld1q_u8(c2s + 112);
+    int i = 0;
+    for (; i + 16 <= n; i += 16) {
+        uint8x8_t cl = flat_d7_unpack(bm + ((i      * 7) >> 3));
+        uint8x8_t ch = flat_d7_unpack(bm + (((i + 8) * 7) >> 3));
+        uint8x16_t codes = vcombine_u8(cl, ch);
+        uint8x16_t s0 = vqtbl4q_u8(lo, codes);
+        uint8x16_t s1 = vqtbl4q_u8(hi, vsubq_u8(codes, vdupq_n_u8(64)));
+        vst1q_u8(symbols + i, vorrq_u8(s0, s1));
+    }
+    for (; i + 8 <= n; i += 8) {
+        uint8x8_t codes = flat_d7_unpack(bm + ((i * 7) >> 3));
+        uint8x8_t s0 = vqtbl4_u8(lo, codes);
+        uint8x8_t s1 = vqtbl4_u8(hi, vsub_u8(codes, vdup_n_u8(64)));
+        vst1_u8(symbols + i, vorr_u8(s0, s1));
+    }
+    for (; i < n; i++) {
+        uint32_t code = extract_D_bits_neon(bm, i * 7, 7);
+        symbols[i] = c2s[code];
+    }
+}
+
+/* D=8: bm is already byte-per-code; just gather through c2s.  c2s has
+ * 256 entries here so no TBL fits -- this is the scalar floor. */
+static inline void flat_decode_direct_neon_d8(uint8_t *symbols, int n,
+                                                const uint8_t *bm,
+                                                const uint8_t *c2s)
+{
+    for (int i = 0; i < n; i++)
+        symbols[i] = c2s[bm[i]];
+}
+
+/* flat_decode_to_buffer_neon -- D-bit flat-subtree decode into a
+ * contiguous output buffer.  Dispatches to the per-D specialisation. */
 static inline void flat_decode_to_buffer_neon(uint8_t *out, int n,
                                                 const uint8_t *bm, int D,
                                                 const uint8_t *c2s)
 {
     PROF_TIC();
-    flat_decode_direct_neon_inner(out, n, bm, D, c2s);
+    switch (D) {
+    case 2: flat_decode_direct_neon_d2(out, n, bm, c2s); break;
+    case 3: flat_decode_direct_neon_d3(out, n, bm, c2s); break;
+    case 4: flat_decode_direct_neon_d4(out, n, bm, c2s); break;
+    case 5: flat_decode_direct_neon_d5(out, n, bm, c2s); break;
+    case 6: flat_decode_direct_neon_d6(out, n, bm, c2s); break;
+    case 7: flat_decode_direct_neon_d7(out, n, bm, c2s); break;
+    case 8: flat_decode_direct_neon_d8(out, n, bm, c2s); break;
+    default: {
+        /* Generic fallback for any unhandled D <= 16. */
+        for (int i = 0; i < n; i++) {
+            uint32_t code = extract_D_bits_neon(bm, i * D, D);
+            out[i] = c2s[code];
+        }
+        break;
+    }
+    }
     PROF_TOC(PROF_BU_FLAT_DECODE, n);
 }
 
