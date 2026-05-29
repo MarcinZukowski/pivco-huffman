@@ -434,7 +434,9 @@ static int build_table_finish(const uint8_t lengths[PIVCO_MAX_SYMBOLS],
     }
     PROF_MARK("gather_2a");
 
-    /* Decompose each c_L into chunks (one chunk per set bit). */
+    /* Decompose each c_L into chunks.  Strategy depends on tree mode --
+       see pivco_huffman_set_tree_mode().  Default OPTIMIZED matches the
+       original production behavior (decompose c_L by its set bits). */
     typedef struct {
         uint16_t L;
         uint16_t bit;       /* 0..PIVCO_MAX_CODE_LEN */
@@ -445,7 +447,92 @@ static int build_table_finish(const uint8_t lengths[PIVCO_MAX_SYMBOLS],
     } chunk_t;
     chunk_t chunks[PIVCO_MAX_SYMBOLS];   /* upper bound: one chunk per symbol */
     int n_chunks = 0;
-    {
+    pivco_tree_mode_t tree_mode = pivco_huffman_get_tree_mode();
+
+    if (tree_mode == PIVCO_TREE_MODE_NAIVE) {
+        /* Every symbol is its own D=0 chunk at depth L. */
+        for (int L = 1; L <= max_len; L++) {
+            int c = table->sym_count[L];
+            int cur = per_len_start[L];
+            for (int i = 0; i < c; i++) {
+                chunks[n_chunks].L       = (uint16_t)L;
+                chunks[n_chunks].bit     = 0;
+                chunks[n_chunks].depth   = (uint16_t)L;
+                chunks[n_chunks].n_syms  = 1;
+                chunks[n_chunks].sym_idx = cur + i;
+                n_chunks++;
+            }
+        }
+    } else if (tree_mode == PIVCO_TREE_MODE_FUSED) {
+        /* D=1 sibling pairs first within each length, then a D=0 singleton
+           for the odd-tail symbol.  Sequential reassign in the standard
+           depth-sort step gives canonical Huffman codes. */
+        for (int L = 1; L <= max_len; L++) {
+            int c = table->sym_count[L];
+            int cur = per_len_start[L];
+            int n_pairs = c / 2;
+            int n_singletons = c & 1;
+            for (int i = 0; i < n_pairs; i++) {
+                chunks[n_chunks].L       = (uint16_t)L;
+                chunks[n_chunks].bit     = 1;
+                chunks[n_chunks].depth   = (uint16_t)(L - 1);
+                chunks[n_chunks].n_syms  = 2;
+                chunks[n_chunks].sym_idx = cur;
+                cur += 2;
+                n_chunks++;
+            }
+            for (int i = 0; i < n_singletons; i++) {
+                chunks[n_chunks].L       = (uint16_t)L;
+                chunks[n_chunks].bit     = 0;
+                chunks[n_chunks].depth   = (uint16_t)L;
+                chunks[n_chunks].n_syms  = 1;
+                chunks[n_chunks].sym_idx = cur;
+                cur++;
+                n_chunks++;
+            }
+        }
+    } else if (tree_mode == PIVCO_TREE_MODE_CANONICAL_FLAT) {
+        /* Compute canonical first_code[L] = (first_code[L-1] + c_{L-1}) << 1
+           starting from min_len.  For each length, greedy-peel the largest
+           2^k chunk such that the canonical start code C is 2^k-aligned and
+           2^k <= remaining.  root_code = C >> k. */
+        uint32_t fc[PIVCO_MAX_CODE_LEN + 2] = {0};
+        uint32_t code = 0;
+        int last_L = 0;
+        for (int L = 1; L <= max_len; L++) {
+            if (table->sym_count[L]) {
+                if (last_L) code = (code + (uint32_t)table->sym_count[last_L]) << (L - last_L);
+                fc[L] = code;
+                last_L = L;
+            }
+        }
+        for (int L = 1; L <= max_len; L++) {
+            int c = table->sym_count[L];
+            if (c == 0) continue;
+            int cur = per_len_start[L];
+            uint32_t C = fc[L];
+            int remaining = c;
+            while (remaining > 0) {
+                int max_k_align = (C == 0) ? PIVCO_MAX_CODE_LEN : __builtin_ctz(C);
+                int max_k_count = (remaining > 1) ? (31 - __builtin_clz((unsigned)remaining)) : 0;
+                int k = max_k_align < max_k_count ? max_k_align : max_k_count;
+                /* Safety: chunk depth = L-k must be >= 0; since k <= log2(remaining) <= log2(c) <= L-1
+                   under any valid Kraft length distribution, this is always true. */
+                int n = 1 << k;
+                chunks[n_chunks].L        = (uint16_t)L;
+                chunks[n_chunks].bit      = (uint16_t)k;
+                chunks[n_chunks].depth    = (uint16_t)(L - k);
+                chunks[n_chunks].n_syms   = (uint16_t)n;
+                chunks[n_chunks].root_code = (uint16_t)(C >> k);
+                chunks[n_chunks].sym_idx  = cur;
+                cur += n;
+                n_chunks++;
+                C += (uint32_t)n;
+                remaining -= n;
+            }
+        }
+    } else {
+        /* OPTIMIZED (default): original bit-decomposition of c_L. */
         for (int L = 1; L <= max_len; L++) {
             int c = table->sym_count[L];
             int cur = per_len_start[L];
@@ -473,42 +560,60 @@ static int build_table_finish(const uint8_t lengths[PIVCO_MAX_SYMBOLS],
 
     PROF_MARK("decompose_2b");
 
-    /* Sort chunks by depth asc (stable; ties keep their natural order
-       which is L asc by length, larger-bit-first within length). */
-    for (int i = 1; i < n_chunks; i++) {
-        chunk_t cur = chunks[i];
-        int j = i - 1;
-        while (j >= 0 && chunks[j].depth > cur.depth) {
-            chunks[j + 1] = chunks[j];
-            j--;
-        }
-        chunks[j + 1] = cur;
-    }
-
-    PROF_MARK("sort_2c");
-
-    /* Canonical-assign codes to chunks (chunk-level Kraft sum = 1).
-       Each chunk gets a code prefix of length `chunk.depth`.  Within
-       the chunk, symbol i takes suffix i for i in [0, 2^bit). */
-    {
-        uint32_t code = 0;
-        int prev_depth = 0;
+    /* For CANONICAL_FLAT, chunks already carry canonical root_codes; assign
+       symbol codes directly from them and skip the depth-sort + sequential
+       reassign step (sequential reassign would clobber the canonical
+       prefixes when chunks span multiple depths).  All other modes use
+       the standard pipeline. */
+    if (tree_mode == PIVCO_TREE_MODE_CANONICAL_FLAT) {
         for (int ci = 0; ci < n_chunks; ci++) {
-            int d = chunks[ci].depth;
-            if (d > prev_depth) code <<= (d - prev_depth);
-            chunks[ci].root_code = (uint16_t)code;
             int bit = chunks[ci].bit;
             int n   = chunks[ci].n_syms;
+            uint16_t root = chunks[ci].root_code;
             for (int i = 0; i < n; i++) {
                 uint8_t sym = flat_items[chunks[ci].sym_idx + i].sym;
-                table->code[sym] = (uint16_t)((code << bit) | (uint32_t)i);
+                table->code[sym] = (uint16_t)(((uint32_t)root << bit) | (uint32_t)i);
             }
-            code += 1;
-            prev_depth = d;
         }
-    }
+        PROF_MARK("assign_2d");
+    } else {
+        /* Sort chunks by depth asc (stable; ties keep their natural order
+           which is L asc by length, larger-bit-first within length). */
+        for (int i = 1; i < n_chunks; i++) {
+            chunk_t cur = chunks[i];
+            int j = i - 1;
+            while (j >= 0 && chunks[j].depth > cur.depth) {
+                chunks[j + 1] = chunks[j];
+                j--;
+            }
+            chunks[j + 1] = cur;
+        }
 
-    PROF_MARK("assign_2d");
+        PROF_MARK("sort_2c");
+
+        /* Canonical-assign codes to chunks (chunk-level Kraft sum = 1).
+           Each chunk gets a code prefix of length `chunk.depth`.  Within
+           the chunk, symbol i takes suffix i for i in [0, 2^bit). */
+        {
+            uint32_t code = 0;
+            int prev_depth = 0;
+            for (int ci = 0; ci < n_chunks; ci++) {
+                int d = chunks[ci].depth;
+                if (d > prev_depth) code <<= (d - prev_depth);
+                chunks[ci].root_code = (uint16_t)code;
+                int bit = chunks[ci].bit;
+                int n   = chunks[ci].n_syms;
+                for (int i = 0; i < n; i++) {
+                    uint8_t sym = flat_items[chunks[ci].sym_idx + i].sym;
+                    table->code[sym] = (uint16_t)((code << bit) | (uint32_t)i);
+                }
+                code += 1;
+                prev_depth = d;
+            }
+        }
+
+        PROF_MARK("assign_2d");
+    }
 
     /* Populate sorted_symbols / first_sym_idx / first_code from the
        new code assignment.  These fields are not used by runtime

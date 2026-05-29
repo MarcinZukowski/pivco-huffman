@@ -1,0 +1,45 @@
+bench_tree_modes: pure tree-shape ablation (FSE off)
+BUF=1048576 bytes, BLK=8192, blocks=128, RUNS=5
+
+dist             mode                 MB/s    ratio  flat_syms      v_opt
+----             ----                 ----    -----  ---------      -----
+proba80          OPTIMIZED           13797    6.323          0      1.00x
+proba80          NAIVE               14170    6.323          0      1.03x
+proba80          FUSED               14170    6.323          0      1.03x
+proba80          CANONICAL_FLAT      14170    6.323          0      1.03x
+
+english          OPTIMIZED            6242    1.868         20      1.00x
+english          NAIVE                4387    1.853          0      0.70x
+english          FUSED                4406    1.853          0      0.71x
+english          CANONICAL_FLAT       5296    1.863         16      0.85x
+
+html_wiki        OPTIMIZED            4462    1.404        184      1.00x
+html_wiki        NAIVE                2335    1.319          0      0.52x
+html_wiki        FUSED                2405    1.319          0      0.54x
+html_wiki        CANONICAL_FLAT       4128    1.402        180      0.93x
+
+prose_pride      OPTIMIZED            4723    1.717         80      1.00x
+prose_pride      NAIVE                3438    1.660          0      0.73x
+prose_pride      FUSED                3472    1.660          0      0.74x
+prose_pride      CANONICAL_FLAT       4500    1.711         72      0.95x
+
+json_api         OPTIMIZED            4280    1.510         88      1.00x
+json_api         NAIVE                2954    1.465          0      0.69x
+json_api         FUSED                3057    1.465          0      0.71x
+json_api         CANONICAL_FLAT       3957    1.505         84      0.92x
+
+dna_fasta        OPTIMIZED            7654    3.496         24      1.00x
+dna_fasta        NAIVE                8257    3.487          0      1.08x
+dna_fasta        FUSED                8004    3.487          0      1.05x
+dna_fasta        CANONICAL_FLAT       8257    3.492         20      1.08x
+
+chinese_text     OPTIMIZED            4599    1.327        136      1.00x
+chinese_text     NAIVE                2509    1.278          0      0.55x
+chinese_text     FUSED                2551    1.278          0      0.55x
+chinese_text     CANONICAL_FLAT       3692    1.322        132      0.80x
+
+calgary_pic      OPTIMIZED           10082    4.569        148      1.00x
+calgary_pic      NAIVE                5793    3.998          0      0.57x
+calgary_pic      FUSED                5668    3.998          0      0.56x
+calgary_pic      CANONICAL_FLAT       9362    4.520        140      0.93x
+

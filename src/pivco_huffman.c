@@ -87,6 +87,18 @@ int pivco_huffman_get_fse_enabled(void)
     return g_fse_enabled;
 }
 
+static pivco_tree_mode_t g_tree_mode = PIVCO_TREE_MODE_OPTIMIZED;
+
+void pivco_huffman_set_tree_mode(pivco_tree_mode_t mode)
+{
+    g_tree_mode = mode;
+}
+
+pivco_tree_mode_t pivco_huffman_get_tree_mode(void)
+{
+    return g_tree_mode;
+}
+
 static pivco_impl_t resolve_impl(void)
 {
     if (g_impl != PIVCO_IMPL_AUTO) return g_impl;

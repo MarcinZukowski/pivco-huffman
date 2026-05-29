@@ -34,6 +34,31 @@ target_link_libraries(pivco_huffman_bench_encode pivco_huffman huf0 m)
 target_include_directories(pivco_huffman_bench_encode PRIVATE
     ${CMAKE_SOURCE_DIR}/ext/fse/lib)
 
+# Tree-shape ablation: OPTIMIZED / NAIVE / FUSED / CANONICAL_FLAT, with
+# huf0 (stock) and oo-huff baselines measured in the same session for
+# apples-to-apples decode-bandwidth comparison.  FSE disabled in all runs;
+# this isolates tree-shape vs entropy-coding effects.
+add_executable(pivco_bench_tree_modes
+    bench_tree_modes.c
+    ${BENCH_DIST}
+)
+target_link_libraries(pivco_bench_tree_modes pivco_huffman huf0 m)
+target_include_directories(pivco_bench_tree_modes PRIVATE
+    ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/ext/fse/lib
+    ${CMAKE_CURRENT_SOURCE_DIR})
+if(OODLE_DETECTED)
+    target_sources(pivco_bench_tree_modes PRIVATE
+        bench_oodle_wrapper.cpp)
+    target_link_libraries(pivco_bench_tree_modes ${OODLE_STATIC_LIB})
+    target_include_directories(pivco_bench_tree_modes PRIVATE
+        "${OODLE_ROOT}/src/oodle2/core"
+        "${OODLE_ROOT}/src/oodle2/core/public"
+        "${OODLE_ROOT}/src/oodle2/base"
+        "${OODLE_ROOT}/include")
+    target_compile_definitions(pivco_bench_tree_modes PRIVATE PIVCO_HAS_OODLE=1)
+endif()
+
 # Brotli vs pivco vs huf0_x1 comparison bench.  Standalone harness:
 # encode + decode timing across the MAIN distribution set.  Skipped
 # if ext/brotli/ is not present.  See IDEAS.md 2026-05-12 for the

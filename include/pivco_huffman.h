@@ -168,6 +168,41 @@ pivco_impl_t pivco_huffman_get_impl(void);
 void pivco_huffman_set_fse_enabled(int enabled);
 int  pivco_huffman_get_fse_enabled(void);
 
+/* ---------- Tree-shape mode (build-time) ----------
+ *
+ * Experimental knob for paper-style ablations.  Changes how the chunks
+ * are decomposed inside pivco_huffman_build_table; the codec downstream
+ * picks up the resulting table->flat_depth/flat_offset/code[] uniformly.
+ *
+ *   OPTIMIZED      production: per length L, decompose c_L by its set
+ *                  bits.  Produces non-canonical codes that maximize
+ *                  flat-D>=2 subtree coverage.
+ *   NAIVE          every symbol is a D=0 singleton.  Tree shape ==
+ *                  pure canonical Huffman; no leaf fusion, no flat
+ *                  subtrees.  Slowest decode; best baseline for "ph
+ *                  without any tree optimizations vs Huff0".
+ *   FUSED          allow D=1 sibling pairs but no D>=2 flats.  Tree
+ *                  shape == canonical with `scatter_two` / `merge_two`
+ *                  leaf fusion only.
+ *   CANONICAL_FLAT chunks are derived from canonical code positions:
+ *                  greedy peel the largest 2^k chunk such that the
+ *                  canonical start code is 2^k-aligned and 2^k <=
+ *                  remaining.  Produces canonical codes that happen
+ *                  to contain flat subtrees; isolates the gain from
+ *                  the OPTIMIZED non-canonical reorganization.
+ *
+ * The flag must be set BEFORE pivco_huffman_build_table() runs; both
+ * encoder and decoder side must use the same value (the wire format
+ * carries only code lengths, not tree shape).  Default = OPTIMIZED. */
+typedef enum {
+    PIVCO_TREE_MODE_OPTIMIZED       = 0,
+    PIVCO_TREE_MODE_NAIVE           = 1,
+    PIVCO_TREE_MODE_FUSED           = 2,
+    PIVCO_TREE_MODE_CANONICAL_FLAT  = 3,
+} pivco_tree_mode_t;
+void pivco_huffman_set_tree_mode(pivco_tree_mode_t mode);
+pivco_tree_mode_t pivco_huffman_get_tree_mode(void);
+
 /* ---------- FSE table-usage stats (debug instrumentation) ----------
  *
  * Per-table-id counters incremented inside the encoder every time an

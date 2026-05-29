@@ -1,0 +1,61 @@
+bench_tree_modes: pure tree-shape ablation (FSE off)
+BUF=1048576 bytes, BLK=8192, blocks=128, RUNS=10
+
+dist             mode                 MB/s    ratio  flat_syms      v_opt
+----             ----                 ----    -----  ---------      -----
+proba80          OPTIMIZED           16671    6.323          0      1.00x
+proba80          NAIVE               16513    6.323          0      0.99x
+proba80          FUSED               16513    6.323          0      0.99x
+proba80          CANONICAL_FLAT      16410    6.323          0      0.98x
+proba80          huf0                 2801        -          -         -
+proba80          oo_huff              3187        -          -         -
+
+english          OPTIMIZED            6340    1.868         20      1.00x
+english          NAIVE                4696    1.853          0      0.74x
+english          FUSED                4585    1.853          0      0.72x
+english          CANONICAL_FLAT       5598    1.863         16      0.88x
+english          huf0                 2682        -          -         -
+english          oo_huff              3371        -          -         -
+
+html_wiki        OPTIMIZED            4934    1.404        184      1.00x
+html_wiki        NAIVE                2522    1.319          0      0.51x
+html_wiki        FUSED                2477    1.319          0      0.50x
+html_wiki        CANONICAL_FLAT       4589    1.402        180      0.93x
+html_wiki        huf0                 2309        -          -         -
+html_wiki        oo_huff              3157        -          -         -
+
+prose_pride      OPTIMIZED            5083    1.717         80      1.00x
+prose_pride      NAIVE                3498    1.660          0      0.69x
+prose_pride      FUSED                3471    1.660          0      0.68x
+prose_pride      CANONICAL_FLAT       4489    1.711         72      0.88x
+prose_pride      huf0                 2503        -          -         -
+prose_pride      oo_huff              3199        -          -         -
+
+json_api         OPTIMIZED            4702    1.510         88      1.00x
+json_api         NAIVE                3217    1.465          0      0.68x
+json_api         FUSED                3239    1.465          0      0.69x
+json_api         CANONICAL_FLAT       4196    1.505         84      0.89x
+json_api         huf0                 2472        -          -         -
+json_api         oo_huff              3193        -          -         -
+
+dna_fasta        OPTIMIZED            8978    3.496         24      1.00x
+dna_fasta        NAIVE                8916    3.487          0      0.99x
+dna_fasta        FUSED                9158    3.487          0      1.02x
+dna_fasta        CANONICAL_FLAT       8924    3.492         20      0.99x
+dna_fasta        huf0                 2806        -          -         -
+dna_fasta        oo_huff              3292        -          -         -
+
+chinese_text     OPTIMIZED            4777    1.327        136      1.00x
+chinese_text     NAIVE                2650    1.278          0      0.55x
+chinese_text     FUSED                2705    1.278          0      0.57x
+chinese_text     CANONICAL_FLAT       3938    1.322        132      0.82x
+chinese_text     huf0                 2148        -          -         -
+chinese_text     oo_huff              3173        -          -         -
+
+calgary_pic      OPTIMIZED           12193    4.569        148      1.00x
+calgary_pic      NAIVE                6100    3.998          0      0.50x
+calgary_pic      FUSED                6230    3.998          0      0.51x
+calgary_pic      CANONICAL_FLAT      10667    4.520        140      0.87x
+calgary_pic      huf0                 2762        -          -         -
+calgary_pic      oo_huff              3257        -          -         -
+
