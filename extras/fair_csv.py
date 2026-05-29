@@ -21,9 +21,12 @@ in the raw results/ captures for ad-hoc eyeballing.
 """
 import sys
 
-# canonical reported set (11) -- forced huf0_4x2 intentionally omitted
+# canonical reported set -- forced huf0_4x2 intentionally omitted.
+# ph_naive / ph_flat are tree-mode ablation variants of `ph` (same codec,
+# different chunk decomposition at build_table).
 ENGINES = {
-    "ph", "pha", "td_naive", "td_scl_opt", "td_nv_simd", "td_simdopt",
+    "ph", "pha", "ph_naive", "ph_flat",
+    "td_naive", "td_scl_opt", "td_nv_simd", "td_simdopt",
     "huf0", "fse_stk", "fse_x8y1", "oo_huff", "oo_tans",
 }
 EXCLUDE = {"huf0_4x2"}

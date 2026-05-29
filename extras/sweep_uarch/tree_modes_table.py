@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
 """Generate the typst table + per-host bar plot for the tree-mode ablation.
 
-Reads bench_tree_modes output files (one per host) and produces:
- - paper-ready typst snippet on stdout (12 data columns: 4 ph modes +
-   huf0 + oo-huff for each of M4 and c8i)
+Reads paper/data/fair.csv directly (the long-format consolidated table that
+all paper figures share -- so this comparison stays consistent with the
+ANS / encoding plots).  Engines used: ph_naive, ph_flat, ph (= OPTIMIZED),
+huf0, oo_huff.  FUSED is excluded -- in the bottom-up codec the merge_two
+fast path fires automatically for any sibling-pair internal node, so
+explicit FUSED tree-build mode is indistinguishable from NAIVE.
+
+Outputs:
+ - paper-ready typst snippet on stdout (10 data columns: 4 engines
+   for each of M4 and c8i)
  - paper/plots/tree_modes_<host>.svg per host (grouped bar chart)
 
-Missing engines (e.g. oo_huff on hosts without Oodle staged) are filled
-from paper/data/fair.csv when available; cell becomes "—" otherwise.
-
-usage: tree_modes_table.py m4=<path> c8i=<path>
+usage: tree_modes_table.py [hosts=m4,c8i]
 """
 import csv, os, re, sys
 import matplotlib.pyplot as plt
@@ -19,58 +23,42 @@ ROOT   = os.path.normpath(os.path.join(HERE, "..", ".."))
 PLOTS  = os.path.join(ROOT, "paper", "plots")
 FAIRCSV = os.path.join(ROOT, "paper", "data", "fair.csv")
 
-ENGINES_PH    = ["NAIVE", "FUSED", "CANONICAL_FLAT", "OPTIMIZED"]
-ENGINES_BASE  = ["huf0", "oo_huff"]
-ENGINES_ALL   = ENGINES_PH + ENGINES_BASE
-ENGINE_LABEL  = {"NAIVE": "PH naive", "FUSED": "PH fused leaves",
-                 "CANONICAL_FLAT": "PH flat", "OPTIMIZED": "PH flat opt.",
-                 "huf0": "Huff0", "oo_huff": "Oodle Huffman"}
+# fair.csv engine names, in plot left-to-right order.
+ENGINES_ALL   = ["ph_naive", "ph_flat", "ph", "huf0", "oo_huff"]
+ENGINE_LABEL  = {"ph_naive": "PH naive",
+                 "ph_flat":  "PH flat",
+                 "ph":       "PH flat opt.",
+                 "huf0":     "Huff0",
+                 "oo_huff":  "Oodle Huffman"}
 # Short labels for the dense typst table header (kept brief).
-TABLE_LABEL   = {"NAIVE": "naive", "FUSED": "fused leaves",
-                 "CANONICAL_FLAT": "flat", "OPTIMIZED": "flat opt.",
-                 "huf0": "Huff0", "oo_huff": "Oodle Huffman"}
+TABLE_LABEL   = {"ph_naive": "naive",
+                 "ph_flat":  "flat",
+                 "ph":       "flat opt.",
+                 "huf0":     "Huff0",
+                 "oo_huff":  "Oodle Huffman"}
 HOST_LABEL    = {"m4": "M4", "c8i": "c8i"}
+# Datasets to plot, in left-to-right order on the x-axis.
+DATASETS      = ["proba80", "english", "html_wiki", "prose_pride",
+                 "json_api", "dna_fasta", "chinese_text", "calgary_pic"]
 
-ROW_RE = re.compile(
-    r"^\s*(\S+)\s+(NAIVE|FUSED|CANONICAL_FLAT|OPTIMIZED|huf0|oo_huff)\s+"
-    r"(\d+|n/a)\b"
-)
-
-def parse_bench(path):
-    """Returns {dataset: {engine: mbs or None}}"""
+def load_faircsv():
+    """Returns {(host, dataset, engine): dec_op}."""
     out = {}
-    with open(path) as f:
-        for line in f:
-            m = ROW_RE.match(line)
-            if not m: continue
-            ds, eng, mbs = m.group(1), m.group(2), m.group(3)
-            out.setdefault(ds, {})[eng] = None if mbs == "n/a" else float(mbs)
-    return out
-
-def parse_faircsv(host, engine, dataset):
-    """Backfill from paper/data/fair.csv (column 6 = dec_op)."""
-    if not os.path.exists(FAIRCSV): return None
+    if not os.path.exists(FAIRCSV): return out
     with open(FAIRCSV) as f:
         rdr = csv.reader(f)
+        next(rdr, None)        # skip header
         for row in rdr:
             if len(row) < 6: continue
-            if row[0] == host and row[1] == dataset and row[2] == engine:
-                try: return float(row[5])
-                except ValueError: return None
-    return None
-
-def fill_missing(host, data):
-    """In place: replace None cells with fair.csv values where available."""
-    for ds, eng_dict in data.items():
-        for eng in ENGINES_ALL:
-            if eng_dict.get(eng) is None:
-                v = parse_faircsv(host, eng, ds)
-                if v is not None: eng_dict[eng] = v
+            host, ds, eng = row[0], row[1], row[2]
+            try: out[(host, ds, eng)] = float(row[5])  # dec_op column
+            except ValueError: pass
+    return out
 
 # -------------------- typst emit --------------------
 
-def emit_typst(host_data, datasets, hosts):
-    # 13 columns: dataset, then 6 engines x len(hosts)
+def emit_typst(fair, datasets, hosts):
+    # 1 + 5*len(hosts) columns: dataset, then 5 engines x len(hosts)
     n_eng = len(ENGINES_ALL)
     print("// Per-dataset decode bandwidth (MB/s) across the 4 ph tree-build")
     print("// modes + huf0 (stock HUF_decompress) + Oodle Huffman.  Same session")
@@ -89,7 +77,7 @@ def emit_typst(host_data, datasets, hosts):
         cells = [f"[{ds}]"]
         for h in hosts:
             for e in ENGINES_ALL:
-                v = host_data[h].get(ds, {}).get(e)
+                v = fair.get((h, ds, e))
                 cells.append(f"[{v:.0f}]" if v is not None else "[—]")
         print(f"    " + ",  ".join(cells) + ",")
     print(f"  ),")
@@ -107,21 +95,20 @@ def emit_typst(host_data, datasets, hosts):
 
 # -------------------- per-host bar plot --------------------
 
-# PH gradient = colorbrewer Greens 4-step (light -> dark).  Endpoints
-# (#a6dba0 light, #1b7837 dark) match the existing enc-bars-* SVG palette
-# in paper/plots/common.typ so PH-flat-opt reads as the same engine across
-# all paper plots.  Huff0 (#ef8a3b orange) and Oodle Huffman (#9467bd
-# purple) also match common.typ.
+# PH gradient = colorbrewer Greens 3-step (light -> dark).  The dark
+# endpoint (#1b7837) matches the existing enc-bars-* / dec-bw-* SVG
+# palette in paper/plots/common.typ so PH-flat-opt reads as the same
+# engine across all paper plots.  Huff0 (#ef8a3b orange) and Oodle
+# Huffman (#9467bd purple) also match common.typ.
 ENG_COLORS = {
-    "NAIVE":          "#d9f0d3",
-    "FUSED":          "#a6dba0",
-    "CANONICAL_FLAT": "#5aae61",
-    "OPTIMIZED":      "#1b7837",
-    "huf0":           "#ef8a3b",
-    "oo_huff":        "#9467bd",
+    "ph_naive": "#a6dba0",
+    "ph_flat":  "#5aae61",
+    "ph":       "#1b7837",
+    "huf0":     "#ef8a3b",
+    "oo_huff":  "#9467bd",
 }
 
-def plot_host(host, data, datasets):
+def plot_host(host, fair, datasets):
     n_eng = len(ENGINES_ALL)
     n_ds  = len(datasets)
     # Y-axis caps match paper/plots/dec-bw.typ so all "decode bandwidth"
@@ -134,7 +121,7 @@ def plot_host(host, data, datasets):
     bar_w = 0.85 / n_eng
     xs = list(range(n_ds))
     for i, e in enumerate(ENGINES_ALL):
-        ys_true  = [data.get(ds, {}).get(e) or 0 for ds in datasets]
+        ys_true  = [fair.get((host, ds, e)) or 0 for ds in datasets]
         ys_drawn = [min(y, cap) if cap is not None else y for y in ys_true]
         offs     = [x + (i - (n_eng - 1) / 2) * bar_w for x in xs]
         ax.bar(offs, ys_drawn, width=bar_w, label=ENGINE_LABEL[e],
@@ -174,30 +161,16 @@ def plot_host(host, data, datasets):
 # -------------------- main --------------------
 
 def main():
-    hosts = []
-    host_data = {}
+    hosts = ["m4", "c8i"]
     for arg in sys.argv[1:]:
-        h, _, p = arg.partition("=")
-        if not h or not p: continue
-        host_data[h] = parse_bench(p)
-        hosts.append(h)
-    if not hosts:
-        print("usage: tree_modes_table.py m4=<m4.txt> c8i=<c8i.txt>", file=sys.stderr)
-        sys.exit(1)
-    # backfill missing engines from fair.csv (e.g. oo_huff on c8i where
-    # Oodle isn't staged on the remote)
+        if arg.startswith("hosts="):
+            hosts = arg.partition("=")[2].split(",")
+    fair = load_faircsv()
+    if not fair:
+        print(f"no data found in {FAIRCSV}", file=sys.stderr); sys.exit(1)
+    emit_typst(fair, DATASETS, hosts)
     for h in hosts:
-        fill_missing(h, host_data[h])
-    # collect dataset names (union, in the order they appear in the first host)
-    datasets = []
-    seen = set()
-    for h in hosts:
-        for ds in host_data[h].keys():
-            if ds not in seen:
-                seen.add(ds); datasets.append(ds)
-    emit_typst(host_data, datasets, hosts)
-    for h in hosts:
-        plot_host(h, host_data[h], datasets)
+        plot_host(h, fair, DATASETS)
 
 if __name__ == "__main__":
     main()

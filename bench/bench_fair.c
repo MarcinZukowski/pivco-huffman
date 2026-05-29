@@ -14,7 +14,10 @@
  * tree every G bytes (default 128 KB, matching huf0's hard chunk cap),
  * which models the parked block-structured file format's "format block".
  *
- * Methodology: best of RUNS runs x REPEATS passes over the 1 MB buffer.
+ * Methodology: adaptive best-of-N x REPEATS passes over the 1 MB buffer.
+ *   Start with 20 samples (each = 20 inner passes); if the top two are
+ *   within 2%, stop and report the best.  Otherwise add 2 more samples
+ *   and re-check, up to 40 samples total.
  * Reports enc/dec MB/s (input bytes) for each mode + compression ratio
  * + table builds per 1 MB.  Oodle columns (opaque-only) added separately
  * under PIVCO_HAS_OODLE.
@@ -54,7 +57,7 @@ extern void         bench_generate_symbols(int dist_idx, uint8_t *symbols,
 #define BLK        PIVCO_BLOCK_SIZE     /* ph decode sub-block (4-8 KB) */
 #define HUF_CHUNK  (128 * 1024)         /* huf0 hard cap; FSE controlled chunk */
 #define RUNS       10
-#define REPEATS    10
+#define REPEATS    20
 #define SEED       0xBEEFCAFE12345678ULL
 #define MAXLOG     12                   /* FSE tableLog (tANS state-table log) */
 #define HUFLOG     PIVCO_MAX_CODE_LEN    /* HUF max code length = ph's budget (11);
@@ -69,15 +72,42 @@ static double now_ns(void) {
     return (double)t.tv_sec * 1e9 + (double)t.tv_nsec;
 }
 
-/* best (max) MB/s over RUNS, each run = REPEATS passes over TOTAL bytes */
+/* Adaptive best-MB/s measurement: each sample times REPEATS consecutive
+ * passes over the buffer; collect samples; keep going until the top two
+ * samples differ by <= 2% (good convergence) or we hit _BMA_MAX.
+ *
+ * Schedule: 20 samples up front, then 2 more at a time up to 40.  Budget
+ * skewed toward outer samples (independent draws) rather than inner reps
+ * (which past ~10 just amortize the same jitter on a longer window). */
+#define _BMA_MIN     20
+#define _BMA_STEP    2
+#define _BMA_MAX     40
+#define _BMA_TOL     0.02
 #define BEST_MBPS(...) do {                                             \
-        best = 0.0;                                                     \
-        for (int _r = 0; _r < RUNS; _r++) {                             \
+        double _bma_smp[_BMA_MAX];                                      \
+        int    _bma_n = 0;                                              \
+        for (int _r = 0; _r < _BMA_MIN; _r++) {                         \
             double _t0 = now_ns();                                      \
             for (int _rep = 0; _rep < REPEATS; _rep++) { __VA_ARGS__; } \
             double _el = now_ns() - _t0;                                \
-            double _mb = 1000.0 * (double)TOTAL * REPEATS / _el;        \
-            if (_mb > best) best = _mb;                                 \
+            _bma_smp[_bma_n++] = 1000.0 * (double)TOTAL * REPEATS / _el;\
+        }                                                               \
+        for (;;) {                                                      \
+            double _m1 = 0, _m2 = 0;                                    \
+            for (int _i = 0; _i < _bma_n; _i++) {                       \
+                double _v = _bma_smp[_i];                               \
+                if      (_v > _m1) { _m2 = _m1; _m1 = _v; }             \
+                else if (_v > _m2) { _m2 = _v; }                        \
+            }                                                           \
+            int _converged = (_m1 > 0 &&                                \
+                              (_m1 - _m2) <= _BMA_TOL * _m1);           \
+            if (_converged || _bma_n >= _BMA_MAX) { best = _m1; break; }\
+            for (int _r = 0; _r < _BMA_STEP && _bma_n < _BMA_MAX; _r++){\
+                double _t0 = now_ns();                                  \
+                for (int _rep = 0; _rep < REPEATS; _rep++) { __VA_ARGS__; }\
+                double _el = now_ns() - _t0;                            \
+                _bma_smp[_bma_n++] = 1000.0 * (double)TOTAL * REPEATS / _el;\
+            }                                                           \
         }                                                               \
     } while (0)
 
@@ -111,7 +141,8 @@ typedef struct {
 } result_t;
 
 /* ============================ ph / pha ============================ */
-static result_t measure_ph(const uint8_t *sym, size_t n, int fse_on) {
+static result_t measure_ph(const uint8_t *sym, size_t n, int fse_on,
+                             pivco_tree_mode_t tree_mode) {
     result_t R; memset(&R, 0, sizeof R);
     size_t nblk = n / BLK;
     size_t G    = g_table_G;
@@ -120,6 +151,7 @@ static result_t measure_ph(const uint8_t *sym, size_t n, int fse_on) {
     R.builds = (int)nwin;
 
     pivco_huffman_set_fse_enabled(fse_on);
+    pivco_huffman_set_tree_mode(tree_mode);
 
     pivco_huffman_table_t *gtbl = NULL, *wtbl = NULL, *wtbls = NULL;
     uint8_t (*win_clen)[256] = NULL;
@@ -613,8 +645,10 @@ static void print_row(const char *name, result_t R) {
 }
 
 /* ---- engine registry: uniform (sym,n)->result_t thunks ---- */
-static result_t e_ph (const uint8_t*s,size_t n){ return measure_ph(s,n,0); }
-static result_t e_pha(const uint8_t*s,size_t n){ return measure_ph(s,n,1); }
+static result_t e_ph       (const uint8_t*s,size_t n){ return measure_ph(s,n,0,PIVCO_TREE_MODE_OPTIMIZED); }
+static result_t e_pha      (const uint8_t*s,size_t n){ return measure_ph(s,n,1,PIVCO_TREE_MODE_OPTIMIZED); }
+static result_t e_ph_naive (const uint8_t*s,size_t n){ return measure_ph(s,n,0,PIVCO_TREE_MODE_NAIVE); }
+static result_t e_ph_flat  (const uint8_t*s,size_t n){ return measure_ph(s,n,0,PIVCO_TREE_MODE_CANONICAL_FLAT); }
 static result_t e_td_naive (const uint8_t*s,size_t n){ return measure_phtd(phtd_build_table_naive, phtd_encode_naive,      phtd_decode_naive,      s,n); }
 static result_t e_td_scl   (const uint8_t*s,size_t n){ return measure_phtd(phtd_build_table,       phtd_encode_scalar_opt, phtd_decode_scalar_opt, s,n); }
 #if defined(PIVCO_HAS_NEON)
@@ -642,6 +676,10 @@ static result_t e_oo_tans (const uint8_t*s,size_t n){ return measure_oodle(s,n,1
 typedef result_t (*engine_fn)(const uint8_t*, size_t);
 static const struct { const char *name; engine_fn fn; } ENGINES[] = {
     {"ph", e_ph}, {"pha", e_pha},
+    /* Tree-shape ablation variants — same codec as `ph`, different chunk-
+     * decomposition at build_table.  See pivco_huffman_set_tree_mode().
+     * Used by paper/plots/tree_modes_*.svg and <tab-tree-modes>. */
+    {"ph_naive", e_ph_naive}, {"ph_flat", e_ph_flat},
     {"td_naive", e_td_naive}, {"td_scl_opt", e_td_scl},
 #if defined(PIVCO_HAS_NEON) || defined(PIVCO_HAS_AVX512)
     {"td_nv_simd", e_td_nvsimd}, {"td_simdopt", e_td_simdopt},
@@ -690,8 +728,10 @@ int main(int argc, char **argv) {
     }
     bench_init();
     phtd_set_fse_enabled(0);   /* TD grid: raw bitmaps, isolate tree x prims */
-    printf("fair-bench: %d MB-class buffer = %d KB, best of %dx%d, ph table-G=%zu KB, BLK=%d\n",
-           TOTAL/(1<<20), TOTAL/1024, RUNS, REPEATS, g_table_G/1024, BLK);
+    printf("fair-bench: %d MB-class buffer = %d KB, adaptive %d-%d runs x %d reps "
+           "(top-2 within %d%% stops), ph table-G=%zu KB, BLK=%d\n",
+           TOTAL/(1<<20), TOTAL/1024, _BMA_MIN, _BMA_MAX, REPEATS,
+           (int)(_BMA_TOL*100), g_table_G/1024, BLK);
     if (eng_filter)  printf("  engines: %s\n", eng_filter);
     if (dist_filter) printf("  dists:   %s\n", dist_filter);
     printf("columns: enc(opaque prebuilt)  dec(opaque prebuilt)  MB/s | ratio(op pb) | builds/1MB\n\n");
