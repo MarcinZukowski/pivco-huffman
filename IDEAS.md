@@ -3330,6 +3330,29 @@ These already appear explored or unlikely to pay off:
     vector pipe AND lengthens the latency — strictly worse on every
     distribution.
 
+- **`prim_merge` popcount via pre-pass / in-register vcnt (2026-05-29)**
+  - Decode-side variant: instead of `expand_popcnt[bm[j>>3]]` (mask-
+    indexed table load) inside the merge hot loop, either
+    (a) pre-compute a parallel `bm_popcnt[]` array via a SIMD `vcntq_u8`
+        pre-pass and read sequentially in the merge, or
+    (b) 8-way unroll the merge to process 64 outputs per outer iter,
+        load 8 bm bytes into one register, `vcnt_u8` once, and pull
+        each iter's mask + popcount from vector lanes via `vget_lane_u8`
+        (no memory traffic for popcount at all).
+  - Variants registered in `bench/bench_prim.c` as `neon_pcpc` /
+    `neon_pcpc_full` / `neon_unroll8` (under `ST_MERGE_GEN`).
+  - M4: `neon_unroll8` is **−8%** vs production (the in-register
+    in-lane popcount + freed dep chain wins despite doubled L/R loads).
+    `neon_pcpc` pure = −6%, with prepass = −1%.
+  - c8g (Neoverse V2): same change is **+15% slower** for `neon_unroll8`
+    (narrower LSU + smaller OoO window can't absorb the extra L/R
+    loads).  `neon_pcpc` pure ≈ −3%, with prepass ≈ wash.
+  - **Parked, do not ship.**  No single best variant across the ARM
+    lineup; locking in `unroll8` regresses every Graviton-class server.
+    The M4 win confirms the production merge is dependency-bound on
+    the `expand_popcnt[mask]` load on Apple cores — relevant for any
+    future Apple-specific kernel selection.
+
 - **SVE at 128-bit width**
   - already slower than NEON on Graviton4.
 

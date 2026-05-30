@@ -108,9 +108,50 @@ static int scalar_partition(const uint16_t *codes_la, int n, int depth,
     }
     return nr;
 }
+/* scalar references for the binary-merge family (bottom-up).  bm bit==0
+   -> take next left, bm bit==1 -> take next right (or constants). */
+static void scalar_merge_gen(uint8_t *out, const uint8_t *bm, int n,
+                              const uint8_t *L, const uint8_t *R) {
+    int lc=0, rc=0;
+    for (int i=0; i<n; i++) {
+        int b = (bm[i>>3] >> (i&7)) & 1;
+        out[i] = b ? R[rc++] : L[lc++];
+    }
+}
+static void scalar_merge_two(uint8_t *out, const uint8_t *bm, int n,
+                              uint8_t l, uint8_t r) {
+    for (int i=0; i<n; i++) {
+        int b = (bm[i>>3] >> (i&7)) & 1;
+        out[i] = b ? r : l;
+    }
+}
+static void scalar_merge_const_l(uint8_t *out, const uint8_t *bm, int n,
+                                  uint8_t l, const uint8_t *R) {
+    int rc=0;
+    for (int i=0; i<n; i++) {
+        int b = (bm[i>>3] >> (i&7)) & 1;
+        out[i] = b ? R[rc++] : l;
+    }
+}
+static void scalar_merge_const_r(uint8_t *out, const uint8_t *bm, int n,
+                                  const uint8_t *L, uint8_t r) {
+    int lc=0;
+    for (int i=0; i<n; i++) {
+        int b = (bm[i>>3] >> (i&7)) & 1;
+        out[i] = b ? r : L[lc++];
+    }
+}
+
+/* MERGE_CONST_SYMBOLS are baked-in constants used by every merge_two /
+ * merge_constant_* variant (scalar refs and SIMD wrappers) so the
+ * correctness check across implementations agrees on which two symbols
+ * to emit per bm bit. */
+#define MERGE_LEFT_SYM   0x42
+#define MERGE_RIGHT_SYM  0xA5
 
 typedef struct {
     uint8_t  *bm, *codes, *c2s, *out, *pack_out;
+    uint8_t  *merge_left, *merge_right;   /* dense byte sources for prim_merge */
     uint16_t *la_work, *tmp16;
     int n, D, depth;
 } ctx_t;
@@ -126,6 +167,11 @@ static void p_part_scalar   (const ctx_t *c){
     scalar_partition(c->la_work, c->n, c->depth, c->bm, lbuf, c->tmp16);
     memcpy(c->la_work, lbuf, (size_t)(c->n - 0) * 2); /* keep left in place like the prim */
 }
+/* scalar refs for the new binary-merge stages */
+static void p_merge_gen_scalar     (const ctx_t *c){ scalar_merge_gen(c->out, c->bm, c->n, c->merge_left, c->merge_right); }
+static void p_merge_two_scalar     (const ctx_t *c){ scalar_merge_two(c->out, c->bm, c->n, MERGE_LEFT_SYM, MERGE_RIGHT_SYM); }
+static void p_merge_const_l_scalar (const ctx_t *c){ scalar_merge_const_l(c->out, c->bm, c->n, MERGE_LEFT_SYM, c->merge_right); }
+static void p_merge_const_r_scalar (const ctx_t *c){ scalar_merge_const_r(c->out, c->bm, c->n, c->merge_left, MERGE_RIGHT_SYM); }
 
 #if defined(HAVE_NEON_KERNELS)   /* standalone unpack/scatter: NEON intrinsics */
 static void neon_unpack(const ctx_t *c) {
@@ -167,8 +213,133 @@ static void neon_scatter(const ctx_t *c) {
 
 #if defined(HAVE_SIMD)   /* pack/merge/partition: production prim_*, all backends */
 static void simd_pack (const ctx_t *c){ prim_enc_pack_dN(c->la_work, c->n, c->D, c->depth, c->pack_out); }
-static void simd_merge(const ctx_t *c){ prim_merge_flat(c->out, c->n, c->bm, c->D, c->c2s); }
+static void simd_merge_flat(const ctx_t *c){ prim_merge_flat(c->out, c->n, c->bm, c->D, c->c2s); }
 static void simd_part (const ctx_t *c){ prim_enc_partition_full(c->la_work, c->n, c->depth, c->bm, c->tmp16); }
+#endif
+#if defined(HAVE_NEON_KERNELS)   /* binary-merge family lives in the NEON header today */
+static void simd_merge_gen     (const ctx_t *c){ prim_merge(c->bm, c->n, c->merge_left, c->merge_right, c->out); }
+static void simd_merge_two     (const ctx_t *c){ prim_merge_two(c->bm, c->n, MERGE_LEFT_SYM, MERGE_RIGHT_SYM, c->out); }
+static void simd_merge_const_l (const ctx_t *c){ prim_merge_constant_left(c->bm, c->n, MERGE_LEFT_SYM, c->merge_right, c->out); }
+static void simd_merge_const_r (const ctx_t *c){ prim_merge_constant_right(c->bm, c->n, c->merge_left, MERGE_RIGHT_SYM, c->out); }
+
+/* ---------- experimental: precomputed-popcount merge ----------
+ *
+ * Replace the per-iter `expand_popcnt[bm[j>>3]]` table lookup with a
+ * sequential read from a precomputed bm_popcnt[] array.  The hypothesis
+ * is that the production lookup is on the critical path (mask compute ->
+ * popcnt-table load -> cursor advance), and a statically-known sequential
+ * address frees the load to start at iter top.
+ *
+ * Two variants:
+ *   neon_pcpc_pure   — bm_popcnt[] is pre-filled (treat the populating
+ *                       pass as amortized cost; bench the merge alone).
+ *   neon_pcpc_full   — populate bm_popcnt[] inside the timed function
+ *                       (the realistic cost a caller would pay).
+ *
+ * The shuffle vectors (expand_tab[m] / expand_tab_pre[nr0][m]) STILL
+ * depend on the mask byte itself — only the popcount load is replaced.
+ */
+static uint8_t g_bm_popcnt[16384] __attribute__((aligned(64)));
+
+static inline void fill_bm_popcnt(const uint8_t *bm, int K) {
+    int bm_bytes = (K + 7) >> 3;
+    int i = 0;
+    for (; i + 16 <= bm_bytes; i += 16) {
+        vst1q_u8(g_bm_popcnt + i, vcntq_u8(vld1q_u8(bm + i)));
+    }
+    for (; i < bm_bytes; i++) g_bm_popcnt[i] = (uint8_t)__builtin_popcount(bm[i]);
+}
+
+static inline void merge_neon_pcpc(const uint8_t *bm, int K,
+                                     const uint8_t *left, const uint8_t *right,
+                                     uint8_t *out) {
+    int lc = 0, rc = 0, j = 0;
+    for (; j + 16 <= K; j += 16) {
+        uint8x16_t L_full = vld1q_u8(left + lc);
+        uint8x16_t R_full = vld1q_u8(right + rc);
+
+        uint8_t m0  = bm[j >> 3];
+        int     nr0 = g_bm_popcnt[j >> 3];        /* sequential, address known early */
+        uint8x16_t both0 = vcombine_u8(vget_low_u8(L_full), vget_low_u8(R_full));
+        uint8x8_t  shuf0 = vld1_u8(expand_tab[m0]);
+        uint8x8_t  o0    = vqtbl1_u8(both0, shuf0);
+        vst1_u8(out + j, o0);
+
+        uint8_t m1  = bm[(j >> 3) + 1];
+        int     nr1 = g_bm_popcnt[(j >> 3) + 1];
+        uint8x16x2_t src = {{ L_full, R_full }};
+        uint8x8_t shuf1  = vld1_u8(expand_tab_pre[nr0][m1]);
+        uint8x8_t o1     = vqtbl2_u8(src, shuf1);
+        vst1_u8(out + j + 8, o1);
+
+        rc += nr0 + nr1;
+        lc += (16 - nr0 - nr1);
+    }
+    for (; j < K; j++) {
+        int mb = (bm[j >> 3] >> (j & 7)) & 1;
+        out[j] = mb ? right[rc++] : left[lc++];
+    }
+}
+
+static void simd_merge_pcpc_pure (const ctx_t *c){
+    /* Caller responsibility: bm_popcnt must already be filled.  Each
+       outer rep keeps the same bm, so we let the bench's inner timer
+       see only the merge work; fill_bm_popcnt is called once outside
+       the timing loop via the correctness path. */
+    merge_neon_pcpc(c->bm, c->n, c->merge_left, c->merge_right, c->out);
+}
+static void simd_merge_pcpc_full (const ctx_t *c){
+    fill_bm_popcnt(c->bm, c->n);
+    merge_neon_pcpc(c->bm, c->n, c->merge_left, c->merge_right, c->out);
+}
+
+/* ---- 8-way unrolled, in-register popcount ----
+ *
+ * Per outer iter:
+ *   - vld1_u8 8 bitmap bytes into bm_vec  (1 load, 8 masks)
+ *   - vcnt_u8 produces 8 popcounts in pc_vec (1 op)
+ *   - 8 unrolled sub-iters: lane K extracts mask[K] + popcount[K] via
+ *     vget_lane_u8 (compile-time index, ~1c), then runs the standard
+ *     merge body with 1-mask-per-sub-iter shape.
+ *
+ * Trade vs neon_pcpc: no temp store, no second-pass load — popcount
+ * values stay in vector lanes and get pulled via vget_lane.  Cost: each
+ * sub-iter is the simpler 1-mask version, so we load L + R every 8
+ * outputs instead of every 16 (DOUBLES L/R load count).  If those loads
+ * are not on the critical path the freed popcount dependency may still
+ * net out positive. */
+static inline void merge_neon_unroll8(const uint8_t *bm, int K,
+                                        const uint8_t *left, const uint8_t *right,
+                                        uint8_t *out) {
+    int lc = 0, rc = 0, j = 0;
+    for (; j + 64 <= K; j += 64) {
+        uint8x8_t bm_vec = vld1_u8(bm + (j >> 3));
+        uint8x8_t pc_vec = vcnt_u8(bm_vec);
+#define UNROLL_STEP(K_) do {                                          \
+            uint8_t  m  = vget_lane_u8(bm_vec, K_);                   \
+            int      nr = vget_lane_u8(pc_vec, K_);                   \
+            uint8x8_t  L = vld1_u8(left  + lc);                       \
+            uint8x8_t  R = vld1_u8(right + rc);                       \
+            uint8x16_t both = vcombine_u8(L, R);                      \
+            uint8x8_t  shuf = vld1_u8(expand_tab[m]);                 \
+            uint8x8_t  o    = vqtbl1_u8(both, shuf);                  \
+            vst1_u8(out + j + 8 * K_, o);                             \
+            rc += nr;                                                  \
+            lc += (8 - nr);                                            \
+        } while (0)
+        UNROLL_STEP(0); UNROLL_STEP(1); UNROLL_STEP(2); UNROLL_STEP(3);
+        UNROLL_STEP(4); UNROLL_STEP(5); UNROLL_STEP(6); UNROLL_STEP(7);
+#undef UNROLL_STEP
+    }
+    /* scalar tail for elements past the last 64-aligned boundary */
+    for (; j < K; j++) {
+        int mb = (bm[j >> 3] >> (j & 7)) & 1;
+        out[j] = mb ? right[rc++] : left[lc++];
+    }
+}
+static void simd_merge_unroll8 (const ctx_t *c){
+    merge_neon_unroll8(c->bm, c->n, c->merge_left, c->merge_right, c->out);
+}
 #endif
 
 #if defined(HAVE_NEON_KERNELS)   /* partition family + unfused comparison (NEON only) */
@@ -181,8 +352,9 @@ static void simd_partbm  (const ctx_t *c){ part_core_neon(c->la_work, c->n, c->d
 static void simd_parthalf(const ctx_t *c){ part_core_neon(c->la_work, c->n, c->depth, NULL, c->bm, c->tmp16, 0, 1, 0); }
 #endif
 
-typedef enum { ST_UNPACK, ST_SCATTER, ST_PACK, ST_MERGE, ST_PART,
-               ST_BMBUILD, ST_PARTBM, ST_PARTHALF, ST_FUSEDHALF } stage_t;
+typedef enum { ST_UNPACK, ST_SCATTER, ST_PACK, ST_MERGE_FLAT, ST_PART,
+               ST_BMBUILD, ST_PARTBM, ST_PARTHALF, ST_FUSEDHALF,
+               ST_MERGE_GEN, ST_MERGE_TWO, ST_MERGE_CL, ST_MERGE_CR } stage_t;
 typedef struct {
     const char *variant; stage_t stage; int D; int inplace; void (*run)(const ctx_t *);
 } prim_t;
@@ -190,12 +362,114 @@ static prim_t PRIMS[256]; static int NPRIMS = 0;
 static void reg(const char *v, stage_t s, int D, int ip, void (*fn)(const ctx_t *)) {
     PRIMS[NPRIMS++] = (prim_t){ v, s, D, ip, fn };
 }
+/* Stage label = the .h primitive name (without the prim_ prefix), or the
+   internal name for the few stages that have no production analogue
+   (part_bm / part_half exist only as instrumentation for the unfused
+   partition cost decomposition). */
 static const char *stage_name(stage_t s){
-    switch(s){case ST_UNPACK:return"unpack";case ST_SCATTER:return"scatter";
-              case ST_PACK:return"pack";case ST_MERGE:return"merge";
-              case ST_BMBUILD:return"bm_build";case ST_PARTBM:return"part_bm";
-              case ST_PARTHALF:return"part_half";case ST_FUSEDHALF:return"fused_half";
-              default:return"partition";}
+    switch(s){
+    case ST_UNPACK:     return "flat_dN_unpack";
+    case ST_SCATTER:    return "flat_scatter";
+    case ST_PACK:       return "enc_pack_dN";
+    case ST_MERGE_FLAT: return "merge_flat";
+    case ST_PART:       return "enc_partition_full";
+    case ST_BMBUILD:    return "enc_partition_none";
+    case ST_FUSEDHALF:  return "enc_partition_right";
+    case ST_PARTBM:     return "part_bm";        /* no prod primitive */
+    case ST_PARTHALF:   return "part_half";      /* no prod primitive */
+    case ST_MERGE_GEN:  return "merge";
+    case ST_MERGE_TWO:  return "merge_two";
+    case ST_MERGE_CL:   return "merge_constant_left";
+    case ST_MERGE_CR:   return "merge_constant_right";
+    }
+    return "?";
+}
+/* Per-element accounting (bits): data input, data output, lookup-table
+ * load (control inputs like the bitmap or the mask vector treated as
+ * "data input").  For partition stages the unit element is one input
+ * code (n inputs = n outputs across the L/R split).  For merge / unpack /
+ * scatter / merge_flat the unit element is one output byte.  Fractional
+ * costs (e.g. 1 byte of expand_popcnt amortized over 8 output bytes =
+ * 0.125 bit/elem) are kept; the bandwidth column then reports the
+ * effective data-path pressure.
+ *
+ * Sources for the numbers:
+ *   merge / merge_constant_*  -- tree_merge_neon / tree_merge_bcast_*_neon
+ *     load expand_tab[mask] (1 byte/output) + expand_popcnt[mask]
+ *     (0.125 byte/output) + 1 source byte/output + 1 bm bit/output.
+ *   merge_two -- merge_both_const_neon: only consumes 1 bm bit/output;
+ *     the bit_pos_tab is a compile-time vector held in a register.
+ *   merge_flat (D) -- packed bm stream is D bits/output, the c2s lookup
+ *     yields one byte/output (the symbol); the c2s table is held in
+ *     registers (D<=6) or via vqtbl2/4 splits but each output still costs
+ *     one looked-up byte = 8 bits.
+ *   enc_partition_full -- compress_tab[mask] is 32 bytes/8 inputs = 4
+ *     byte/elem = 32 bits/elem; +1 byte/8 inputs from compress_popcnt =
+ *     1 bit/elem.  Outputs are 1 bm bit + 16 code bits per input (the
+ *     code goes to exactly one of L or R) = 17 bits/elem.
+ *   enc_partition_none -- builds bm only (no compress_tab load);
+ *     out = 1 bit/elem.
+ *   enc_partition_right (FUSEDHALF) -- like full but only loads the
+ *     right half of compress_tab (16 bytes/8 inputs) and writes only
+ *     right + bm.  Average emit is half the input codes worth of bytes;
+ *     we report 1 + 16 = 17 (the LOADED right shuffle still uses 16/8 =
+ *     2 byte/elem = 16 lut bits).
+ *   part_bm / part_half -- unfused: same as enc_partition_full /
+ *     _right but ADDITIONALLY load the prebuilt bm (1 bit/elem extra
+ *     on the data-input side; lut unchanged).
+ *   flat_dN_unpack -- packed input D bits/output; out is the 8-bit code
+ *     (0..2^D-1).  No mask-indexed table load.
+ *   flat_scatter -- input 8-bit code, output 8-bit symbol; c2s held in
+ *     registers (one byte of effective lookup per output = 8 lut bits).
+ *   enc_pack_dN -- read u16 code (16 bits/elem), emit D bits/elem;
+ *     no table load.
+ *
+ * For partition stages the "out" count includes both the per-element
+ * bitmap bit AND the dense code-byte traffic, so the out_MB/s column
+ * reflects total write-port pressure. */
+/* Accounting convention: each number is the LOAD/STORE bandwidth from the
+ * named stream amortized per element, including the "over-read" /
+ * "over-store" that comes from the SIMD primitives always operating on
+ * full 16-byte vectors regardless of how much of the vector ends up in
+ * the cursor advance.
+ *
+ * Concretely for merge (tree_merge_neon, 16 outputs per inner iter):
+ *   - vld1q_u8(left + lc):  16 bytes loaded / 16 outputs = 1 byte/elem = 8 bits/elem
+ *   - vld1q_u8(right + rc): 16 bytes loaded / 16 outputs = 1 byte/elem = 8 bits/elem
+ *   - bm[j>>3]:             2 bytes loaded / 16 outputs = 1 bit/elem
+ * The cursors `lc` and `rc` only advance by (16 - nr) and nr respectively
+ * each iter, totaling 16 bytes of cursor advance per iter -- but we LOAD
+ * 32 bytes, so 16 bytes per iter are over-read (the same source bytes get
+ * loaded twice across consecutive iters when the partition is skewed).
+ *
+ * For partition_full (8 codes per inner iter, in-place left write):
+ *   - vld1q_u16(codes_la + j):       16 bytes / 8 inputs = 16 bits/elem
+ *   - compress_tab[mask] vld1q_u8 x2: 32 bytes / 8 inputs = 32 bits/elem (lut)
+ *   - compress_popcnt[mask]:          1 byte  / 8 inputs =  1 bit/elem  (lut)
+ *   - vst1q_u8 to right_out:         16 bytes / 8 inputs = 16 bits/elem
+ *   - vst1q_u8 to codes_la (left):   16 bytes / 8 inputs = 16 bits/elem
+ *   - bm[j>>3] write:                 1 byte  / 8 inputs =  1 bit/elem
+ * The cursors n_right and n_left advance by nr*2 and (8-nr)*2 bytes per
+ * iter, summing to exactly 16 bytes per iter -- but we WRITE 32 bytes per
+ * iter, so 16 bytes/iter are "over-store" (garbage-tail bytes overwritten
+ * by the next iter's valid+garbage write).  This is safe by construction:
+ * see comment in main() for the n_left <= j invariant proof. */
+static void stage_bits(stage_t s, int D, double *in, double *out, double *lut) {
+    switch (s) {
+    case ST_UNPACK:     *in=D;        *out=8;        *lut=0;       break;
+    case ST_SCATTER:    *in=8;        *out=8;        *lut=8;       break;
+    case ST_PACK:       *in=16;       *out=D;        *lut=0;       break;
+    case ST_MERGE_FLAT: *in=D;        *out=8;        *lut=8;       break;
+    case ST_PART:       *in=16;       *out=1+32;     *lut=32+1;    break;
+    case ST_BMBUILD:    *in=16;       *out=1;        *lut=0;       break;
+    case ST_PARTBM:     *in=16+1;     *out=32;       *lut=32+1;    break;
+    case ST_PARTHALF:   *in=16+1;     *out=16;       *lut=16+1;    break;
+    case ST_FUSEDHALF:  *in=16;       *out=1+16;     *lut=16+1;    break;
+    case ST_MERGE_GEN:  *in=8+8+1;    *out=8;        *lut=8+1;     break;
+    case ST_MERGE_TWO:  *in=1;        *out=8;        *lut=0;       break;
+    case ST_MERGE_CL:   *in=8+1;      *out=8;        *lut=8+1;     break;
+    case ST_MERGE_CR:   *in=8+1;      *out=8;        *lut=8+1;     break;
+    }
 }
 
 int main(int argc, char **argv) {
@@ -215,11 +489,13 @@ int main(int argc, char **argv) {
 #endif
     uint8_t  *bm = malloc(n+16), *codes = malloc(n+16), *out = malloc(n+16);
     uint8_t  *ref = malloc(n+16), *pack_out = malloc(n+16);
+    uint8_t  *merge_left = malloc(n+16), *merge_right = malloc(n+16);
     uint16_t *la_pristine = malloc((n+16)*2), *la_work = malloc((n+16)*2),
              *tmp16 = malloc((n+16)*2), *ref16l = malloc((n+16)*2), *ref16r = malloc((n+16)*2);
     uint8_t   c2s[256], ref_bm[ (8192/8) + 64 ];   /* 2^8 entries (D up to 8) */
     srand(0xC0FFEE);
     for (int i=0;i<n+16;i++){ bm[i]=(uint8_t)rand(); la_pristine[i]=(uint16_t)rand(); }
+    for (int i=0;i<n+16;i++){ merge_left[i]=(uint8_t)rand(); merge_right[i]=(uint8_t)rand(); }
     for (int i=0;i<256;i++) c2s[i]=(uint8_t)rand();
 
     for (int d=2; d<=MAXD; d++) {
@@ -242,9 +518,9 @@ int main(int argc, char **argv) {
 #if defined(HAVE_SIMD)
         reg(BK,ST_PACK,   d,0,simd_pack);
 #endif
-        reg("scalar",ST_MERGE,  d,0,p_merge_scalar);
+        reg("scalar",ST_MERGE_FLAT,  d,0,p_merge_scalar);
 #if defined(HAVE_SIMD)
-        reg(BK,ST_MERGE,  d,0,simd_merge);
+        reg(BK,ST_MERGE_FLAT,  d,0,simd_merge_flat);
 #endif
     }
     reg("scalar",ST_PART,0,1,p_part_scalar);
@@ -258,16 +534,34 @@ int main(int argc, char **argv) {
     reg(BK, ST_PARTBM,  0,1, simd_partbm);
     reg(BK, ST_PARTHALF,0,0, simd_parthalf);
     reg(BK, ST_FUSEDHALF,0,0, simd_fusedhalf);
+    /* Binary-merge family: production prims used at every internal node in
+       the bottom-up codec.  Same bm consumption pattern as merge_flat D=1
+       but the symbol(s) come from buffer reads or scalar constants
+       instead of a c2s lookup. */
+    reg("scalar", ST_MERGE_GEN, 0, 0, p_merge_gen_scalar);
+    reg(BK,       ST_MERGE_GEN, 0, 0, simd_merge_gen);
+    reg("neon_pcpc",     ST_MERGE_GEN, 0, 0, simd_merge_pcpc_pure);
+    reg("neon_pcpc_full",ST_MERGE_GEN, 0, 0, simd_merge_pcpc_full);
+    reg("neon_unroll8",  ST_MERGE_GEN, 0, 0, simd_merge_unroll8);
+    reg("scalar", ST_MERGE_TWO, 0, 0, p_merge_two_scalar);
+    reg(BK,       ST_MERGE_TWO, 0, 0, simd_merge_two);
+    reg("scalar", ST_MERGE_CL,  0, 0, p_merge_const_l_scalar);
+    reg(BK,       ST_MERGE_CL,  0, 0, simd_merge_const_l);
+    reg("scalar", ST_MERGE_CR,  0, 0, p_merge_const_r_scalar);
+    reg(BK,       ST_MERGE_CR,  0, 0, simd_merge_const_r);
 #endif
 
     printf("bench_prim: n=%d elems, best-of-9 x %d reps, partition depth=%d\n",
            n, reps, PART_DEPTH);
-    printf("%-10s %-4s %-7s %10s  %s\n","stage","D","variant","ns/elem","check");
+    printf("%-22s %-3s %-9s %10s  %5s %5s %5s   %6s %6s %6s  %s\n",
+           "stage","D","variant","ns/elem",
+           "in_b","out_b","lut_b", "in_MB/s","out_MB/s","lut_MB/s","check");
     volatile uint8_t sink = 0; int prevD=-99; stage_t prevS=-1;
 
     for (int k=0;k<NPRIMS;k++) {
         prim_t *p = &PRIMS[k];
-        ctx_t cx = { bm, codes, c2s, out, pack_out, la_work, tmp16, n, p->D, PART_DEPTH };
+        ctx_t cx = { bm, codes, c2s, out, pack_out, merge_left, merge_right,
+                     la_work, tmp16, n, p->D, PART_DEPTH };
         const char *chk = "ok";
 
         /* per-stage input prep + correctness vs scalar reference */
@@ -282,8 +576,29 @@ int main(int argc, char **argv) {
             memcpy(la_work,la_pristine,(size_t)n*2);
             scalar_pack(ref,la_pristine,n,p->D,PART_DEPTH); memset(pack_out,0,n); p->run(&cx);
             if (memcmp(pack_out,ref,(n*p->D+7)>>3)) chk="FAIL";
-        } else if (p->stage == ST_MERGE) {
+        } else if (p->stage == ST_MERGE_FLAT) {
             scalar_unpack(codes,bm,n,p->D); scalar_scatter(ref,codes,c2s,n);
+            memset(out,0,n); p->run(&cx);
+            if (memcmp(out,ref,n)) chk="FAIL";
+        } else if (p->stage == ST_MERGE_GEN) {
+#if defined(HAVE_NEON_KERNELS)
+            /* Populate g_bm_popcnt once per row so the _pcpc_pure variant
+               sees an up-to-date table; harmless for other variants. */
+            fill_bm_popcnt(bm, n);
+#endif
+            scalar_merge_gen(ref, bm, n, merge_left, merge_right);
+            memset(out,0,n); p->run(&cx);
+            if (memcmp(out,ref,n)) chk="FAIL";
+        } else if (p->stage == ST_MERGE_TWO) {
+            scalar_merge_two(ref, bm, n, MERGE_LEFT_SYM, MERGE_RIGHT_SYM);
+            memset(out,0,n); p->run(&cx);
+            if (memcmp(out,ref,n)) chk="FAIL";
+        } else if (p->stage == ST_MERGE_CL) {
+            scalar_merge_const_l(ref, bm, n, MERGE_LEFT_SYM, merge_right);
+            memset(out,0,n); p->run(&cx);
+            if (memcmp(out,ref,n)) chk="FAIL";
+        } else if (p->stage == ST_MERGE_CR) {
+            scalar_merge_const_r(ref, bm, n, merge_left, MERGE_RIGHT_SYM);
             memset(out,0,n); p->run(&cx);
             if (memcmp(out,ref,n)) chk="FAIL";
         } else if (p->stage == ST_BMBUILD) {
@@ -335,8 +650,18 @@ int main(int argc, char **argv) {
         if (p->D!=prevD || p->stage!=prevS) printf("\n");
         prevD=p->D; prevS=p->stage;
         char dbuf[8]; if (p->D==0) strcpy(dbuf,"-"); else snprintf(dbuf,8,"%d",p->D);
-        printf("%-10s %-4s %-7s %10.3g  %s\n", stage_name(p->stage), dbuf, p->variant, best, chk);
+        double in_b=0, out_b=0, lut_b=0;
+        stage_bits(p->stage, p->D, &in_b, &out_b, &lut_b);
+        /* MB/s = bits/elem * 125 / ns/elem.  Derivation: bytes/sec =
+           (bits/8) / (ns*1e-9); divide by 1e6 -> bits * 125 / ns. */
+        double in_bw  = best > 0 ? in_b  * 125.0 / best : 0;
+        double out_bw = best > 0 ? out_b * 125.0 / best : 0;
+        double lut_bw = best > 0 ? lut_b * 125.0 / best : 0;
+        printf("%-22s %-3s %-9s %10.3g  %5.2f %5.2f %5.2f   %6.0f %6.0f %6.0f  %s\n",
+               stage_name(p->stage), dbuf, p->variant, best,
+               in_b, out_b, lut_b, in_bw, out_bw, lut_bw, chk);
     }
     (void)sink;
+    free(merge_left); free(merge_right);
     return 0;
 }
