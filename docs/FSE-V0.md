@@ -571,3 +571,145 @@ Findings:
 - raw sweep outputs: `results/fair/<host>-<date>.txt`.
 - aggregated table: `paper/data/fair.csv` (driven by the same
   bench output via `extras/fair_csv.py`).
+
+## 2026-05-30 — ph/pha on zstd's entropy streams (parked)
+
+A side investigation: extract every byte stream zstd hands to its
+entropy coders (literal residuals → HUF, plus LL/OF/ML codes → three
+FSE streams) and benchmark ph/pha against huf0/fse_stk on each.
+**Not part of the official benchmark set** — these distributions
+were temporarily added to `bench/bench_distributions.c` to produce
+the numbers below and then removed.
+
+### How to reproduce
+
+- Patched libzstd lives at `ext/zstd/` (cloned from upstream
+  5233c58 = v1.6.0).  Patches in `lib/decompress/zstd_prof.{h,c}`
+  add accumulators for HUF / FSE-build / sequence-loop on decode
+  and LZ-match-find / HUF / FSE-build / FSE-emit on encode, plus
+  optional dump pointers (`g_zstd_prof_lit_dump_fp`,
+  `g_zstd_prof_{ll,of,ml}_dump_fp`) that snapshot the four
+  streams during compression.
+- Extractor: `extras/bench/extract_zstd_lits.c` — dumps the four
+  streams + Shannon H per stream to `extras/datasets/lits/`.
+- Decode/encode time-breakdown driver:
+  `extras/bench/bench_zstd_breakdown.c`.
+- Rebuild + run:
+  ```
+  (cd ext/zstd/lib && make clean && CFLAGS='-O3 -DNDEBUG' make libzstd.a -j)
+  cc -O3 -I ext/zstd/lib -o build/extract_zstd_lits \
+      extras/bench/extract_zstd_lits.c ext/zstd/lib/libzstd.a
+  cc -O3 -I ext/zstd/lib -o build/bench_zstd_breakdown \
+      extras/bench/bench_zstd_breakdown.c ext/zstd/lib/libzstd.a
+  ```
+
+### zstd decode time-budget (M4, L3, real data, hot cache)
+
+| dataset | huff% | fseB% | fseD% | lzX% | other% | MB/s |
+|---|---|---|---|---|---|---|
+| calgary_pic | 21.5% | 6.9% | 57.1% | 14.3% | 0.2% | 4458 |
+| cat-wiki.html | 14.1% | 5.2% | 78.1% | 2.5% | 0.1% | 2732 |
+| pride.txt | 5.5% | 3.0% | 87.8% | 3.6% | 0.1% | 1512 |
+| dna_fasta | 1.7% | 3.0% | 95.8% | 0.0% | 0.0% | 1449 |
+| cat-image.jpg | 0.0% | 11.5% | 24.9% | 6.0% | 57.6% | 50096 |
+
+LZ match-execution is ~free on hot M4 caches (cache-resident
+source reads + tight wildcopy).  The FSE sequence-decode loop
+dominates on text-y data (78–96%).  Huffman of literals is
+at most 22% even on the most literal-heavy real dataset.
+
+### Encode time-budget (M4, L3)
+
+| dataset | lz% | huff% | fseB% | fseE% | MB/s |
+|---|---|---|---|---|---|
+| calgary_pic | 62.8% | 10.4% | 9.8% | 12.2% | 1078 |
+| cat-wiki.html | 74.5% | 4.4% | 8.2% | 10.9% | 683 |
+| pride.txt | 81.9% | 1.5% | 6.3% | 9.5% | 301 |
+| dna_fasta | 79.5% | 0.8% | 8.0% | 11.0% | 316 |
+| cat-image.jpg | 13.7% | 82.9% | 0.9% | 0.5% | 1604 |
+
+LZ match-find dominates encode (63–82% on compressible data).
+Symmetric inverse of the decode picture: matches are expensive
+to *discover* and cheap to *redeem*.
+
+### Stream sizes + Shannon H (bytes in)
+
+| dataset | raw | lit | LL | OF | ML | H_raw | H_lit | H_LL | H_OF | H_ML |
+|---|---|---|---|---|---|---|---|---|---|---|
+| calgary_pic | 501 | 39 | 12 | 12 | 12 | 1.21 | 5.37 | 2.80 | 2.89 | 4.74 |
+| cat-wiki.html | 985 | 65 | 49 | 49 | 49 | 5.48 | 5.96 | 2.03 | 4.04 | 4.54 |
+| pride.txt | 721 | 43 | 84 | 84 | 84 | 4.53 | 4.99 | 1.24 | 3.47 | 3.15 |
+| dna_fasta | 488 | 11 | 63 | 63 | 63 | 2.08 | 2.35 | **0.68** | 3.41 | 2.06 |
+| chinese_text | 483 | 112 | 51 | 51 | 51 | 5.79 | 5.95 | 2.54 | 3.56 | 2.78 |
+| json_api | 515 | 37 | 12 | 12 | 12 | 5.20 | 5.82 | 2.37 | 3.79 | 4.33 |
+| cat-image.jpg | 273 | 263 | 0 | 0 | 0 | 7.89 | 7.89 | — | — | — |
+
+(All sizes KB.  Bits/byte for H.)
+
+### Relative share of compressed bits (Shannon estimate)
+
+| dataset | lit% | LL% | OF% | ML% |
+|---|---|---|---|---|
+| calgary_pic | **63%** | 10% | 10% | 17% |
+| cat-wiki.html | 41% | 11% | 21% | 23% |
+| chinese_text | **66%** | 14% | 19% | 16% |
+| pride.txt | 25% | 12% | **33%** | 30% |
+| dna_fasta | 6% | 10% | **52%** | 31% |
+| cat-image.jpg | **100%** | 0% | 0% | 0% |
+
+The FSE streams (especially OF) own most of the compressed
+bitstream on text-y data, not the literals.  Image-like data
+inverts that.
+
+### ph/pha vs huf0/fse_stk on these streams (M4, ratio_op)
+
+| stream | H | huf0 | ph | pha | fse_stk |
+|---|---|---|---|---|---|
+| L_calgary | 5.37 | 1.47 | 1.45 | 1.45 | 1.48 |
+| L_pride | 4.99 | 1.59 | 1.57 | 1.57 | 1.60 |
+| L_dna | 2.35 | 3.22 | 3.18 | 3.30 | 3.40 |
+| LL_pride | 1.24 | 5.33 | 5.17 | **6.16** | **6.39** |
+| LL_dna | **0.68** | 6.82 | 6.71 | **11.29** | **11.72** |
+| OF_dna | 3.41 | 2.31 | 2.28 | 2.35 | 2.34 |
+| ML_pride | 3.15 | 2.51 | 2.47 | 2.48 | 2.54 |
+
+### Conclusions (then parked)
+
+1. **Literals are flat-ish; ph ≈ pha ≈ huf0 within ~2% ratio.**
+   pha's prebuilt Bernoulli tables have nothing to fit on
+   post-LZ residuals.
+
+2. **LL is where Huffman fails and pha shines.**  When the
+   alphabet is small and one symbol is very common (LL_dna
+   H=0.68), the integer-bit Huffman floor caps ratio at 6.82
+   — pha's prebuilt-Bernoulli mechanism nearly doubles that
+   to 11.29, almost matching fse_stk's 11.72.  This is the
+   archetypal "where does ANS beat Huffman" case made
+   concrete on zstd's actual workload.
+
+3. **pha closes the huf0→fse_stk gap on FSE streams much
+   better than ph does** (LL_dna gap to fse_stk: huf0=4.90,
+   ph=5.01, pha=0.43).  pha's per-block adaptation matters
+   most when the underlying distribution is far from uniform.
+
+4. **A hypothetical ph-in-zstd swap would buy ~10% decode
+   time on Huffman replacement and 10-40% on FSE-stream
+   replacement** (driven by the FSE share in the decode
+   profile above).  Not pursued — wire-format change rules
+   it out as a real zstd contribution; logged as research.
+
+### Reproducing the per-stream A/B
+
+If you re-add the stream distributions, the entries (now
+removed from `bench/bench_distributions.c`) were:
+
+```
+{ .name = "L_<dataset>",  .source = "lits/<file>.lits" }
+{ .name = "LL_<dataset>", .source = "lits/<file>.ll" }
+{ .name = "OF_<dataset>", .source = "lits/<file>.of" }
+{ .name = "ML_<dataset>", .source = "lits/<file>.ml" }
+```
+
+The `.lits/.ll/.of/.ml` files in `extras/datasets/lits/` are
+generated by `extract_zstd_lits` and are deliberately not
+committed.
