@@ -316,6 +316,13 @@ endif()
 # Benchmarks
 option(BUILD_BENCH "Build benchmarks" ON)
 if(BUILD_BENCH)
+    # bench_distributions.c reads the real-world dataset files verbatim
+    # from this directory.  Apply the compile-time path to every TU that
+    # includes the file (set on the file so it propagates to every target
+    # that uses bench/bench_distributions.c -- ~10 of them).
+    set_source_files_properties(bench/bench_distributions.c PROPERTIES
+        COMPILE_DEFINITIONS "PIVCO_DATASET_DIR=\"${CMAKE_SOURCE_DIR}/extras/datasets\"")
+
     add_executable(pivco_huffman_bench
         bench/bench_main.c
         bench/bench_distributions.c

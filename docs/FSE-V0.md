@@ -484,3 +484,90 @@ extras/datasets/calgary_pic` to see the real-data behavior.
 All instrumentation lives in `src/pivco_huffman_neon.c`
 (`g_pivco_fse_commit[26]`, `g_pivco_fse_root_log[]`) and is
 single-threaded debug-only — not on the hot path.
+
+## 2026-05-30 — pha vs stock FSE on real data: the prebuilt-table mechanism
+
+After fixing `bench/bench_distributions.c` to read real source files
+verbatim (instead of IID-resampling from each file's byte histogram),
+`pha` shows much stronger wins on locally-clustered data than the
+IID benchmark suggested:
+
+| dataset | `fse_stk` ratio | `pha` ratio |
+|---|---|---|
+| calgary_pic (real) | 6.63 | **7.09** |
+| calgary_pic (IID resampled) | 6.42 | 6.13 |
+
+The on-disk methodology preserves spatial clustering (long runs of
+0x00 in white-page bitmaps) which IID resampling destroyed.  On
+text-y datasets the change is small (most ratios within ±2%); on
+calgary_pic it flips the leaderboard — pha now beats fse_stk on
+ratio AND decodes ~6× faster (4231 vs 666 MB/s).
+
+### Why pha wins on calgary_pic
+
+Probed by adding a temporary `fse_8k` engine (same FSE codec, force
+8 KB chunks instead of 128 KB) and timing FSE_buildDTable
+separately.  Numbers on M4, real calgary_pic:
+
+| engine | ratio_op | ratio_pb | dec_op MB/s | build / chunk | build share |
+|---|---|---|---|---|---|
+| `fse_stk` (12 × 128 KB) | 6.63 | 6.61 | 666 | 4.8 μs | 2.6% |
+| `fse_8k` (192 × 8 KB) | **6.95** | 6.60 | 650 | 2.2 μs | **18.9%** |
+| `pha` | **7.09** | 7.10 | **4231** | ~0 (table prebuilt) | ~0% |
+
+Findings:
+
+1. **Per-chunk adaptation is intrinsically valuable for clustered
+   data.**  fse_8k → fse_stk swap alone gains +0.32 ratio
+   (6.63 → 6.95) on calgary_pic — about 70% of the way to pha.
+   The gain comes from each 8 KB chunk's FSE table being a better
+   fit to its local byte distribution than the 128 KB-averaged
+   table.
+
+2. **The cost is asymmetric, and it's about the table header.**
+   fse_stk pays ~256-500 bytes of NCount header per 128 KB chunk
+   (< 0.4% overhead).  fse_8k pays the same ~300 bytes per
+   chunk — but 16× more chunks → 3-6% header overhead.  That's why
+   fse_8k's ratio doesn't reach pha's 7.09 despite per-chunk
+   adaptation.  pha sidesteps this entirely: per-block table
+   selection costs **1 byte** (the marker for one of 50 prebuilt
+   tables), so per-block adaptation is essentially free.
+
+3. **Build time is also asymmetric, and it's significant on small
+   chunks.**  FSE_buildDTable takes ~2-5 μs per chunk depending on
+   alphabet size and count magnitudes.  At 128 KB chunks this is
+   negligible (~2-3% of decode time).  At 8 KB chunks it becomes
+   **15-19%** of total decode time across all measured datasets.
+   pha pays zero build cost — its 50 DTables are constructed once
+   at library init.  This is why pha decodes 6× faster than
+   fse_stk on calgary even with stricter per-block adaptation.
+
+4. **The pha mechanism in plain English:** instead of fitting a
+   bespoke FSE table per chunk and shipping it (the natural FSE
+   path), pha picks the closest of 50 prebuilt Bernoulli(p) tables
+   and tags it with one byte.  This trades a small fit penalty
+   (prebuilt is ~0.5 bit/elem worse than fitted on a perfect-fit
+   chunk) for two enormous savings: (a) **table header overhead
+   drops from ~300 B/chunk to 1 B/chunk**, and (b) **decoder build
+   cost drops from ~2-5 μs/chunk to 0**.  The math works out
+   strongly in pha's favor on heavily clustered data; on text-y
+   data the per-chunk fit penalty is more visible but the decoder
+   speedup remains decisive.
+
+5. **The prebuilt-table approach has a ceiling.**  If a hypothetical
+   FSE variant could ship a fitted-per-chunk table with the same
+   1-byte selection overhead, calgary_pic ratio could likely
+   reach ~9+ (estimated from `fse_8k`'s output minus its header
+   overhead).  That's the natural next research direction — but
+   it requires a different wire format (table-quantization
+   strategy or learned-vocab tables), out of scope for v0.
+
+### Source of truth
+
+- bench: `bench/bench_fair.c` (`fse_stk`, `pha`, `ph` rows).
+- real-data path: `bench/bench_distributions.c` (`load_file` +
+  `bench_dist_size`).  CMake passes the dataset dir at compile
+  time (`PIVCO_DATASET_DIR`).
+- raw sweep outputs: `results/fair/<host>-<date>.txt`.
+- aggregated table: `paper/data/fair.csv` (driven by the same
+  bench output via `extras/fair_csv.py`).

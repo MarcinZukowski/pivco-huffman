@@ -51,11 +51,21 @@ extern const char  *bench_dist_name(int idx);
 extern int          bench_dist_is_main(int idx);
 extern void         bench_generate_symbols(int dist_idx, uint8_t *symbols,
                                            int n_symbols, uint64_t seed);
+extern int          bench_dist_size(int dist_idx, int min_n, int block_align);
 
 /* ---- config ---- */
-#define TOTAL      (1 << 20)            /* 1 MB working buffer */
+#define TOTAL      (1 << 20)            /* MIN buffer size (1 MB).  For
+                                           real-file datasets the natural
+                                           size may be larger (file used
+                                           as-is if >= 1 MB; cycled to
+                                           >= 1 MB if smaller). */
+#define TOTAL_MAX  (16 * 1024 * 1024)   /* generous alloc ceiling */
 #define BLK        PIVCO_BLOCK_SIZE     /* ph decode sub-block (4-8 KB) */
 #define HUF_CHUNK  (128 * 1024)         /* huf0 hard cap; FSE controlled chunk */
+
+/* Per-distribution buffer size, set in main() before each engine row is
+ * measured.  Used by BEST_MBPS for the MB/s conversion. */
+static size_t g_total = TOTAL;
 #define RUNS       10
 #define REPEATS    20
 #define SEED       0xBEEFCAFE12345678ULL
@@ -90,7 +100,7 @@ static double now_ns(void) {
             double _t0 = now_ns();                                      \
             for (int _rep = 0; _rep < REPEATS; _rep++) { __VA_ARGS__; } \
             double _el = now_ns() - _t0;                                \
-            _bma_smp[_bma_n++] = 1000.0 * (double)TOTAL * REPEATS / _el;\
+            _bma_smp[_bma_n++] = 1000.0 * (double)g_total * REPEATS / _el;\
         }                                                               \
         for (;;) {                                                      \
             double _m1 = 0, _m2 = 0;                                    \
@@ -106,7 +116,7 @@ static double now_ns(void) {
                 double _t0 = now_ns();                                  \
                 for (int _rep = 0; _rep < REPEATS; _rep++) { __VA_ARGS__; }\
                 double _el = now_ns() - _t0;                            \
-                _bma_smp[_bma_n++] = 1000.0 * (double)TOTAL * REPEATS / _el;\
+                _bma_smp[_bma_n++] = 1000.0 * (double)g_total * REPEATS / _el;\
             }                                                           \
         }                                                               \
     } while (0)
@@ -419,7 +429,8 @@ fail:
 /* ============================ FSE ============================ */
 static result_t measure_fse(const uint8_t *sym, size_t n) {
     result_t R; memset(&R, 0, sizeof R);
-    size_t nch = (n + HUF_CHUNK - 1) / HUF_CHUNK;
+    size_t CHK = HUF_CHUNK;
+    size_t nch = (n + CHK - 1) / CHK;
     R.builds = (int)nch;
 
     unsigned cnt[256], maxSym; histo_u(sym, n, cnt, &maxSym);
@@ -445,30 +456,30 @@ static result_t measure_fse(const uint8_t *sym, size_t n) {
     if (!enc||!encp||!off||!offp||!dec||FSE_isError(ncSize)) goto fail;
 
     off[0]=0;
-    for (size_t c=0;c<nch;c++){ size_t sz=(c<nch-1)?HUF_CHUNK:n-c*HUF_CHUNK;
-        size_t r=FSE_compress(enc+off[c], sz+1024, sym+c*HUF_CHUNK, sz);
+    for (size_t c=0;c<nch;c++){ size_t sz=(c<nch-1)?CHK:n-c*CHK;
+        size_t r=FSE_compress(enc+off[c], sz+1024, sym+c*CHK, sz);
         if (FSE_isError(r)||r==0) goto fail; off[c+1]=off[c]+r; }
     offp[0]=0;
-    for (size_t c=0;c<nch;c++){ size_t sz=(c<nch-1)?HUF_CHUNK:n-c*HUF_CHUNK;
-        size_t r=FSE_compress_usingCTable(encp+offp[c], sz+1024, sym+c*HUF_CHUNK, sz, ct);
+    for (size_t c=0;c<nch;c++){ size_t sz=(c<nch-1)?CHK:n-c*CHK;
+        size_t r=FSE_compress_usingCTable(encp+offp[c], sz+1024, sym+c*CHK, sz, ct);
         if (FSE_isError(r)||r==0) goto fail; offp[c+1]=offp[c]+r; }
 
     /* correctness: prebuilt decode (usingDTable on body) */
-    for (size_t c=0;c<nch;c++){ size_t sz=(c<nch-1)?HUF_CHUNK:n-c*HUF_CHUNK;
+    for (size_t c=0;c<nch;c++){ size_t sz=(c<nch-1)?CHK:n-c*CHK;
         size_t r=FSE_decompress_usingDTable(dec, sz, encp+offp[c], offp[c+1]-offp[c], dt);
-        if (FSE_isError(r)||memcmp(sym+c*HUF_CHUNK,dec,sz)!=0){fprintf(stderr,"FSE PB mismatch ch %zu\n",c);goto fail;} }
+        if (FSE_isError(r)||memcmp(sym+c*CHK,dec,sz)!=0){fprintf(stderr,"FSE PB mismatch ch %zu\n",c);goto fail;} }
 
     double best;
-    BEST_MBPS({ for (size_t c=0;c<nch;c++){ size_t sz=(c<nch-1)?HUF_CHUNK:n-c*HUF_CHUNK;
-        FSE_compress(enc+off[c], sz+1024, sym+c*HUF_CHUNK, sz); } });
+    BEST_MBPS({ for (size_t c=0;c<nch;c++){ size_t sz=(c<nch-1)?CHK:n-c*CHK;
+        FSE_compress(enc+off[c], sz+1024, sym+c*CHK, sz); } });
     R.enc_op = best;
-    BEST_MBPS({ for (size_t c=0;c<nch;c++){ size_t sz=(c<nch-1)?HUF_CHUNK:n-c*HUF_CHUNK;
-        FSE_compress_usingCTable(encp+offp[c], sz+1024, sym+c*HUF_CHUNK, sz, ct); } });
+    BEST_MBPS({ for (size_t c=0;c<nch;c++){ size_t sz=(c<nch-1)?CHK:n-c*CHK;
+        FSE_compress_usingCTable(encp+offp[c], sz+1024, sym+c*CHK, sz, ct); } });
     R.enc_pb = best;
-    BEST_MBPS({ for (size_t c=0;c<nch;c++){ size_t sz=(c<nch-1)?HUF_CHUNK:n-c*HUF_CHUNK;
+    BEST_MBPS({ for (size_t c=0;c<nch;c++){ size_t sz=(c<nch-1)?CHK:n-c*CHK;
         FSE_decompress(dec, sz, enc+off[c], off[c+1]-off[c]); } });
     R.dec_op = best;
-    BEST_MBPS({ for (size_t c=0;c<nch;c++){ size_t sz=(c<nch-1)?HUF_CHUNK:n-c*HUF_CHUNK;
+    BEST_MBPS({ for (size_t c=0;c<nch;c++){ size_t sz=(c<nch-1)?CHK:n-c*CHK;
         FSE_decompress_usingDTable(dec, sz, encp+offp[c], offp[c+1]-offp[c], dt); } });
     R.dec_pb = best;
 
@@ -728,25 +739,34 @@ int main(int argc, char **argv) {
     }
     bench_init();
     phtd_set_fse_enabled(0);   /* TD grid: raw bitmaps, isolate tree x prims */
-    printf("fair-bench: %d MB-class buffer = %d KB, adaptive %d-%d runs x %d reps "
-           "(top-2 within %d%% stops), ph table-G=%zu KB, BLK=%d\n",
-           TOTAL/(1<<20), TOTAL/1024, _BMA_MIN, _BMA_MAX, REPEATS,
+    printf("fair-bench: buffer >= %d KB (real-file dists may be larger), "
+           "adaptive %d-%d runs x %d reps (top-2 within %d%% stops), "
+           "ph table-G=%zu KB, BLK=%d\n",
+           TOTAL/1024, _BMA_MIN, _BMA_MAX, REPEATS,
            (int)(_BMA_TOL*100), g_table_G/1024, BLK);
     if (eng_filter)  printf("  engines: %s\n", eng_filter);
     if (dist_filter) printf("  dists:   %s\n", dist_filter);
     printf("columns: enc(opaque prebuilt)  dec(opaque prebuilt)  MB/s | ratio(op pb) | builds/1MB\n\n");
 
-    uint8_t *sym = malloc(TOTAL);
+    uint8_t *sym = malloc(TOTAL_MAX);
     int nd = bench_num_distributions();
     for (int d = 0; d < nd; d++) {
         int include = dist_filter ? in_csv(dist_filter, bench_dist_name(d))
                                   : (run_all || bench_dist_is_main(d));
         if (!include) continue;
-        bench_generate_symbols(d, sym, TOTAL, SEED);
-        printf("== %-16s ==        enc_op  enc_pb   dec_op  dec_pb |  r_op  r_pb | blds\n", bench_dist_name(d));
+        /* Align to ph's table-refresh granularity G (default 128 KB,
+           matches huf0's HUF_CHUNK).  This guarantees nwin*bpw == nblk
+           in measure_ph so every block falls under some window's table. */
+        int align = (int)g_table_G;
+        int n = bench_dist_size(d, TOTAL, align);
+        if (n > TOTAL_MAX) n = TOTAL_MAX - (TOTAL_MAX % align);
+        g_total = (size_t)n;
+        bench_generate_symbols(d, sym, n, SEED);
+        printf("== %-16s == n=%d KB enc_op  enc_pb   dec_op  dec_pb |  r_op  r_pb | blds\n",
+               bench_dist_name(d), n/1024);
         for (int e = 0; e < N_ENGINES; e++)
             if (in_csv(eng_filter, ENGINES[e].name))
-                print_row(ENGINES[e].name, ENGINES[e].fn(sym, TOTAL));
+                print_row(ENGINES[e].name, ENGINES[e].fn(sym, (size_t)n));
         printf("\n");
     }
     free(sym);

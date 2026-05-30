@@ -1,9 +1,17 @@
 #include "pivco_huffman.h"
 #include <string.h>
 #include <stdlib.h>
+#include <stdio.h>
 #include <math.h>
 
 #include "dist_real_freqs.h"   /* freq_html_wiki / prose_pride / image_jpeg */
+
+/* CMake passes -DPIVCO_DATASET_DIR=\"...\" for the on-disk path to the
+ * real-world source files (extras/datasets/).  Fallback is the relative
+ * path so the bench still finds them when run from the repo root. */
+#ifndef PIVCO_DATASET_DIR
+#define PIVCO_DATASET_DIR "extras/datasets"
+#endif
 
 /* ---------- PRNG ---------- */
 
@@ -23,6 +31,13 @@ typedef struct {
     const char *name;
     int         is_main;   /* 1 = part of the MAIN dev-iteration set */
     uint64_t    freq[PIVCO_MAX_SYMBOLS];
+    /* Optional real-file source: when non-NULL, bench_generate_symbols
+     * reads the file's bytes VERBATIM (cycling to fill n) instead of
+     * IID-sampling from `freq`.  This preserves cross-byte correlation
+     * (runs, clustering, structure) which the IID resampling destroys --
+     * critical for honest FSE / context-model benchmarks.  Set in
+     * init_distributions(). */
+    const char *source;
 } distribution_t;
 
 /* Sample symbols from a distribution using the CDF */
@@ -42,6 +57,65 @@ void dist_sample(const distribution_t *dist, uint8_t *symbols, int n,
             if (r < cum) break;
         }
         symbols[i] = (uint8_t)sym;
+    }
+}
+
+/* Lazy-loaded per-distribution file cache.  Loaded once on first use,
+ * indexed by distribution position in the `distributions` array. */
+#define MAX_CACHED_DISTS  64
+static uint8_t *cached_data[MAX_CACHED_DISTS];
+static size_t   cached_len [MAX_CACHED_DISTS];
+
+/* Load file <PIVCO_DATASET_DIR>/<source> into cached_data[idx].  Tries
+ * several candidate paths so the bench works whether run from build/ or
+ * the repo root. */
+static int load_file(int idx, const char *source) {
+    if (cached_data[idx]) return 1;
+    const char *candidates[] = {
+        PIVCO_DATASET_DIR, "extras/datasets",
+        "../extras/datasets", "../../extras/datasets",
+    };
+    FILE *f = NULL;
+    for (size_t c = 0; c < sizeof(candidates)/sizeof(candidates[0]); c++) {
+        char path[512];
+        snprintf(path, sizeof(path), "%s/%s", candidates[c], source);
+        f = fopen(path, "rb");
+        if (f) break;
+    }
+    if (!f) {
+        fprintf(stderr, "bench_distributions: cannot open dataset '%s'\n", source);
+        return 0;
+    }
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (sz <= 0) { fclose(f); return 0; }
+    uint8_t *buf = (uint8_t *)malloc((size_t)sz);
+    if (!buf) { fclose(f); return 0; }
+    if (fread(buf, 1, (size_t)sz, f) != (size_t)sz) {
+        fprintf(stderr, "bench_distributions: short read on '%s'\n", source);
+        free(buf); fclose(f); return 0;
+    }
+    fclose(f);
+    cached_data[idx] = buf;
+    cached_len [idx] = (size_t)sz;
+    return 1;
+}
+
+/* Fill `symbols[0..n)` from the cached file, cycling if the file is
+ * smaller than n.  The cycling boundary introduces ~ceil(n/sz) artifical
+ * seams in 1 MB; for typical files (50 KB - 1 MB) that's 1-20 seams in
+ * 1 MB worth of bench input -- negligible vs the IID resampling that
+ * destroyed cross-byte structure across the whole stream. */
+static void fill_from_file(int idx, uint8_t *symbols, int n) {
+    const uint8_t *src = cached_data[idx];
+    size_t sz = cached_len[idx];
+    size_t off = 0;
+    while ((int)off < n) {
+        size_t chunk = (size_t)n - off;
+        if (chunk > sz) chunk = sz;
+        memcpy(symbols + off, src, chunk);
+        off += chunk;
     }
 }
 
@@ -74,18 +148,20 @@ static distribution_t distributions[] = {
     { .name = "flat_M5" },                      /* 32  symbols, M=5 */
     { .name = "flat_M6" },                      /* 64  symbols, M=6 */
     { .name = "flat_M7" },                      /* 128 symbols, M=7 */
-    /* Real-world byte distributions (extras/datasets/README.md). */
-    { .name = "html_wiki",     .is_main = 1 },  /* en.wikipedia.org/wiki/Cat HTML */
-    { .name = "prose_pride",   .is_main = 1 },  /* Project Gutenberg Pride and Prejudice */
-    { .name = "image_jpeg",    .is_main = 1 },  /* Wikimedia Commons Cat03.jpg */
-    { .name = "json_api",      .is_main = 1 },  /* GitHub API commit feed JSON */
-    { .name = "source_c" },                     /* zstd_compress.c */
-    { .name = "log_apache" },                   /* NASA HTTP / Logstash sample */
-    { .name = "dna_fasta",     .is_main = 1 },  /* E. coli K-12 genome FASTA */
-    { .name = "csv_numeric" },                  /* OWID CO2 dataset CSV */
-    { .name = "gzip_random" },                  /* gzip(cat-wiki.html) — near-uniform */
-    { .name = "chinese_text",  .is_main = 1 },  /* Project Gutenberg 紅樓夢 */
-    { .name = "calgary_pic",   .is_main = 1 },  /* Calgary corpus 1bpp scanned page — proba80-like real dataset */
+    /* Real-world byte distributions (extras/datasets/README.md).  source
+     * paths are filenames in PIVCO_DATASET_DIR; bench_generate_symbols
+     * reads them verbatim so cross-byte structure is preserved. */
+    { .name = "html_wiki",     .is_main = 1, .source = "cat-wiki.html" },
+    { .name = "prose_pride",   .is_main = 1, .source = "pride.txt" },
+    { .name = "image_jpeg",    .is_main = 1, .source = "cat-image.jpg" },
+    { .name = "json_api",      .is_main = 1, .source = "json_api.json" },
+    { .name = "source_c",                    .source = "source_c.c" },
+    { .name = "log_apache",                  .source = "log_apache.log" },
+    { .name = "dna_fasta",     .is_main = 1, .source = "dna_fasta.fa" },
+    { .name = "csv_numeric",                 .source = "csv_numeric.csv" },
+    { .name = "gzip_random",                 .source = "gzip_random.gz" },
+    { .name = "chinese_text",  .is_main = 1, .source = "chinese_text.txt" },
+    { .name = "calgary_pic",   .is_main = 1, .source = "calgary_pic" },
 };
 
 #define NUM_DISTRIBUTIONS (sizeof(distributions) / sizeof(distributions[0]))
@@ -269,5 +345,47 @@ void bench_init(void) { init_distributions(); }
 void bench_generate_symbols(int dist_idx, uint8_t *symbols, int n_symbols,
                             uint64_t seed)
 {
-    dist_sample(&distributions[dist_idx], symbols, n_symbols, seed);
+    const distribution_t *d = &distributions[dist_idx];
+    if (d->source) {
+        /* Real-file path: read the source verbatim, cycling to fill n.
+         * On first call per (dist, path), the file is loaded into the
+         * cache.  If load fails we fall back to IID-from-freq so the
+         * bench still produces something (and the warning makes the
+         * problem visible). */
+        if (dist_idx < MAX_CACHED_DISTS && load_file(dist_idx, d->source)) {
+            fill_from_file(dist_idx, symbols, n_symbols);
+            return;
+        }
+    }
+    dist_sample(d, symbols, n_symbols, seed);
+}
+
+/* Return the natural buffer size for this distribution:
+ *   - real-file dist: enough to fit max(min_n, ceil(file_size cycled
+ *     until >= min_n)), rounded UP to the BLK alignment hinted by
+ *     `block_align`.  Files larger than min_n use their full natural
+ *     size (no truncation).
+ *   - synthetic dist: returns min_n unchanged.
+ * `block_align` should be the codec's natural sub-block size (BLK,
+ * 8192) so the bench's per-block dispatch stays aligned. */
+int bench_dist_size(int dist_idx, int min_n, int block_align)
+{
+    const distribution_t *d = &distributions[dist_idx];
+    if (!d->source) return min_n;
+    if (dist_idx >= MAX_CACHED_DISTS) return min_n;
+    if (!load_file(dist_idx, d->source)) return min_n;
+    size_t sz = cached_len[dist_idx];
+    if (sz == 0) return min_n;
+    /* Cycle the file as many full copies as needed to reach min_n. */
+    size_t copies = ((size_t)min_n + sz - 1) / sz;
+    if (copies < 1) copies = 1;
+    size_t out_sz = copies * sz;
+    /* Round UP to block_align by extending into the next cycle's prefix.
+     * This keeps the per-block dispatch boundary-aligned without
+     * dropping any source bytes. */
+    if (block_align > 1) {
+        size_t r = out_sz % (size_t)block_align;
+        if (r) out_sz += (size_t)block_align - r;
+    }
+    return (int)out_sz;
 }
