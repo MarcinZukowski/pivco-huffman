@@ -1014,6 +1014,33 @@ static void bench_flat_scatter_d6(uint8_t *out, const uint16_t *idx,
  * (matches the scalar scatter floor).  Use `scatter_scalar` as the
  * comparable scatter row on x86_64. */
 
+/* Diagnostic: the AVX-512 "SIMD" scatter pattern used in extras/ph-td
+ * (scatter_write_avx512): load 8 uint16_t indices via SIMD, then
+ * _mm_extract_epi16 each + store sym.  We expect this to be slower
+ * than plain scalar — pextrw goes through port 5 single-issue while
+ * scalar movzwl can issue across multiple load ports. */
+__attribute__((noinline))
+static void bench_scatter_avx512_pextrw(uint8_t *symbols,
+                                          const uint16_t *indices,
+                                          int n, uint8_t sym, int reps)
+{
+    for (int r = 0; r < reps; r++) {
+        int j = 0;
+        for (; j + 8 <= n; j += 8) {
+            __m128i idx = _mm_loadu_si128((const __m128i *)(indices + j));
+            symbols[_mm_extract_epi16(idx, 0)] = sym;
+            symbols[_mm_extract_epi16(idx, 1)] = sym;
+            symbols[_mm_extract_epi16(idx, 2)] = sym;
+            symbols[_mm_extract_epi16(idx, 3)] = sym;
+            symbols[_mm_extract_epi16(idx, 4)] = sym;
+            symbols[_mm_extract_epi16(idx, 5)] = sym;
+            symbols[_mm_extract_epi16(idx, 6)] = sym;
+            symbols[_mm_extract_epi16(idx, 7)] = sym;
+        }
+        for (; j < n; j++) symbols[indices[j]] = sym;
+    }
+}
+
 __attribute__((noinline))
 static void bench_partition_avx512(const uint16_t *src,
                                     const uint32_t *masks32,
@@ -1860,6 +1887,14 @@ int main(void)
     ns_per_elem = (t1 - t0) / ((double)N * REPS) * 1e9;
     printf("%-30s %5.2f ns/elem  (%5.1f GB/s)\n",
            "partition_root (gen+compress):", ns_per_elem, 1.0 / ns_per_elem);
+
+    /* Diagnostic: SIMD-extract scatter (extras/ph-td's scatter_write_avx512). */
+    t0 = now_sec();
+    bench_scatter_avx512_pextrw(symbols, indices, N, 0x42, REPS);
+    t1 = now_sec();
+    ns_per_elem = (t1 - t0) / ((double)N * REPS) * 1e9;
+    printf("%-30s %5.2f ns/elem  (%5.1f GB/s)\n",
+           "scatter_avx512 (load+pextrw):", ns_per_elem, 1.0 / ns_per_elem);
 
     t0 = now_sec();
     bench_partition_half_avx512(indices, (const uint32_t *)bitmap, right, N, REPS);

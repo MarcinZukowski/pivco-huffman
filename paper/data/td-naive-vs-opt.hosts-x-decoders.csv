@@ -1,0 +1,3 @@
+distribution,m4_naive,m4_naive_simd,m4_scalar,m4_simd,m4_huf0,m4_naive_vs_huf0,m4_naive_simd_vs_huf0,m4_scalar_vs_huf0,m4_simd_vs_huf0,c8i_naive,c8i_naive_simd,c8i_scalar,c8i_simd,c8i_huf0,c8i_naive_vs_huf0,c8i_naive_simd_vs_huf0,c8i_scalar_vs_huf0,c8i_simd_vs_huf0
+proba80,1.309,4.4347,1.8148,8.9115,2.8618,0.46,1.55,0.63,3.11,0.3319,3.6334,0.7612,8.2229,1.8185,0.18,2.00,0.42,4.52
+prose_pride,0.4455,1.8398,0.602,2.7262,2.5447,0.18,0.72,0.24,1.07,0.0478,0.8836,0.0704,2.129,1.6623,0.03,0.53,0.04,1.28

@@ -62,26 +62,35 @@ static inline void scatter_write_avx512(uint8_t *symbols,
                                          const uint16_t *indices, int n,
                                          uint8_t sym)
 {
-    /* AVX-512 doesn't have byte scatter, but we can use vpscatterd
-       with 32-bit indices for dword scatter. For byte writes, we
-       fall back to SSE-style extract or scalar.
-       Use SSE extract for now (same as x86 backend). */
+    /* AVX-512 has no byte-granularity scatter — `vpscatterdd` and friends
+     * only operate on 32/64-bit elements.  An earlier SIMD-wrapper
+     * (`_mm_loadu_si128 + 8× _mm_extract_epi16`) bottlenecked on port 5
+     * (pextrw is single-issue) and ran 2-3× slower than the same shape
+     * used by scatter_both_leaves_avx512 — which reads its indices as
+     * a regular uint16_t array, letting the compiler issue independent
+     * movzwl loads across multiple load ports and feed the store buffer
+     * at 1 store/cycle.  Match that shape here.  Unroll-16 to amortize
+     * loop overhead. */
     int j = 0;
-    /* Process 8 at a time using SSE extract */
-    for (; j + 8 <= n; j += 8) {
-        __m128i idx = _mm_loadu_si128((const __m128i *)(indices + j));
-        symbols[_mm_extract_epi16(idx, 0)] = sym;
-        symbols[_mm_extract_epi16(idx, 1)] = sym;
-        symbols[_mm_extract_epi16(idx, 2)] = sym;
-        symbols[_mm_extract_epi16(idx, 3)] = sym;
-        symbols[_mm_extract_epi16(idx, 4)] = sym;
-        symbols[_mm_extract_epi16(idx, 5)] = sym;
-        symbols[_mm_extract_epi16(idx, 6)] = sym;
-        symbols[_mm_extract_epi16(idx, 7)] = sym;
+    for (; j + 16 <= n; j += 16) {
+        symbols[indices[j +  0]] = sym;
+        symbols[indices[j +  1]] = sym;
+        symbols[indices[j +  2]] = sym;
+        symbols[indices[j +  3]] = sym;
+        symbols[indices[j +  4]] = sym;
+        symbols[indices[j +  5]] = sym;
+        symbols[indices[j +  6]] = sym;
+        symbols[indices[j +  7]] = sym;
+        symbols[indices[j +  8]] = sym;
+        symbols[indices[j +  9]] = sym;
+        symbols[indices[j + 10]] = sym;
+        symbols[indices[j + 11]] = sym;
+        symbols[indices[j + 12]] = sym;
+        symbols[indices[j + 13]] = sym;
+        symbols[indices[j + 14]] = sym;
+        symbols[indices[j + 15]] = sym;
     }
-    for (; j < n; j++) {
-        symbols[indices[j]] = sym;
-    }
+    for (; j < n; j++) symbols[indices[j]] = sym;
 }
 
 /* ---------- AVX-512 Encode (Tree-Walk) ---------- */

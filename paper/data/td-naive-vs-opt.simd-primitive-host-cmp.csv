@@ -1,6 +1,6 @@
 primitive,m4_proba80,c8i_proba80,c8i_over_m4_proba80,m4_prose,c8i_prose,c8i_over_m4_prose
-simd_partition,0.063,0.079,1.3x,0.065,0.064,1.0x
+simd_partition,0.063,0.081,1.3x,0.064,0.064,1.0x
 simd_partition_half_right,0.049,0.036,0.7x,0.048,0.035,0.7x
-simd_s1_scatter,0.130,0.286,2.2x,0.153,0.354,2.3x
-simd_s2_scatter_both,0.202,1.334,6.6x,0.164,0.235,1.4x
-simd_sfx_scatter_flat,—,—,—,0.160,0.312,1.9x
+simd_s1_scatter,0.134,0.165,1.2x,0.152,0.217,1.4x
+simd_s2_scatter_both,0.219,1.324,6.0x,0.163,0.235,1.4x
+simd_sfx_scatter_flat,—,—,—,0.161,0.220,1.4x
