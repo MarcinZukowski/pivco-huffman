@@ -281,42 +281,35 @@ static inline void tree_merge_bcast_right_avx512(const uint8_t *bm, int K,
     PROF_TOC(PROF_BU_TREE_MERGE_BCAST_RIGHT, K);
 }
 
-/* merge_both_const_avx512 — both inputs are constants.  AVX2 stride-32
- * pblendvb main path (lifted as-is from primitives_x86.h since AVX-512
- * has no faster sequence for this); SSE 16-byte tail. */
+/* merge_both_const_avx512 — both inputs are constants.  Native AVX-512
+ * stride-64: read 64 bm bits as a kmask, single mask_blend_epi8 of two
+ * broadcast registers, one 64-byte store.  SSE 16-byte and scalar tails. */
 static inline void merge_both_const_avx512(const uint8_t *bm, int K,
                                              uint8_t left_sym, uint8_t right_sym,
                                              uint8_t *out)
 {
     PROF_TIC();
-    __m128i vsym0 = _mm_set1_epi8((char)left_sym);
-    __m128i vsym1 = _mm_set1_epi8((char)right_sym);
-    __m128i bits  = _mm_setr_epi8(1,2,4,8,16,32,64,(char)128,
-                                   1,2,4,8,16,32,64,(char)128);
-    __m128i shuf  = _mm_setr_epi8(0,0,0,0,0,0,0,0,
-                                   1,1,1,1,1,1,1,1);
+    __m512i vL_64 = _mm512_set1_epi8((char)left_sym);
+    __m512i vR_64 = _mm512_set1_epi8((char)right_sym);
     int j = 0;
-    __m256i vsym0_256 = _mm256_set1_epi8((char)left_sym);
-    __m256i vsym1_256 = _mm256_set1_epi8((char)right_sym);
-    __m256i bits_256  = _mm256_broadcastsi128_si256(bits);
-    __m256i shuf_256  = _mm256_broadcastsi128_si256(shuf);
-    for (; j + 32 <= K; j += 32) {
-        uint32_t four;
-        memcpy(&four, bm + (j >> 3), 4);
-        __m256i bm_quad = _mm256_set_epi32(0, 0, 0, (int)(four >> 16),
-                                           0, 0, 0, (int)(four & 0xFFFF));
-        __m256i bm_dup  = _mm256_shuffle_epi8(bm_quad, shuf_256);
-        __m256i masked  = _mm256_and_si256(bm_dup, bits_256);
-        __m256i mask8   = _mm256_cmpeq_epi8(masked, bits_256);
-        __m256i o       = _mm256_blendv_epi8(vsym0_256, vsym1_256, mask8);
-        _mm256_storeu_si256((__m256i *)(out + j), o);
+    for (; j + 64 <= K; j += 64) {
+        uint64_t mask;
+        memcpy(&mask, bm + (j >> 3), 8);
+        __m512i o = _mm512_mask_blend_epi8((__mmask64)mask, vL_64, vR_64);
+        _mm512_storeu_si512((__m512i *)(out + j), o);
     }
+    __m128i vL = _mm_set1_epi8((char)left_sym);
+    __m128i vR = _mm_set1_epi8((char)right_sym);
+    __m128i bits = _mm_setr_epi8(1,2,4,8,16,32,64,(char)128,
+                                  1,2,4,8,16,32,64,(char)128);
+    __m128i shuf = _mm_setr_epi8(0,0,0,0,0,0,0,0,
+                                  1,1,1,1,1,1,1,1);
     for (; j + 16 <= K; j += 16) {
         __m128i bm_pair = _mm_cvtsi32_si128(*(const uint16_t *)(bm + (j >> 3)));
         __m128i bm_dup  = _mm_shuffle_epi8(bm_pair, shuf);
         __m128i masked  = _mm_and_si128(bm_dup, bits);
         __m128i mask8   = _mm_cmpeq_epi8(masked, bits);
-        __m128i o       = _mm_blendv_epi8(vsym0, vsym1, mask8);
+        __m128i o       = _mm_blendv_epi8(vL, vR, mask8);
         _mm_storeu_si128((__m128i *)(out + j), o);
     }
     for (; j < K; j++) {
@@ -452,6 +445,27 @@ static inline void flat_decode_direct_avx512_inner(uint8_t *symbols, int n,
             uint32_t code = extract_D_bits_avx512(bm, i * D, D);
             symbols[i] = c2s[code];
         }
+        return;
+    }
+    if (D == 8) {
+        /* c2s has 256 entries — four zmm tables.  Two vpermi2b lookups
+         * (each over a 128-byte half) + one mask_blend on the high bit
+         * of the code (bit 7 selects which half).  bm is byte-per-code,
+         * so we load 64 codes per iter and produce 64 symbols. */
+        __m512i t_0_64    = _mm512_loadu_si512((const __m512i *)(c2s      ));
+        __m512i t_64_128  = _mm512_loadu_si512((const __m512i *)(c2s +  64));
+        __m512i t_128_192 = _mm512_loadu_si512((const __m512i *)(c2s + 128));
+        __m512i t_192_256 = _mm512_loadu_si512((const __m512i *)(c2s + 192));
+        int i = 0;
+        for (; i + 64 <= n; i += 64) {
+            __m512i codes = _mm512_loadu_si512((const __m512i *)(bm + i));
+            __m512i lo = _mm512_permutex2var_epi8(t_0_64,    codes, t_64_128);
+            __m512i hi = _mm512_permutex2var_epi8(t_128_192, codes, t_192_256);
+            __mmask64 m = _mm512_movepi8_mask(codes);  /* bit 7 of each byte */
+            __m512i syms = _mm512_mask_blend_epi8(m, lo, hi);
+            _mm512_storeu_si512((__m512i *)(symbols + i), syms);
+        }
+        for (; i < n; i++) symbols[i] = c2s[bm[i]];
         return;
     }
     if (D == 7) {

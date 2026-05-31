@@ -292,6 +292,138 @@ static void simd_xor_accum (const ctx_t *c){
     o[0] = r;
 }
 
+#if defined(HAVE_NEON_KERNELS)
+/* Alternate merge_two: replace vtst+vand+veor with a 256×8 lookup that
+ * pre-expands each bm byte to (0xFF/0x00) × 8.  One vld1_u8 per 8
+ * outputs vs three SIMD ops in the production path. */
+static uint8_t g_mask_to_bits[256][8];
+static int g_mask_to_bits_built = 0;
+static void ensure_mask_to_bits(void) {
+    if (g_mask_to_bits_built) return;
+    for (int m = 0; m < 256; m++)
+        for (int i = 0; i < 8; i++)
+            g_mask_to_bits[m][i] = ((m >> i) & 1) ? 0xFF : 0x00;
+    g_mask_to_bits_built = 1;
+}
+/* blend_tab: per (left_sym, right_sym) pair, precompute 256×8 of fully
+ * blended output bytes.  Built once outside the hot loop for the bench. */
+static uint8_t g_blend_tab[256][8] __attribute__((aligned(64)));
+static int g_blend_tab_built = 0;
+static void ensure_blend_tab(void) {
+    if (g_blend_tab_built) return;
+    for (int m = 0; m < 256; m++)
+        for (int i = 0; i < 8; i++)
+            g_blend_tab[m][i] = ((m >> i) & 1) ? MERGE_RIGHT_SYM : MERGE_LEFT_SYM;
+    g_blend_tab_built = 1;
+}
+static void simd_merge_two_tbl (const ctx_t *c) {
+    const uint8_t *bm = c->bm; uint8_t *out = c->out; int K = c->n;
+    uint8_t L = MERGE_LEFT_SYM, R = MERGE_RIGHT_SYM;
+    uint8x16_t vleft  = vdupq_n_u8(L);
+    uint8x16_t vdelta = vdupq_n_u8(L ^ R);
+    int j = 0;
+    for (; j + 16 <= K; j += 16) {
+        uint8x16_t bits = vcombine_u8(
+            vld1_u8(g_mask_to_bits[bm[j >> 3]]),
+            vld1_u8(g_mask_to_bits[bm[(j >> 3) + 1]]));
+        vst1q_u8(out + j, veorq_u8(vleft, vandq_u8(vdelta, bits)));
+    }
+    for (; j < K; j++) {
+        int mb = (bm[j >> 3] >> (j & 7)) & 1;
+        out[j] = mb ? R : L;
+    }
+}
+/* blend_tab variant: 2 loads + 1 vcombine + 1 store per 16 outputs.  No
+ * SIMD compute in the hot loop — the blend was precomputed into the
+ * lookup table at startup. */
+static void simd_merge_two_blendtab (const ctx_t *c) {
+    const uint8_t *bm = c->bm; uint8_t *out = c->out; int K = c->n;
+    int j = 0;
+    for (; j + 16 <= K; j += 16) {
+        uint8x8_t lo = vld1_u8(g_blend_tab[bm[j >> 3]]);
+        uint8x8_t hi = vld1_u8(g_blend_tab[bm[(j >> 3) + 1]]);
+        vst1q_u8(out + j, vcombine_u8(lo, hi));
+    }
+    for (; j < K; j++) {
+        int mb = (bm[j >> 3] >> (j & 7)) & 1;
+        out[j] = mb ? MERGE_RIGHT_SYM : MERGE_LEFT_SYM;
+    }
+}
+/* 16-byte version of "your" idea: combine two bm-byte broadcasts into
+ * one 16-lane register, vtstq → vandq → vqtbl1q.  One wide store per
+ * 16 outputs. */
+static void simd_merge_two_vtblq (const ctx_t *c) {
+    const uint8_t *bm = c->bm; uint8_t *out = c->out; int K = c->n;
+    static const uint8_t bit_pos_tab16[16] = {1,2,4,8,16,32,64,128,
+                                              1,2,4,8,16,32,64,128};
+    uint8x16_t vbits = vld1q_u8(bit_pos_tab16);
+    uint16_t lr = (uint16_t)MERGE_LEFT_SYM | ((uint16_t)MERGE_RIGHT_SYM << 8);
+    uint8x16_t c2s_vec = vreinterpretq_u8_u16(vdupq_n_u16(lr));
+    uint8x16_t one = vdupq_n_u8(1);
+    int j = 0;
+    for (; j + 16 <= K; j += 16) {
+        uint8x16_t bm_dup = vcombine_u8(vdup_n_u8(bm[j >> 3]),
+                                         vdup_n_u8(bm[(j >> 3) + 1]));
+        uint8x16_t m   = vtstq_u8(bm_dup, vbits);
+        uint8x16_t idx = vandq_u8(m, one);
+        vst1q_u8(out + j, vqtbl1q_u8(c2s_vec, idx));
+    }
+    for (; j < K; j++) {
+        int mb = (bm[j >> 3] >> (j & 7)) & 1;
+        out[j] = mb ? MERGE_RIGHT_SYM : MERGE_LEFT_SYM;
+    }
+}
+/* Marcin's simple variant: vtst → mask (0xFF/0x00) → mask & 1 → TBL.
+ * 8-byte half-width, two independent halves per 16-output iter. */
+static void simd_merge_two_vtbl (const ctx_t *c) {
+    const uint8_t *bm = c->bm; uint8_t *out = c->out; int K = c->n;
+    static const uint8_t bit_pos_tab[8] = {1,2,4,8,16,32,64,128};
+    uint8x8_t vbits = vld1_u8(bit_pos_tab);
+    uint16_t lr = (uint16_t)MERGE_LEFT_SYM | ((uint16_t)MERGE_RIGHT_SYM << 8);
+    uint8x8_t c2s8 = vreinterpret_u8_u16(vdup_n_u16(lr));    /* [L,R,L,R,L,R,L,R] */
+    uint8x8_t one  = vdup_n_u8(1);
+    int j = 0;
+    for (; j + 16 <= K; j += 16) {
+        uint8x8_t m0 = vtst_u8(vdup_n_u8(bm[j >> 3]),     vbits);
+        uint8x8_t m1 = vtst_u8(vdup_n_u8(bm[(j >> 3)+1]), vbits);
+        vst1_u8(out + j,     vtbl1_u8(c2s8, vand_u8(m0, one)));
+        vst1_u8(out + j + 8, vtbl1_u8(c2s8, vand_u8(m1, one)));
+    }
+    for (; j < K; j++) {
+        int mb = (bm[j >> 3] >> (j & 7)) & 1;
+        out[j] = mb ? MERGE_RIGHT_SYM : MERGE_LEFT_SYM;
+    }
+}
+/* D=1 flat-decode variant: same shape as merge_flat_d2 but with a 2-byte
+ * (L,R) lookup.  bm bit i = index 0 or 1, used as a TBL index into a
+ * register holding [L,R,L,R,...]. */
+static void simd_merge_two_d1flat (const ctx_t *c) {
+    const uint8_t *bm = c->bm; uint8_t *out = c->out; int K = c->n;
+    uint16_t lr_word = (uint16_t)MERGE_LEFT_SYM | ((uint16_t)MERGE_RIGHT_SYM << 8);
+    uint8x16_t c2s_vec = vreinterpretq_u8_u16(vdupq_n_u16(lr_word));
+    static const uint8_t dup_tab_d1  [16] = {0,0,0,0,0,0,0,0, 1,1,1,1,1,1,1,1};
+    static const int8_t  shift_tab_d1[16] = {0,-1,-2,-3,-4,-5,-6,-7,
+                                             0,-1,-2,-3,-4,-5,-6,-7};
+    uint8x16_t dup_v   = vld1q_u8(dup_tab_d1);
+    int8x16_t  shift_v = vld1q_s8(shift_tab_d1);
+    uint8x16_t one_v   = vdupq_n_u8(1);
+    int j = 0;
+    for (; j + 16 <= K; j += 16) {
+        uint16_t bm_word; memcpy(&bm_word, bm + (j >> 3), 2);
+        uint8x16_t bm_lo = vreinterpretq_u8_u16(
+            vsetq_lane_u16(bm_word, vdupq_n_u16(0), 0));
+        uint8x16_t dup     = vqtbl1q_u8(bm_lo, dup_v);
+        uint8x16_t shifted = vshlq_u8(dup, shift_v);
+        uint8x16_t idx     = vandq_u8(shifted, one_v);
+        vst1q_u8(out + j, vqtbl1q_u8(c2s_vec, idx));
+    }
+    for (; j < K; j++) {
+        int mb = (bm[j >> 3] >> (j & 7)) & 1;
+        out[j] = mb ? MERGE_RIGHT_SYM : MERGE_LEFT_SYM;
+    }
+}
+#endif
+
 /* max-out-bw probe: write only, value out[i] = (uint8_t)i. */
 static void simd_plus_one (const ctx_t *c){
     uint8_t *o = c->out; int n = c->n, i = 0;
@@ -662,6 +794,13 @@ int main(int argc, char **argv) {
     reg("neon_pcpc",     ST_MERGE_GEN, 0, 0, simd_merge_pcpc_pure);
     reg("neon_pcpc_full",ST_MERGE_GEN, 0, 0, simd_merge_pcpc_full);
     reg("neon_unroll8",  ST_MERGE_GEN, 0, 0, simd_merge_unroll8);
+    ensure_mask_to_bits();
+    ensure_blend_tab();
+    reg("neon_tbl",      ST_MERGE_TWO, 0, 0, simd_merge_two_tbl);
+    reg("neon_blendtab", ST_MERGE_TWO, 0, 0, simd_merge_two_blendtab);
+    reg("neon_vtbl",     ST_MERGE_TWO, 0, 0, simd_merge_two_vtbl);
+    reg("neon_vtblq",    ST_MERGE_TWO, 0, 0, simd_merge_two_vtblq);
+    reg("neon_d1flat",   ST_MERGE_TWO, 0, 0, simd_merge_two_d1flat);
 #endif
     /* Synthetic byte-XOR — memory-bandwidth comparison point. */
     reg("scalar", ST_XOR, 0, 0, p_xor_scalar);

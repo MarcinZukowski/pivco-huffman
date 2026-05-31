@@ -237,28 +237,44 @@ static inline void tree_merge_bcast_right_neon(const uint8_t *bm, int K,
     PROF_TOC(PROF_BU_TREE_MERGE_BCAST_RIGHT, K);
 }
 
-/* merge_both_const_neon — both inputs are constants.  vtst+veor blend
- * (no TBL needed).  16 outputs per iter via 2× 8-lane blends. */
+/* merge_both_const_neon — both inputs are constants.  Treated as a
+ * D=1 flat decode: a 2-byte (left, right) "c2s" table replicated across
+ * 16 lanes via vdupq_n_u16, indexed by the bm bit (0 or 1).  Bit-spread
+ * uses the same vqtbl(dup_tab) + vshlq(shift_tab) + vandq pattern as
+ * flat_decode_direct_neon_d2, scaled down for D=1 (8 codes / bm byte
+ * instead of 4).  Faster than vtst+vand+veor by ~1.6× on M4 NEON and
+ * ~1.4× on Neoverse V2. */
+static const uint8_t merge_two_dup_tab[16]   = {0,0,0,0,0,0,0,0,
+                                                1,1,1,1,1,1,1,1};
+static const int8_t  merge_two_shift_tab[16] = {0,-1,-2,-3,-4,-5,-6,-7,
+                                                0,-1,-2,-3,-4,-5,-6,-7};
 static inline void merge_both_const_neon(const uint8_t *bm, int K,
                                            uint8_t left_sym, uint8_t right_sym,
                                            uint8_t *out)
 {
     PROF_TIC();
-    uint8x8_t vleft  = vdup_n_u8(left_sym);
-    uint8x8_t vdelta = vdup_n_u8(left_sym ^ right_sym);
-    static const uint8_t bit_pos_tab[8] = {1,2,4,8,16,32,64,128};
-    uint8x8_t vbits = vld1_u8(bit_pos_tab);
+    uint16_t lr_word = (uint16_t)left_sym | ((uint16_t)right_sym << 8);
+    uint8x16_t c2s_vec = vreinterpretq_u8_u16(vdupq_n_u16(lr_word));
+    uint8x16_t dup_v   = vld1q_u8(merge_two_dup_tab);
+    int8x16_t  shift_v = vld1q_s8(merge_two_shift_tab);
+    uint8x16_t one_v   = vdupq_n_u8(1);
 
     int j = 0;
     for (; j + 16 <= K; j += 16) {
-        uint8x8_t bits0 = vtst_u8(vdup_n_u8(bm[j >> 3]), vbits);
-        uint8x8_t bits1 = vtst_u8(vdup_n_u8(bm[(j >> 3) + 1]), vbits);
-        vst1_u8(out + j,     veor_u8(vleft, vand_u8(vdelta, bits0)));
-        vst1_u8(out + j + 8, veor_u8(vleft, vand_u8(vdelta, bits1)));
+        uint16_t bm_word; memcpy(&bm_word, bm + (j >> 3), 2);
+        uint8x16_t bm_lo = vreinterpretq_u8_u16(
+            vsetq_lane_u16(bm_word, vdupq_n_u16(0), 0));
+        uint8x16_t dup     = vqtbl1q_u8(bm_lo, dup_v);
+        uint8x16_t shifted = vshlq_u8(dup, shift_v);
+        uint8x16_t idx     = vandq_u8(shifted, one_v);
+        vst1q_u8(out + j, vqtbl1q_u8(c2s_vec, idx));
     }
     for (; j + 8 <= K; j += 8) {
-        uint8x8_t bits = vtst_u8(vdup_n_u8(bm[j >> 3]), vbits);
-        vst1_u8(out + j, veor_u8(vleft, vand_u8(vdelta, bits)));
+        uint8x8_t bm_v = vdup_n_u8(bm[j >> 3]);
+        uint8x8_t dup     = vtbl1_u8(bm_v, vget_low_u8(dup_v));
+        uint8x8_t shifted = vshl_u8(dup, vget_low_s8(shift_v));
+        uint8x8_t idx     = vand_u8(shifted, vget_low_u8(one_v));
+        vst1_u8(out + j, vtbl1_u8(vget_low_u8(c2s_vec), idx));
     }
     for (; j < K; j++) {
         int mb = (bm[j >> 3] >> (j & 7)) & 1;
@@ -425,11 +441,9 @@ static inline void flat_decode_direct_neon_d6(uint8_t *symbols, int n,
     }
 }
 
-/* D=7: 128-entry c2s exceeds a single TBL (vqtbl4 = 64), so use two
- * vqtbl4 lookups -- low table covers codes 0..63, high table codes
- * 64..127 (indexed by code-64, which wraps <64 out of range).  Each
- * out-of-range lookup yields 0, so OR-ing the two selects the right
- * half. */
+/* D=7: 128-entry c2s = 2 * vqtbl4 (= 64).  vqtbl4 on the low half +
+ * vqtbx4 on the high half (with code-64 indexing) — vqtbx keeps the
+ * first result for out-of-range lanes, so no OR-merge needed. */
 static inline void flat_decode_direct_neon_d7(uint8_t *symbols, int n,
                                                 const uint8_t *bm,
                                                 const uint8_t *c2s)
@@ -439,20 +453,22 @@ static inline void flat_decode_direct_neon_d7(uint8_t *symbols, int n,
     lo.val[2] = vld1q_u8(c2s + 32);  lo.val[3] = vld1q_u8(c2s + 48);
     hi.val[0] = vld1q_u8(c2s + 64);  hi.val[1] = vld1q_u8(c2s + 80);
     hi.val[2] = vld1q_u8(c2s + 96);  hi.val[3] = vld1q_u8(c2s + 112);
+    uint8x16_t sub64q = vdupq_n_u8(64);
+    uint8x8_t  sub64  = vdup_n_u8(64);
     int i = 0;
     for (; i + 16 <= n; i += 16) {
         uint8x8_t cl = flat_d7_unpack(bm + ((i      * 7) >> 3));
         uint8x8_t ch = flat_d7_unpack(bm + (((i + 8) * 7) >> 3));
         uint8x16_t codes = vcombine_u8(cl, ch);
-        uint8x16_t s0 = vqtbl4q_u8(lo, codes);
-        uint8x16_t s1 = vqtbl4q_u8(hi, vsubq_u8(codes, vdupq_n_u8(64)));
-        vst1q_u8(symbols + i, vorrq_u8(s0, s1));
+        uint8x16_t s = vqtbl4q_u8(lo, codes);
+        s = vqtbx4q_u8(s, hi, vsubq_u8(codes, sub64q));
+        vst1q_u8(symbols + i, s);
     }
     for (; i + 8 <= n; i += 8) {
         uint8x8_t codes = flat_d7_unpack(bm + ((i * 7) >> 3));
-        uint8x8_t s0 = vqtbl4_u8(lo, codes);
-        uint8x8_t s1 = vqtbl4_u8(hi, vsub_u8(codes, vdup_n_u8(64)));
-        vst1_u8(symbols + i, vorr_u8(s0, s1));
+        uint8x8_t s = vqtbl4_u8(lo, codes);
+        s = vqtbx4_u8(s, hi, vsub_u8(codes, sub64));
+        vst1_u8(symbols + i, s);
     }
     for (; i < n; i++) {
         uint32_t code = extract_D_bits_neon(bm, i * 7, 7);
@@ -460,14 +476,38 @@ static inline void flat_decode_direct_neon_d7(uint8_t *symbols, int n,
     }
 }
 
-/* D=8: bm is already byte-per-code; just gather through c2s.  c2s has
- * 256 entries here so no TBL fits -- this is the scalar floor. */
+/* D=8: 256-entry c2s = 4 * vqtbl4.  bm is byte-per-code so no unpack.
+ * One vqtbl4 + three vqtbx4 stages with the high tables indexed by
+ * code-64 / code-128 / code-192 (wraps out of [0,63] elsewhere).
+ * A parallel 4×vqtbl + OR-tree alternative was measured equivalent on
+ * M4 (vqtbl4q is wide-register-read-bound, not latency-bound), so the
+ * chained-tbx form wins on instruction count. */
 static inline void flat_decode_direct_neon_d8(uint8_t *symbols, int n,
                                                 const uint8_t *bm,
                                                 const uint8_t *c2s)
 {
-    for (int i = 0; i < n; i++)
-        symbols[i] = c2s[bm[i]];
+    uint8x16x4_t t0, t1, t2, t3;
+    t0.val[0]=vld1q_u8(c2s     ); t0.val[1]=vld1q_u8(c2s + 16);
+    t0.val[2]=vld1q_u8(c2s + 32); t0.val[3]=vld1q_u8(c2s + 48);
+    t1.val[0]=vld1q_u8(c2s + 64); t1.val[1]=vld1q_u8(c2s + 80);
+    t1.val[2]=vld1q_u8(c2s + 96); t1.val[3]=vld1q_u8(c2s +112);
+    t2.val[0]=vld1q_u8(c2s +128); t2.val[1]=vld1q_u8(c2s +144);
+    t2.val[2]=vld1q_u8(c2s +160); t2.val[3]=vld1q_u8(c2s +176);
+    t3.val[0]=vld1q_u8(c2s +192); t3.val[1]=vld1q_u8(c2s +208);
+    t3.val[2]=vld1q_u8(c2s +224); t3.val[3]=vld1q_u8(c2s +240);
+    uint8x16_t s64  = vdupq_n_u8(64);
+    uint8x16_t s128 = vdupq_n_u8(128);
+    uint8x16_t s192 = vdupq_n_u8(192);
+    int i = 0;
+    for (; i + 16 <= n; i += 16) {
+        uint8x16_t codes = vld1q_u8(bm + i);
+        uint8x16_t s = vqtbl4q_u8(t0, codes);
+        s = vqtbx4q_u8(s, t1, vsubq_u8(codes, s64));
+        s = vqtbx4q_u8(s, t2, vsubq_u8(codes, s128));
+        s = vqtbx4q_u8(s, t3, vsubq_u8(codes, s192));
+        vst1q_u8(symbols + i, s);
+    }
+    for (; i < n; i++) symbols[i] = c2s[bm[i]];
 }
 
 /* flat_decode_to_buffer_neon -- D-bit flat-subtree decode into a
