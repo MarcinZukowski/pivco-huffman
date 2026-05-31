@@ -40,16 +40,19 @@
 
 // Grouped vertical bars.  host: "m4"/"c8i".  series: array of
 // (label, method, metric, color) — one clustered bar per series, per dataset.
-// cap (none|number): clip bars above `cap` to the axis top, draw a break mark,
-// and print the true value above the bar.
-#let grouped(host, series, ylabel: "MB/s", cap: none, plot-w: 16, plot-h: 6.2) = {
+// fair.csv values are MB/s; we divide by 1000 here so the axis, ticks, and
+// clipped-bar labels are all in GB/s.  cap is expressed in GB/s.
+#let grouped(host, series, ylabel: "GB/s", cap: none, plot-w: 16, plot-h: 6.2) = {
   let vals = dsets.map(((d, short)) =>
-    series.map(((lab, m, metric, col)) => num(cell(host, d, m, metric))))
+    series.map(((lab, m, metric, col)) => num(cell(host, d, m, metric)) / 1000.0))
   let rawmax = calc.max(..vals.flatten())
   let ymax = if cap == none { rawmax } else { cap }
-  // nice tick step ~ ymax/5
-  let mag = calc.pow(10, calc.floor(calc.log(ymax / 5)))
-  let step = calc.ceil((ymax / 5) / mag) * mag
+  // "Nice" tick step: pick from {1, 2, 5} × 10^k so labels are clean.
+  let raw_step = ymax / 5
+  let mag = calc.pow(10, calc.floor(calc.log(raw_step)))
+  let norm = raw_step / mag
+  let nice = if norm <= 1.5 { 1 } else if norm <= 3 { 2 } else if norm <= 6 { 5 } else { 10 }
+  let step = nice * mag
   let ys = plot-h / ymax
   let ng = dsets.len()
   let ns = series.len()
@@ -65,7 +68,9 @@
     while t <= ymax + step * 0.01 {
       let y = t * ys
       line((0, y), (plot-w, y), stroke: 0.3pt + luma(210))
-      content((-0.18, y), text(11pt)[#int(calc.round(t))], anchor: "east")
+      let lab = if step >= 1 { str(int(calc.round(t))) }
+                else { str(calc.round(t, digits: 1)) }
+      content((-0.18, y), text(11pt)[#lab], anchor: "east")
       t = t + step
     }
     // axes + y label
@@ -84,18 +89,23 @@
         let x1 = x0 + bw * 0.9
         rect((x0, 0), (x1, h), fill: col, stroke: 0.3pt + black)
         if clipped {
-          // break mark (zigzag) near the top + true value horizontally above
+          // break mark (zigzag) near the top + true value rotated 90° above
           line((x0, h - 0.20), (x1, h - 0.07), stroke: 0.7pt + black)
           line((x0, h - 0.13), (x1, h), stroke: 0.7pt + black)
-          content(((x0 + x1) / 2, h + 0.14), text(10pt, weight: "bold")[#int(v)],
-                  anchor: "south")
+          content(((x0 + x1) / 2, h + 0.14),
+                  text(9pt, weight: "bold")[#calc.round(v, digits: 1)],
+                  anchor: "west", angle: 90deg)
         }
       }
-      content((gi * gp + gp / 2, -0.34), text(12pt)[#short], anchor: "north")
+      content((gi * gp + gp / 2, -0.18),
+              text(11pt)[#short], anchor: "north-east", angle: 25deg)
     }
 
-    // vertical legend on the right (auto page width includes it)
-    let ly = plot-h
+    // host name + vertical legend on the right (auto page width includes them)
+    let host_disp = if host == "m4" { "M4" } else { host }
+    content((plot-w + 0.35, plot-h + 0.40),
+            text(15pt, weight: "extrabold")[#host_disp], anchor: "west")
+    let ly = plot-h - 0.50
     for (lab, m, metric, col) in series {
       rect((plot-w + 0.35, ly - 0.4), (plot-w + 0.75, ly), fill: col, stroke: 0.3pt + black)
       content((plot-w + 0.9, ly - 0.2), text(12pt)[#lab], anchor: "west")

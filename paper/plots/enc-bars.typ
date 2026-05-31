@@ -9,4 +9,4 @@
   ("Pivco-Huffman prebuilt", "ph",      "enc_pb", C.lgreen),
   ("Huff0",                  "huf0",    "enc_op", C.orange),
   ("Oodle Huffman",          "oo_huff", "enc_op", C.purple),
-), cap: if host == "c8i" { 5500 } else { none })
+), cap: if host == "c8i" { 4 } else { none })

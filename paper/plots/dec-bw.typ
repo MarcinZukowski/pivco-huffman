@@ -11,4 +11,4 @@
   ("Huff0",             "huf0",     "dec_op", C.orange),
   ("FSE x8y1",          "fse_x8y1", "dec_op", C.blue),
   ("Oodle TANS",        "oo_tans",  "dec_op", C.rose),
-), cap: if host == "m4" { 9000 } else { 10000 })
+), cap: 11)
