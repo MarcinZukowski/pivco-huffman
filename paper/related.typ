@@ -84,8 +84,8 @@ Their implementation depends heavily on packing/unpacking D-bit integers,
  often called a _Frame-of-Reference_ coding (which additionally applies an offset).
 This problem appears in many different areas, including databases and information retrieval.
 A lot of work focuses on this problem in its original setting, where values are packed
- contiguously (e.g. @for, @zuk06)
-However other approaches uses non-linear data organization allowing them to achieve
+ contiguously (e.g. @for, @zuk06).
+However, other approaches use non-linear data organization allowing them to achieve
  much higher performance (@simdcomp, @fastlanes).
 
 #PH currently uses a relatively straightforward, linear, SIMD-based bit-packing.

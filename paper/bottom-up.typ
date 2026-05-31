@@ -50,7 +50,7 @@ With a different processing model, let us see how tree optimizations from @ph-op
 - _fused-leaves_ - not applicable, as the leaves just produce constant values
 - _frequent-symbol_ - not applicable, as the final merge in the root produces a dense full-output sequence
 - _flat-subtrees_ - directly applicable, reduces the tree size
-- _non-canonical subtrees_ - directly applicable, further reduces the tree size
+- _non-canonical flat-subtrees_ - directly applicable, further reduces the tree size
 
 #let _bts = csv("data/bu-tree-stats.csv")
 #figure(
@@ -63,7 +63,7 @@ With a different processing model, let us see how tree optimizations from @ph-op
       table.cell(rowspan: 2)[*L*],
       table.cell(colspan: 2)[*naive*],
       table.cell(colspan: 2)[*flat*],
-      table.cell(colspan: 2)[*full*],
+      table.cell(colspan: 2)[*flat-opt*],
       [nodes], [ops/B],
       [nodes], [ops/B],
       [nodes], [ops/B],
@@ -259,8 +259,8 @@ pay the memory-overload penalty that the slow `scatter` primitives suffered from
         table.cell(rowspan: 2)[*Huff0*],
         table.cell(rowspan: 2)[*Oo-Huff*],
 
-        [*naive*],  [*flat*],  [*full*],
-        [*naive*],  [*flat*],  [*full*],
+        [*naive*],  [*flat*],  [*flat-opt*],
+        [*naive*],  [*flat*],  [*flat-opt*],
       ),
       .._body_tm,
     ),

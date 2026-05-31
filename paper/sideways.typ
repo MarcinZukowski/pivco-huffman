@@ -483,7 +483,7 @@ For `scatter_flat_D` we get a D-bit packed bitmap.
 The first step is to unpack it, using an optimized unpacking kernel.
 #footnote[Our unpacking code is decent, but not as optimized as e.g. @fastlanes.].
 Then each unpacked value can be used to lookup an actual symbol to write from a table.
-For up to 64 elements, on ARM this can be done with `vqtbl*` instructions.
+On ARM this can be done with `vqtbl*` instructions.
 For example, here's an implementation for D=5:
 
 ```c
@@ -542,7 +542,7 @@ Note that per-dataset numbers vary due to different cardinalities.
 In particular, `proba80` has very few elements reaching `simd_s2_scatter_both`, causing a high
 per/element cost.
 
-#todo[weird c8i scatter numbers, slower than naive]
+// #todo[weird c8i scatter numbers, slower than naive]
 
 // #todo[perhaps a pure primitive benchmark would be better]
 
