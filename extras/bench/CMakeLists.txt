@@ -47,6 +47,15 @@ target_include_directories(pivco_bench_tree_modes PRIVATE
     ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/src
     ${CMAKE_SOURCE_DIR}/ext/fse/lib
     ${CMAKE_CURRENT_SOURCE_DIR})
+
+add_executable(pivco_bench_tree_table
+    bench_tree_table.c
+    ${BENCH_DIST}
+)
+target_link_libraries(pivco_bench_tree_table pivco_huffman m)
+target_include_directories(pivco_bench_tree_table PRIVATE
+    ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR})
 if(OODLE_DETECTED)
     target_sources(pivco_bench_tree_modes PRIVATE
         bench_oodle_wrapper.cpp)
