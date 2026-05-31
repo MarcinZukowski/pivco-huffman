@@ -8,7 +8,9 @@ However, for each node in the Huffman tree to have access to relevant
 bits from the stream, a different data layout is needed.
 We found a great solution for this in the _wavelet tree_ structure @grossi2003wt.
 
-#he("gridtable")[
+#figure(
+placement: top,
+he("gridtable")[
   #table(
     columns: (50%, 50%),
     stroke: 0pt,
@@ -36,6 +38,7 @@ We found a great solution for this in the _wavelet tree_ structure @grossi2003wt
     ],
   )
 ]
+)
 
 // #mf("pivot-bitmaps")
 
@@ -518,6 +521,7 @@ as they only work with 32- and 64-bit values.
 #let rows = csv("data/td-naive-vs-opt.simd-primitive-host-cmp.csv")
 #let rows = pick-cols(rows, ("primitive","m4_proba80","c8i_proba80","m4_prose","c8i_prose"))
 #figure(
+  placement: top,
   table(
     columns: 5,
     table.header(

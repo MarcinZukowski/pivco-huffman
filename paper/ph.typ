@@ -14,7 +14,7 @@
     \
  ]
 #text(size: 10pt)[
-  _v.0.5, built on #datetime.today().display()_
+  _v.0.8, built on #datetime.today().display()_
 ]
 
 #set align(left)

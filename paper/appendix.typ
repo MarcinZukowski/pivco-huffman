@@ -56,9 +56,9 @@
     [*Symbol*], [*Machine type*], [*Arch*], [*CPU family*], [*CPU year*],
   ),
   [M4],  [Apple MacBook Pro (Mac16,6)], [aarch64], [Apple M4 Max],                  [2024],
-  [c8g], [AWS EC2 c8g.large],           [aarch64], [AWS Graviton4 (Neoverse V2)],   [2024],
+//  [c8g], [AWS EC2 c8g.large],           [aarch64], [AWS Graviton4 (Neoverse V2)],   [2024],
   [c8i], [AWS EC2 c8i.large],           [x86-64],  [Intel Xeon 6 (Granite Rapids)], [2024],
-  [c6a], [AWS EC2 c6a.large],           [x86-64],  [AMD EPYC 7R13 (Milan, Zen 3)],  [2021],
+//  [c6a], [AWS EC2 c6a.large],           [x86-64],  [AMD EPYC 7R13 (Milan, Zen 3)],  [2021],
 )<tab-machines>
 ]
 

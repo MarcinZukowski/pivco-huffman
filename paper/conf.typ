@@ -26,6 +26,7 @@
 
 #set text(font: "New Computer Modern", size: 11pt)
 #set par(justify: true)
+#set figure(placement: auto)
 
 #let anote(body) = {
   if _html {

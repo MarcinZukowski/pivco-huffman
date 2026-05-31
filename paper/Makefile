@@ -21,8 +21,9 @@ INCS   := conf.typ \
 	bottom-up.typ \
 	enc.typ \
 	intro.typ \
-	related.typ
+	related.typ \
 	sideways.typ \
+
 STYLE  := style.css
 OUT    := out
 PDF    := $(OUT)/ph.pdf
