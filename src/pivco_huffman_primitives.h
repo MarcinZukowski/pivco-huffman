@@ -162,14 +162,14 @@
  *    Unpack n D-bit codes from bm[], look each up in c2s[2^D], write
  *    the resulting symbols to out[0..n).  bm is `ceil(n*D/8)` bytes.
  *
- *  void prim_merge_two(const uint8_t *bm, int K,
+ *  void prim_merge_cst_cst(const uint8_t *bm, int K,
  *                              uint8_t left_sym, uint8_t right_sym,
  *                              uint8_t *out);
  *
  *    Both-leaves merge: for j in [0..K),
  *        out[j] = (bit_j ? right_sym : left_sym).
  *
- *  void prim_merge_constant_left(const uint8_t *bm, int K,
+ *  void prim_merge_cst_vec(const uint8_t *bm, int K,
  *                                   uint8_t left_sym,
  *                                   const uint8_t *right_buf,
  *                                   uint8_t *out);
@@ -178,14 +178,14 @@
  *    : left_sym).  Used by HALF_RIGHT when the left child is a leaf
  *    (or prefilled).
  *
- *  void prim_merge_constant_right(const uint8_t *bm, int K,
+ *  void prim_merge_vec_cst(const uint8_t *bm, int K,
  *                                    const uint8_t *left_buf,
  *                                    uint8_t right_sym,
  *                                    uint8_t *out);
  *
  *    Mirror of the above: out[j] = (bit_j ? right_sym : left_buf[l++]).
  *
- *  void prim_merge(const uint8_t *bm, int K,
+ *  void prim_merge_vec_vec(const uint8_t *bm, int K,
  *                        const uint8_t *left_buf,
  *                        const uint8_t *right_buf,
  *                        uint8_t *out);

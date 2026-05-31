@@ -110,7 +110,7 @@ static int scalar_partition(const uint16_t *codes_la, int n, int depth,
 }
 /* scalar references for the binary-merge family (bottom-up).  bm bit==0
    -> take next left, bm bit==1 -> take next right (or constants). */
-static void scalar_merge_gen(uint8_t *out, const uint8_t *bm, int n,
+static void scalar_merge_vec_vec(uint8_t *out, const uint8_t *bm, int n,
                               const uint8_t *L, const uint8_t *R) {
     int lc=0, rc=0;
     for (int i=0; i<n; i++) {
@@ -118,14 +118,14 @@ static void scalar_merge_gen(uint8_t *out, const uint8_t *bm, int n,
         out[i] = b ? R[rc++] : L[lc++];
     }
 }
-static void scalar_merge_two(uint8_t *out, const uint8_t *bm, int n,
+static void scalar_merge_cst_cst(uint8_t *out, const uint8_t *bm, int n,
                               uint8_t l, uint8_t r) {
     for (int i=0; i<n; i++) {
         int b = (bm[i>>3] >> (i&7)) & 1;
         out[i] = b ? r : l;
     }
 }
-static void scalar_merge_const_l(uint8_t *out, const uint8_t *bm, int n,
+static void scalar_merge_cst_vec(uint8_t *out, const uint8_t *bm, int n,
                                   uint8_t l, const uint8_t *R) {
     int rc=0;
     for (int i=0; i<n; i++) {
@@ -133,7 +133,7 @@ static void scalar_merge_const_l(uint8_t *out, const uint8_t *bm, int n,
         out[i] = b ? R[rc++] : l;
     }
 }
-static void scalar_merge_const_r(uint8_t *out, const uint8_t *bm, int n,
+static void scalar_merge_vec_cst(uint8_t *out, const uint8_t *bm, int n,
                                   const uint8_t *L, uint8_t r) {
     int lc=0;
     for (int i=0; i<n; i++) {
@@ -151,7 +151,7 @@ static void scalar_merge_const_r(uint8_t *out, const uint8_t *bm, int n,
 
 typedef struct {
     uint8_t  *bm, *codes, *c2s, *out, *pack_out;
-    uint8_t  *merge_left, *merge_right;   /* dense byte sources for prim_merge */
+    uint8_t  *merge_left, *merge_right;   /* dense byte sources for prim_merge_vec_vec */
     uint16_t *la_work, *tmp16;
     int n, D, depth;
 } ctx_t;
@@ -168,10 +168,10 @@ static void p_part_scalar   (const ctx_t *c){
     memcpy(c->la_work, lbuf, (size_t)(c->n - 0) * 2); /* keep left in place like the prim */
 }
 /* scalar refs for the new binary-merge stages */
-static void p_merge_gen_scalar     (const ctx_t *c){ scalar_merge_gen(c->out, c->bm, c->n, c->merge_left, c->merge_right); }
-static void p_merge_two_scalar     (const ctx_t *c){ scalar_merge_two(c->out, c->bm, c->n, MERGE_LEFT_SYM, MERGE_RIGHT_SYM); }
-static void p_merge_const_l_scalar (const ctx_t *c){ scalar_merge_const_l(c->out, c->bm, c->n, MERGE_LEFT_SYM, c->merge_right); }
-static void p_merge_const_r_scalar (const ctx_t *c){ scalar_merge_const_r(c->out, c->bm, c->n, c->merge_left, MERGE_RIGHT_SYM); }
+static void p_merge_vec_vec_scalar     (const ctx_t *c){ scalar_merge_vec_vec(c->out, c->bm, c->n, c->merge_left, c->merge_right); }
+static void p_merge_cst_cst_scalar     (const ctx_t *c){ scalar_merge_cst_cst(c->out, c->bm, c->n, MERGE_LEFT_SYM, MERGE_RIGHT_SYM); }
+static void p_merge_cst_vec_scalar (const ctx_t *c){ scalar_merge_cst_vec(c->out, c->bm, c->n, MERGE_LEFT_SYM, c->merge_right); }
+static void p_merge_vec_cst_scalar (const ctx_t *c){ scalar_merge_vec_cst(c->out, c->bm, c->n, c->merge_left, MERGE_RIGHT_SYM); }
 /* Synthetic memory-bandwidth comparison points. */
 static void scalar_xor(uint8_t *out, const uint8_t *a, const uint8_t *b, int n) {
     for (int i = 0; i < n; i++) out[i] = a[i] ^ b[i];
@@ -234,10 +234,10 @@ static void simd_merge_flat(const ctx_t *c){ prim_merge_flat(c->out, c->n, c->bm
 static void simd_part (const ctx_t *c){ prim_enc_partition_full(c->la_work, c->n, c->depth, c->bm, c->tmp16); }
 #endif
 #if defined(HAVE_SIMD)   /* binary-merge production primitives — all backends */
-static void simd_merge_gen     (const ctx_t *c){ prim_merge(c->bm, c->n, c->merge_left, c->merge_right, c->out); }
-static void simd_merge_two     (const ctx_t *c){ prim_merge_two(c->bm, c->n, MERGE_LEFT_SYM, MERGE_RIGHT_SYM, c->out); }
-static void simd_merge_const_l (const ctx_t *c){ prim_merge_constant_left(c->bm, c->n, MERGE_LEFT_SYM, c->merge_right, c->out); }
-static void simd_merge_const_r (const ctx_t *c){ prim_merge_constant_right(c->bm, c->n, c->merge_left, MERGE_RIGHT_SYM, c->out); }
+static void simd_merge_vec_vec     (const ctx_t *c){ prim_merge_vec_vec(c->bm, c->n, c->merge_left, c->merge_right, c->out); }
+static void simd_merge_cst_cst     (const ctx_t *c){ prim_merge_cst_cst(c->bm, c->n, MERGE_LEFT_SYM, MERGE_RIGHT_SYM, c->out); }
+static void simd_merge_cst_vec (const ctx_t *c){ prim_merge_cst_vec(c->bm, c->n, MERGE_LEFT_SYM, c->merge_right, c->out); }
+static void simd_merge_vec_cst (const ctx_t *c){ prim_merge_vec_cst(c->bm, c->n, c->merge_left, MERGE_RIGHT_SYM, c->out); }
 /* Synthetic byte-XOR: explicit SIMD reference for memory-bandwidth comparison.
    16 bytes per iter via NEON veorq_u8 / 64 bytes via AVX-512 _mm512_xor_si512
    / 16 bytes via SSE _mm_xor_si128.  Scalar tail covers the unaligned end. */
@@ -316,7 +316,7 @@ static void ensure_blend_tab(void) {
             g_blend_tab[m][i] = ((m >> i) & 1) ? MERGE_RIGHT_SYM : MERGE_LEFT_SYM;
     g_blend_tab_built = 1;
 }
-static void simd_merge_two_tbl (const ctx_t *c) {
+static void simd_merge_cst_cst_tbl (const ctx_t *c) {
     const uint8_t *bm = c->bm; uint8_t *out = c->out; int K = c->n;
     uint8_t L = MERGE_LEFT_SYM, R = MERGE_RIGHT_SYM;
     uint8x16_t vleft  = vdupq_n_u8(L);
@@ -336,7 +336,7 @@ static void simd_merge_two_tbl (const ctx_t *c) {
 /* blend_tab variant: 2 loads + 1 vcombine + 1 store per 16 outputs.  No
  * SIMD compute in the hot loop — the blend was precomputed into the
  * lookup table at startup. */
-static void simd_merge_two_blendtab (const ctx_t *c) {
+static void simd_merge_cst_cst_blendtab (const ctx_t *c) {
     const uint8_t *bm = c->bm; uint8_t *out = c->out; int K = c->n;
     int j = 0;
     for (; j + 16 <= K; j += 16) {
@@ -352,7 +352,7 @@ static void simd_merge_two_blendtab (const ctx_t *c) {
 /* 16-byte version of "your" idea: combine two bm-byte broadcasts into
  * one 16-lane register, vtstq → vandq → vqtbl1q.  One wide store per
  * 16 outputs. */
-static void simd_merge_two_vtblq (const ctx_t *c) {
+static void simd_merge_cst_cst_vtblq (const ctx_t *c) {
     const uint8_t *bm = c->bm; uint8_t *out = c->out; int K = c->n;
     static const uint8_t bit_pos_tab16[16] = {1,2,4,8,16,32,64,128,
                                               1,2,4,8,16,32,64,128};
@@ -375,7 +375,7 @@ static void simd_merge_two_vtblq (const ctx_t *c) {
 }
 /* Marcin's simple variant: vtst → mask (0xFF/0x00) → mask & 1 → TBL.
  * 8-byte half-width, two independent halves per 16-output iter. */
-static void simd_merge_two_vtbl (const ctx_t *c) {
+static void simd_merge_cst_cst_vtbl (const ctx_t *c) {
     const uint8_t *bm = c->bm; uint8_t *out = c->out; int K = c->n;
     static const uint8_t bit_pos_tab[8] = {1,2,4,8,16,32,64,128};
     uint8x8_t vbits = vld1_u8(bit_pos_tab);
@@ -397,7 +397,7 @@ static void simd_merge_two_vtbl (const ctx_t *c) {
 /* D=1 flat-decode variant: same shape as merge_flat_d2 but with a 2-byte
  * (L,R) lookup.  bm bit i = index 0 or 1, used as a TBL index into a
  * register holding [L,R,L,R,...]. */
-static void simd_merge_two_d1flat (const ctx_t *c) {
+static void simd_merge_cst_cst_d1flat (const ctx_t *c) {
     const uint8_t *bm = c->bm; uint8_t *out = c->out; int K = c->n;
     uint16_t lr_word = (uint16_t)MERGE_LEFT_SYM | ((uint16_t)MERGE_RIGHT_SYM << 8);
     uint8x16_t c2s_vec = vreinterpretq_u8_u16(vdupq_n_u16(lr_word));
@@ -514,14 +514,14 @@ static inline void merge_neon_pcpc(const uint8_t *bm, int K,
     }
 }
 
-static void simd_merge_pcpc_pure (const ctx_t *c){
+static void simd_merge_vec_vec_pcpc_pure (const ctx_t *c){
     /* Caller responsibility: bm_popcnt must already be filled.  Each
        outer rep keeps the same bm, so we let the bench's inner timer
        see only the merge work; fill_bm_popcnt is called once outside
        the timing loop via the correctness path. */
     merge_neon_pcpc(c->bm, c->n, c->merge_left, c->merge_right, c->out);
 }
-static void simd_merge_pcpc_full (const ctx_t *c){
+static void simd_merge_vec_vec_pcpc_full (const ctx_t *c){
     fill_bm_popcnt(c->bm, c->n);
     merge_neon_pcpc(c->bm, c->n, c->merge_left, c->merge_right, c->out);
 }
@@ -570,7 +570,7 @@ static inline void merge_neon_unroll8(const uint8_t *bm, int K,
         out[j] = mb ? right[rc++] : left[lc++];
     }
 }
-static void simd_merge_unroll8 (const ctx_t *c){
+static void simd_merge_vec_vec_unroll8 (const ctx_t *c){
     merge_neon_unroll8(c->bm, c->n, c->merge_left, c->merge_right, c->out);
 }
 #endif
@@ -587,7 +587,7 @@ static void simd_parthalf(const ctx_t *c){ part_core_neon(c->la_work, c->n, c->d
 
 typedef enum { ST_UNPACK, ST_SCATTER, ST_PACK, ST_MERGE_FLAT, ST_PART,
                ST_BMBUILD, ST_PARTBM, ST_PARTHALF, ST_FUSEDHALF,
-               ST_MERGE_GEN, ST_MERGE_TWO, ST_MERGE_CL, ST_MERGE_CR,
+               ST_MERGE_VEC_VEC, ST_MERGE_CST_CST, ST_MERGE_CST_VEC, ST_MERGE_VEC_CST,
                ST_XOR, ST_XOR_ACCUM, ST_PLUS_ONE } stage_t;
 typedef struct {
     const char *variant; stage_t stage; int D; int inplace; void (*run)(const ctx_t *);
@@ -611,10 +611,10 @@ static const char *stage_name(stage_t s){
     case ST_FUSEDHALF:  return "enc_partition_right";
     case ST_PARTBM:     return "part_bm";        /* no prod primitive */
     case ST_PARTHALF:   return "part_half";      /* no prod primitive */
-    case ST_MERGE_GEN:  return "merge";
-    case ST_MERGE_TWO:  return "merge_two";
-    case ST_MERGE_CL:   return "merge_constant_left";
-    case ST_MERGE_CR:   return "merge_constant_right";
+    case ST_MERGE_VEC_VEC:  return "merge_vec_vec";
+    case ST_MERGE_CST_CST:  return "merge_cst_cst";
+    case ST_MERGE_CST_VEC:   return "merge_cst_vec";
+    case ST_MERGE_VEC_CST:   return "merge_vec_cst";
     case ST_XOR:        return "xor";
     case ST_XOR_ACCUM:  return "xor_accum";
     case ST_PLUS_ONE:   return "plus_one";
@@ -631,10 +631,10 @@ static const char *stage_name(stage_t s){
  * effective data-path pressure.
  *
  * Sources for the numbers:
- *   merge / merge_constant_*  -- tree_merge_neon / tree_merge_bcast_*_neon
+ *   merge / merge_constant_*  -- merge_vec_vec_neon / merge_cst_vec_neon / merge_vec_cst_neon
  *     load expand_tab[mask] (1 byte/output) + expand_popcnt[mask]
  *     (0.125 byte/output) + 1 source byte/output + 1 bm bit/output.
- *   merge_two -- merge_both_const_neon: only consumes 1 bm bit/output;
+ *   merge_two -- merge_cst_cst_neon: only consumes 1 bm bit/output;
  *     the bit_pos_tab is a compile-time vector held in a register.
  *   merge_flat (D) -- packed bm stream is D bits/output, the c2s lookup
  *     yields one byte/output (the symbol); the c2s table is held in
@@ -670,7 +670,7 @@ static const char *stage_name(stage_t s){
  * full 16-byte vectors regardless of how much of the vector ends up in
  * the cursor advance.
  *
- * Concretely for merge (tree_merge_neon, 16 outputs per inner iter):
+ * Concretely for merge_vec_vec (merge_vec_vec_neon, 16 outputs per inner iter):
  *   - vld1q_u8(left + lc):  16 bytes loaded / 16 outputs = 1 byte/elem = 8 bits/elem
  *   - vld1q_u8(right + rc): 16 bytes loaded / 16 outputs = 1 byte/elem = 8 bits/elem
  *   - bm[j>>3]:             2 bytes loaded / 16 outputs = 1 bit/elem
@@ -702,10 +702,10 @@ static void stage_bits(stage_t s, int D, double *in, double *out, double *lut) {
     case ST_PARTBM:     *in=16+1;     *out=32;       *lut=32+1;    break;
     case ST_PARTHALF:   *in=16+1;     *out=16;       *lut=16+1;    break;
     case ST_FUSEDHALF:  *in=16;       *out=1+16;     *lut=16+1;    break;
-    case ST_MERGE_GEN:  *in=8+8+1;    *out=8;        *lut=8+1;     break;
-    case ST_MERGE_TWO:  *in=1;        *out=8;        *lut=0;       break;
-    case ST_MERGE_CL:   *in=8+1;      *out=8;        *lut=8+1;     break;
-    case ST_MERGE_CR:   *in=8+1;      *out=8;        *lut=8+1;     break;
+    case ST_MERGE_VEC_VEC:  *in=8+8+1;    *out=8;        *lut=8+1;     break;
+    case ST_MERGE_CST_CST:  *in=1;        *out=8;        *lut=0;       break;
+    case ST_MERGE_CST_VEC:   *in=8+1;      *out=8;        *lut=8+1;     break;
+    case ST_MERGE_VEC_CST:   *in=8+1;      *out=8;        *lut=8+1;     break;
     case ST_XOR:        *in=16;       *out=8;        *lut=0;       break;
     case ST_XOR_ACCUM:  *in=8;        *out=0;        *lut=0;       break;
     case ST_PLUS_ONE:   *in=0;        *out=8;        *lut=0;       break;
@@ -780,27 +780,27 @@ int main(int argc, char **argv) {
        but the symbol(s) come from buffer reads or scalar constants
        instead of a c2s lookup.  Scalar refs + production SIMD on all
        backends; the pcpc/unroll8 experimental variants are NEON-only. */
-    reg("scalar", ST_MERGE_GEN, 0, 0, p_merge_gen_scalar);
-    reg("scalar", ST_MERGE_TWO, 0, 0, p_merge_two_scalar);
-    reg("scalar", ST_MERGE_CL,  0, 0, p_merge_const_l_scalar);
-    reg("scalar", ST_MERGE_CR,  0, 0, p_merge_const_r_scalar);
+    reg("scalar", ST_MERGE_VEC_VEC, 0, 0, p_merge_vec_vec_scalar);
+    reg("scalar", ST_MERGE_CST_CST, 0, 0, p_merge_cst_cst_scalar);
+    reg("scalar", ST_MERGE_CST_VEC,  0, 0, p_merge_cst_vec_scalar);
+    reg("scalar", ST_MERGE_VEC_CST,  0, 0, p_merge_vec_cst_scalar);
 #if defined(HAVE_SIMD)
-    reg(BK,       ST_MERGE_GEN, 0, 0, simd_merge_gen);
-    reg(BK,       ST_MERGE_TWO, 0, 0, simd_merge_two);
-    reg(BK,       ST_MERGE_CL,  0, 0, simd_merge_const_l);
-    reg(BK,       ST_MERGE_CR,  0, 0, simd_merge_const_r);
+    reg(BK,       ST_MERGE_VEC_VEC, 0, 0, simd_merge_vec_vec);
+    reg(BK,       ST_MERGE_CST_CST, 0, 0, simd_merge_cst_cst);
+    reg(BK,       ST_MERGE_CST_VEC,  0, 0, simd_merge_cst_vec);
+    reg(BK,       ST_MERGE_VEC_CST,  0, 0, simd_merge_vec_cst);
 #endif
 #if defined(HAVE_NEON_KERNELS)
-    reg("neon_pcpc",     ST_MERGE_GEN, 0, 0, simd_merge_pcpc_pure);
-    reg("neon_pcpc_full",ST_MERGE_GEN, 0, 0, simd_merge_pcpc_full);
-    reg("neon_unroll8",  ST_MERGE_GEN, 0, 0, simd_merge_unroll8);
+    reg("neon_pcpc",     ST_MERGE_VEC_VEC, 0, 0, simd_merge_vec_vec_pcpc_pure);
+    reg("neon_pcpc_full",ST_MERGE_VEC_VEC, 0, 0, simd_merge_vec_vec_pcpc_full);
+    reg("neon_unroll8",  ST_MERGE_VEC_VEC, 0, 0, simd_merge_vec_vec_unroll8);
     ensure_mask_to_bits();
     ensure_blend_tab();
-    reg("neon_tbl",      ST_MERGE_TWO, 0, 0, simd_merge_two_tbl);
-    reg("neon_blendtab", ST_MERGE_TWO, 0, 0, simd_merge_two_blendtab);
-    reg("neon_vtbl",     ST_MERGE_TWO, 0, 0, simd_merge_two_vtbl);
-    reg("neon_vtblq",    ST_MERGE_TWO, 0, 0, simd_merge_two_vtblq);
-    reg("neon_d1flat",   ST_MERGE_TWO, 0, 0, simd_merge_two_d1flat);
+    reg("neon_tbl",      ST_MERGE_CST_CST, 0, 0, simd_merge_cst_cst_tbl);
+    reg("neon_blendtab", ST_MERGE_CST_CST, 0, 0, simd_merge_cst_cst_blendtab);
+    reg("neon_vtbl",     ST_MERGE_CST_CST, 0, 0, simd_merge_cst_cst_vtbl);
+    reg("neon_vtblq",    ST_MERGE_CST_CST, 0, 0, simd_merge_cst_cst_vtblq);
+    reg("neon_d1flat",   ST_MERGE_CST_CST, 0, 0, simd_merge_cst_cst_d1flat);
 #endif
     /* Synthetic byte-XOR — memory-bandwidth comparison point. */
     reg("scalar", ST_XOR, 0, 0, p_xor_scalar);
@@ -847,25 +847,25 @@ int main(int argc, char **argv) {
             scalar_unpack(codes,bm,n,p->D); scalar_scatter(ref,codes,c2s,n);
             memset(out,0,n); p->run(&cx);
             if (memcmp(out,ref,n)) chk="FAIL";
-        } else if (p->stage == ST_MERGE_GEN) {
+        } else if (p->stage == ST_MERGE_VEC_VEC) {
 #if defined(HAVE_NEON_KERNELS)
             /* Populate g_bm_popcnt once per row so the _pcpc_pure variant
                sees an up-to-date table; harmless for other variants. */
             fill_bm_popcnt(bm, n);
 #endif
-            scalar_merge_gen(ref, bm, n, merge_left, merge_right);
+            scalar_merge_vec_vec(ref, bm, n, merge_left, merge_right);
             memset(out,0,n); p->run(&cx);
             if (memcmp(out,ref,n)) chk="FAIL";
-        } else if (p->stage == ST_MERGE_TWO) {
-            scalar_merge_two(ref, bm, n, MERGE_LEFT_SYM, MERGE_RIGHT_SYM);
+        } else if (p->stage == ST_MERGE_CST_CST) {
+            scalar_merge_cst_cst(ref, bm, n, MERGE_LEFT_SYM, MERGE_RIGHT_SYM);
             memset(out,0,n); p->run(&cx);
             if (memcmp(out,ref,n)) chk="FAIL";
-        } else if (p->stage == ST_MERGE_CL) {
-            scalar_merge_const_l(ref, bm, n, MERGE_LEFT_SYM, merge_right);
+        } else if (p->stage == ST_MERGE_CST_VEC) {
+            scalar_merge_cst_vec(ref, bm, n, MERGE_LEFT_SYM, merge_right);
             memset(out,0,n); p->run(&cx);
             if (memcmp(out,ref,n)) chk="FAIL";
-        } else if (p->stage == ST_MERGE_CR) {
-            scalar_merge_const_r(ref, bm, n, merge_left, MERGE_RIGHT_SYM);
+        } else if (p->stage == ST_MERGE_VEC_CST) {
+            scalar_merge_vec_cst(ref, bm, n, merge_left, MERGE_RIGHT_SYM);
             memset(out,0,n); p->run(&cx);
             if (memcmp(out,ref,n)) chk="FAIL";
         } else if (p->stage == ST_XOR) {

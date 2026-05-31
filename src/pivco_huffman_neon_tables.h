@@ -14,7 +14,7 @@
  *      Both halves loaded with one `ldp q0, q1` (32 bytes contiguous).
  *
  *   expand_tab / expand_tab_pre / expand_popcnt + init_expand_table
- *      BU `tree_merge` V4 strategy: per (nr0, m1) precomputed shuf
+ *      BU `merge` V4 strategy: per (nr0, m1) precomputed shuf
  *      vectors for the 32-byte (L_full, R_full) source register pair.
  *      18 432 bytes; fits L1d on every target.  See the long comment
  *      at the definition for the (nr0, m1) algebra.
@@ -42,7 +42,7 @@ extern uint8_t compress_popcnt [256];
 extern int     compress_table_ready;
 void init_compress_table(void);
 
-/* BU tree_merge V4 expand / popcount tables. */
+/* BU merge V4 expand / popcount tables. */
 extern uint8_t expand_tab     [256][8];
 extern uint8_t expand_tab_pre [9][256][8];
 extern uint8_t expand_popcnt  [256];

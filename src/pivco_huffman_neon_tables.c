@@ -55,7 +55,7 @@ void init_compress_table(void)
     compress_table_ready = 1;
 }
 
-/* ---------- BU tree_merge V4: expand_tab + expand_tab_pre + expand_popcnt
+/* ---------- BU merge V4: expand_tab + expand_tab_pre + expand_popcnt
  *
  * `expand_tab[m][k]` is the lane index (0..15) for output position k
  * of an 8-element merge controlled by mask byte m.  Values 0..7 select

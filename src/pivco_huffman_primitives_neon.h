@@ -29,7 +29,7 @@
 #include <string.h>
 
 /* Backend lifecycle.  Lazily build the compress_tab + expand_tab pre-
- * bake tables that the NEON partition / tree_merge primitives index
+ * bake tables that the NEON partition / merge primitives index
  * into.  Idempotent and cheap after the first call. */
 static inline void codec_init_neon(void)
 {
@@ -82,7 +82,7 @@ static inline int popcount_K_right_neon(const uint8_t *bm, int nbytes, int K)
     return K_right;
 }
 
-/* tree_merge_neon — V4 stride-16 main path.
+/* merge_vec_vec_neon — V4 stride-16 main path.
  *
  * Each iter loads 16-byte L_full / R_full once, produces two 8-byte
  * output halves.  Iter 0 uses vqtbl1 over vcombine(low(L_full),
@@ -93,9 +93,9 @@ static inline int popcount_K_right_neon(const uint8_t *bm, int nbytes, int K)
  * pivco_huffman_neon_tables.c for the (nr0, m1) table algebra.
  *
  * +13-15% bench gain on M4, +7-10% on Graviton 4 vs the older stride-
- * 16 path with 4 × vld_8 per iter.  See IDEAS.md "NEON bu_tree_merge:
+ * 16 path with 4 × vld_8 per iter.  See IDEAS.md "NEON bu_merge:
  * 16-byte loads + precomputed (nr0, m1) shuf — SHIPPED (2026-05-11)". */
-static inline void tree_merge_neon(const uint8_t *bm, int K,
+static inline void merge_vec_vec_neon(const uint8_t *bm, int K,
                                      const uint8_t *left,
                                      const uint8_t *right,
                                      uint8_t *out)
@@ -144,13 +144,13 @@ static inline void tree_merge_neon(const uint8_t *bm, int K,
         int mb = (bm[j >> 3] >> (j & 7)) & 1;
         out[j] = mb ? right[rc++] : left[lc++];
     }
-    PROF_TOC(PROF_BU_TREE_MERGE, K);
+    PROF_TOC(PROF_BU_MERGE_VEC_VEC, K);
 }
 
-/* tree_merge_bcast_left_neon — left input is a broadcast constant.
- * Same V4 strategy as tree_merge_neon; the L lane of every vqtbl2
+/* merge_cst_vec_neon — left input is a broadcast constant.
+ * Same V4 strategy as merge_vec_vec_neon; the L lane of every vqtbl2
  * iteration reads from a duplicated 16-byte register holding left_sym. */
-static inline void tree_merge_bcast_left_neon(const uint8_t *bm, int K,
+static inline void merge_cst_vec_neon(const uint8_t *bm, int K,
                                                 uint8_t left_sym,
                                                 const uint8_t *right,
                                                 uint8_t *out)
@@ -190,11 +190,11 @@ static inline void tree_merge_bcast_left_neon(const uint8_t *bm, int K,
         int mb = (bm[j >> 3] >> (j & 7)) & 1;
         out[j] = mb ? right[rc++] : left_sym;
     }
-    PROF_TOC(PROF_BU_TREE_MERGE_BCAST_LEFT, K);
+    PROF_TOC(PROF_BU_MERGE_CST_VEC, K);
 }
 
-/* tree_merge_bcast_right_neon — mirror of tree_merge_bcast_left_neon. */
-static inline void tree_merge_bcast_right_neon(const uint8_t *bm, int K,
+/* merge_vec_cst_neon — mirror of merge_cst_vec_neon. */
+static inline void merge_vec_cst_neon(const uint8_t *bm, int K,
                                                  const uint8_t *left,
                                                  uint8_t right_sym,
                                                  uint8_t *out)
@@ -234,21 +234,21 @@ static inline void tree_merge_bcast_right_neon(const uint8_t *bm, int K,
         int mb = (bm[j >> 3] >> (j & 7)) & 1;
         out[j] = mb ? right_sym : left[lc++];
     }
-    PROF_TOC(PROF_BU_TREE_MERGE_BCAST_RIGHT, K);
+    PROF_TOC(PROF_BU_MERGE_VEC_CST, K);
 }
 
-/* merge_both_const_neon — both inputs are constants.  Treated as a
+/* merge_cst_cst_neon — both inputs are constants.  Treated as a
  * D=1 flat decode: a 2-byte (left, right) "c2s" table replicated across
  * 16 lanes via vdupq_n_u16, indexed by the bm bit (0 or 1).  Bit-spread
  * uses the same vqtbl(dup_tab) + vshlq(shift_tab) + vandq pattern as
- * flat_decode_direct_neon_d2, scaled down for D=1 (8 codes / bm byte
+ * merge_flat_d2_neon, scaled down for D=1 (8 codes / bm byte
  * instead of 4).  Faster than vtst+vand+veor by ~1.6× on M4 NEON and
  * ~1.4× on Neoverse V2. */
 static const uint8_t merge_two_dup_tab[16]   = {0,0,0,0,0,0,0,0,
                                                 1,1,1,1,1,1,1,1};
 static const int8_t  merge_two_shift_tab[16] = {0,-1,-2,-3,-4,-5,-6,-7,
                                                 0,-1,-2,-3,-4,-5,-6,-7};
-static inline void merge_both_const_neon(const uint8_t *bm, int K,
+static inline void merge_cst_cst_neon(const uint8_t *bm, int K,
                                            uint8_t left_sym, uint8_t right_sym,
                                            uint8_t *out)
 {
@@ -280,7 +280,7 @@ static inline void merge_both_const_neon(const uint8_t *bm, int K,
         int mb = (bm[j >> 3] >> (j & 7)) & 1;
         out[j] = mb ? right_sym : left_sym;
     }
-    PROF_TOC(PROF_BU_MERGE_BOTH_CONST, K);
+    PROF_TOC(PROF_BU_MERGE_CST_CST, K);
 }
 
 /* ---------- Flat-subtree decode (contiguous output) ----------
@@ -289,7 +289,7 @@ static inline void merge_both_const_neon(const uint8_t *bm, int K,
  * resulting bytes to out[0..n).  Output is dense / sequential -- the
  * BU codec calls this when it hits a PIVCO_NODE_INTERNAL_FLAT.
  *
- * One static-inline per supported D (2..8); flat_decode_to_buffer_neon
+ * One static-inline per supported D (2..8); merge_flat_neon
  * is a switch dispatcher.  The per-D unpack helpers
  * (flat_d{2,3,4,5,6,7}_unpack) come from pivco_huffman_neon_flat.h.
  */
@@ -308,7 +308,7 @@ static inline uint32_t extract_D_bits_neon(const uint8_t *in,
 }
 
 /* D=2: 4 packed bits per byte -> 16 codes (uint8x16_t), 1 vqtbl1q_u8. */
-static inline void flat_decode_direct_neon_d2(uint8_t *symbols, int n,
+static inline void merge_flat_d2_neon(uint8_t *symbols, int n,
                                                 const uint8_t *bm,
                                                 const uint8_t *c2s)
 {
@@ -334,7 +334,7 @@ static inline void flat_decode_direct_neon_d2(uint8_t *symbols, int n,
 
 /* D=3: 3 bytes -> 8 codes (uint8x8_t).  16-elem chunk: two unpacks +
  * vcombine + vqtbl1q_u8; 8-elem chunk: one unpack + vqtbl1_u8. */
-static inline void flat_decode_direct_neon_d3(uint8_t *symbols, int n,
+static inline void merge_flat_d3_neon(uint8_t *symbols, int n,
                                                 const uint8_t *bm,
                                                 const uint8_t *c2s)
 {
@@ -359,7 +359,7 @@ static inline void flat_decode_direct_neon_d3(uint8_t *symbols, int n,
 }
 
 /* D=4: 2 nibbles per byte -> 16 codes (uint8x16_t), 1 vqtbl1q_u8. */
-static inline void flat_decode_direct_neon_d4(uint8_t *symbols, int n,
+static inline void merge_flat_d4_neon(uint8_t *symbols, int n,
                                                 const uint8_t *bm,
                                                 const uint8_t *c2s)
 {
@@ -386,7 +386,7 @@ static inline void flat_decode_direct_neon_d4(uint8_t *symbols, int n,
  * at the n that BU's contiguous flat-subtree path produces (typically
  * thousands of elements) the SIMD path still wins -- on Graviton 4
  * flat_M5 measured 9121 vs 2845 M/s SIMD-vs-scalar 2026-05-14. */
-static inline void flat_decode_direct_neon_d5(uint8_t *symbols, int n,
+static inline void merge_flat_d5_neon(uint8_t *symbols, int n,
                                                 const uint8_t *bm,
                                                 const uint8_t *c2s)
 {
@@ -413,7 +413,7 @@ static inline void flat_decode_direct_neon_d5(uint8_t *symbols, int n,
 }
 
 /* D=6: c2s is 64 bytes (4 regs), TBL via vqtbl4. */
-static inline void flat_decode_direct_neon_d6(uint8_t *symbols, int n,
+static inline void merge_flat_d6_neon(uint8_t *symbols, int n,
                                                 const uint8_t *bm,
                                                 const uint8_t *c2s)
 {
@@ -444,7 +444,7 @@ static inline void flat_decode_direct_neon_d6(uint8_t *symbols, int n,
 /* D=7: 128-entry c2s = 2 * vqtbl4 (= 64).  vqtbl4 on the low half +
  * vqtbx4 on the high half (with code-64 indexing) — vqtbx keeps the
  * first result for out-of-range lanes, so no OR-merge needed. */
-static inline void flat_decode_direct_neon_d7(uint8_t *symbols, int n,
+static inline void merge_flat_d7_neon(uint8_t *symbols, int n,
                                                 const uint8_t *bm,
                                                 const uint8_t *c2s)
 {
@@ -482,7 +482,7 @@ static inline void flat_decode_direct_neon_d7(uint8_t *symbols, int n,
  * A parallel 4×vqtbl + OR-tree alternative was measured equivalent on
  * M4 (vqtbl4q is wide-register-read-bound, not latency-bound), so the
  * chained-tbx form wins on instruction count. */
-static inline void flat_decode_direct_neon_d8(uint8_t *symbols, int n,
+static inline void merge_flat_d8_neon(uint8_t *symbols, int n,
                                                 const uint8_t *bm,
                                                 const uint8_t *c2s)
 {
@@ -510,21 +510,21 @@ static inline void flat_decode_direct_neon_d8(uint8_t *symbols, int n,
     for (; i < n; i++) symbols[i] = c2s[bm[i]];
 }
 
-/* flat_decode_to_buffer_neon -- D-bit flat-subtree decode into a
+/* merge_flat_neon -- D-bit flat-subtree decode into a
  * contiguous output buffer.  Dispatches to the per-D specialisation. */
-static inline void flat_decode_to_buffer_neon(uint8_t *out, int n,
+static inline void merge_flat_neon(uint8_t *out, int n,
                                                 const uint8_t *bm, int D,
                                                 const uint8_t *c2s)
 {
     PROF_TIC();
     switch (D) {
-    case 2: flat_decode_direct_neon_d2(out, n, bm, c2s); break;
-    case 3: flat_decode_direct_neon_d3(out, n, bm, c2s); break;
-    case 4: flat_decode_direct_neon_d4(out, n, bm, c2s); break;
-    case 5: flat_decode_direct_neon_d5(out, n, bm, c2s); break;
-    case 6: flat_decode_direct_neon_d6(out, n, bm, c2s); break;
-    case 7: flat_decode_direct_neon_d7(out, n, bm, c2s); break;
-    case 8: flat_decode_direct_neon_d8(out, n, bm, c2s); break;
+    case 2: merge_flat_d2_neon(out, n, bm, c2s); break;
+    case 3: merge_flat_d3_neon(out, n, bm, c2s); break;
+    case 4: merge_flat_d4_neon(out, n, bm, c2s); break;
+    case 5: merge_flat_d5_neon(out, n, bm, c2s); break;
+    case 6: merge_flat_d6_neon(out, n, bm, c2s); break;
+    case 7: merge_flat_d7_neon(out, n, bm, c2s); break;
+    case 8: merge_flat_d8_neon(out, n, bm, c2s); break;
     default: {
         /* Generic fallback for any unhandled D <= 16. */
         for (int i = 0; i < n; i++) {
@@ -534,7 +534,7 @@ static inline void flat_decode_to_buffer_neon(uint8_t *out, int n,
         break;
     }
     }
-    PROF_TOC(PROF_BU_FLAT_DECODE, n);
+    PROF_TOC(PROF_BU_MERGE_FLAT, n);
 }
 
 /* ---------- Encode primitives (bitmap + partition) ----------
@@ -954,30 +954,30 @@ PIVCO_PRIM_ALWAYS_INLINE void prim_enc_pack_dN(const uint16_t *codes_la,
 PIVCO_PRIM_ALWAYS_INLINE void prim_merge_flat(uint8_t *out, int n,
                                                           const uint8_t *bm, int D,
                                                           const uint8_t *c2s)
-{ flat_decode_to_buffer_neon(out, n, bm, D, c2s); }
+{ merge_flat_neon(out, n, bm, D, c2s); }
 
-PIVCO_PRIM_ALWAYS_INLINE void prim_merge_two(const uint8_t *bm, int K,
+PIVCO_PRIM_ALWAYS_INLINE void prim_merge_cst_cst(const uint8_t *bm, int K,
                                                       uint8_t left_sym,
                                                       uint8_t right_sym,
                                                       uint8_t *out)
-{ merge_both_const_neon(bm, K, left_sym, right_sym, out); }
+{ merge_cst_cst_neon(bm, K, left_sym, right_sym, out); }
 
-PIVCO_PRIM_ALWAYS_INLINE void prim_merge_constant_left(const uint8_t *bm, int K,
+PIVCO_PRIM_ALWAYS_INLINE void prim_merge_cst_vec(const uint8_t *bm, int K,
                                                           uint8_t left_sym,
                                                           const uint8_t *right_buf,
                                                           uint8_t *out)
-{ tree_merge_bcast_left_neon(bm, K, left_sym, right_buf, out); }
+{ merge_cst_vec_neon(bm, K, left_sym, right_buf, out); }
 
-PIVCO_PRIM_ALWAYS_INLINE void prim_merge_constant_right(const uint8_t *bm, int K,
+PIVCO_PRIM_ALWAYS_INLINE void prim_merge_vec_cst(const uint8_t *bm, int K,
                                                            const uint8_t *left_buf,
                                                            uint8_t right_sym,
                                                            uint8_t *out)
-{ tree_merge_bcast_right_neon(bm, K, left_buf, right_sym, out); }
+{ merge_vec_cst_neon(bm, K, left_buf, right_sym, out); }
 
-PIVCO_PRIM_ALWAYS_INLINE void prim_merge(const uint8_t *bm, int K,
+PIVCO_PRIM_ALWAYS_INLINE void prim_merge_vec_vec(const uint8_t *bm, int K,
                                                const uint8_t *left_buf,
                                                const uint8_t *right_buf,
                                                uint8_t *out)
-{ tree_merge_neon(bm, K, left_buf, right_buf, out); }
+{ merge_vec_vec_neon(bm, K, left_buf, right_buf, out); }
 
 #endif  /* PIVCO_HUFFMAN_PRIMITIVES_NEON_H */

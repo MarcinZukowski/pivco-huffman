@@ -43,7 +43,7 @@
 #include <string.h>
 
 /* Backend lifecycle.  Lazily build the compress_tab + expand_tab pre-
- * bake tables that the x86 partition / tree_merge primitives index
+ * bake tables that the x86 partition / merge primitives index
  * into.  Idempotent and cheap after the first call. */
 static inline void codec_init_x86(void)
 {
@@ -97,13 +97,13 @@ static inline int popcount_K_right_x86(const uint8_t *bm, int nbytes, int K)
     return K_right;
 }
 
-/* tree_merge_x86 — SSE 8-byte chunk via pshufb on
+/* merge_vec_vec_x86 — SSE 8-byte chunk via pshufb on
  * _mm_unpacklo_epi64(L8, R8) with expand_tab[mask].  2x-unrolled
  * stride-16 main path: two independent 8-byte merges per iter so OOO
  * overlaps loads / shuffles / stores.  Only lc/rc cursor adds carry a
  * real dep, and that's short-latency add.  AVX-512 VBMI2 64-byte
  * vpexpandb fast path lives in primitives_avx512.h. */
-static inline void tree_merge_x86(const uint8_t *bm, int K,
+static inline void merge_vec_vec_x86(const uint8_t *bm, int K,
                                     const uint8_t *left,
                                     const uint8_t *right,
                                     uint8_t *out)
@@ -147,13 +147,13 @@ static inline void tree_merge_x86(const uint8_t *bm, int K,
         int mb = (bm[j >> 3] >> (j & 7)) & 1;
         out[j] = mb ? right[rc++] : left[lc++];
     }
-    PROF_TOC(PROF_BU_TREE_MERGE, K);
+    PROF_TOC(PROF_BU_MERGE_VEC_VEC, K);
 }
 
-/* tree_merge_bcast_left_x86 — left input is a broadcast constant.
+/* merge_cst_vec_x86 — left input is a broadcast constant.
  * Same 2x-unrolled structure; the L lane is a duplicated 16-byte
  * register holding left_sym. */
-static inline void tree_merge_bcast_left_x86(const uint8_t *bm, int K,
+static inline void merge_cst_vec_x86(const uint8_t *bm, int K,
                                                uint8_t left_sym,
                                                const uint8_t *right,
                                                uint8_t *out)
@@ -192,11 +192,11 @@ static inline void tree_merge_bcast_left_x86(const uint8_t *bm, int K,
         int mb = (bm[j >> 3] >> (j & 7)) & 1;
         out[j] = mb ? right[rc++] : left_sym;
     }
-    PROF_TOC(PROF_BU_TREE_MERGE_BCAST_LEFT, K);
+    PROF_TOC(PROF_BU_MERGE_CST_VEC, K);
 }
 
-/* tree_merge_bcast_right_x86 — mirror of tree_merge_bcast_left_x86. */
-static inline void tree_merge_bcast_right_x86(const uint8_t *bm, int K,
+/* merge_vec_cst_x86 — mirror of merge_cst_vec_x86. */
+static inline void merge_vec_cst_x86(const uint8_t *bm, int K,
                                                 const uint8_t *left,
                                                 uint8_t right_sym,
                                                 uint8_t *out)
@@ -235,13 +235,13 @@ static inline void tree_merge_bcast_right_x86(const uint8_t *bm, int K,
         int mb = (bm[j >> 3] >> (j & 7)) & 1;
         out[j] = mb ? right_sym : left[lc++];
     }
-    PROF_TOC(PROF_BU_TREE_MERGE_BCAST_RIGHT, K);
+    PROF_TOC(PROF_BU_MERGE_VEC_CST, K);
 }
 
-/* merge_both_const_x86 — both inputs are constants.  vpblendvb-style:
+/* merge_cst_cst_x86 — both inputs are constants.  vpblendvb-style:
  * for each bit in mask, output is right_sym or left_sym.  AVX2 widens
  * to 32 bytes per iter; SSE4.1 floor handles 16. */
-static inline void merge_both_const_x86(const uint8_t *bm, int K,
+static inline void merge_cst_cst_x86(const uint8_t *bm, int K,
                                           uint8_t left_sym, uint8_t right_sym,
                                           uint8_t *out)
 {
@@ -282,7 +282,7 @@ static inline void merge_both_const_x86(const uint8_t *bm, int K,
         int mb = (bm[j >> 3] >> (j & 7)) & 1;
         out[j] = mb ? right_sym : left_sym;
     }
-    PROF_TOC(PROF_BU_MERGE_BOTH_CONST, K);
+    PROF_TOC(PROF_BU_MERGE_CST_CST, K);
 }
 
 /* ---------- Flat-subtree decode (contiguous output) ----------
@@ -388,10 +388,10 @@ static inline uint32_t extract_D_bits_x86(const uint8_t *in,
         DST(i) = c2s[code];                                                    \
     }
 
-/* flat_decode_direct_x86_inner — write n D-bit symbols contiguously to
+/* merge_flat_x86_impl — write n D-bit symbols contiguously to
  * out[].  D=4 SIMD specialisation, scalar unrolled tail for everything
  * else. */
-static inline void flat_decode_direct_x86_inner(uint8_t *symbols, int n,
+static inline void merge_flat_x86_impl(uint8_t *symbols, int n,
                                                   const uint8_t *bm, int D,
                                                   const uint8_t *c2s)
 {
@@ -541,17 +541,17 @@ static inline void flat_decode_direct_x86_inner(uint8_t *symbols, int n,
 #undef DST_DIRECT
 }
 
-/* flat_decode_to_buffer_x86 — D-bit flat-subtree decode into a
+/* merge_flat_x86 — D-bit flat-subtree decode into a
  * contiguous output buffer.  AVX2 D=4 32-byte path or SSE D=4 16-byte
  * path; scalar unrolled tail for other D.  AVX-512 D=5/D=6 fast paths
  * live in primitives_avx512.h. */
-static inline void flat_decode_to_buffer_x86(uint8_t *out, int n,
+static inline void merge_flat_x86(uint8_t *out, int n,
                                                const uint8_t *bm, int D,
                                                const uint8_t *c2s)
 {
     PROF_TIC();
-    flat_decode_direct_x86_inner(out, n, bm, D, c2s);
-    PROF_TOC(PROF_BU_FLAT_DECODE, n);
+    merge_flat_x86_impl(out, n, bm, D, c2s);
+    PROF_TOC(PROF_BU_MERGE_FLAT, n);
 }
 
 /* ---------- Encode primitives (bitmap + partition) ----------
@@ -942,30 +942,30 @@ PIVCO_PRIM_ALWAYS_INLINE void prim_enc_pack_dN(const uint16_t *codes_la,
 PIVCO_PRIM_ALWAYS_INLINE void prim_merge_flat(uint8_t *out, int n,
                                                           const uint8_t *bm, int D,
                                                           const uint8_t *c2s)
-{ flat_decode_to_buffer_x86(out, n, bm, D, c2s); }
+{ merge_flat_x86(out, n, bm, D, c2s); }
 
-PIVCO_PRIM_ALWAYS_INLINE void prim_merge_two(const uint8_t *bm, int K,
+PIVCO_PRIM_ALWAYS_INLINE void prim_merge_cst_cst(const uint8_t *bm, int K,
                                                       uint8_t left_sym,
                                                       uint8_t right_sym,
                                                       uint8_t *out)
-{ merge_both_const_x86(bm, K, left_sym, right_sym, out); }
+{ merge_cst_cst_x86(bm, K, left_sym, right_sym, out); }
 
-PIVCO_PRIM_ALWAYS_INLINE void prim_merge_constant_left(const uint8_t *bm, int K,
+PIVCO_PRIM_ALWAYS_INLINE void prim_merge_cst_vec(const uint8_t *bm, int K,
                                                           uint8_t left_sym,
                                                           const uint8_t *right_buf,
                                                           uint8_t *out)
-{ tree_merge_bcast_left_x86(bm, K, left_sym, right_buf, out); }
+{ merge_cst_vec_x86(bm, K, left_sym, right_buf, out); }
 
-PIVCO_PRIM_ALWAYS_INLINE void prim_merge_constant_right(const uint8_t *bm, int K,
+PIVCO_PRIM_ALWAYS_INLINE void prim_merge_vec_cst(const uint8_t *bm, int K,
                                                            const uint8_t *left_buf,
                                                            uint8_t right_sym,
                                                            uint8_t *out)
-{ tree_merge_bcast_right_x86(bm, K, left_buf, right_sym, out); }
+{ merge_vec_cst_x86(bm, K, left_buf, right_sym, out); }
 
-PIVCO_PRIM_ALWAYS_INLINE void prim_merge(const uint8_t *bm, int K,
+PIVCO_PRIM_ALWAYS_INLINE void prim_merge_vec_vec(const uint8_t *bm, int K,
                                                const uint8_t *left_buf,
                                                const uint8_t *right_buf,
                                                uint8_t *out)
-{ tree_merge_x86(bm, K, left_buf, right_buf, out); }
+{ merge_vec_vec_x86(bm, K, left_buf, right_buf, out); }
 
 #endif  /* PIVCO_HUFFMAN_PRIMITIVES_X86_H */

@@ -26,12 +26,12 @@
  *     also using vpcompressw via VL.  No shuffle table -- compressw is
  *     the table-free analog of the SSE pshufb + compress_tab dance.
  *
- *   - BU tree_merge_avx512 family: 64-byte vpexpandb main loop (one
+ *   - BU merge_vec_vec_avx512 family: 64-byte vpexpandb main loop (one
  *     ZMM load+expand per side, OR'd together), SSE stride-16 tail
  *     using expand_tab from pivco_huffman_x86_tables (the only x86
  *     table this backend depends on; codec_init_avx512 inits it).
  *
- *   - flat_decode_to_buffer_avx512: D=2/3/4/5/6 vector unpacks via the
+ *   - merge_flat_avx512: D=2/3/4/5/6 vector unpacks via the
  *     shared pivco_huffman_avx512_flat.h helpers (D=5/6 use
  *     vpmultishiftqb / vpermb -- the AVX-512-only fast paths).
  *
@@ -63,7 +63,7 @@
 #include <stdint.h>
 #include <string.h>
 
-/* Backend lifecycle.  Only the BU tree_merge SSE-stride tail needs a
+/* Backend lifecycle.  Only the BU merge SSE-stride tail needs a
  * runtime table (expand_tab in pivco_huffman_x86_tables.c).  AVX-512
  * partition and encode are entirely table-free (vpcompressw is the
  * "table" -- it's hardware). */
@@ -111,10 +111,10 @@ static inline int popcount_K_right_avx512(const uint8_t *bm,
     return K_right;
 }
 
-/* tree_merge_avx512 — VBMI2 64-byte main loop via vpexpandb (two
+/* merge_vec_vec_avx512 — VBMI2 64-byte main loop via vpexpandb (two
  * masked expand-loads OR'd together), SSE stride-16/-8 tails using
  * expand_tab from x86_tables.  ~0.023 ns/byte on Xeon Ice Lake+. */
-static inline void tree_merge_avx512(const uint8_t *bm, int K,
+static inline void merge_vec_vec_avx512(const uint8_t *bm, int K,
                                        const uint8_t *left,
                                        const uint8_t *right,
                                        uint8_t *out)
@@ -171,11 +171,11 @@ static inline void tree_merge_avx512(const uint8_t *bm, int K,
         int mb = (bm[j >> 3] >> (j & 7)) & 1;
         out[j] = mb ? right[rc++] : left[lc++];
     }
-    PROF_TOC(PROF_BU_TREE_MERGE, K);
+    PROF_TOC(PROF_BU_MERGE_VEC_VEC, K);
 }
 
-/* tree_merge_bcast_left_avx512 — left input is a broadcast constant. */
-static inline void tree_merge_bcast_left_avx512(const uint8_t *bm, int K,
+/* merge_cst_vec_avx512 — left input is a broadcast constant. */
+static inline void merge_cst_vec_avx512(const uint8_t *bm, int K,
                                                   uint8_t left_sym,
                                                   const uint8_t *right,
                                                   uint8_t *out)
@@ -224,11 +224,11 @@ static inline void tree_merge_bcast_left_avx512(const uint8_t *bm, int K,
         int mb = (bm[j >> 3] >> (j & 7)) & 1;
         out[j] = mb ? right[rc++] : left_sym;
     }
-    PROF_TOC(PROF_BU_TREE_MERGE_BCAST_LEFT, K);
+    PROF_TOC(PROF_BU_MERGE_CST_VEC, K);
 }
 
-/* tree_merge_bcast_right_avx512 — mirror of the bcast_left variant. */
-static inline void tree_merge_bcast_right_avx512(const uint8_t *bm, int K,
+/* merge_vec_cst_avx512 — mirror of the bcast_left variant. */
+static inline void merge_vec_cst_avx512(const uint8_t *bm, int K,
                                                    const uint8_t *left,
                                                    uint8_t right_sym,
                                                    uint8_t *out)
@@ -278,13 +278,13 @@ static inline void tree_merge_bcast_right_avx512(const uint8_t *bm, int K,
         int mb = (bm[j >> 3] >> (j & 7)) & 1;
         out[j] = mb ? right_sym : left[lc++];
     }
-    PROF_TOC(PROF_BU_TREE_MERGE_BCAST_RIGHT, K);
+    PROF_TOC(PROF_BU_MERGE_VEC_CST, K);
 }
 
-/* merge_both_const_avx512 — both inputs are constants.  Native AVX-512
+/* merge_cst_cst_avx512 — both inputs are constants.  Native AVX-512
  * stride-64: read 64 bm bits as a kmask, single mask_blend_epi8 of two
  * broadcast registers, one 64-byte store.  SSE 16-byte and scalar tails. */
-static inline void merge_both_const_avx512(const uint8_t *bm, int K,
+static inline void merge_cst_cst_avx512(const uint8_t *bm, int K,
                                              uint8_t left_sym, uint8_t right_sym,
                                              uint8_t *out)
 {
@@ -316,7 +316,7 @@ static inline void merge_both_const_avx512(const uint8_t *bm, int K,
         int mb = (bm[j >> 3] >> (j & 7)) & 1;
         out[j] = mb ? right_sym : left_sym;
     }
-    PROF_TOC(PROF_BU_MERGE_BOTH_CONST, K);
+    PROF_TOC(PROF_BU_MERGE_CST_CST, K);
 }
 
 /* ---------- Flat-subtree decode (contiguous output) ---------- */
@@ -335,7 +335,7 @@ static inline uint32_t extract_D_bits_avx512(const uint8_t *in,
 
 /* Per-D direct decode (D-bit packed bm -> symbols).  Reads n*D packed
  * bits, looks up each D-bit code in c2s, writes the resulting bytes
- * to symbols[0..n).  flat_decode_to_buffer_avx512 is a switch
+ * to symbols[0..n).  merge_flat_avx512 is a switch
  * dispatcher to the per-D specialisation; structure mirrors the NEON
  * file at pivco_huffman_primitives_neon.h.
  *
@@ -344,7 +344,7 @@ static inline uint32_t extract_D_bits_avx512(const uint8_t *in,
 
 /* D=2: 4 packed codes per byte -> 16 codes (__m128i), 1 pshufb on a
  * 4-byte c2s broadcast into all 4 lanes. */
-static inline void flat_decode_direct_avx512_d2(uint8_t *symbols, int n,
+static inline void merge_flat_d2_avx512(uint8_t *symbols, int n,
                                                   const uint8_t *bm,
                                                   const uint8_t *c2s)
 {
@@ -373,7 +373,7 @@ static inline void flat_decode_direct_avx512_d2(uint8_t *symbols, int n,
 /* D=3: c2s = 8 entries fits in low 8 bytes of an xmm; 16-elem chunk
  * via pshufb on an 8-byte c2s broadcast (only low 3 bits of each lane
  * matter, c2s is loaded into low 8 bytes). */
-static inline void flat_decode_direct_avx512_d3(uint8_t *symbols, int n,
+static inline void merge_flat_d3_avx512(uint8_t *symbols, int n,
                                                   const uint8_t *bm,
                                                   const uint8_t *c2s)
 {
@@ -400,7 +400,7 @@ static inline void flat_decode_direct_avx512_d3(uint8_t *symbols, int n,
 }
 
 /* D=4: c2s = 16 entries fits in an xmm; pshufb directly. */
-static inline void flat_decode_direct_avx512_d4(uint8_t *symbols, int n,
+static inline void merge_flat_d4_avx512(uint8_t *symbols, int n,
                                                   const uint8_t *bm,
                                                   const uint8_t *c2s)
 {
@@ -418,7 +418,7 @@ static inline void flat_decode_direct_avx512_d4(uint8_t *symbols, int n,
 }
 
 /* D=5: c2s = 32 entries needs vpermb over an ymm. */
-static inline void flat_decode_direct_avx512_d5(uint8_t *symbols, int n,
+static inline void merge_flat_d5_avx512(uint8_t *symbols, int n,
                                                   const uint8_t *bm,
                                                   const uint8_t *c2s)
 {
@@ -447,7 +447,7 @@ static inline void flat_decode_direct_avx512_d5(uint8_t *symbols, int n,
 }
 
 /* D=6: c2s = 64 entries fits in a zmm, use vpermb. */
-static inline void flat_decode_direct_avx512_d6(uint8_t *symbols, int n,
+static inline void merge_flat_d6_avx512(uint8_t *symbols, int n,
                                                   const uint8_t *bm,
                                                   const uint8_t *c2s)
 {
@@ -477,7 +477,7 @@ static inline void flat_decode_direct_avx512_d6(uint8_t *symbols, int n,
 
 /* D=7: c2s = 128 entries spans two zmm tables.  One vpermi2b looks up
  * the full 128-byte table in a single op. */
-static inline void flat_decode_direct_avx512_d7(uint8_t *symbols, int n,
+static inline void merge_flat_d7_avx512(uint8_t *symbols, int n,
                                                   const uint8_t *bm,
                                                   const uint8_t *c2s)
 {
@@ -510,7 +510,7 @@ static inline void flat_decode_direct_avx512_d7(uint8_t *symbols, int n,
  * so 64 codes load in a single zmm.  Two vpermi2b lookups (one for the
  * lower 128-byte half, one for the upper) + one mask_blend on bit 7 of
  * each code (which half to take).  Produces 64 symbols per iter. */
-static inline void flat_decode_direct_avx512_d8(uint8_t *symbols, int n,
+static inline void merge_flat_d8_avx512(uint8_t *symbols, int n,
                                                   const uint8_t *bm,
                                                   const uint8_t *c2s)
 {
@@ -530,21 +530,21 @@ static inline void flat_decode_direct_avx512_d8(uint8_t *symbols, int n,
     for (; i < n; i++) symbols[i] = c2s[bm[i]];
 }
 
-/* flat_decode_to_buffer_avx512 — D-bit flat-subtree decode into a
+/* merge_flat_avx512 — D-bit flat-subtree decode into a
  * contiguous output buffer.  Dispatches to the per-D specialisation. */
-static inline void flat_decode_to_buffer_avx512(uint8_t *out, int n,
+static inline void merge_flat_avx512(uint8_t *out, int n,
                                                   const uint8_t *bm, int D,
                                                   const uint8_t *c2s)
 {
     PROF_TIC();
     switch (D) {
-    case 2: flat_decode_direct_avx512_d2(out, n, bm, c2s); break;
-    case 3: flat_decode_direct_avx512_d3(out, n, bm, c2s); break;
-    case 4: flat_decode_direct_avx512_d4(out, n, bm, c2s); break;
-    case 5: flat_decode_direct_avx512_d5(out, n, bm, c2s); break;
-    case 6: flat_decode_direct_avx512_d6(out, n, bm, c2s); break;
-    case 7: flat_decode_direct_avx512_d7(out, n, bm, c2s); break;
-    case 8: flat_decode_direct_avx512_d8(out, n, bm, c2s); break;
+    case 2: merge_flat_d2_avx512(out, n, bm, c2s); break;
+    case 3: merge_flat_d3_avx512(out, n, bm, c2s); break;
+    case 4: merge_flat_d4_avx512(out, n, bm, c2s); break;
+    case 5: merge_flat_d5_avx512(out, n, bm, c2s); break;
+    case 6: merge_flat_d6_avx512(out, n, bm, c2s); break;
+    case 7: merge_flat_d7_avx512(out, n, bm, c2s); break;
+    case 8: merge_flat_d8_avx512(out, n, bm, c2s); break;
     default:
         for (int i = 0; i < n; i++) {
             uint32_t code = extract_D_bits_avx512(bm, i * D, D);
@@ -552,7 +552,7 @@ static inline void flat_decode_to_buffer_avx512(uint8_t *out, int n,
         }
         break;
     }
-    PROF_TOC(PROF_BU_FLAT_DECODE, n);
+    PROF_TOC(PROF_BU_MERGE_FLAT, n);
 }
 
 /* ---------- Encode primitives (bitmap + partition) ----------
@@ -937,30 +937,30 @@ PIVCO_PRIM_ALWAYS_INLINE void prim_enc_pack_dN(const uint16_t *codes_la,
 PIVCO_PRIM_ALWAYS_INLINE void prim_merge_flat(uint8_t *out, int n,
                                                           const uint8_t *bm, int D,
                                                           const uint8_t *c2s)
-{ flat_decode_to_buffer_avx512(out, n, bm, D, c2s); }
+{ merge_flat_avx512(out, n, bm, D, c2s); }
 
-PIVCO_PRIM_ALWAYS_INLINE void prim_merge_two(const uint8_t *bm, int K,
+PIVCO_PRIM_ALWAYS_INLINE void prim_merge_cst_cst(const uint8_t *bm, int K,
                                                       uint8_t left_sym,
                                                       uint8_t right_sym,
                                                       uint8_t *out)
-{ merge_both_const_avx512(bm, K, left_sym, right_sym, out); }
+{ merge_cst_cst_avx512(bm, K, left_sym, right_sym, out); }
 
-PIVCO_PRIM_ALWAYS_INLINE void prim_merge_constant_left(const uint8_t *bm, int K,
+PIVCO_PRIM_ALWAYS_INLINE void prim_merge_cst_vec(const uint8_t *bm, int K,
                                                           uint8_t left_sym,
                                                           const uint8_t *right_buf,
                                                           uint8_t *out)
-{ tree_merge_bcast_left_avx512(bm, K, left_sym, right_buf, out); }
+{ merge_cst_vec_avx512(bm, K, left_sym, right_buf, out); }
 
-PIVCO_PRIM_ALWAYS_INLINE void prim_merge_constant_right(const uint8_t *bm, int K,
+PIVCO_PRIM_ALWAYS_INLINE void prim_merge_vec_cst(const uint8_t *bm, int K,
                                                            const uint8_t *left_buf,
                                                            uint8_t right_sym,
                                                            uint8_t *out)
-{ tree_merge_bcast_right_avx512(bm, K, left_buf, right_sym, out); }
+{ merge_vec_cst_avx512(bm, K, left_buf, right_sym, out); }
 
-PIVCO_PRIM_ALWAYS_INLINE void prim_merge(const uint8_t *bm, int K,
+PIVCO_PRIM_ALWAYS_INLINE void prim_merge_vec_vec(const uint8_t *bm, int K,
                                                const uint8_t *left_buf,
                                                const uint8_t *right_buf,
                                                uint8_t *out)
-{ tree_merge_avx512(bm, K, left_buf, right_buf, out); }
+{ merge_vec_vec_avx512(bm, K, left_buf, right_buf, out); }
 
 #endif  /* PIVCO_HUFFMAN_PRIMITIVES_AVX512_H */

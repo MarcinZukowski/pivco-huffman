@@ -90,7 +90,7 @@ static inline int bitmap_bytes(int n)
  *
  * Condition: node has at least one child that's NOT a leaf.  Encodes the
  * exact set of popcount call sites in the BU decoder.  Both-leaf cases
- * and HALF_*-with-leaf cases get no header (decoder uses merge_both_const
+ * and HALF_*-with-leaf cases get no header (decoder uses merge_cst_cst
  * directly).
  *
  * The "needs header" decision is a pure function of the tree topology and

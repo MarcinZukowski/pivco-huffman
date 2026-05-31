@@ -11,7 +11,7 @@
  *      slots are set to 0x80 (pshufb zero-fill sentinel).
  *
  *   expand_tab + expand_popcnt + init_expand_table_x86
- *      BU tree_merge per-mask-byte shuffle pattern for the 8-element
+ *      BU merge per-mask-byte shuffle pattern for the 8-element
  *      pshufb merge over `_mm_unpacklo_epi64(L8, R8)`.  expand_tab[m][k]
  *      gives the lane index (0..15) for output position k controlled
  *      by mask byte m -- values 0..7 select from L, 8..15 from R.
@@ -38,7 +38,7 @@ extern uint8_t compress_popcnt [256];
 extern int     compress_table_ready;
 void init_compress_table_x86(void);
 
-/* BU tree_merge expand / popcount tables. */
+/* BU merge expand / popcount tables. */
 extern uint8_t expand_tab    [256][8];
 extern uint8_t expand_popcnt [256];
 extern int     expand_table_ready;

@@ -139,7 +139,7 @@ int pivco_huffman_decode(const uint8_t *in, size_t in_len,
                          const pivco_huffman_table_t *table,
                          uint8_t *symbols, size_t *consumed)
 {
-    /* Bottom-up tree_merge is the production decode path (since 2026-05-12
+    /* Bottom-up merge is the production decode path (since 2026-05-12
      * K_right landing).  Each backend's BU entry comes from codec.c
      * compiled with the matching PIVCO_BACKEND_* define. */
     switch (resolve_impl()) {

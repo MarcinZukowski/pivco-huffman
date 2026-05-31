@@ -398,7 +398,7 @@ int main(int argc, char **argv)
             }
         }, "pivco_n");
 
-        /* Bottom-up tree_merge decoder.  Same encoded stream as the
+        /* Bottom-up merge decoder.  Same encoded stream as the
          * top-down decoder; routed per-arch.  See pivco_huffman_bu_*.c. */
         BENCH(p_dec_bu, {
             for (int b = 0; b < NBLOCKS; b++) {

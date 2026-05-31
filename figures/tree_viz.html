@@ -870,10 +870,10 @@ function detectFlatSubtrees(root) {
  *   3. fuse-leaves on AND both children are leaves → S2 (and absorb both leaves)
  *   4. constant on AND at least one child is a leaf:
  *        - parent (TD) → half variant: PH / PRH
- *        - parent (BU) → MC
+ *        - parent (BU) → MCV / MVC
  *        - the constant-side leaf → C
  *        - the other side (if also a leaf) → S1
- *   5. otherwise: parent = P / PR / M; leaves = S1.
+ *   5. otherwise: parent = P / PR / MVV; leaves = S1.
  *
  * When BOTH children are leaves and constant is on AND fuse-leaves is
  * off: pick the higher-frequency leaf as the "constant" side (gets C);
@@ -907,7 +907,6 @@ function annotatePrimitives(root, meta) {
     }
 
     const tdMode = meta.mode !== 'bottom-up';
-    const Pletter = tdMode ? 'P' : 'M';
 
     function isLeaf(n) { return n && n.symbol >= 0; }
 
@@ -919,12 +918,12 @@ function annotatePrimitives(root, meta) {
      *       cheaply skip a scatter loop, so we don't proliferate.
      *
      *   BU: any leaf paired with a subtree sibling is a constant —
-     *       the merge uses tree_merge_bcast_{left,right}, with the
+     *       the merge uses merge_cst_vec / merge_vec_cst, with the
      *       leaf-side broadcast as a scalar.  Multiple such leaves can
      *       coexist independently; every leaf-vs-subtree internal
-     *       gets MC.  Both-leaf parents don't qualify (neither side is
+     *       gets MCV/MVC.  Both-leaf parents don't qualify (neither side is
      *       "the constant against a subtree"); those fall to
-     *       fuse-leaves S2 or plain M.
+     *       fuse-leaves S2 or plain MVV.
      */
     let tdConstantLeaf = null;
     if (meta.constantDetect && tdMode) {
@@ -940,10 +939,10 @@ function annotatePrimitives(root, meta) {
         tdConstantLeaf = best;
     }
     /* BU constant: always fires, independent of the constant toggle.
-     * The bcast variants (tree_merge_bcast_left / _right) ARE BU's
+     * The bcast variants (merge_cst_vec / merge_vec_cst) ARE BU's
      * merge primitive when a leaf is paired with a subtree — there
      * is no "non-bcast" alternative path in the real decoder, so the
-     * visualisation always labels these as MC. */
+     * visualisation labels these MCV (left=cst) or MVC (right=cst). */
     function isBuConstantLeaf(n, parent) {
         if (tdMode) return false;
         if (!parent || !isLeaf(n)) return false;
@@ -959,7 +958,7 @@ function annotatePrimitives(root, meta) {
                 (n.left === tdConstantLeaf || n.right === tdConstantLeaf);
         }
         /* BU: exactly one child is a leaf, the other a subtree.  Not
-         * gated on the toggle — MC is intrinsic. */
+         * gated on the toggle — MCV/MVC is intrinsic to BU. */
         const L = n.left, R = n.right;
         if (!L || !R) return false;
         return isLeaf(L) !== isLeaf(R);
@@ -1011,33 +1010,31 @@ function annotatePrimitives(root, meta) {
             return;
         }
         if (meta.fuseLeaves && isLeaf(n.left) && isLeaf(n.right)) {
-            /* Fused both-leaves: scatter-two in TD, merge-two in BU.
-             * (BU has no M1 because there are no per-leaf primitives in
-             * BU — leaves are just scalar inputs to the parent's merge.) */
-            n._primitive = tdMode ? 'S2' : 'M2';
+            /* Fused both-leaves: TD scatter-two (S2), BU merge cst+cst (MCC).
+             * BU has no M1 because there are no per-leaf primitives in BU —
+             * leaves are just scalar inputs to the parent's merge. */
+            n._primitive = tdMode ? 'S2' : 'MCC';
             /* Recurse so the two leaves get _primitive = null (absorbed). */
             walk(n.left, n); walk(n.right, n);
             return;
         }
-        /* Half-partition variant fires ONLY at the constant leaf's
-         * direct parent.  Every other internal stays at P / PR / M
-         * regardless of leaf-vs-subtree configuration. */
+        /* Internal node naming.
+         *   TD: P (full), PR (root), PH (half-partition near constant leaf).
+         *   BU: by operand shape — MVV (vec/vec), MCV (left=cst, right=vec),
+         *       MVC (left=vec, right=cst).  Mirrors the prim_merge_*_*
+         *       naming in the codec primitives. */
         const isRoot = n.depth === 0;
-        const half = isConstantParent(n);
-        let p = Pletter;
-        /* TD has a genuine root variant (PR/PRH) because the root
-         * partition operates on the identity index array [0..N-1]
-         * and skips the index load.  BU has no root-specific merge
-         * primitive — the merge logic at the root is identical to any
-         * internal merge, only the output buffer differs.  So we
-         * suffix R only in TD. */
-        if (isRoot && tdMode) p += 'R';
-        /* TD uses H (half-partition — we genuinely skip work on the
-         * leaf side).  BU uses C (full merge, but with a constant
-         * scalar input from the leaf side — no half-skip, just a
-         * different operand source). */
-        if (half) p += tdMode ? 'H' : 'C';
-        n._primitive = p;
+        if (tdMode) {
+            let p = 'P';
+            if (isRoot) p += 'R';                            /* PR for root */
+            if (isConstantParent(n)) p += 'H';               /* PH near constant leaf */
+            n._primitive = p;
+        } else {
+            const lLeaf = isLeaf(n.left), rLeaf = isLeaf(n.right);
+            if      (lLeaf && !rLeaf) n._primitive = 'MCV';  /* left  = cst, right = vec */
+            else if (!lLeaf && rLeaf) n._primitive = 'MVC';  /* left  = vec, right = cst */
+            else                      n._primitive = 'MVV';  /* both vec/vec */
+        }
         walk(n.left, n); walk(n.right, n);
     }
     walk(root, null);
@@ -1816,7 +1813,7 @@ function renderTree(rootNode, meta) {
      *   TD: at most the one globally-most-frequent leaf (its
      *       primitive is C; memset fast-path).
      *   BU: every leaf whose sibling is a subtree (its parent uses
-     *       MC and treats this leaf as a broadcast input). */
+     *       MCV/MVC and treats this leaf as the constant operand). */
     const isConstantLeaf = d => d.data._isConstantLeaf;
     if (meta.showLeafDetails) {
         const W2 = leafSize - 2, H2 = 18;
@@ -2785,7 +2782,7 @@ function renderStats(rootNode, meta, stats) {
      * flat-subtree fast path. */
     addRow('ops/leaf (avg)', opsSimple.toFixed(2),
         "Average decode primitives per distinct symbol (each leaf counted " +
-        "once).  Counts every primitive on the root-to-leaf path (P/M/PH/DX/S2/S1, " +
+        "once).  Counts every primitive on the root-to-leaf path (P/MVV/PH/DX/S2/S1, " +
         "but NOT C which is bulk-amortised memset).  Flip show-flat / fuse-leaves / " +
         "constant to see the savings each optimisation contributes.");
     addRow('ops/byte (weighted)', opsW.toFixed(3),
@@ -3167,7 +3164,7 @@ const URL_PARAM_MAP = [
     { kind: 'str',  param: 'mode',           id: 'tree-mode',
       desc: 'Which traversal / set of primitives the bubbles show (with "primitives" on); the tree shape is identical in every mode.<br><br>' +
             '<b>top-down</b> — decode: partition input bytes left/right at each internal, scatter at leaves (P / S* primitives)<br>' +
-            '<b>bottom-up</b> — decode: recursively merge child outputs (M / S* primitives)<br>' +
+            '<b>bottom-up</b> — decode: recursively merge child outputs (MVV / MCV / MVC / MCC / MFx / S* primitives)<br>' +
             '<b>encode</b> — the encoder\'s per-node partition op, by node type: ' +
             '<b>EP-F</b> full (both subtrees), <b>EP-R</b>/<b>EP-L</b> half (one child a leaf — emit only the subtree side), ' +
             '<b>EP-N</b> none (both leaves — build the bitmap, no scatter), <b>PK</b>{D} pack a flat D-bit subtree. ' +
@@ -3186,7 +3183,7 @@ const URL_PARAM_MAP = [
     { kind: 'bool', param: 'constant',       id: 'constant-detect',
       desc: 'Toggle for the <b>top-down</b> memset-fast-path optimisation.<br><br>' +
             '<b>Top-down</b>: when on, the single globally-most-frequent leaf is marked as the constant — its primitive is <b>C</b> (memset, skips the per-byte scatter loop), and its direct parent uses <b>PH</b> / <b>PRH</b> (genuine half-partition).  When off: every leaf is S1, every non-flat internal is P / PR, no red border.<br><br>' +
-            '<b>Bottom-up</b>: <i>this toggle has no effect</i>.  BU\'s merge primitive intrinsically takes one side as a broadcast scalar whenever a leaf is paired with a subtree (tree_merge_bcast_left / _right) — there is no non-bcast alternative.  So MC and the red border are always shown for those configurations, regardless of this toggle.',
+            '<b>Bottom-up</b>: <i>this toggle has no effect</i>.  BU\'s merge primitive intrinsically takes one side as a broadcast scalar whenever a leaf is paired with a subtree (merge_cst_vec / merge_vec_cst) — there is no non-bcast alternative.  So MCV/MVC and the red border are always shown for those configurations, regardless of this toggle.',
       values: '1 | 0' },
     { kind: 'bool', param: 'fuse-leaves',    id: 'fuse-leaves',
       desc: 'When an internal node\'s two children are both leaves, emit one fused S2 primitive (scatter two symbols at once) at the parent. Absorbs both leaves\' S1s. Wins over constant detection when both children are leaves.',
@@ -3231,19 +3228,20 @@ const URL_PARAM_MAP = [
             '&nbsp;&nbsp;<b>PR</b>         — root partition<br>' +
             '&nbsp;&nbsp;<b>PH</b>         — half-partition: skip work on the constant leaf side<br>' +
             '&nbsp;&nbsp;<b>PRH</b>        — root + half<br><br>' +
-            '<b>Internal — bottom-up</b> (M = merge):<br>' +
-            '&nbsp;&nbsp;<b>M</b>          — merge (root and non-root use the same primitive)<br>' +
-            '&nbsp;&nbsp;<b>MC</b>         — merge with constant leaf input (broadcast, full merge)<br><br>' +
+            '<b>Internal — bottom-up</b> (M = merge; named by operand shape):<br>' +
+            '&nbsp;&nbsp;<b>MVV</b>        — merge two vectors (both children are subtrees)<br>' +
+            '&nbsp;&nbsp;<b>MCV</b>        — left child is a constant leaf, right is a vector<br>' +
+            '&nbsp;&nbsp;<b>MVC</b>        — left child is a vector, right is a constant leaf<br><br>' +
             '<b>Flat-subtree</b> (different operation per mode):<br>' +
             '&nbsp;&nbsp;<b>SFx</b>        — TD: scatter N symbols to non-contiguous output indices via N·x packed bits<br>' +
             '&nbsp;&nbsp;<b>MFx</b>        — BU: expand N·x packed bits into a contiguous buffer for the parent\'s merge<br><br>' +
             '<b>Fused two-leaf</b> (parent of two sibling leaves with <b>fuse-leaves</b> on):<br>' +
             '&nbsp;&nbsp;<b>S2</b>         — TD: scatter both symbols<br>' +
-            '&nbsp;&nbsp;<b>M2</b>         — BU: merge two scalar inputs<br><br>' +
+            '&nbsp;&nbsp;<b>MCC</b>        — BU: merge two constant scalar inputs<br><br>' +
             '<b>Leaf-side</b> (TD only — BU leaves are just scalar inputs, no badge):<br>' +
             '&nbsp;&nbsp;<b>S1</b>         — scatter one leaf<br>' +
             '&nbsp;&nbsp;<b>C</b>          — memset of the constant leaf<br><br>' +
-            'In BU the constant leaf gets a red border but no badge — it\'s the broadcast input to MC.',
+            'In BU the constant leaf gets a red border but no badge — it\'s the constant-scalar operand to MCV/MVC/MCC.',
       values: '1 | 0' },
     { kind: 'str',  param: 'title',          id: 'title-input',
       desc: 'Optional title rendered centred above the tree. Leave empty to omit. Free text (no metric substitution).',

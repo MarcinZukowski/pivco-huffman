@@ -104,7 +104,7 @@ static inline uint32_t extract_D_bits_scalar(const uint8_t *in,
 }
 
 /* Unpack n D-bit codes, look up in c2s, write to out[0..n). */
-static inline void flat_decode_to_buffer_scalar(uint8_t *out, int n,
+static inline void merge_flat_scalar(uint8_t *out, int n,
                                                   const uint8_t *bm, int D,
                                                   const uint8_t *c2s)
 {
@@ -115,7 +115,7 @@ static inline void flat_decode_to_buffer_scalar(uint8_t *out, int n,
 }
 
 /* Both-leaves merge: per bit, pick left_sym or right_sym. */
-static inline void merge_both_const_scalar(const uint8_t *bm, int K,
+static inline void merge_cst_cst_scalar(const uint8_t *bm, int K,
                                              uint8_t left_sym,
                                              uint8_t right_sym,
                                              uint8_t *out)
@@ -127,7 +127,7 @@ static inline void merge_both_const_scalar(const uint8_t *bm, int K,
 }
 
 /* Half-leaf merge, constant left: out[j] = (bit_j ? right_buf[r++] : left_sym). */
-static inline void tree_merge_bcast_left_scalar(const uint8_t *bm, int K,
+static inline void merge_cst_vec_scalar(const uint8_t *bm, int K,
                                                   uint8_t left_sym,
                                                   const uint8_t *right_buf,
                                                   uint8_t *out)
@@ -140,7 +140,7 @@ static inline void tree_merge_bcast_left_scalar(const uint8_t *bm, int K,
 }
 
 /* Half-leaf merge, constant right: out[j] = (bit_j ? right_sym : left_buf[l++]). */
-static inline void tree_merge_bcast_right_scalar(const uint8_t *bm, int K,
+static inline void merge_vec_cst_scalar(const uint8_t *bm, int K,
                                                    const uint8_t *left_buf,
                                                    uint8_t right_sym,
                                                    uint8_t *out)
@@ -153,7 +153,7 @@ static inline void tree_merge_bcast_right_scalar(const uint8_t *bm, int K,
 }
 
 /* Full BU merge: out[j] = (bit_j ? right_buf[r++] : left_buf[l++]). */
-static inline void tree_merge_scalar(const uint8_t *bm, int K,
+static inline void merge_vec_vec_scalar(const uint8_t *bm, int K,
                                        const uint8_t *left_buf,
                                        const uint8_t *right_buf,
                                        uint8_t *out)
@@ -203,30 +203,30 @@ PIVCO_PRIM_ALWAYS_INLINE void prim_enc_pack_dN(const uint16_t *codes_la,
 PIVCO_PRIM_ALWAYS_INLINE void prim_merge_flat(uint8_t *out, int n,
                                                            const uint8_t *bm, int D,
                                                            const uint8_t *c2s)
-{ flat_decode_to_buffer_scalar(out, n, bm, D, c2s); }
+{ merge_flat_scalar(out, n, bm, D, c2s); }
 
-PIVCO_PRIM_ALWAYS_INLINE void prim_merge_two(const uint8_t *bm, int K,
+PIVCO_PRIM_ALWAYS_INLINE void prim_merge_cst_cst(const uint8_t *bm, int K,
                                                       uint8_t left_sym,
                                                       uint8_t right_sym,
                                                       uint8_t *out)
-{ merge_both_const_scalar(bm, K, left_sym, right_sym, out); }
+{ merge_cst_cst_scalar(bm, K, left_sym, right_sym, out); }
 
-PIVCO_PRIM_ALWAYS_INLINE void prim_merge_constant_left(const uint8_t *bm, int K,
+PIVCO_PRIM_ALWAYS_INLINE void prim_merge_cst_vec(const uint8_t *bm, int K,
                                                            uint8_t left_sym,
                                                            const uint8_t *right_buf,
                                                            uint8_t *out)
-{ tree_merge_bcast_left_scalar(bm, K, left_sym, right_buf, out); }
+{ merge_cst_vec_scalar(bm, K, left_sym, right_buf, out); }
 
-PIVCO_PRIM_ALWAYS_INLINE void prim_merge_constant_right(const uint8_t *bm, int K,
+PIVCO_PRIM_ALWAYS_INLINE void prim_merge_vec_cst(const uint8_t *bm, int K,
                                                             const uint8_t *left_buf,
                                                             uint8_t right_sym,
                                                             uint8_t *out)
-{ tree_merge_bcast_right_scalar(bm, K, left_buf, right_sym, out); }
+{ merge_vec_cst_scalar(bm, K, left_buf, right_sym, out); }
 
-PIVCO_PRIM_ALWAYS_INLINE void prim_merge(const uint8_t *bm, int K,
+PIVCO_PRIM_ALWAYS_INLINE void prim_merge_vec_vec(const uint8_t *bm, int K,
                                                 const uint8_t *left_buf,
                                                 const uint8_t *right_buf,
                                                 uint8_t *out)
-{ tree_merge_scalar(bm, K, left_buf, right_buf, out); }
+{ merge_vec_vec_scalar(bm, K, left_buf, right_buf, out); }
 
 #endif  /* PIVCO_HUFFMAN_PRIMITIVES_SCALAR_H */
