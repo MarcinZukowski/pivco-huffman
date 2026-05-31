@@ -156,8 +156,11 @@ static result_t measure_ph(const uint8_t *sym, size_t n, int fse_on,
     result_t R; memset(&R, 0, sizeof R);
     size_t nblk = n / BLK;
     size_t G    = g_table_G;
-    size_t nwin = n / G;
-    size_t bpw  = G / BLK;            /* sub-blocks per table window */
+    size_t nwin = (n + G - 1) / G;    /* ceiling: last window may be short */
+    size_t bpw  = G / BLK;            /* full-window sub-block count */
+    /* Per-window block count: bpw for all but possibly the last. */
+    #define WBPW(w) (((w) + 1 < nwin) ? bpw : (nblk - (w) * bpw))
+    #define WSZ(w)  (((w) + 1 < nwin) ? G   : (n    - (w) * G))
     R.builds = (int)nwin;
 
     pivco_huffman_set_fse_enabled(fse_on);
@@ -180,7 +183,7 @@ static result_t measure_ph(const uint8_t *sym, size_t n, int fse_on,
     wtbls = malloc(nwin * sizeof *wtbls);
     if (!win_clen || !wtbls) goto done_fail;
     for (size_t w = 0; w < nwin; w++) {
-        uint64_t wf[256]; histo_u64(sym + w * G, G, wf);
+        uint64_t wf[256]; histo_u64(sym + w * G, WSZ(w), wf);
         if (pivco_huffman_build_table(wf, &wtbls[w]) != 0) goto done_fail;
         memcpy(win_clen[w], wtbls[w].code_len, 256);
     }
@@ -202,7 +205,7 @@ static result_t measure_ph(const uint8_t *sym, size_t n, int fse_on,
     /* pre-encode opaque stream (per-window tables) */
     offo[0] = 0;
     for (size_t w = 0; w < nwin; w++)
-        for (size_t i = 0; i < bpw; i++) {
+        for (size_t i = 0, wb = WBPW(w); i < wb; i++) {
             size_t b = w * bpw + i, L = 0;
             if (pivco_huffman_encode(sym + b * BLK, &wtbls[w], enco + offo[b], &L) != 0) goto done_fail;
             offo[b + 1] = offo[b] + L;
@@ -215,7 +218,7 @@ static result_t measure_ph(const uint8_t *sym, size_t n, int fse_on,
         if (memcmp(sym + b * BLK, dec, BLK) != 0) { fprintf(stderr,"ph PB mismatch blk %zu\n",b); goto done_fail; }
     }
     for (size_t w = 0; w < nwin; w++)
-        for (size_t i = 0; i < bpw; i++) {
+        for (size_t i = 0, wb = WBPW(w); i < wb; i++) {
             size_t b = w*bpw+i, c = 0;
             pivco_huffman_decode(enco + offo[b], offo[b+1]-offo[b], &wtbls[w], dec, &c);
             if (memcmp(sym + b * BLK, dec, BLK) != 0) { fprintf(stderr,"ph OP mismatch blk %zu\n",b); goto done_fail; }
@@ -230,9 +233,9 @@ static result_t measure_ph(const uint8_t *sym, size_t n, int fse_on,
     /* ---- encode opaque: rebuild table per window + emit ---- */
     BEST_MBPS({
         for (size_t w = 0; w < nwin; w++) {
-            uint64_t wf[256]; histo_u64(sym + w*G, G, wf);
+            uint64_t wf[256]; histo_u64(sym + w*G, WSZ(w), wf);
             pivco_huffman_build_table(wf, wtbl);
-            for (size_t i = 0; i < bpw; i++) { size_t b=w*bpw+i, L=0; pivco_huffman_encode(sym + b*BLK, wtbl, enco + offo[b], &L); }
+            for (size_t i = 0, wb = WBPW(w); i < wb; i++) { size_t b=w*bpw+i, L=0; pivco_huffman_encode(sym + b*BLK, wtbl, enco + offo[b], &L); }
         }
     });
     R.enc_op = best;
@@ -245,7 +248,7 @@ static result_t measure_ph(const uint8_t *sym, size_t n, int fse_on,
     BEST_MBPS({
         for (size_t w = 0; w < nwin; w++) {
             pivco_huffman_build_table_from_code_lens(win_clen[w], wtbl);
-            for (size_t i = 0; i < bpw; i++) { size_t b=w*bpw+i, c=0; pivco_huffman_decode(enco + offo[b], offo[b+1]-offo[b], wtbl, dec, &c); }
+            for (size_t i = 0, wb = WBPW(w); i < wb; i++) { size_t b=w*bpw+i, c=0; pivco_huffman_decode(enco + offo[b], offo[b+1]-offo[b], wtbl, dec, &c); }
         }
     });
     R.dec_op = best;
@@ -263,6 +266,8 @@ done_fail:
     free(enc); free(off); free(offo); free(enco); free(dec);
     return R;
 }
+#undef WBPW
+#undef WSZ
 
 /* ===================== top-down TD grid (phtd_* lib) ===================== */
 /* Generic over (build, encode, decode) so the 2x2 grid -- tree {naive,opt}
@@ -277,7 +282,10 @@ static result_t measure_phtd(phtd_build_fn B, phtd_enc_fn E, phtd_dec_fn D,
                              const uint8_t *sym, size_t n) {
     result_t R; memset(&R, 0, sizeof R);
     const size_t TB = PHTD_BLOCK_SIZE, tsz = phtd_table_size();
-    size_t nblk = n / TB, nwin = n / g_table_G, bpw = g_table_G / TB;
+    size_t G = g_table_G;
+    size_t nblk = n / TB, nwin = (n + G - 1) / G, bpw = G / TB;
+    #define WBPW(w) (((w) + 1 < nwin) ? bpw : (nblk - (w) * bpw))
+    #define WSZ(w)  (((w) + 1 < nwin) ? G   : (n    - (w) * G))
     R.builds = (int)nwin;
     char *gt = malloc(tsz), *wt = malloc(tsz), *wts = malloc(nwin * tsz);
     uint8_t *enc = malloc(n + n/2 + 4096), *eno = malloc(n + n/2 + 4096), *dec = malloc(n);
@@ -286,24 +294,24 @@ static result_t measure_phtd(phtd_build_fn B, phtd_enc_fn E, phtd_dec_fn D,
 #define WT(k) ((phtd_table_t*)(wts + (k)*tsz))
     uint64_t f[256]; histo_u64(sym, n, f);
     if (B(f, (phtd_table_t*)gt) != 0) goto done;
-    for (size_t k=0;k<nwin;k++){ uint64_t wf[256]; histo_u64(sym+k*g_table_G, g_table_G, wf);
+    for (size_t k=0;k<nwin;k++){ uint64_t wf[256]; histo_u64(sym+k*G, WSZ(k), wf);
         if (B(wf, WT(k)) != 0) goto done; }
 
     off[0]=0; for (size_t b=0;b<nblk;b++){ size_t L=0; if (E(sym+b*TB,(phtd_table_t*)gt,enc+off[b],&L)!=0) goto done; off[b+1]=off[b]+L; }
-    ofo[0]=0; for (size_t k=0;k<nwin;k++) for (size_t i=0;i<bpw;i++){ size_t b=k*bpw+i,L=0;
+    ofo[0]=0; for (size_t k=0;k<nwin;k++) for (size_t i=0,wb=WBPW(k);i<wb;i++){ size_t b=k*bpw+i,L=0;
         if (E(sym+b*TB,WT(k),eno+ofo[b],&L)!=0) goto done; ofo[b+1]=ofo[b]+L; }
 
     for (size_t b=0;b<nblk;b++){ size_t c=0; D(enc+off[b],off[b+1]-off[b],(phtd_table_t*)gt,dec,&c);
         if (memcmp(sym+b*TB,dec,TB)){fprintf(stderr,"phtd PB mismatch blk %zu\n",b);goto done;} }
-    for (size_t k=0;k<nwin;k++) for (size_t i=0;i<bpw;i++){ size_t b=k*bpw+i,c=0;
+    for (size_t k=0;k<nwin;k++) for (size_t i=0,wb=WBPW(k);i<wb;i++){ size_t b=k*bpw+i,c=0;
         D(eno+ofo[b],ofo[b+1]-ofo[b],WT(k),dec,&c);
         if (memcmp(sym+b*TB,dec,TB)){fprintf(stderr,"phtd OP mismatch blk %zu\n",b);goto done;} }
 
     double best;
     BEST_MBPS({ for (size_t b=0;b<nblk;b++){ size_t L=0; E(sym+b*TB,(phtd_table_t*)gt,enc+off[b],&L);} });
     R.enc_pb = best;
-    BEST_MBPS({ for (size_t k=0;k<nwin;k++){ uint64_t wf[256]; histo_u64(sym+k*g_table_G,g_table_G,wf); B(wf,(phtd_table_t*)wt);
-        for (size_t i=0;i<bpw;i++){ size_t b=k*bpw+i,L=0; E(sym+b*TB,(phtd_table_t*)wt,eno+ofo[b],&L);} } });
+    BEST_MBPS({ for (size_t k=0;k<nwin;k++){ uint64_t wf[256]; histo_u64(sym+k*G,WSZ(k),wf); B(wf,(phtd_table_t*)wt);
+        for (size_t i=0,wb=WBPW(k);i<wb;i++){ size_t b=k*bpw+i,L=0; E(sym+b*TB,(phtd_table_t*)wt,eno+ofo[b],&L);} } });
     R.enc_op = best;
     BEST_MBPS({ for (size_t b=0;b<nblk;b++){ size_t c=0; D(enc+off[b],off[b+1]-off[b],(phtd_table_t*)gt,dec,&c);} });
     R.dec_pb = best;
@@ -311,12 +319,14 @@ static result_t measure_phtd(phtd_build_fn B, phtd_enc_fn E, phtd_dec_fn D,
      * front -- NOT inside the timer).  A decoder never re-histograms or rebuilds
      * the tree from frequencies, so that work must not pollute the decode timer.
      * (Tree-construction cost is measured separately, in a dedicated bench.) */
-    BEST_MBPS({ for (size_t k=0;k<nwin;k++){ for (size_t i=0;i<bpw;i++){ size_t b=k*bpw+i,c=0; D(eno+ofo[b],ofo[b+1]-ofo[b],WT(k),dec,&c);} } });
+    BEST_MBPS({ for (size_t k=0;k<nwin;k++){ for (size_t i=0,wb=WBPW(k);i<wb;i++){ size_t b=k*bpw+i,c=0; D(eno+ofo[b],ofo[b+1]-ofo[b],WT(k),dec,&c);} } });
     R.dec_op = best;
     R.ratio_pb = (double)n / (double)(off[nblk] + 128);
     R.ratio_op = (double)n / (double)(ofo[nblk] + 128 * nwin);
     R.ok = 1;
 #undef WT
+#undef WBPW
+#undef WSZ
 done:
     free(gt); free(wt); free(wts); free(enc); free(eno); free(dec); free(off); free(ofo);
     return R;
@@ -754,10 +764,9 @@ int main(int argc, char **argv) {
         int include = dist_filter ? in_csv(dist_filter, bench_dist_name(d))
                                   : (run_all || bench_dist_is_main(d));
         if (!include) continue;
-        /* Align to ph's table-refresh granularity G (default 128 KB,
-           matches huf0's HUF_CHUNK).  This guarantees nwin*bpw == nblk
-           in measure_ph so every block falls under some window's table. */
-        int align = (int)g_table_G;
+        /* Align only to the codec's sub-block size BLK.  measure_ph /
+           measure_phtd handle a possibly-short last window via WBPW/WSZ. */
+        int align = BLK;
         int n = bench_dist_size(d, TOTAL, align);
         if (n > TOTAL_MAX) n = TOTAL_MAX - (TOTAL_MAX % align);
         g_total = (size_t)n;
