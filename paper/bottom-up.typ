@@ -1,4 +1,4 @@
-#import "conf.typ": anote, PH, he, mf, sym, pick-cols, todo
+#import "conf.typ": anote, PH, he, mf, sym, pick-cols, todo, fair-cell
 
 = Going Bottom-Up<bottom-up>
 
@@ -31,11 +31,9 @@ of codes equal to the complete expected output.
 #footnote[Note that a similar symmetry of _partitioning_ vs _merging_ can be found
 in other places, e.g. sorting or joins in databases].
 
-This approach has some very interesting properties:
-- leaf nodes don't require any processing, as they just produce a constant value.
-  This is different from the top-down approach, where we had to apply a `scatter` primitive.
-- inputs and output of each node are _dense_, alleviating the scatter problem.
-- most of the tree optimizations from @naive can be applied.
+In this approahc, leaf nodes do not require any processing, as they just produce a constant value.
+This is different from the top-down approach, where we had to apply a `scatter` primitive.
+Additionally, inputs and output of each node are _dense_, alleviating the scatter problem of the top-down approach.
 
 #figure(
   mf("bu-tree"),
@@ -44,7 +42,41 @@ This approach has some very interesting properties:
 
 This results in the approach presented in @fig-bu-tree.
 Note that this tree is symmetrical to @fig-pivot-tree, with just data traveling in the opposite direction,
- and different data flowing with the bitmaps (symbols vs indices).
+ and different data flowing with the Huffman-code bitmaps (symbols vs indices).
+
+== Bottom-up tree optimizations
+
+With a different processing model, let us see how tree optimizations from @ph-opt apply to the bottom-up approach:
+- _fused-leaves_ - not applicable, as the leaves just produce constant values
+- _frequent-symbol_ - not applicable, as the final merge in the root produces a dense full-output sequence
+- _flat-subtrees_ - directly applicable, reduces the tree size
+- _non-canonical subtrees_ - directly applicable, further reduces the tree size
+
+#let _bts = csv("data/bu-tree-stats.csv")
+#figure(
+  table(
+    columns: 9,
+    align: (left, right, right, right, right, right, right, right, right),
+    table.header(
+      table.cell(rowspan: 2)[*Dataset*],
+      table.cell(rowspan: 2)[*H*],
+      table.cell(rowspan: 2)[*L*],
+      table.cell(colspan: 2)[*naive*],
+      table.cell(colspan: 2)[*flat*],
+      table.cell(colspan: 2)[*full*],
+      [nodes], [ops/B],
+      [nodes], [ops/B],
+      [nodes], [ops/B],
+    ),
+    ..(_bts.slice(1).flatten()),
+  ),
+  caption: [The impact of tree optimizations on the decoding cost. *L* - the average (weighted) Huffman code symbol.]
+)<bu-tree-stats>
+
+Table @bu-tree-stats shows the impact of flat-subtrees and fully-optimized non-canonical trees.
+The significant reduction in _ops/B_ results in a better encoding and decoding performance.
+Additionally, the reduction of the number of nodes helps tree construction time and tree traversal overheads.
+See also @tab-tree-modes for the actual decoding performance.
 
 == Bottom-up tree operations
 
@@ -72,11 +104,6 @@ caption: [Primitives used in bottom-up processing and their top-down equivalents
 
 @fig-bu-ops shows the example tree we used before, but this time with operations used for the bottom-up processing.
 Again, it is straightforwardly symmetrical to @treeopt-flat.
-
-Note that the _most frequent symbol_ optimization from the top-down approach is not applicable
-when going bottom-up.
-This is because the final merge operation in root will always write the entire output sequence anyway.
-The other tree optimizations apply directly.
 
 == Bottom-up primitives
 
@@ -119,16 +146,15 @@ The code for `merge_constant` is identical, except we use a precomputed
   uint8x8_t  lsyms = vdup_n_u8(left_sym);
 ```
 
-For `merge_two` we could also use the same trick for both sides.
-But in our testing an `eor` based approach similar to `scatter_two`
-turned out slightly more performant.
+Other _merge_ primitives do not have symbols as an input, but rather, logically,
+a bit-packed index into a code-to-symbol table.
+The bitmap used in `merge_two` can be seen as such 1-bit packing.
+As such, the process for all these primitives consists of
+unpacking the packed-values, and then performing such a lookup.
+We found this solution to be fastest even for `merge_two`.
 
-#todo[Verify]
-
-`merge_flat_D` is an interesting case, where depending on D we might
-need to use different approaches.
-For D=2..6, so up to 64 symbols, we can use the family of `vqtbl*` operations
-that for each symbol index simply fetch the proper symbol.
+For the lookup, on M4 we use use the family of `vqtbl*` operations
+for D=1..6, chained with `vqtbx*` operations for D=7..8.
 Here's an example for D=4 (16 symbols):
 ```c
 // Before loop - load the code-to-symbol mapping into a vector
@@ -144,13 +170,9 @@ vst1q_u8(symbols + i, syms);
 ```
 See how we can decode 16 symbols with just bit-unpacking and 3 extra instructions.
 
-For D=7 and D=8 we currently use non-simd variants, but that could be further optimized.
-
-#todo[consider optimizing]
-
 == Bottom-up primitive performance
 
-
+/*
 #let rows = csv("data/bu-primitive-host-cmp.csv")
 #let rows = pick-cols(rows, ("primitive","m4_proba80","c8i_proba80","m4_prose","c8i_prose"))
 #figure(
@@ -167,11 +189,102 @@ For D=7 and D=8 we currently use non-simd variants, but that could be further op
   ),
   caption: [Performance of bottom-up primitives (ns/code)]
 )<prim-bu>
+*/
+#let _bp = csv("data/bu-prim-bits.csv")
+
+#he("prim-bu", style:"
+  .prim-bu td:nth-child(1) { text-align: left; }
+  .prim-bu td,th {padding: 3pt; font-size: ;}
+  .prim-bu td:nth-child(1) { font-weight: bold; border-right: solid 2px black;}
+  .prim-bu td:nth-child(5) { font-weight: bold; border-left: solid 2px black;}
+  .prim-bu td:nth-child(9) { font-weight: bold; border-left: solid 2px black;}
+")[
+#figure(
+  table(
+    columns: 12,
+    align: (left, right, right, right, right, right, right, right, right, right, right, right),
+    table.header(
+      table.cell(colspan: 4)[*primitive*],
+      table.cell(colspan: 4)[*M4*],
+      table.cell(colspan: 4)[*c8i*],
+      [name], [in_b], [out_b], [lut_b],
+      [ns/el], [in_bw], [out_bw], [lut_bw],
+      [ns/el], [in_bw], [out_bw], [lut_bw],
+    ),
+    ..(_bp.slice(1).flatten()),
+  ),
+  caption: [Bottom-up priomitive performance on M4 and c8i. *in_b / out_b / lut_b* - input /output / lookup table *bits* used per element.
+  *in_bw / out_bw / lut_bw* - respective memory bandwidths achieved in *GB/s*.]
+)<prim-bu>
+]
 
 @prim-bu demonstrates bottom-up primitive-performance.
-We see that all primitives (except for the degenerated `merge_two` in proba80 due to a very small input)
-achieve performance comparable to the fast `partition` primitives from @prim-td-opt, and none
+Looking at the *ns/elem* metric, we see that all primitives
+achieve performance comparable or better to the fast `partition` primitives from @prim-td-opt, and none
 pay the memory-overload penalty that the slow `scatter` primitives suffered from.
+
 
 == Bottom-up decoding performance
 
+#let fair = csv("data/fair.csv")
+#let _dsets_tm = ("proba80", "english", "html_wiki", "prose_pride",
+                  "json_api", "dna_fasta", "chinese_text", "calgary_pic")
+#let _engs_tm = ("ph_naive", "ph_flat", "ph", "huf0", "oo_huff")
+#let _body_tm = _dsets_tm.map(d => {
+  ([#d],) + ("m4", "c8i").map(h =>
+    _engs_tm.map(e => fair-cell(fair, h, d, e, "dec_op"))).flatten()
+}).flatten()
+
+#he("tab-tree-nodes", style:"
+  .tab-tree-nodes td:nth-child(1) { text-align: left; }
+  .tab-tree-nodes td,th {padding: 3pt; font-size: ;}
+  .tab-tree-nodes td:nth-child(1) { font-weight: bold; }
+  .tab-tree-nodes td:nth-child(4) { font-weight: bold; }
+  .tab-tree-nodes td:nth-child(9) { font-weight: bold; }
+")[
+
+  #figure(
+    table(
+      columns: 11,
+      align: (col, _) => if col == 0 { left } else { right },
+      table.header(
+        table.cell(rowspan: 3)[*Dataset*],
+        table.cell(colspan: 5)[*M4*],
+        table.cell(colspan: 5)[*c8i*],
+
+        table.cell(colspan: 3)[*#PH tree opt.*],
+        table.cell(rowspan: 2)[*Huff0*],
+        table.cell(rowspan: 2)[*Oo-Huff*],
+        table.cell(colspan: 3)[*#PH tree opt.*],
+        table.cell(rowspan: 2)[*Huff0*],
+        table.cell(rowspan: 2)[*Oo-Huff*],
+
+        [*naive*],  [*flat*],  [*full*],
+        [*naive*],  [*flat*],  [*full*],
+      ),
+      .._body_tm,
+    ),
+    caption: [#PH (bottom-up) decode bandwidth (MB/s) for different tree optimization levels.
+    We compare naive, fused-leaves, flat-tables and optimized flat-tables against Huff0 and Oodle-Huffman.]
+  )<tab-tree-modes>
+]
+
+#figure(
+  [
+    #image("plots/tree_modes_m4.svg")
+    #image("plots/tree_modes_c8i.svg")
+  ],
+  caption:[#PH decoding performance with different tree optimization levels]
+)<plot-tree-nodes>
+
+To evaluate the performance of bottom-up #PH decoding we looked at our datasets on two machines.
+We're also testing the impact of tree-complexity optimizations from @ph-opt.
+@tab-tree-modes and @plot-tree-nodes show the results.
+We can see that #PH decisively beats decoding performance of Huff0 and Oodle Huffman on all datasets and platforms.
+The magnitude of #PH benefits depends on three factors:
+- tree level optimization - we see that both flat subtrees and their optimized versions provide significant benefits.
+  This makes sense, as with the reduction of the number of operations, the performance improves.
+- dataset - skewed datasets benefit most, as on these #PH can reduce the number of operations for shorter codes / more frequent symbols.
+  In particular, tree optimizations have no impact on _proba80_ and only marginal on _dna_fasta_.
+- CPU - on c8i, with its worse OoO capabilities, Huff0 and Oodle Huffman perform worse.
+  On the other hand, with its better SIMD capabilities of AVX-512, #PH actually performs better here, magnifying it's win over other algorithms.

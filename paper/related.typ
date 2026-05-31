@@ -2,7 +2,18 @@
 
 = Related work <related>
 
-== Huffman encoding
+== Entropy coding
+
+Entropy-based encoding systems have been intensely researched for many decades,
+ with Huffman, arithmetic compression and (recently) ANS-family being the most popular,
+ both in research and in applications.
+Other well-known approaches include Golomb-Rice (@golomb1966, @rice1971), Elias-Fano (@ottaviano2014pef), Tunstall (@tunstall1967) and others (@sayood2017).
+
+In this context, #PH can be seen as a performance-focused variant of Huffman.
+The ANS application, while useful, is more of an extension to this core idea.
+
+Separately, it would be interesting to see if some of the techniques applied in this paper
+ could be used to other methods in this space.
 
 == Wavelet trees <wt>
 
@@ -66,10 +77,16 @@ caption: [Comparison of wavelet trees and #PH]
 )<tab-wavelet>
 ]
 
-== ANS/FSE
-
 == Bit-packing
 
-== ?? bitmap compression
+_Flat-subtrees_ are one of the key performance aspects of #PH.
+Their implementation depends heavily on packing/unpacking D-bit integers,
+ often called a _Frame-of-Reference_ coding (which additionally applies an offset).
+This problem appears in many different areas, including databases and information retrieval.
+A lot of work focuses on this problem in its original setting, where values are packed
+ contiguously (e.g. @for, @zuk06)
+However other approaches uses non-linear data organization allowing them to achieve
+ much higher performance (@simdcomp, @fastlanes).
 
-TODO: check golomb coding
+#PH currently uses a relatively straightforward, linear, SIMD-based bit-packing.
+Applying techniques from other work in that space could possibly further improve #PH's performance.

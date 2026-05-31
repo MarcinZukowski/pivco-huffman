@@ -2,12 +2,12 @@
 
 = Breaking the bit-barrier <ans>
 
-Huffman encoding, while ubiquitous, has one well-known, key limitation:
+Huffman encoding, while ubiquitous, has one key limitation:
 its code lengths are constrained to whole bits.
 That means, for some distributions, it is further from entropy-optimal
 than desired.
 
-A well-known solution to this problem is arithmetic coding (AC, @arithmetic); however,
+A well-known solution to this problem is arithmetic coding (@arithmetic); however,
 it has not been popular due to its performance and patent controversies.
 Luckily, Jarek Duda proposed _ANS-based encoding_ (@dudaans),
 which solves both problems.
@@ -137,18 +137,34 @@ One non-trivial cost of FSE is creation of decode tables.
 To avoid it, we use statically precomputed 50 decode tables for bitmap skew in range (50,51,..,98,99)%.
 Then, we simply choose a table based on the symbol skew during encoding/decoding.
 
+An interesting aspect of this decision is that the tables above are built for _bytes_
+ constructed using a random _bit_ distribution.
+Depending on the actual distribution of bits, this can lead to reduced
+ compression efficiency.
+For example, let us take a sequence of 600 zero-bits and 200 one-bits.
+If the decoding table was built on that actual byte sequence, values `0x00` and `0xFF`
+ would take 75% and 25%, respectively, of the frequencies.
+However, with pre-built partitions assuming random bit distribution, their expected frequencies
+ will be much lower, resulting in more bits assigned to them during encoding.
+While this in theory can result in decreased FSE's compression ratios, we have not
+ noticed any significant impact of that in our testing.
+
 Note, we use a _tuned_ version of FSE (_x8y1_), as we found that the default implementation
 can be significantly improved for our needs, see @tuning-fse.
 See also @fuse-fse-merge for another possible optimization.
 
 == Benefits
 
-The selective FSE application has the following benefits:
+This approach to FSE application in #PHA has the following benefits:
 - FSE is slower than Huffman, but since each FSE-symbol we decode covers 8 Huffman-symbols from our main tree, we pay only 1/8th of the cost
   per bitmap
-- it can be only applied for nodes where it actually matters (mostly highly skewed)
-- compression ratio vs performance can actually be _tuned_ (slightly) depending on the actual FSE-triggering
+- It can be applied _only_ to nodes where it actually matters (mostly highly skewed)
+- Compression ratio vs performance can actually be _tuned_ (slightly) depending on the actual FSE-triggering
   strategy
+- There is no FSE table construction
+- The FSE table selection can be done for every decompression block separately (8kb).
+  This allows exploiting locally-optimimum distributions.
+  Stock FSE decides on the decoding table every 128KB, and so it will not exploit these local properties.
 
 == Results
 
@@ -163,7 +179,27 @@ The selective FSE application has the following benefits:
     _na(fair-cell(fair, "m4", d, e, "dec_op")),
   )).flatten()
 }).flatten()
-#figure(
+
+#he("tab-fair-m4", style: "
+  .tab-fair-m4 td:nth-child(4) { font-weight: bold; }
+  .tab-fair-m4 td:nth-child(5) { font-weight: bold; }
+  .tab-fair-m4 tr:nth-child(9) td:nth-child(4) { color: red; }
+  .tab-fair-m4 tr:nth-child(9) td:nth-child(8) { color: red; }
+  .tab-fair-m4 tr:nth-child(9) td:nth-child(10) { color: red; }
+  .tab-fair-m4 tr:nth-child(1) { font-style: italic; }
+  .tab-fair-m4 tr:nth-child(7) { font-style: italic; }
+  .tab-fair-m4 tr:nth-child(9) { font-style: italic; }
+")[
+#{
+show table.cell.where(x:3, y:10): set text(fill: red)
+show table.cell.where(x:7, y:10): set text(fill: red)
+show table.cell.where(x:9, y:10): set text(fill: red)
+show table.cell.where(x:3): set text(weight: "bold")
+show table.cell.where(x:4): set text(weight: "bold")
+show table.cell.where(y:2): set text(style: "italic")
+show table.cell.where(y:8): set text(style: "italic")
+show table.cell.where(y:10): set text(style: "italic")
+[#figure(
 table(
     columns: 11,
     align: (col, _) => if col == 0 { left } else { right },
@@ -182,8 +218,10 @@ caption: [M4 #PHA benchmark: compression ratio (higher = better) and decode
             throughput (MB/s) per engine. *ph* and #h0 are plain Huffman (≈equal
             ratio); *pha* gains ratio from ANS-coded partition bitmaps; the
             standalone *fse_x8y1* and *oo-tans* reach the best ratio (full FSE) but are
-            the slowest.],
+            the slowest. Skew-heavy rows in _italic_. "Calgary" compression ratio in #text(red)[red].],
 )<tab-fair-m4>
+]}
+]
 
 #figure(
   [
@@ -192,8 +230,7 @@ caption: [M4 #PHA benchmark: compression ratio (higher = better) and decode
     #image("plots/dec-bw-c8i.svg", width: 100%)
   ],
   caption: [Decode throughput per engine, M4 (top) and c8i (bottom) — the bandwidth
-    columns of @tab-fair-m4. Bars above the axis cap are clipped, with the true value
-    labelled (e.g. #PH on proba80).],
+    columns of @tab-fair-m4.],
 )<fig-dec-bw>
 
 In @tab-fair-m4 we compare the #PH (*ph*) and #PHA (*pha*) performance with other solutions, including Huff0, FSE and
@@ -201,3 +238,6 @@ Oodle's TANS library.
 We see that for non-skewed datasets, *ph* and *pha* achieve the same performance, but for skewed datasets
 *pha* detects an opportunity to _selectively_ apply FSE - this brings the compression ratio close to full FSE,
 while still achieving significantly higher decode performance.
+Finally, the compression ratio of the _calgary_ dataset (a scanned text-on-white image)
+ showcases the impact of #PHA utilizing locally-optimal decompression tables.
+#footnote[The author by no means suggests #PHA is better than FSE - it just occassionally has this slightly unexpected property]

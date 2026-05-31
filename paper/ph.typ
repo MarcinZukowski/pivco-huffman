@@ -31,7 +31,7 @@ Additionally, we show how ANS-coding can be _selectively_
 applied to this structure when it is actually useful.
 The end result is a novel algorithm that consistently beats
 the decoding performance of state-of-the-art Huffman codecs,
-while providing compression ratios close to ANS-based solutions.
+while also often providing compression ratios comparable to ANS-based solutions.
 
 #if _html { outline() }
 
@@ -60,9 +60,17 @@ The HTML version has some nice QoL features:
 
 = Conclusions
 
-== Contributions
-In this paper
+In this paper we presented #PH, a novel approach to Huffman-compression, based on the structure from _wavelet trees_.
+The main contributions are:
+- application of the _wavelet trees_ structure to the problem of core data compression
+- compression-focused tree-structure optimizations allowing better encoding/decoding performance
+- novel "bottom-up" decoding approach, eliminating the _scatter_ problem of the more natural top-down approach
+- highly performant SIMD primivites for all both encoding and decoding operations
+- the concept of _selective_ applicaton of ANS-based encoding in the Huffman tree to further improve its compressio ratio
 
+The resulting approach, while slightly slower on the encoding side,
+ consistently beats the decoding speeds ot the state-of-the-art solutions by a large margin.
+It also provides compression ratios approaching the ANS-based methods at significantly better speeds.
 
 == AI disclosure
 
@@ -70,11 +78,11 @@ Anthropic Claude was used extensively during development of this project, especi
 like coding, testing, automation and research.
 It also contributed many small ideas and improvements, especially around SIMD code.
 At the same time, Author declares that the vast majority of the key ideas and concepts here are human-invented.
-This paper is purely human-written (except for spellcheck etc.).
+This document is purely human-written (except for spellcheck etc.).
 
 == Acknowledgments
 
-Author would like to thank Fabian Giesen for his help with Oodle.
+Author would like to thank Fabian "Ryg" Giesen for his help with Oodle and his comments on an early draft of the paper.
 
 #bibliography("refs.bib")
 

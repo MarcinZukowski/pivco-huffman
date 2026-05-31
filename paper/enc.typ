@@ -23,10 +23,10 @@ and follows the same pattern of tree traversal with high-performance SIMD primit
           columns: 2,
           align: (center, left),
           table.header([*Symbol*], [*Explanation*]),
-          [`EP-F`], [`enc_partition_full` - create a bitmap, split codes into left/right outputs],
-          [`EP-L`], [`enc_partition_left` - right child is a leaf, only produce bitmap+left codes],
-          [`EP-R`], [`enc_partition_right` - left child is a leaf, only produce bitmap+right codes],
-          [`EP-N`], [`enc_partition_none` - both children are leaves, only produce bitmap],
+          [`EPF`], [`enc_partition_full` - create a bitmap, split codes into left/right outputs],
+          [`EPL`], [`enc_partition_left` - right child is a leaf, only produce bitmap+left codes],
+          [`EPR`], [`enc_partition_right` - left child is a leaf, only produce bitmap+right codes],
+          [`EPN`], [`enc_partition_none` - both children are leaves, only produce bitmap],
           [`PKN`], [`packN` - pack codes into N-bits sequence, used for flat subtrees],
         ),
         caption: [Primitives used in encoding]
@@ -40,7 +40,7 @@ and follows the same pattern of tree traversal with high-performance SIMD primit
 used in that phase.
 Note extreme similarity to @treeopt-symbols from @sideways.
 In fact, `enc_partition_*` operations are functionally equivalent to first building a bitmap
-from symbols, and then applying `partition` operation used in top-down decoding.
+from symbols, and then applying the `partition` operations used in top-down decoding.
 A small difference is that the elements we partition are not 16-bit _indices in the output_,
  but 16-bit _codes_. Still, the primitives are the same.
 
@@ -109,11 +109,10 @@ The "prebuilt-tree" results show the actual encoding performance,
 showing e.g. how highly-skewed datasets can achieve
 very high "raw" encoding performance.
 
-== Performance/compression tradeoffs
-
-- FSE application more aggressive
-
-- splitting trees for FSE
-
-- K_right - helps FSE a tiny bit can make non-fse decoding marginally faster
-
+One compression ratio / performance tradeoff we have made
+is that every bitmap (which needs it) stores additional information
+about the length of its right child (equivalent to the number of 1s in the bitmap).
+This is necessary during decoding, as we need to know where to locate the
+ bitmaps of the children nodes to decode them.
+We could slightly improve the compression ratio by not including this information
+and recalculating it during decoding, at the cost of reduced decompression speed.

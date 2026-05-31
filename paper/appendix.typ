@@ -32,7 +32,7 @@
     ),
     ..data.flatten(),
   ),
-  caption: [MAIN test distributions: alphabet size, entropy _H_, mean Huffman
+  caption: [Used datasets: alphabet size, entropy _H_, mean Huffman
             code length, code-length min/max, and source. Available #link("https://github.com/MarcinZukowski/pivco-huffman/blob/main/extras/datasets/README.md")[in #PH repo] ],
 )<tab-datasets>
 ]
@@ -61,15 +61,24 @@
   [c6a], [AWS EC2 c6a.large],           [x86-64],  [AMD EPYC 7R13 (Milan, Zen 3)],  [2021],
 )<tab-machines>
 ]
+
 = Testing methodology <testing-method>
 
 In our testing we use datasets from @datasets and machines from @machines.
 
 Unless stated otherwise, we compute the time that _includes_ the setup time.
 
-Whenever we test encoding/decoding bandwidth, we use the following setup:
-We do 10 _runs_, each _run_ does 10 _repetitions_ of 1MB encoding/decoding.
-Then, we take the best time across the runs.
+For datasets that are smaller than 1MB, we create copies to cross the 1MB size.
+
+For bandwidth tests,
+to determine the optimal performance of each algorithm (reduce noise etc),
+we use the following setup:
+- one _run_ performs does 20 repetitions of the operation back-to-back
+- we execute 20 _runs_ and collects the timings
+- if the top-two _run_ timings are within 2%, we stop
+- otherwise, two more _runs_ , until the 2%
+  difference goal is met, up to 40 times in total.
+- the best _run_ time is used
 
 = Failed optimizations
 
@@ -122,24 +131,25 @@ By default, it looks like this (slightly simplified):
 ```c
   while ((BIT_reloadDStream(&bitD) == BIT_DStream_unfinished)   // reload once at top
           & (op + 4 <= olim)) {
-      op[0] = FSE_decodeSymbolFast(&s[0], &bitD);
-      op[1] = FSE_decodeSymbolFast(&s[1], &bitD);
-      op[2] = FSE_decodeSymbolFast(&s[0], &bitD);
-      op[3] = FSE_decodeSymbolFast(&s[1], &bitD);
+      op[0] = FSE_decodeSymbolFast(&states[0], &bitD);
+      op[1] = FSE_decodeSymbolFast(&states[1], &bitD);
+      op[2] = FSE_decodeSymbolFast(&states[0], &bitD);
+      op[3] = FSE_decodeSymbolFast(&states[1], &bitD);
       op += 4;
   }
 ```
-In that code, `s` refers to a table of two states in the FSE table - this is similar to using two cursors.
+In that code, `states` refers to a table of two states in the FSE table - this is similar to using two independent cursors
+ and provides more independent instructions to modern CPUs.
 Still, the data for both states comes from a single, interleaved stream.
-We also see that the loop is explicitly _2-unrolled_ - this allows reducing the loop overhead.
+We also see that the loop is explicitly _2-unrolled_, reducing the loop overhead.
 We call this particular implementation *x2y2* (x: 2 cursors, y: 2-unroll).
 
 We performed a thorough testing of equivalent implementations of FSE with *x={2,4,6,8,10,12,16}* and *y={1,2,4}* on a number of machines.
 The example results for M4 are in @tab-fse-xy-m4.
 The interesting points are in bold.
-We see how the peak performance is at *x10y4*, almost 3x the default *x2y2*.
+We see how the peak performance for M4 is at *x10y4*, almost 3x the default *x2y2*.
 Still, for our experiments we chose *x8y1* as it provided robust close-to-peak performance on all hosts we tested on.
-Note, *x8y1* requires a _wire format change_, so is not directly applicable for _stock_ FSE-encoded data.
+Note, *x8y1* requires a _wire format change_, so is not directly applicable to _stock_ FSE-encoded data.
 
 #let rows = csv("data/fse-xy-m4.csv")
 #let data = rows.slice(1).map(r => {

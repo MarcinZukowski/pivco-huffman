@@ -334,8 +334,8 @@ together, further reducing ops/byte.
   caption: [Combined impact of tree optimizations on performance]
 )<tab-tree-opt>
 
-@tab-tree-opt shows that applying all the optimizations above allows improving #PH performance
-by up to a factor of two.
+@tab-tree-opt shows that applying all optimizations above allows improving #PH performance
+by up to factor two.
 However, as we will demonstrate later, these optimizations are even more important
 with faster compute primitives.
 
@@ -540,27 +540,27 @@ compared to @prim-td-naive.
 
 Note that per-dataset numbers vary due to different cardinalities.
 In particular, `proba80` has very few elements reaching `simd_s2_scatter_both`, causing a high
-per-element cost.
+per/element cost.
 
 #todo[weird c8i scatter numbers, slower than naive]
 
-#todo[perhaps a pure primitive benchmark would be better]
+// #todo[perhaps a pure primitive benchmark would be better]
 
 == Results
 
-@ph-td-final-bw and @ph-td-final-ratio show how,
+@ph-td-final-bw and @ph-td-final-ratio show how
 thanks to combining tree optimizations and high-performance SIMD primitives,
 this version of #PH enters the performance territory of #h0.
-We also see how, with faster primitives, the impact of the optimized tree shape provides
-stronger and more consistent benefits compared to @tab-tree-opt.
+We also see how with faster primitives the impact of the optimized tree shape provides
+stronger and more consistent benefits comparing to @tab-tree-opt.
 
-Notably, the performance depends heavily on the dataset - on `proba80`, with its lower
-entropy and shorter codes, the average number of operations per symbol is much smaller.
-This behavior is unique to #PH, and allows it to decidedly beat #h0 on such
+Notably, the performance really depends on dataset - in `proba80`, with its lower
+entropy / shorter codes, average number of operations per symbol is much smaller.
+This behaviour is unique to #PH, and allows it to decidedly beat #h0 on such
 distributions.
 
 Still, the performance is not consistently impressive - this is mostly
-due to the write bottleneck in the `scatter` primitives.
+impacted by the bottleneck of writes in `scatter` primitives.
 
 In the next Section we'll discuss a different approach to #PH that works around this problem.
 
