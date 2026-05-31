@@ -172,6 +172,23 @@ static void p_merge_gen_scalar     (const ctx_t *c){ scalar_merge_gen(c->out, c-
 static void p_merge_two_scalar     (const ctx_t *c){ scalar_merge_two(c->out, c->bm, c->n, MERGE_LEFT_SYM, MERGE_RIGHT_SYM); }
 static void p_merge_const_l_scalar (const ctx_t *c){ scalar_merge_const_l(c->out, c->bm, c->n, MERGE_LEFT_SYM, c->merge_right); }
 static void p_merge_const_r_scalar (const ctx_t *c){ scalar_merge_const_r(c->out, c->bm, c->n, c->merge_left, MERGE_RIGHT_SYM); }
+/* Synthetic memory-bandwidth comparison points. */
+static void scalar_xor(uint8_t *out, const uint8_t *a, const uint8_t *b, int n) {
+    for (int i = 0; i < n; i++) out[i] = a[i] ^ b[i];
+}
+/* xor_accum: read input only, write a single byte at the end (max-in-bw probe). */
+static void scalar_xor_accum(uint8_t *out, const uint8_t *a, int n) {
+    uint8_t acc = 0;
+    for (int i = 0; i < n; i++) acc ^= a[i];
+    out[0] = acc;
+}
+/* plus_one: write only, value out[i] = (uint8_t)i (max-out-bw probe).  */
+static void scalar_plus_one(uint8_t *out, int n) {
+    for (int i = 0; i < n; i++) out[i] = (uint8_t)i;
+}
+static void p_xor_scalar       (const ctx_t *c){ scalar_xor(c->out, c->merge_left, c->merge_right, c->n); }
+static void p_xor_accum_scalar (const ctx_t *c){ scalar_xor_accum(c->out, c->merge_left, c->n); }
+static void p_plus_one_scalar  (const ctx_t *c){ scalar_plus_one(c->out, c->n); }
 
 #if defined(HAVE_NEON_KERNELS)   /* standalone unpack/scatter: NEON intrinsics */
 static void neon_unpack(const ctx_t *c) {
@@ -216,12 +233,96 @@ static void simd_pack (const ctx_t *c){ prim_enc_pack_dN(c->la_work, c->n, c->D,
 static void simd_merge_flat(const ctx_t *c){ prim_merge_flat(c->out, c->n, c->bm, c->D, c->c2s); }
 static void simd_part (const ctx_t *c){ prim_enc_partition_full(c->la_work, c->n, c->depth, c->bm, c->tmp16); }
 #endif
-#if defined(HAVE_NEON_KERNELS)   /* binary-merge family lives in the NEON header today */
+#if defined(HAVE_SIMD)   /* binary-merge production primitives — all backends */
 static void simd_merge_gen     (const ctx_t *c){ prim_merge(c->bm, c->n, c->merge_left, c->merge_right, c->out); }
 static void simd_merge_two     (const ctx_t *c){ prim_merge_two(c->bm, c->n, MERGE_LEFT_SYM, MERGE_RIGHT_SYM, c->out); }
 static void simd_merge_const_l (const ctx_t *c){ prim_merge_constant_left(c->bm, c->n, MERGE_LEFT_SYM, c->merge_right, c->out); }
 static void simd_merge_const_r (const ctx_t *c){ prim_merge_constant_right(c->bm, c->n, c->merge_left, MERGE_RIGHT_SYM, c->out); }
+/* Synthetic byte-XOR: explicit SIMD reference for memory-bandwidth comparison.
+   16 bytes per iter via NEON veorq_u8 / 64 bytes via AVX-512 _mm512_xor_si512
+   / 16 bytes via SSE _mm_xor_si128.  Scalar tail covers the unaligned end. */
+static void simd_xor (const ctx_t *c){
+    const uint8_t *a = c->merge_left, *b = c->merge_right; uint8_t *o = c->out;
+    int n = c->n, i = 0;
+#if defined(__aarch64__)
+    for (; i + 16 <= n; i += 16) vst1q_u8(o + i, veorq_u8(vld1q_u8(a + i), vld1q_u8(b + i)));
+#elif defined(__AVX512F__)
+    for (; i + 64 <= n; i += 64) _mm512_storeu_si512((void*)(o + i),
+        _mm512_xor_si512(_mm512_loadu_si512((const void*)(a + i)),
+                         _mm512_loadu_si512((const void*)(b + i))));
+#elif defined(__AVX2__)
+    for (; i + 32 <= n; i += 32) _mm256_storeu_si256((__m256i*)(o + i),
+        _mm256_xor_si256(_mm256_loadu_si256((const __m256i*)(a + i)),
+                         _mm256_loadu_si256((const __m256i*)(b + i))));
+#elif defined(__SSE2__)
+    for (; i + 16 <= n; i += 16) _mm_storeu_si128((__m128i*)(o + i),
+        _mm_xor_si128(_mm_loadu_si128((const __m128i*)(a + i)),
+                      _mm_loadu_si128((const __m128i*)(b + i))));
+#endif
+    for (; i < n; i++) o[i] = a[i] ^ b[i];
+}
 
+/* max-in-bw probe: vector XOR-fold of input, single-byte write at end. */
+static void simd_xor_accum (const ctx_t *c){
+    const uint8_t *a = c->merge_left; uint8_t *o = c->out; int n = c->n, i = 0;
+#if defined(__aarch64__)
+    uint8x16_t acc = vdupq_n_u8(0);
+    for (; i + 16 <= n; i += 16) acc = veorq_u8(acc, vld1q_u8(a + i));
+    uint8_t buf[16]; vst1q_u8(buf, acc); uint8_t r = 0;
+    for (int j = 0; j < 16; j++) r ^= buf[j];
+#elif defined(__AVX512F__)
+    __m512i acc = _mm512_setzero_si512();
+    for (; i + 64 <= n; i += 64) acc = _mm512_xor_si512(acc, _mm512_loadu_si512((const void*)(a + i)));
+    uint8_t buf[64]; _mm512_storeu_si512((void*)buf, acc); uint8_t r = 0;
+    for (int j = 0; j < 64; j++) r ^= buf[j];
+#elif defined(__AVX2__)
+    __m256i acc = _mm256_setzero_si256();
+    for (; i + 32 <= n; i += 32) acc = _mm256_xor_si256(acc, _mm256_loadu_si256((const __m256i*)(a + i)));
+    uint8_t buf[32]; _mm256_storeu_si256((__m256i*)buf, acc); uint8_t r = 0;
+    for (int j = 0; j < 32; j++) r ^= buf[j];
+#elif defined(__SSE2__)
+    __m128i acc = _mm_setzero_si128();
+    for (; i + 16 <= n; i += 16) acc = _mm_xor_si128(acc, _mm_loadu_si128((const __m128i*)(a + i)));
+    uint8_t buf[16]; _mm_storeu_si128((__m128i*)buf, acc); uint8_t r = 0;
+    for (int j = 0; j < 16; j++) r ^= buf[j];
+#else
+    uint8_t r = 0;
+#endif
+    for (; i < n; i++) r ^= a[i];
+    o[0] = r;
+}
+
+/* max-out-bw probe: write only, value out[i] = (uint8_t)i. */
+static void simd_plus_one (const ctx_t *c){
+    uint8_t *o = c->out; int n = c->n, i = 0;
+#if defined(__aarch64__)
+    static const uint8_t IOTA16[16] = {0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15};
+    uint8x16_t iota = vld1q_u8(IOTA16);
+    for (; i + 16 <= n; i += 16) vst1q_u8(o + i, vaddq_u8(vdupq_n_u8((uint8_t)i), iota));
+#elif defined(__AVX512F__)
+    static const uint8_t IOTA64[64] __attribute__((aligned(64))) = {
+        0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15, 16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,
+        32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47, 48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63};
+    __m512i iota = _mm512_load_si512((const void*)IOTA64);
+    for (; i + 64 <= n; i += 64) _mm512_storeu_si512((void*)(o + i),
+        _mm512_add_epi8(_mm512_set1_epi8((char)i), iota));
+#elif defined(__AVX2__)
+    static const uint8_t IOTA32[32] __attribute__((aligned(32))) = {
+        0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15, 16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31};
+    __m256i iota = _mm256_load_si256((const __m256i*)IOTA32);
+    for (; i + 32 <= n; i += 32) _mm256_storeu_si256((__m256i*)(o + i),
+        _mm256_add_epi8(_mm256_set1_epi8((char)i), iota));
+#elif defined(__SSE2__)
+    static const uint8_t IOTA16[16] __attribute__((aligned(16))) = {0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15};
+    __m128i iota = _mm_load_si128((const __m128i*)IOTA16);
+    for (; i + 16 <= n; i += 16) _mm_storeu_si128((__m128i*)(o + i),
+        _mm_add_epi8(_mm_set1_epi8((char)i), iota));
+#endif
+    for (; i < n; i++) o[i] = (uint8_t)i;
+}
+#endif
+
+#if defined(HAVE_NEON_KERNELS)
 /* ---------- experimental: precomputed-popcount merge ----------
  *
  * Replace the per-iter `expand_popcnt[bm[j>>3]]` table lookup with a
@@ -354,7 +455,8 @@ static void simd_parthalf(const ctx_t *c){ part_core_neon(c->la_work, c->n, c->d
 
 typedef enum { ST_UNPACK, ST_SCATTER, ST_PACK, ST_MERGE_FLAT, ST_PART,
                ST_BMBUILD, ST_PARTBM, ST_PARTHALF, ST_FUSEDHALF,
-               ST_MERGE_GEN, ST_MERGE_TWO, ST_MERGE_CL, ST_MERGE_CR } stage_t;
+               ST_MERGE_GEN, ST_MERGE_TWO, ST_MERGE_CL, ST_MERGE_CR,
+               ST_XOR, ST_XOR_ACCUM, ST_PLUS_ONE } stage_t;
 typedef struct {
     const char *variant; stage_t stage; int D; int inplace; void (*run)(const ctx_t *);
 } prim_t;
@@ -381,6 +483,9 @@ static const char *stage_name(stage_t s){
     case ST_MERGE_TWO:  return "merge_two";
     case ST_MERGE_CL:   return "merge_constant_left";
     case ST_MERGE_CR:   return "merge_constant_right";
+    case ST_XOR:        return "xor";
+    case ST_XOR_ACCUM:  return "xor_accum";
+    case ST_PLUS_ONE:   return "plus_one";
     }
     return "?";
 }
@@ -469,6 +574,9 @@ static void stage_bits(stage_t s, int D, double *in, double *out, double *lut) {
     case ST_MERGE_TWO:  *in=1;        *out=8;        *lut=0;       break;
     case ST_MERGE_CL:   *in=8+1;      *out=8;        *lut=8+1;     break;
     case ST_MERGE_CR:   *in=8+1;      *out=8;        *lut=8+1;     break;
+    case ST_XOR:        *in=16;       *out=8;        *lut=0;       break;
+    case ST_XOR_ACCUM:  *in=8;        *out=0;        *lut=0;       break;
+    case ST_PLUS_ONE:   *in=0;        *out=8;        *lut=0;       break;
     }
 }
 
@@ -534,21 +642,41 @@ int main(int argc, char **argv) {
     reg(BK, ST_PARTBM,  0,1, simd_partbm);
     reg(BK, ST_PARTHALF,0,0, simd_parthalf);
     reg(BK, ST_FUSEDHALF,0,0, simd_fusedhalf);
+#endif
     /* Binary-merge family: production prims used at every internal node in
        the bottom-up codec.  Same bm consumption pattern as merge_flat D=1
        but the symbol(s) come from buffer reads or scalar constants
-       instead of a c2s lookup. */
+       instead of a c2s lookup.  Scalar refs + production SIMD on all
+       backends; the pcpc/unroll8 experimental variants are NEON-only. */
     reg("scalar", ST_MERGE_GEN, 0, 0, p_merge_gen_scalar);
+    reg("scalar", ST_MERGE_TWO, 0, 0, p_merge_two_scalar);
+    reg("scalar", ST_MERGE_CL,  0, 0, p_merge_const_l_scalar);
+    reg("scalar", ST_MERGE_CR,  0, 0, p_merge_const_r_scalar);
+#if defined(HAVE_SIMD)
     reg(BK,       ST_MERGE_GEN, 0, 0, simd_merge_gen);
+    reg(BK,       ST_MERGE_TWO, 0, 0, simd_merge_two);
+    reg(BK,       ST_MERGE_CL,  0, 0, simd_merge_const_l);
+    reg(BK,       ST_MERGE_CR,  0, 0, simd_merge_const_r);
+#endif
+#if defined(HAVE_NEON_KERNELS)
     reg("neon_pcpc",     ST_MERGE_GEN, 0, 0, simd_merge_pcpc_pure);
     reg("neon_pcpc_full",ST_MERGE_GEN, 0, 0, simd_merge_pcpc_full);
     reg("neon_unroll8",  ST_MERGE_GEN, 0, 0, simd_merge_unroll8);
-    reg("scalar", ST_MERGE_TWO, 0, 0, p_merge_two_scalar);
-    reg(BK,       ST_MERGE_TWO, 0, 0, simd_merge_two);
-    reg("scalar", ST_MERGE_CL,  0, 0, p_merge_const_l_scalar);
-    reg(BK,       ST_MERGE_CL,  0, 0, simd_merge_const_l);
-    reg("scalar", ST_MERGE_CR,  0, 0, p_merge_const_r_scalar);
-    reg(BK,       ST_MERGE_CR,  0, 0, simd_merge_const_r);
+#endif
+    /* Synthetic byte-XOR — memory-bandwidth comparison point. */
+    reg("scalar", ST_XOR, 0, 0, p_xor_scalar);
+#if defined(HAVE_SIMD)
+    reg(BK,       ST_XOR, 0, 0, simd_xor);
+#endif
+    /* Max-in-bw probe: read-heavy XOR fold, single-byte write at end. */
+    reg("scalar", ST_XOR_ACCUM, 0, 0, p_xor_accum_scalar);
+#if defined(HAVE_SIMD)
+    reg(BK,       ST_XOR_ACCUM, 0, 0, simd_xor_accum);
+#endif
+    /* Max-out-bw probe: write-only iota pattern. */
+    reg("scalar", ST_PLUS_ONE, 0, 0, p_plus_one_scalar);
+#if defined(HAVE_SIMD)
+    reg(BK,       ST_PLUS_ONE, 0, 0, simd_plus_one);
 #endif
 
     printf("bench_prim: n=%d elems, best-of-9 x %d reps, partition depth=%d\n",
@@ -599,6 +727,18 @@ int main(int argc, char **argv) {
             if (memcmp(out,ref,n)) chk="FAIL";
         } else if (p->stage == ST_MERGE_CR) {
             scalar_merge_const_r(ref, bm, n, merge_left, MERGE_RIGHT_SYM);
+            memset(out,0,n); p->run(&cx);
+            if (memcmp(out,ref,n)) chk="FAIL";
+        } else if (p->stage == ST_XOR) {
+            scalar_xor(ref, merge_left, merge_right, n);
+            memset(out,0,n); p->run(&cx);
+            if (memcmp(out,ref,n)) chk="FAIL";
+        } else if (p->stage == ST_XOR_ACCUM) {
+            scalar_xor_accum(ref, merge_left, n);
+            memset(out,0,1); p->run(&cx);
+            if (out[0] != ref[0]) chk="FAIL";
+        } else if (p->stage == ST_PLUS_ONE) {
+            scalar_plus_one(ref, n);
             memset(out,0,n); p->run(&cx);
             if (memcmp(out,ref,n)) chk="FAIL";
         } else if (p->stage == ST_BMBUILD) {
