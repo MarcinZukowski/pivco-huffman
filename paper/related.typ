@@ -2,7 +2,7 @@
 
 = Related work <related>
 
-== Entropy coding
+== Entropy coding <entropy>
 
 Entropy-based encoding systems have been intensely researched for many decades,
  with Huffman, arithmetic compression and (recently) ANS-family being the most popular,
@@ -14,6 +14,8 @@ The ANS application, while useful, is more of an extension to this core idea.
 
 Separately, it would be interesting to see if some of the techniques applied in this paper
  could be used to other methods in this space.
+For example, @app-golomb discusses how the _pivoted coding_ approach can be applied
+ to Golomb coding.
 
 == Wavelet trees <wt>
 
@@ -77,7 +79,7 @@ caption: [Comparison of wavelet trees and #PH]
 )<tab-wavelet>
 ]
 
-== Bit-packing
+== Bit-packing <bitpack>
 
 _Flat-subtrees_ are one of the key performance aspects of #PH.
 Their implementation depends heavily on packing/unpacking D-bit integers,

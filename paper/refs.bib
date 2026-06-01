@@ -172,6 +172,18 @@
               % [USED FOR: IDEAS.md "FSE wide-cursor decoder"]}
 }
 
+@misc{ryg-golomb,
+  author    = {Giesen, Fabian},
+  title     = {Simple batch decoding of unary codes},
+  url       = {https://fgiesen.wordpress.com/2026/05/30/simple-batch-decoding-of-unary-codes/},
+  year      = {2026},
+  note      = {Four progressively-faster unary decoders: naive serial,
+              two-codes-per-iter via {\tt bitbuf \& (bitbuf-1)}, then a
+              byte-at-a-time Tunstall-style table, and finally a 64-bit
+              packed-table version with a single store per byte.  Used
+              as the post-best baseline in extras/golomb/.}
+}
+
 @misc{ryg-rans,
   author    = {Giesen, Fabian},
   title     = {ryg\_rans: rANS implementations and writeups},

@@ -169,3 +169,48 @@ Note, *x8y1* requires a _wire format change_, so is not directly applicable to _
   caption: [FSE wide-cursor decode throughput on M4 (MB/s), per
             cursor count _x_ and unroll _y_, at _p_maj=0.80_, 2880 B.],
 )<tab-fse-xy-m4>
+
+= PivCo-Golomb <app-golomb>
+
+As discussed in @entropy, applying _pivoted coding_ in other areas is an interesting research question.
+Coincidentally, just days before publishing this paper, a blog post appeared on fast Golomb decoding (@ryg-golomb).
+Its author proposed a Tunstall-style approach,
+ using a precomputed decoding table to quickly generate multiple output symbols (up to 8)
+ from one byte of encoded data.
+
+To investigate if we can apply our ideas in this field as well, we implemented *PivCo-Golomb*.
+It follows the approach very similar to #PH, except instead of a _tree_, it simply processes a _list_ of bitmaps,
+ starting from the bitmap for the last code bit all the way to the first bit.
+It uses a single primitive `merge_vec_cst_plus1` - which extends `merge_vec_cst` by adding `0x01` to produced values.
+The `cst` value used is `0xFF`.
+This way, when decoding a bitmap, values with `1` set will get an output symbol of `0x00`,
+and bitmap values of `0` will get the input symbols increased by 1.
+
+  #figure(
+    table(
+      columns: 7,
+      align: (col, _) => if col == 0 { left } else { right },
+      table.header(
+        table.cell(rowspan: 2)[*avg code length*],
+        table.cell(colspan: 3)[*M4* (ns/symbol)],
+        table.cell(colspan: 3)[*c8i* (ns/symbol)],
+        [naive], [tunstall-64], [PivCo-Golomb],
+        [naive], [tunstall-64], [PivCo-Golomb],
+      ),
+      [1.5], [2.23], [0.09], [0.07], [2.28], [0.11], [0.03],
+      [2],   [1.70], [0.10], [0.08], [2.26], [0.15], [0.05],
+      [3],   [1.66], [0.22], [0.13], [2.27], [0.32], [0.08],
+      [4],   [1.64], [0.43], [0.17], [2.26], [0.62], [0.11],
+      [5],   [1.68], [0.74], [0.23], [2.27], [1.03], [0.13],
+      [6],   [1.72], [1.08], [0.26], [2.27], [1.51], [0.17],
+    ),
+    caption: [Comparing Golomb-decoding implementation: naive and Tunstall-style 64-bit table from @ryg-golomb and PivCo-Golomb],
+  )<tab-pivco-golomb>
+
+In @tab-pivco-golomb we can see that also in this application our approach can provide excellent performance.
+It is especially visible on longer average code lengths,
+ where _tunstall-64_ from @ryg-golomb slows down, mostly because of branch mispredictions.
+PivCo-Golomb's performance scales linearly with the length of the code, with the per-bit cost
+ comparable to the `merge_vec_cst` performance we measured in @prim-bu.
+
+This provides an interesting validation point that the _pivoted coding_ idea could apply efficiently in other areas.

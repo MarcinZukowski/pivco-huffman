@@ -139,7 +139,7 @@ Then, we simply choose a table based on the symbol skew during encoding/decoding
 
 An interesting aspect of this decision is that the tables above are built for _bytes_
  constructed using a random _bit_ distribution.
-Depending on the actual distribution of bits, this can lead to reduced
+Depending on the actual distribution of bits, this can reduce
  compression efficiency.
 For example, let us take a sequence of 600 zero-bits and 200 one-bits.
 If the decoding table was built on that actual byte sequence, values `0x00` and `0xFF`

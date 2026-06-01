@@ -483,8 +483,7 @@ arithmetic and a precomputed delta between `symbol0` and `symbol1`.
 ```
 
 For `scatter_flat_D` we get a D-bit packed bitmap.
-The first step is to unpack it, using an optimized unpacking kernel.
-#footnote[Our unpacking code is decent, but not as optimized as e.g. @fastlanes.].
+The first step is to unpack it, using an optimized unpacking kernel (see @bitpack).
 Then each unpacked value can be used to lookup an actual symbol to write from a table.
 On ARM this can be done with `vqtbl*` instructions.
 For example, here's an implementation for D=5:

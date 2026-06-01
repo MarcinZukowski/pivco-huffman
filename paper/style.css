@@ -364,6 +364,17 @@ img, svg {
     height: auto;
 }
 
+/* ---------- Footnote ---------- */
+section[role=doc-endnotes] {
+    background-color: #eee;
+}
+
+section[role=doc-endnotes]::before {
+    content: "Footnotes:";
+    padding: 2px;
+}
+}
+
 /* ---------- Cross-references ---------- *
  * Typst emits internal references as <a href="#anchor">Section X.Y</a>.
  * They look like normal links by default — fine for now. */
