@@ -139,7 +139,8 @@ and, as expected, the performance is very sub-par.
 }
 
 #show table.cell.where(x: 6): strong
-#table(
+#align(center,
+table(
   columns: 7,
   table.header(
     table.cell(rowspan: 2)[*Data*],
@@ -154,7 +155,7 @@ and, as expected, the performance is very sub-par.
   [prose_pride],
   tdg("m4", "prose_pride", "naive"), h0g("m4", "prose_pride"), tdr("m4", "prose_pride", "naive"),
   tdg("c8i", "prose_pride", "naive"), h0g("c8i", "prose_pride"), tdr("c8i", "prose_pride", "naive"),
-)
+))
 
 There are two main reasons for this:
 

@@ -152,19 +152,31 @@ Still, for our experiments we chose *x8y1* as it provided robust close-to-peak p
 Note, *x8y1* requires a _wire format change_, so is not directly applicable to _stock_ FSE-encoded data.
 
 #let rows = csv("data/fse-xy-m4.csv")
-#let data = rows.slice(1).map(r => {
-  // bold the x8y1 cell: x==8 (col 0) -> y1 (col 1)
-  r.enumerate().map(((i, c)) =>
-    if (r.at(0) == "8" and i == 1) or (r.at(0) == "2" and i == 2) or (r.at(0) == "10" and i == 3) { strong[#c] } else { [#c] })
-})
+#let body = rows.slice(1)
+#let xs = body.map(r => r.at(0))            // 7 cursor counts
+#let ys = ("y=1", "y=2", "y=4")             // 3 unrolls
+// Bolded sweet spots (same as the non-transposed version):
+//   x=8,  y=1   x=2,  y=2   x=10, y=4
+#let cell(y_idx, x_idx) = {
+  let x = xs.at(x_idx)
+  let v = body.at(x_idx).at(y_idx + 1)
+  let is_bold = ((x == "8"  and y_idx == 0)
+              or (x == "2"  and y_idx == 1)
+              or (x == "10" and y_idx == 2))
+  if is_bold { strong[#v] } else { [#v] }
+}
+#let body_cells = ys.enumerate().map(((y_idx, y_lbl)) => {
+  ([*#y_lbl*],) + xs.enumerate().map(((x_idx, _)) => cell(y_idx, x_idx))
+}).flatten()
 #figure(
   table(
-    columns: 4,
+    columns: 1 + xs.len(),
     align: (col, _) => if col == 0 { left } else { right },
     table.header(
-      [*x*], [*y=1*], [*y=2*], [*y=4*],
+      [*y \\ x*],
+      ..xs.map(x => [*#x*])
     ),
-    ..data.flatten(),
+    ..body_cells,
   ),
   caption: [FSE wide-cursor decode throughput on M4 (MB/s), per
             cursor count _x_ and unroll _y_, at _p_maj=0.80_, 2880 B.],

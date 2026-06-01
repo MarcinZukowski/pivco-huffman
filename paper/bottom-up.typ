@@ -204,11 +204,12 @@ See how we can decode 16 symbols with just bit-unpacking and 3 extra instruction
 #figure(
   table(
     columns: 12,
+    inset: (x: 0.25em, y: 0.4em),
     align: (left, right, right, right, right, right, right, right, right, right, right, right),
     table.header(
-      table.cell(colspan: 4)[*primitive*],
-      table.cell(colspan: 4)[*M4*],
-      table.cell(colspan: 4)[*c8i*],
+      table.cell(colspan: 4, align: center)[*primitive*],
+      table.cell(colspan: 4, align: center)[*M4*],
+      table.cell(colspan: 4, align: center)[*c8i*],
       [name], [in_b], [out_b], [lut_b],
       [ns/el], [in_bw], [out_bw], [lut_bw],
       [ns/el], [in_bw], [out_bw], [lut_bw],
@@ -248,6 +249,8 @@ pay the memory-overload penalty that the slow `scatter` primitives suffered from
   #figure(
     table(
       columns: 11,
+      inset: (x: 0.2em, y: 0.5em),
+
       align: (col, _) => if col == 0 { left } else { right },
       table.header(
         table.cell(rowspan: 3)[*Dataset*],
@@ -266,6 +269,7 @@ pay the memory-overload penalty that the slow `scatter` primitives suffered from
       ),
       .._body_tm,
     ),
+    placement: top,
     caption: [#PH (bottom-up) decode bandwidth (MB/s) for different tree optimization levels.
     We compare naive, fused-leaves, flat-tables and optimized flat-tables against Huff0 and Oodle-Huffman.]
   )<tab-tree-modes>
@@ -276,6 +280,7 @@ pay the memory-overload penalty that the slow `scatter` primitives suffered from
     #image("plots/tree_modes_m4.svg")
     #image("plots/tree_modes_c8i.svg")
   ],
+  placement: top,
   caption:[#PH decoding performance with different tree optimization levels]
 )<plot-tree-nodes>
 

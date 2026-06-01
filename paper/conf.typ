@@ -53,7 +53,7 @@
     size: 12pt
   )
   show raw.where(block: true): it => block(
-    fill: rgb("#ece6d3"),
+    fill: rgb("#e0f0ff"),
     inset: 10pt,
     radius: 4pt,
     width: 100%,

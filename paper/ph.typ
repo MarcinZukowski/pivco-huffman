@@ -18,6 +18,7 @@
 ]
 
 #set align(left)
+#set par(justify: true)
 
 = Abstract
 

@@ -138,14 +138,14 @@ code, pre, kbd, samp {
 }
 
 code {
-    background: #ece6d3;
+    background: #e0f0ff;
     padding: 0.05em 0.32em;
     border-radius: 3px;
     color: #1a1a1a;
 }
 
 pre {
-    background: #f0ecdf;
+    background: #e0f0ff;
     border: 1px solid #e2dccb;
     padding: 0.85em 1em;
     border-radius: 5px;

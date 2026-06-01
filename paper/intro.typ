@@ -86,6 +86,8 @@ Here are the measured bandwidths on two example datasets on two hosts (see @test
   let oo = f("oo_huff")
   (_na(hf.at(0)), _na(hf.at(1)), _na(oo.at(0)), _na(oo.at(1)))
 }
+
+#align(center)[
 #table(
   columns: 6,
   inset: 5pt,
@@ -103,6 +105,7 @@ Here are the measured bandwidths on two example datasets on two hosts (see @test
   table.cell(rowspan: 2)[prose_pride], [M4], .._hp("m4", "prose_pride"),
                                        [c8i], .._hp("c8i", "prose_pride"),
 )<tab-huffman-perf>
+]
 
 This is an impressive performance.
 Still, in this paper we investigate if it could be further improved by using a completely different approach.

@@ -45,6 +45,7 @@ let b = r.at(0) in bold-rows
 r.map(c => if b { strong[#c] } else { [#c] })   // bold the whole row
 })
 #figure(
+  placement: top,
 table(
     columns: 6,
     align: (col, _) => if col == 0 { left } else { right },

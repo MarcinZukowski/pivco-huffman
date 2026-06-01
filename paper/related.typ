@@ -42,13 +42,13 @@ and @dinklage2023wt apply SIMD instructions to this problem.
 )[
 #figure(
 table(
-  stroke: 0pt,
-  align: center,
+  stroke: 1pt,
+  align: (left, left, left),
   columns: 3,
   table.header(
-    [*Dimension*],
-    [*Wavelet Trees*],
-    [*#PH*],
+    table.cell(align:center)[*Dimension*],
+    table.cell(align:center)[*Wavelet Trees*],
+    table.cell(align:center)[*#PH*],
   ),
   [Core representation],
     [Alphabet tree with node bitmaps],
