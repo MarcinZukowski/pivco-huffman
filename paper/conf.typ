@@ -79,7 +79,7 @@
   }
 }
 
-#let mf(figname) = {
+#let mf(figname, ..opts) = {
   let base = "./"
   if _pdf {
     base = URLBASE
@@ -87,7 +87,7 @@
   he("myfig",
   link(
       base + "figures/fig-web.html?name=" + figname,
-      image("figures/" + figname + ".svg"))
+      image("figures/" + figname + ".svg", ..opts))
   )
 }
 

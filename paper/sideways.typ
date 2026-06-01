@@ -234,7 +234,7 @@ Then, that symbol never needs to be processed during the tree traversal.
 Note that `memset` is 1-2 orders of magnitude faster than our primitives, so that
 cost is negligible.
 
-@treeopt-constant shows the tree with this optimization applied.
+@treeopt-constant shows the tree with this optimization applied to symbol #sym("a").
 Note that as a result we introduce a new operation called `PH` - `partition_half`,
 similar to `partition`, but only producing one of the output index lists.
 

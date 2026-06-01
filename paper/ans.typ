@@ -74,7 +74,7 @@ Three datasets stand out:
     stroke: 0pt,
     align: center,
     [#figure(
-      mf("skew-calgary"),
+      mf("skew-calgary", width:70%),
       caption: [Skew visualization for *calgary_pic* (top part of the tree only)]
     )<fig-skew-calgary-pic>
     ],
@@ -90,6 +90,7 @@ Three datasets stand out:
 top parts of the tree for *calgary_pic* and *dna_fasta* datasets.
 For each tree node, we report left/right skew, and the percentage of data
 covered by a given subtree.
+Bar color reflects skew severity (red - highly skewed).
 
 For *calgary_pic* we see how the root node has a skew of 87.1/12.9, with *H=0.554*
 That means, if that *one node* was entropy-encoded, we would save *0.446* bits

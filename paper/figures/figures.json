@@ -205,7 +205,7 @@
         "show-skew": 1,
         "mode": "bottom-up",
         "no-overlap": 0,
-        "crop-top": 0.35,
+        "crop-top": 0.22,
         "fold-subtrees": 1
       }
     }
