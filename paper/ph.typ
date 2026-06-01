@@ -65,11 +65,11 @@ The main contributions are:
 - application of the _wavelet trees_ structure to the problem of core data compression
 - compression-focused tree-structure optimizations allowing better encoding/decoding performance
 - novel "bottom-up" decoding approach, eliminating the _scatter_ problem of the more natural top-down approach
-- highly performant SIMD primivites for all both encoding and decoding operations
-- the concept of _selective_ applicaton of ANS-based encoding in the Huffman tree to further improve its compressio ratio
+- highly performant SIMD primitives for both encoding and decoding operations
+- the concept of _selective_ application of ANS-based encoding in the Huffman tree to further improve its compression ratio
 
 The resulting approach, while slightly slower on the encoding side,
- consistently beats the decoding speeds ot the state-of-the-art solutions by a large margin.
+ consistently beats the decoding speeds of the state-of-the-art solutions by a large margin.
 It also provides compression ratios approaching the ANS-based methods at significantly better speeds.
 
 == AI disclosure

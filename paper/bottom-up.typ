@@ -31,7 +31,7 @@ of codes equal to the complete expected output.
 #footnote[Note that a similar symmetry of _partitioning_ vs _merging_ can be found
 in other places, e.g. sorting or joins in databases].
 
-In this approahc, leaf nodes do not require any processing, as they just produce a constant value.
+In this approach, leaf nodes do not require any processing, as they just produce a constant value.
 This is different from the top-down approach, where we had to apply a `scatter` primitive.
 Additionally, inputs and output of each node are _dense_, alleviating the scatter problem of the top-down approach.
 
@@ -91,26 +91,27 @@ See also @tab-tree-modes for the actual decoding performance.
     align: (center, center, left),
     table.header([*Top-down equivalent*], [*Bottom-up operation*], [*Explanation*]),
 
-    [`P`],  [`M`], [`merge` is symmetrical to `partition`],
-    [`PR`], [`M`], [`merge` for the root node is identical to other cases],
-    [`PH`], [`MC`], [`merge_constant` - special `merge` variant where one input is constant],
+    [`P`],  [`MVV`], [`merge_vec_vec` is symmetrical to two-sided `partition`],
+    [`PR`], [`MVV`], [`merge_vec_vec` for the root node is identical to other cases],
+    [`PH`], [`MCV/MVC`], [`merge_cst_vec/merge_vec_cst` - _merge_ variant where one input is constant],
+    [`S2`], [`MCC`],   [`merge_cst_cst` - merges two constant symbols into output],
+    [`SFD`], [`MFD`], [`merge_flat_D` - merges 2^D constant symbols into output],
     [`C`],  [--], [Note that in bottom-up multiple leaves can be "constant"],
     [`S1`], [--],  [No operation needed for leaves when going bottom up],
-    [`S2`], [`M2`],   [`merge_two` - merges two constant symbols into output],
-    [`SFD`], [`MFD`], [`merge_flat_D` - merges 2^D constant symbols into output],
   ),
 caption: [Primitives used in bottom-up processing and their top-down equivalents]
 )<bu-symbols>
 
 @fig-bu-ops shows the example tree we used before, but this time with operations used for the bottom-up processing.
-Again, it is straightforwardly symmetrical to @treeopt-flat.
+Again, it is directly symmetrical to @treeopt-flat.
 
 == Bottom-up primitives
 
-Unlike top-down processing, bottom-up processing results in only one family of operations: `merge`,
-with 4 main variants listed in @bu-symbols.
+Bottom-up processing uses two main fami in only one family of operations: binary `merge_X_Y` family,
+where both `X` and `Y` can be `vec` (a vector of symbols) or `cst` (a constant symbol),
+and N-ary `merge_flat_D` primitives, specialized for `D` values.
 
-A naive implementation of e.g. `merge` would be directly symmetrical to `partition` from @naive:
+A naive implementation of e.g. `merge_vec_vec` would be directly symmetrical to `partition` from @naive:
 ```c
   for (i = 0; i < n; i++) {
     bit = get_bit(bitmap, i);
@@ -139,21 +140,22 @@ Naturally, we implement this logic with SIMD, using the following code on ARM NE
   n_left += (8 - nr);
 ```
 
-The code for `merge_constant` is identical, except we use a precomputed
-(outside the hot loop) vector of constant values, e.g.:
+The code for `merge_cst_vec` is identical, except we use a precomputed
+ (outside the hot loop) vector of constant values, e.g.:
 
 ```c
   uint8x8_t  lsyms = vdup_n_u8(left_sym);
 ```
 
+`merge_vec_cst` is symmetrical.
 Other _merge_ primitives do not have symbols as an input, but rather, logically,
-a bit-packed index into a code-to-symbol table.
-The bitmap used in `merge_two` can be seen as such 1-bit packing.
+a bit-packed index into a _code-to-symbol_ table.
 As such, the process for all these primitives consists of
 unpacking the packed-values, and then performing such a lookup.
-We found this solution to be fastest even for `merge_two`.
+We found this solution to be the fastest even for `merge_cst_cst`,
+ which can be seen as `merge_flat_D` with `D=1`.
 
-For the lookup, on M4 we use use the family of `vqtbl*` operations
+For the lookup, on M4 we use the family of `vqtbl*` operations
 for D=1..6, chained with `vqtbx*` operations for D=7..8.
 Here's an example for D=4 (16 symbols):
 ```c
@@ -213,7 +215,7 @@ See how we can decode 16 symbols with just bit-unpacking and 3 extra instruction
     ),
     ..(_bp.slice(1).flatten()),
   ),
-  caption: [Bottom-up priomitive performance on M4 and c8i. *in_b / out_b / lut_b* - input /output / lookup table *bits* used per element.
+  caption: [Bottom-up primitive performance on M4 and c8i. *in_b / out_b / lut_b* - input /output / lookup table *bits* used per element.
   *in_bw / out_bw / lut_bw* - respective memory bandwidths achieved in *GB/s*.]
 )<prim-bu>
 ]
@@ -287,4 +289,4 @@ The magnitude of #PH benefits depends on three factors:
 - dataset - skewed datasets benefit most, as on these #PH can reduce the number of operations for shorter codes / more frequent symbols.
   In particular, tree optimizations have no impact on _proba80_ and only marginal on _dna_fasta_.
 - CPU - on c8i, with its worse OoO capabilities, Huff0 and Oodle Huffman perform worse.
-  On the other hand, with its better SIMD capabilities of AVX-512, #PH actually performs better here, magnifying it's win over other algorithms.
+  On the other hand, with its better SIMD capabilities of AVX-512, #PH actually performs better here, magnifying its win over other algorithms.

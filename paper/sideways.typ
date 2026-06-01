@@ -386,7 +386,7 @@ The critical performance aspect there is this fragment:
 This statement depends on the extracted bit value,
 and may be hard to predict for the branch predictor.
 If the distribution is skewed (like `proba80`), it makes the branch easier to guess.
-For more uniform data, the branch predictor can not guess properly,
+For more uniform data, the branch predictor cannot guess properly,
 as we can see in @prim-td-naive for `prose_pride`.
 On `m4`, with its cheaper branch predictor misses, the difference is minimal, but on `c8i` it is significant.
 
@@ -556,11 +556,11 @@ per/element cost.
 thanks to combining tree optimizations and high-performance SIMD primitives,
 this version of #PH enters the performance territory of #h0.
 We also see how with faster primitives the impact of the optimized tree shape provides
-stronger and more consistent benefits comparing to @tab-tree-opt.
+stronger and more consistent benefits compared to @tab-tree-opt.
 
 Notably, the performance really depends on dataset - in `proba80`, with its lower
 entropy / shorter codes, average number of operations per symbol is much smaller.
-This behaviour is unique to #PH, and allows it to decidedly beat #h0 on such
+This behavior is unique to #PH, and allows it to decidedly beat #h0 on such
 distributions.
 
 Still, the performance is not consistently impressive - this is mostly

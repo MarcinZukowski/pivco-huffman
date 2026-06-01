@@ -98,7 +98,7 @@ For #PH, we report both "end-to-end" and "prebuilt tree" results],
   ],
   caption: [Encoding throughput, M4 (top) and c8i (bottom) — the data of @tab-enc.
     #PH end-to-end (`ph-op`) and prebuilt-tree (`ph-pb`) vs #h0 and Oodle-Huffman.
-    On c8i the `ph-pb` proba80 bar exceeds the axis cap and is clipped (true value labelled).],
+    On c8i the `ph-pb` proba80 bar exceeds the axis cap and is clipped (true value labeled).],
 )<fig-enc-bars>
 
 @tab-enc shows the encoding performance on various datasets and hosts.

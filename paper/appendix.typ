@@ -73,10 +73,10 @@ For datasets that are smaller than 1MB, we create copies to cross the 1MB size.
 For bandwidth tests,
 to determine the optimal performance of each algorithm (reduce noise etc),
 we use the following setup:
-- one _run_ performs does 20 repetitions of the operation back-to-back
-- we execute 20 _runs_ and collects the timings
+- one _run_ performs 20 repetitions of the operation back-to-back
+- we execute 20 _runs_ and collect the timings
 - if the top-two _run_ timings are within 2%, we stop
-- otherwise, two more _runs_ , until the 2%
+- otherwise, two more _runs_, until the 2%
   difference goal is met, up to 40 times in total.
 - the best _run_ time is used
 

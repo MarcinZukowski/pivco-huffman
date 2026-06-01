@@ -163,7 +163,7 @@ This approach to FSE application in #PHA has the following benefits:
   strategy
 - There is no FSE table construction
 - The FSE table selection can be done for every decompression block separately (8kb).
-  This allows exploiting locally-optimimum distributions.
+  This allows exploiting locally-optimum distributions.
   Stock FSE decides on the decoding table every 128KB, and so it will not exploit these local properties.
 
 == Results
@@ -240,4 +240,4 @@ We see that for non-skewed datasets, *ph* and *pha* achieve the same performance
 while still achieving significantly higher decode performance.
 Finally, the compression ratio of the _calgary_ dataset (a scanned text-on-white image)
  showcases the impact of #PHA utilizing locally-optimal decompression tables.
-#footnote[The author by no means suggests #PHA is better than FSE - it just occassionally has this slightly unexpected property]
+#footnote[The author by no means suggests #PHA is better than FSE - it just occasionally has this slightly unexpected property]

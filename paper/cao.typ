@@ -48,8 +48,8 @@ primitives for different backend can be complex.
 Additionally, if we strive for optimal performance,
 the best implementation
  can be specific not only to the ISA,
- but even to the acctual CPU used.
-For example, we have tried optimizations that provided
+ but even to the actual CPU used.
+For example, we have seen optimizations that provided
  benefits on M4, but reduced performance on Graviton.
 
 == Exploring bitmap-compression alternatives
