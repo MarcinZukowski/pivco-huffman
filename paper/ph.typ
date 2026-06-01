@@ -10,7 +10,7 @@
 #title()
 #set align(center)
 #text(size: 12pt, weight: "bold")[
-  Marcin Zukowski
+  Marcin Żukowski
     \
  ]
 #text(size: 10pt)[
@@ -20,6 +20,7 @@
 #set align(left)
 
 = Abstract
+
 Huffman encoding has been an _enduring_ technique for 70+ years,
 ubiquitous in compression algorithms since its invention.
 In this paper we propose a new approach to Huffman
@@ -43,9 +44,9 @@ This document is mostly a verbatim copy of the arXiv paper.
 However, in boxes like this you'll see some additional author's
 thoughts that might not be fitting a scientific paper.
 
-The HTML version has some nice QoL features:
+The HTML version has some nice _quality-of-life_ features:
 - clicking the tree images takes the reader to a visualizer
-- simd code has intrinsics tooltips via simd.dev
+- simd code has intrinsics tooltips via #link("https://simd.dev")[simd.dev]
 - active ToC
 ]
 

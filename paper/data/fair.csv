@@ -223,3 +223,12 @@ c8i,json_api,oo_huff,1365,na,2121,na,1.53,na,8
 c8i,dna_fasta,oo_huff,1449,na,2132,na,3.53,na,8
 c8i,chinese_text,oo_huff,1332,na,2112,na,1.36,na,8
 c8i,calgary_pic,oo_huff,1180,na,2105,na,4.79,na,8
+c8i,proba80,oo_tans,476,na,1469,na,8.84,na,8
+c8i,english,oo_tans,491,na,1448,na,1.89,na,8
+c8i,html_wiki,oo_tans,485,na,1418,na,1.45,na,8
+c8i,prose_pride,oo_tans,490,na,1420,na,1.76,na,8
+c8i,image_jpeg,oo_tans,480,na,1385,na,1.01,na,8
+c8i,json_api,oo_tans,490,na,1413,na,1.53,na,8
+c8i,dna_fasta,oo_tans,496,na,1449,na,3.83,na,8
+c8i,chinese_text,oo_tans,484,na,1406,na,1.37,na,8
+c8i,calgary_pic,oo_tans,468,na,1443,na,6.44,na,8
