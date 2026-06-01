@@ -150,29 +150,26 @@ static int decode_pair(const uint8 *bitptr, uint8 *decoded, size_t n) {
             ERROR_RETURN("too many 0s in a row");
         }
 
-        /* --- verbatim shape from post --- */
+        /* --- verbatim shape from post + guard for long-code regime --- */
         // clear lowest set bit in bitbuf:
         uint64 next = bitbuf & (bitbuf - 1);
-        if (next != 0 && i + 1 < n) {
-            // we know we have at least two set bits in bitbuf,
-            // and can use ctz on "bitbuf" and "next" to determine
-            // the next two code values in parallel.
+        uint64 c1_pos = next ? (uint64)ctz64(next) : 64;
+        if (next != 0 && c1_pos < 56 && i + 1 < n) {
+            // two codes fit safely in the 56-bit refill window
             uint64 c0_pos = ctz64(bitbuf);
-            uint64 c1_pos = ctz64(next);
             decoded[i++] = (uint8)c0_pos;
             decoded[i++] = (uint8)(c1_pos - c0_pos - 1);
             uint64 len = c1_pos + 1;
             bitcount -= len;
             bitbuf >>= len;
         } else {
-            // only one set bit in bitbuf, do single decode as before
+            // single decode (fallback)
             uint64 code = ctz64(bitbuf);
             decoded[i++] = (uint8)code;
             uint64 len = code + 1;
             bitcount -= len;
             bitbuf >>= len;
         }
-        /* --- end verbatim --- */
     }
     return 0;
 }
@@ -343,7 +340,7 @@ static int decode_tunstall64(const uint8 *bitptr, uint8 *decoded8, size_t n_byte
  * bits = count[k], in bytes = ceil(count[k] / 8).
  */
 
-#define PIVCO_MAX_D 40
+#define PIVCO_MAX_D 64
 typedef struct {
     int   max_d;
     int   counts[PIVCO_MAX_D + 1];   /* counts[k] = #codes reaching level k */
@@ -652,11 +649,16 @@ static uint32 sample_geom(uint64 *state, double p) {
     double q = 1.0 - p;
     double v = log(u) / log(q);
     if (v < 0) v = 0;
-    if (v > 40) v = 40;
+    /* clamp at 55: serial/pair/tunstall decoders need < 56 zeros in a row to
+     * detect end-of-stream.  PIVCO_MAX_D = 64 leaves headroom for the
+     * truncated tail of the distribution. */
+    if (v > 55) v = 55;
     return (uint32)v;
 }
 
-int main(void) {
+int main(int argc, char **argv) {
+    double p = (argc > 1) ? atof(argv[1]) : 0.5;
+    if (p <= 0.0 || p >= 1.0) die("p must be in (0,1)");
     build_table();
 
     enum { N = 1 << 20 };          /* ~1M codes */
@@ -673,7 +675,8 @@ int main(void) {
     if (!src || !dec_s || !dec_p || !dec_t || !dec_t64b || !dec_pv || !dec_pvn || !enc) die("oom");
 
     uint64 rng = 0x243F6A8885A308D3ull;
-    for (int i = 0; i < N; i++) src[i] = sample_geom(&rng, 0.5);
+    for (int i = 0; i < N; i++) src[i] = sample_geom(&rng, p);
+    printf("# geometric p=%.3f  (avg code length ~ %.2f bits)\n", p, 1.0 + (1.0 - p) / p);
 
     size_t enc_bytes = encode_unary(src, N, enc, OUT_CAP);
     printf("standard unary: %d codes -> %zu bytes (%.2f bits/code)\n",
