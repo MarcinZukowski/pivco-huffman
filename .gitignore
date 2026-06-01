@@ -1,6 +1,13 @@
 build/
 build-*/
-ext/
+# ext/ holds external clones (zstd, fse, brotli, etc.) that we don't track —
+# but ext/golomb/ is our own scratch reproduction we DO track.  Exclude every
+# direct child of ext/ except golomb/.  (Git won't re-include a path whose
+# parent is excluded, so we can't just say `ext/` + `!ext/golomb/`.)
+ext/*
+!ext/golomb/
+# Local build artefact of the golomb harness:
+ext/golomb/golomb
 *.o
 *.a
 *.dSYM/
