@@ -102,9 +102,10 @@ main {
     font-size: 10px;
     font-weight: 600;
 }
-#tree-svg .node-leaf .leaf-freq {
-    font-size: 7px;
-    fill: #666;
+#tree-svg .node-leaf .leaf-char-hex {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-weight: normal;
+    font-size: 9px;
 }
 #tree-svg .flat-box {
     fill: #22c55e;             /* green, opacity set per-element by D */
@@ -318,7 +319,7 @@ table.node-table tr.in-flat { color: #b45309; }
                 <option value="indices">indices</option>
             </select>
         </label>
-        <label class="toggle" title="Draw leaf boxes with character + hex byte. Off = tiny circles only.">
+        <label class="toggle" title="Draw leaf boxes with the printable character, or 'xNN' for non-printables. Off = tiny circles only.">
             <input type="checkbox" id="show-leaf-details" checked>
             show leaf details
         </label>
@@ -897,10 +898,10 @@ function annotatePrimitives(root, meta) {
             }
             if (meta.showFlat && n.inFlat) { ewalk(n.left); ewalk(n.right); return; }
             const ll = isLeafE(n.left), rl = isLeafE(n.right);
-            if (ll && rl)       n._primitive = 'EP-N';  /* BOTH_LEAVES: bitmap only   */
-            else if (ll && !rl) n._primitive = 'EP-R';  /* HALF_RIGHT: emit right side */
-            else if (!ll && rl) n._primitive = 'EP-L';  /* HALF_LEFT:  emit left side  */
-            else                n._primitive = 'EP-F';  /* INTERNAL_FULL: both sides   */
+            if (ll && rl)       n._primitive = 'EPN';   /* BOTH_LEAVES: bitmap only   */
+            else if (ll && !rl) n._primitive = 'EPR';   /* HALF_RIGHT: emit right side */
+            else if (!ll && rl) n._primitive = 'EPL';   /* HALF_LEFT:  emit left side  */
+            else                n._primitive = 'EPF';   /* INTERNAL_FULL: both sides   */
             ewalk(n.left); ewalk(n.right);
         })(root);
         return;
@@ -1166,14 +1167,21 @@ function showTooltip(html, evt) {
 }
 function hideTooltip() { tooltipEl.classList.remove('visible'); }
 
+/* Printable ASCII (and SVG-safe) -> the character itself.  Everything else
+ * (including the SVG-unsafe printables `"<>&`) -> "xNN" with upper-case hex.
+ * Callers can detect the hex form by checking `out.length === 3` since no
+ * printable result is ever 3 characters long. */
 function fmtChar(b) {
     if (b >= 32 && b <= 126) {
         const c = String.fromCharCode(b);
-        if (c === '"' || c === '<' || c === '>' || c === '&') return '·';
+        if (c === '"' || c === '<' || c === '>' || c === '&') {
+            return 'x' + b.toString(16).padStart(2, '0').toUpperCase();
+        }
         return c;
     }
-    return '·';
+    return 'x' + b.toString(16).padStart(2, '0').toUpperCase();
 }
+function isHexLeafLabel(s) { return s.length === 3 && s.charAt(0) === 'x'; }
 
 function nodeTooltipHtml(n, totalN) {
     if (n.symbol >= 0) {
@@ -1829,14 +1837,15 @@ function renderTree(rootNode, meta) {
             })
             .style('stroke', d => isConstantLeaf(d) ? '#dc2626' : null)
             .style('stroke-width', d => isConstantLeaf(d) ? 2 : null);
+        /* Single line per leaf: either the printable char, or an "xNN"
+         * form for non-printables (and SVG-unsafe printables that we'd
+         * otherwise have to escape).  Hex form switches to monospace +
+         * non-bold so "x0A" reads as a tag, not as a regular glyph.
+         * Hex byte is also visible in the hover tooltip if needed. */
         lg.append('text')
-            .attr('class', 'leaf-char')
-            .attr('y', -2)
+            .attr('class', d => 'leaf-char' + (isHexLeafLabel(fmtChar(d.data.symbol)) ? ' leaf-char-hex' : ''))
+            .attr('y', 2)
             .text(d => fmtChar(d.data.symbol));
-        lg.append('text')
-            .attr('class', 'leaf-freq')
-            .attr('y', 7)
-            .text(d => d.data.symbol.toString(16).padStart(2,'0'));
     } else {
         lg.append('circle')
             .attr('r', d => isConstantLeaf(d) ? 4 : 3)
@@ -3166,8 +3175,8 @@ const URL_PARAM_MAP = [
             '<b>top-down</b> — decode: partition input bytes left/right at each internal, scatter at leaves (P / S* primitives)<br>' +
             '<b>bottom-up</b> — decode: recursively merge child outputs (MVV / MCV / MVC / MCC / MFx / S* primitives)<br>' +
             '<b>encode</b> — the encoder\'s per-node partition op, by node type: ' +
-            '<b>EP-F</b> full (both subtrees), <b>EP-R</b>/<b>EP-L</b> half (one child a leaf — emit only the subtree side), ' +
-            '<b>EP-N</b> none (both leaves — build the bitmap, no scatter), <b>PK</b>{D} pack a flat D-bit subtree. ' +
+            '<b>EPF</b> full (both subtrees), <b>EPR</b>/<b>EPL</b> half (one child a leaf — emit only the subtree side), ' +
+            '<b>EPN</b> none (both leaves — build the bitmap, no scatter), <b>PK</b>{D} pack a flat D-bit subtree. ' +
             'Leaves emit nothing.',
       values: 'top-down | bottom-up | encode' },
     { kind: 'bool', param: 'ph-opt',         id: 'ph-opt',
