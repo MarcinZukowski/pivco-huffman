@@ -18,14 +18,14 @@ all: $(SVGS)
 
 # dash naming: <plot>-<host>.svg from <plot>.typ
 define RULE_DASH
-$(1)-$(2).svg: $(1).typ common.typ $(ROOT)/data/fair.csv
+$(1)-$(2).svg: $(1).typ common.typ $(ROOT)/data/fair.csv ../style.typ
 	$(TYPST) compile --root $(ROOT) --input host=$(2) $(1).typ $$@
 endef
 $(foreach p,$(PLOTS_DASH),$(foreach h,$(HOSTS),$(eval $(call RULE_DASH,$(p),$(h)))))
 
 # underscore naming: <plot>_<host>.svg from <plot>.typ
 define RULE_UNDER
-$(1)_$(2).svg: $(1).typ common.typ $(ROOT)/data/fair.csv
+$(1)_$(2).svg: $(1).typ common.typ $(ROOT)/data/fair.csv ../style.typ
 	$(TYPST) compile --root $(ROOT) --input host=$(2) $(1).typ $$@
 endef
 $(foreach p,$(PLOTS_UNDER),$(foreach h,$(HOSTS),$(eval $(call RULE_UNDER,$(p),$(h)))))
