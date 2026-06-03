@@ -10,7 +10,7 @@
 // stand-ins: lighter PH tints + their own patterns for B/W distinguishability.
 #grouped(host, (
   ("PH naive",       "ph_naive", "dec_op", colors.ph_naive, "dot"),
-  ("PH flat",        "ph_flat",  "dec_op", colors.ph_flat,  "vline"),
+  ("PH flat",        "ph_flat",  "dec_op", colors.ph_flat,  "hlines"),
   ("PH flat opt.",   "ph",       "dec_op", colors.ph,      patterns.ph),
   ("Huff0",          "huf0",     "dec_op", colors.huf0,    "d1"),
   ("Oodle Huffman",  "oo_huff",  "dec_op", colors.oo_huff, "checker"),

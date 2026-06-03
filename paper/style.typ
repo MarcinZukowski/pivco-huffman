@@ -10,10 +10,10 @@
 
 #let _series = (
   //         (   hue,   saturation, bar lightness )
-  ph:        ( 150deg,  80%,        40% ),
+  ph:        ( 150deg,  90%,        40% ),
   ph_naive:  ( 110deg,  60%,        80% ),
   ph_flat:   ( 130deg,  70%,        60% ),
-  ph_pb:     ( 150deg,  80%,        75% ),  // same hue as ph, brighter
+  ph_pb:     ( 120deg,  40%,        75% ),  // same hue as ph, brighter
   pha:       ( 180deg,  90%,        55% ),
   huf0:      (  20deg,  80%,        60% ),
   fse:       (  60deg,  80%,        70% ),
@@ -45,12 +45,12 @@
 
 // B/W-distinguishable pattern kind per series — used by paper/plots/*.typ
 // to drive the `_pat_fill` / `_pat_overlay` helpers in plots/common.typ.
-// Available kinds: "solid", "dot", "vline", "d1", "d2", "checker", "checkerd".
+// Available kinds: "solid", "dot", "hlines", "d1", "d2", "checker", "checkerd".
 #let patterns = (
   ph:      "solid",
   ph_pb:   "dot",
   pha:     "dot",
-  huf0:    "vline",
+  huf0:    "hlines",
   oo_huff: "d1",
   oo_tans: "checker",
   fse:     "d2",

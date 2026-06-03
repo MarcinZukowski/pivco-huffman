@@ -43,7 +43,7 @@
 // Kinds (passed as the optional 5th element of the series tuple):
 //   "solid"     — flat color (default)
 //   "dot"       — column of dots, centered horizontally
-//   "vline"     — single vertical line, centered horizontally
+//   "hlines"    — horizontal-line hatch
 //   "d1"        — diagonal / (positive-slope hatch)
 //   "d2"        — diagonal \ (negative-slope hatch)
 //   "checker"   — square (horizontal/vertical) checkerboard
@@ -56,12 +56,15 @@
 // the centered-mark patterns, just return the plain color — the mark will be
 // drawn separately on top.
 #let _pat_fill(color, kind) = {
-  if kind == none or kind == "solid" or kind == "dot" or kind == "vline" { return color }
+  if kind == none or kind == "solid" or kind == "dot" { return color }
   let s = _pat_size
   let half = s / 2
   let bg = place(rect(width: s, height: s, fill: color, stroke: none))
 
-  if kind == "d1" {
+  if kind == "hlines" {
+    tiling(size: (s, s), bg
+      + place(line(start: (0pt, half), end: (s, half), stroke: _pat_stroke)))
+  } else if kind == "d1" {
     tiling(size: (s, s), bg
       + place(line(start: (0pt, s), end: (s, 0pt), stroke: _pat_stroke)))
   } else if kind == "d2" {
@@ -83,12 +86,11 @@
 
 // Cetz overlay for the centered-mark patterns.  Coordinates are in cetz
 // units (cm).  Called inside a cetz.canvas after the rect is drawn.
+// (Tiling patterns above handle the rest; this only does marks that need
+// to be exactly centered on the bar regardless of bar width.)
 #let _pat_overlay(kind, x0, y0, x1, y1) = {
-  import cetz.draw: line, circle
-  if kind == "vline" {
-    let cx = (x0 + x1) / 2
-    line((cx, y0), (cx, y1), stroke: 1.1pt + black)
-  } else if kind == "dot" {
+  import cetz.draw: circle
+  if kind == "dot" {
     let cx = (x0 + x1) / 2
     let spacing = 0.22  // cm — visually pleasing density
     let y = y0 + spacing / 2
