@@ -1,4 +1,6 @@
 #import "conf.typ": _html, _pdf, _fmt, anote, setup, PH, he, sym, PHA, fair-cell, h0, mf
+#import "style.typ": colors-tab
+#import "tab.typ": tab
 
 = Breaking the bit-barrier <ans>
 
@@ -174,71 +176,72 @@ This approach to FSE application in #PHA has the following benefits:
 #let _na(v) = if v == "na" { [—] } else { [#v] }
 #let _dsets = ("proba80", "english", "html_wiki", "prose_pride", "image_jpeg",
                "json_api", "dna_fasta", "chinese_text", "calgary_pic")
-#let _engs = ("ph", "pha", "huf0", "fse_x8y1","oo_tans")
+#let _engs = ("ph", "pha", "huf0", "oo_tans")
 #let _body = _dsets.map(d => {
   ([#d],) + _engs.map(e => (
     _na(fair-cell(fair, "m4", d, e, "ratio_op")),
     _na(fair-cell(fair, "m4", d, e, "dec_op")),
+    _na(fair-cell(fair, "c8i", d, e, "dec_op")),
   )).flatten()
 }).flatten()
 
-#he("tab-fair-m4", style: "
-  .tab-fair-m4 td:nth-child(4) { font-weight: bold; }
-  .tab-fair-m4 td:nth-child(5) { font-weight: bold; }
-  .tab-fair-m4 tr:nth-child(9) td:nth-child(4) { color: red; }
-  .tab-fair-m4 tr:nth-child(9) td:nth-child(8) { color: red; }
-  .tab-fair-m4 tr:nth-child(9) td:nth-child(10) { color: red; }
-  .tab-fair-m4 tr:nth-child(1) { font-style: italic; }
-  .tab-fair-m4 tr:nth-child(7) { font-style: italic; }
-  .tab-fair-m4 tr:nth-child(9) { font-style: italic; }
-")[
-#{
-show table.cell.where(x:3, y:10): set text(fill: red)
-show table.cell.where(x:7, y:10): set text(fill: red)
-show table.cell.where(x:9, y:10): set text(fill: red)
-show table.cell.where(x:3): set text(weight: "bold")
-show table.cell.where(x:4): set text(weight: "bold")
-show table.cell.where(y:2): set text(style: "italic")
-show table.cell.where(y:8): set text(style: "italic")
-show table.cell.where(y:10): set text(style: "italic")
-[#figure(
-table(
-    columns: 11,
-    align: (col, _) => if col == 0 { left } else { right },
-    table.header(
+#tab(
+  name:    "tab-fair-m4",
+  columns: 13,
+  align: (col, row) => if row < 2 { center }
+                       else if col == 0 { left }
+                       else { right },  header_rows: 2,
+  placement: top,
+  inset: (x: 3.5pt),
+  header:  (
     table.cell(rowspan: 2)[*Dataset*],
-    table.cell(colspan: 2)[*ph*],
-    table.cell(colspan: 2)[*pha*],
-    table.cell(colspan: 2)[*#h0*],
-    table.cell(colspan: 2)[*fse_x8y1*],
-    table.cell(colspan: 2)[*oo-tans*],
-    [ratio], [MB/s], [ratio], [MB/s], [ratio], [MB/s], [ratio], [MB/s], [ratio], [MB/s],
-    ),
-    .._body,
-),
-caption: [M4 #PHA benchmark: compression ratio (higher = better) and decode
-            throughput (MB/s) per engine. *ph* and #h0 are plain Huffman (≈equal
-            ratio); *pha* gains ratio from ANS-coded partition bitmaps; the
-            standalone *fse_x8y1* and *oo-tans* reach the best ratio (full FSE) but are
-            the slowest. Skew-heavy rows in _italic_. "Calgary" compression ratio in #text(red)[red].],
-)<tab-fair-m4>
-]}
-]
+    table.cell(colspan: 3)[*PH*],
+    table.cell(colspan: 3)[*PH+ANS*],
+    table.cell(colspan: 3)[*#h0*],
+    table.cell(colspan: 3)[*oo-tans*],
+    [ratio], [M4 \ MB/s], [c8i \ MB/s],
+    [ratio], [M4 \ MB/s], [c8i \ MB/s],
+    [ratio], [M4 \ MB/s], [c8i \ MB/s],
+    [ratio], [M4 \ MB/s], [c8i \ MB/s],
+  ),
+  body:    _body,
+  rules: (
+    ((x: 0),                (align: left)),
+    ((y: "h"),              (align: center)),
+    ((x: (4,5,6)),           (weight: "bold")),     // pha ratio + MB/s columns
+    ((y: 0),                (style: "italic")),    // proba80 — skew-heavy
+    ((y: 6),                (style: "italic")),    // dna_fasta — skew-heavy
+    ((y: 8),                (style: "italic")),    // calgary_pic — skew-heavy
+    ((y: 8, x: (4, 10, 13)),  (color: red)),         // calgary ratio cells
+    ((x: (1,2,3)),            (fill: colors-tab.ph)),
+    ((x: (4,5,6)),            (fill: colors-tab.pha)),
+    ((x: (7,8,9)),            (fill: colors-tab.huf0)),
+    ((x: (10,11,12)),           (fill: colors-tab.oo_tans)),
+  ),
+  caption: [#PHA benchmark: compression ratio (higher = better) and decode
+            throughput (MB/s) on M4 and c8i. *PH* and #h0 are plain Huffman (≈equal
+            ratio); *PHA* gains ratio from ANS-coded partition bitmaps; the
+            standalone *oo-tans* reaches the best ratio (full FSE) but are
+            the slowest.
+            Skew-heavy datasets in _italic_.
+            "Calgary" compression ratio in #text(red)[red].
+            Huff0 does not compress the _image_jpeg_ dataset.],
+)
 
 #figure(
+  placement: top,
   [
     #image("plots/dec-bw-m4.svg", width: 100%)
 
     #image("plots/dec-bw-c8i.svg", width: 100%)
   ],
   caption: [Decode throughput per engine, M4 (top) and c8i (bottom) — the bandwidth
-    columns of @tab-fair-m4.],
+    columns of @tab-fair-m4, with the addition of *FSE x8y1* ],
 )<fig-dec-bw>
 
-In @tab-fair-m4 we compare the #PH (*ph*) and #PHA (*pha*) performance with other solutions, including Huff0, FSE and
-Oodle's TANS library.
-We see that for non-skewed datasets, *ph* and *pha* achieve the same performance, but for skewed datasets
-*pha* detects an opportunity to _selectively_ apply FSE - this brings the compression ratio close to full FSE,
+In @tab-fair-m4 and @fig-dec-bw we compare the #PH (*PHA*) and #PHA (*PHA*) performance with other solutions, including Huff0, FSE (only in the plots) and Oodle's TANS library.
+We see that for non-skewed datasets, *PH* and *PHA* achieve the same performance, but for skewed datasets
+*PHA* detects an opportunity to _selectively_ apply FSE - this brings the compression ratio close to full FSE,
 while still achieving significantly higher decode performance.
 Finally, the compression ratio of the _calgary_ dataset (a scanned text-on-white image)
  showcases the impact of #PHA utilizing locally-optimal decompression tables.
