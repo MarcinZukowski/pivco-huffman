@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PivCo-Huffman</title>
+  <meta name="description"
+        content="A novel Huffman decoder built on a wavelet-tree-style data layout, beating state-of-the-art Huffman codecs in decode speed.">
+  <link rel="icon" href="data:,">
+  <style>
+    :root {
+      --fg:          #1a1a1a;
+      --fg-soft:     #555;
+      --bg:          #fafaf7;
+      --rule:        #d9d4c8;
+      --accent:      hsl(150, 70%, 32%);   /* matches paper "ph" color */
+      --accent-soft: hsl(150, 70%, 95%);
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; }
+    body {
+      font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI",
+                   Roboto, "Helvetica Neue", Arial, sans-serif;
+      color: var(--fg);
+      background: var(--bg);
+      line-height: 1.55;
+    }
+    main {
+      max-width: 42rem;
+      margin: 0 auto;
+      padding: 3.5rem 1.5rem 4rem;
+    }
+    h1 {
+      font-size: 2.6rem;
+      letter-spacing: -0.02em;
+      margin: 0 0 0.25rem;
+    }
+    h1 .pivco { color: var(--accent); }
+    .tagline {
+      color: var(--fg-soft);
+      font-size: 1.1rem;
+      margin: 0 0 0.25rem;
+    }
+    .author {
+      color: var(--fg-soft);
+      font-size: 0.95rem;
+      margin: 0 0 2.5rem;
+    }
+    p { margin: 0 0 1rem; }
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.7rem;
+      margin: 2rem 0 2.5rem;
+    }
+    .actions a {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.65rem 1.1rem;
+      border-radius: 6px;
+      text-decoration: none;
+      font-weight: 500;
+      font-size: 1rem;
+      border: 1px solid var(--rule);
+      background: white;
+      color: var(--fg);
+      transition: background 80ms ease, border-color 80ms ease;
+    }
+    .actions a:hover { background: var(--accent-soft); border-color: var(--accent); }
+    .actions a.primary { background: var(--accent); color: white; border-color: var(--accent); }
+    .actions a.primary:hover { filter: brightness(0.92); }
+    .actions a svg { width: 1.1em; height: 1.1em; }
+    .footer {
+      margin-top: 3rem;
+      padding-top: 1.5rem;
+      border-top: 1px solid var(--rule);
+      color: var(--fg-soft);
+      font-size: 0.9rem;
+    }
+    .footer a { color: var(--fg-soft); }
+    code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 0.92em;
+      background: rgba(0,0,0,0.05);
+      padding: 0.1em 0.35em;
+      border-radius: 3px;
+    }
+  </style>
+</head>
+<body>
+<main>
+
+  <h1><span class="pivco">PivCo</span>-Huffman</h1>
+  <p class="tagline">A novel approach to Huffman decoding, built on a wavelet-tree-style data layout.</p>
+  <p class="author">by Marcin Żukowski</p>
+
+  <p>
+    <b>PivCo-Huffman</b> decodes data block-by-block via SIMD primitives that operate on
+    per-node bitmaps rather than a code-after-code stream.  In our benchmarks,
+    it consistently beats the decode throughput of state-of-the-art
+    Huffman codecs (Huff0, Oodle Huffman) by a large margin.
+    Additionally, an extension that selectively applies ANS
+    (PivCo-Huffman+ANS) reaches compression ratios approaching full
+    FSE/tANS at much higher speeds.
+  </p>
+
+  <div class="actions">
+    <a class="primary" href="https://arxiv.org/">arXiv</a>
+    <a href="paper-1.0/ph.html">HTML</a>
+    <a href="paper-1.0/ph.pdf">PDF</a>
+    <a href="https://github.com/MarcinZukowski/pivco-huffman">GitHub repository</a>
+  </div>
+
+  <p class="footer">
+    Source: <a href="https://github.com/MarcinZukowski/pivco-huffman">github.com/MarcinZukowski/pivco-huffman</a>
+  </p>
+
+</main>
+</body>
+</html>
