@@ -11,7 +11,8 @@
 // post-processing needed.
 #if _html {
   // simd.dev tooltips
-  html.elem("script", attrs: (src: "https://simd.dev/dist/simd-tooltips.js"))
+//  html.elem("script", attrs: (src: "https://simd.dev/dist/simd-tooltips.js"))
+
   html.elem("style", read("style.css"))
   // web-code.js: runtime extras (author-notes toggle today; more
   // later).  Inlined the same way as style.css — keeps the HTML

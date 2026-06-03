@@ -54,6 +54,8 @@ watchh: | $(OUT)
 clean:
 	rm -rf $(OUT)
 
+SIMD_ANNOTATE=../../simd.dev/simd-annotate/simd-annotate
+
 dist: $(PDF) $(HTML)
 	mkdir -p out/figures
 	cp ../figures/tree_viz.html ../figures/tree_viz_data.js out/figures/
@@ -71,6 +73,8 @@ dist: $(PDF) $(HTML)
 	  open('out/figures/fig-web.html','w').write( \
 	    html.replace('const CFG = null;', \
 	                 'const CFG = ' + json.dumps(cfg) + ';'))"
+	python3 $(SIMD_ANNOTATE) -o /tmp/ph.html out/ph.html
+	mv /tmp/ph.html out/ph.html
 
 zip: out dist
 	cd out && zip -r ../ph.zip .
