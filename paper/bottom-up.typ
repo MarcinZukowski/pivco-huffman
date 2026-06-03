@@ -112,7 +112,7 @@ caption: [Primitives used in bottom-up processing and their top-down equivalents
 Bottom-up processing uses two families of _merge_ operations.
 First are binary `merge_X_Y` primitives,
  where both `X` and `Y` can be `vec` (a vector of symbols) or `cst` (a constant symbol).
-The other and N-ary `merge_flat_D` primitives, specialized for `D` values.
+The other are N-ary `merge_flat_D` primitives, specialized for `D` values.
 @fig-bu-ops shows how they are used to build tree,
 and @bu-symbols discusses how these primitives correspond to the top-down primitives.
 
@@ -274,7 +274,7 @@ pay the memory-overload penalty that the slow `scatter` primitives suffered from
     ((x:(5,10)),         (fill: colors-tab.oo_huff)),
   ),
   caption: [#PH (bottom-up) decode bandwidth (MB/s) for different tree optimization levels.
-            We compare naive, flat-tables and optimized flat-tables against Huff0 and Oodle-Huffman.],
+            We compare naive, flat-subtrees and optimized flat-subtrees against Huff0 and #OOH.],
 )
 
 #figure(
@@ -289,12 +289,12 @@ pay the memory-overload penalty that the slow `scatter` primitives suffered from
 To evaluate the performance of bottom-up #PH decoding we looked at our datasets on two machines.
 We're also testing the impact of tree-complexity optimizations from @ph-opt.
 @tab-tree-modes and @plot-tree-nodes show the results.
-We can see that #PH decisively beats decoding performance of Huff0 and Oodle Huffman on all datasets and platforms.
+We can see that #PH decisively beats decoding performance of Huff0 and #OOH on all datasets and platforms.
 The magnitude of the #PH benefits depends on three factors:
 - tree level optimization - we see that both flat subtrees and their optimized versions provide significant benefits.
   This makes sense, as with the reduction of the number of operations, the performance improves.
 - dataset - skewed datasets benefit most, as on these #PH can reduce the number of operations for shorter codes / more frequent symbols.
   In particular, tree optimizations have no impact on _proba80_ and only marginal on _dna_fasta_.
 - CPU - M4 provides great OoO scalar evaluation, helping traditional algorithms more.
-  On the other hand, c8i has weaker scalar procesisng, but more performant SIMD - with AVX-512 - this benefis #PH.
+  On the other hand, c8i has weaker scalar processing, but more performant SIMD - with AVX-512 - this benefits #PH.
   As a result, while #PH is consistently better on M4, that difference is even more pronounced on c8i.

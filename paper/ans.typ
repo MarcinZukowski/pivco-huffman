@@ -112,7 +112,7 @@ optimizing it is not worth it.
 
 == #PHA implementation
 
-The analysis above suggests, that for most datasets applying ANS-based encoding is not worth additional complexity.
+The analysis above suggests that for most datasets applying ANS-based encoding is not worth the additional complexity.
 This is consistent with what e.g. @fse does - the literal stream is only Huffman compressed, but the significantly
 skewed length/offset data is tANS-compressed.
 
@@ -150,7 +150,7 @@ For example, let us take a collection of 300 `0xFF` and 100 `0x00` values.
 If the decoding table was custom-built, these values
  would take 75% and 25%, respectively, of the frequencies.
 However, since the pre-built partitions assume random bit distribution,
-these symbols expected frequencies
+ these symbols' expected frequencies
  will be much lower, resulting in more bits assigned to them during encoding.
 This shows that our approach might not be able to exploit some order-based compression ratio
  opportunities in the data.
@@ -222,12 +222,10 @@ This approach to FSE application in #PHA has the following benefits:
   ),
   caption: [#PHA benchmark: compression ratio (higher = better) and decode
             throughput (MB/s) on M4 and c8i. *PH* and #h0 are plain Huffman (≈equal
-            ratio); *PHA* gains ratio from ANS-coded partition bitmaps; the
-            standalone *oo-tans* reaches the best ratio (full FSE) but are
-            the slowest.
+            ratio); *PHA* improves ratio from ANS-coded partition bitmaps.
             Skew-heavy datasets in _italic_.
             "Calgary" compression ratio in #text(red)[red].
-            Huff0 does not compress the _image_jpeg_ dataset.],
+            Huff0 refuses to compress the _image_jpeg_ dataset.],
 )
 
 #figure(
@@ -241,7 +239,8 @@ This approach to FSE application in #PHA has the following benefits:
     columns of @tab-fair-m4, with the addition of *FSE x8y1* ],
 )<fig-dec-bw>
 
-In @tab-fair-m4 and @fig-dec-bw we compare the #PH (*PHA*) and #PHA (*PHA*) performance with other solutions, including Huff0, FSE (only in the plots) and Oodle's TANS library.
+@tab-fair-m4 compares the #PH (*PH*) and #PHA (*PHA*) performance with Huff0 and Oodle's TANS library.
+@fig-dec-bw visualizes these results, additionally including FSE.
 We see that for non-skewed datasets, *PH* and *PHA* achieve the same performance, but for skewed datasets
 *PHA* detects an opportunity to _selectively_ apply FSE - this brings the compression ratio close to full FSE,
 while still achieving significantly higher decode performance.

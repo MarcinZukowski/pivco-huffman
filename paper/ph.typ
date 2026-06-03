@@ -26,14 +26,14 @@ Huffman encoding has been an _enduring_ technique for 70+ years,
 ubiquitous in compression algorithms since its invention.
 In this paper we propose a new approach to Huffman
 coding, based on a data structure from _wavelet trees_.
-The resulting _pivot-coded Huffman_ (*#PH*) allows utilizing high-performance
+The resulting _pivot-coded Huffman_ (*#PH*) enables high-performance
 SIMD-friendly encoding and decoding operations.
 In our tests #PH consistently outperforms
- the decoding performance of state-of-the-art Huffman codecs
- by a large margin.
+ state-of-the-art Huffman codecs
+ in decoding throughput.
 Additionally, we show how ANS-coding can be _selectively_
  applied to _skewed_ nodes in this structure,
- approaching the ANS-level compression ratios,
+ yielding compression ratios approaching ANS codecs,
  while preserving very high decompression speeds.
 
 #if _html { outline() }
@@ -65,14 +65,14 @@ The HTML version has some nice _quality-of-life_ features:
 
 In this paper we presented #PH, a novel approach to Huffman-compression, based on the structure from _wavelet trees_.
 The main contributions are:
-- application of the _wavelet trees_ structure to the problem of core data compression
+- adapting the bitmap format of _Huffman-shaped wavelet trees_ into a sequential block-compression wire format
 - compression-focused tree-structure optimizations allowing better encoding/decoding performance
 - novel "bottom-up" decoding approach, eliminating the _scatter_ problem of the more natural top-down approach
 - highly performant SIMD primitives for both encoding and decoding operations
 - the concept of _selective_ application of ANS-based encoding in the Huffman tree to further improve its compression ratio
 
 The resulting approach, while slightly slower on the encoding side,
- consistently beats the decoding speeds of the state-of-the-art solutions by a large margin.
+ in our tests consistently beats the decoding speeds of the state-of-the-art solutions by a large margin.
 It also provides compression ratios approaching the ANS-based methods at significantly better speeds.
 
 == AI disclosure

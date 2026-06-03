@@ -76,7 +76,7 @@ A small difference is that the elements we partition are not 16-bit _indices in 
     table.cell(rowspan: 3)[*Dataset*],
     table.cell(colspan: 4)[*#PH*],
     table.cell(colspan: 2, rowspan: 2)[*#h0*],
-    table.cell(colspan: 2, rowspan: 2)[*oo-huffman*],
+    table.cell(colspan: 2, rowspan: 2)[*Oo-Huff*],
 
     table.cell(colspan: 2)[*end-to-end*],
     table.cell(colspan: 2)[*prebuilt tree*],
@@ -97,29 +97,26 @@ A small difference is that the elements we partition are not 16-bit _indices in 
 )
 
 #figure(
-  placement: bottom,
+  placement: top,
   [
     #image("plots/enc-bars-m4.svg", width: 100%)
 
     #image("plots/enc-bars-c8i.svg", width: 100%)
   ],
   caption: [Encoding throughput, M4 (top) and c8i (bottom) — the data of @tab-enc.
-    #PH end-to-end (`ph-op`) and prebuilt-tree (`ph-pb`) vs #h0 and Oodle-Huffman.
+    #PH end-to-end (`ph-op`) and prebuilt-tree (`ph-pb`) vs #h0 and #OOH.
     On c8i the `ph-pb` proba80 bar exceeds the axis cap and is clipped (true value labeled).],
 )<fig-enc-bars>
 
 @tab-enc and @fig-enc-bars show the encoding performance on various datasets and hosts.
 End-to-end results show a fair comparison with other solutions.
 #PH's performance is hindered here by the Huffman-code creation time,
-dominated by symbol frequency counting.
+ dominated by symbol frequency counting.
 The "prebuilt-tree" results show the actual encoding performance,
-showing e.g. how highly-skewed datasets can achieve
-very high "raw" encoding performance.
+ showing e.g. how highly-skewed datasets can achieve
+ very high "raw" encoding performance.
 
-One compression ratio / performance tradeoff we have made
- is that every bitmap (which needs it) stores additional information
- about the length of its right child (equivalent to the number of 1s in the bitmap).
-This is necessary during decoding, as we need to know where to locate the
- bitmaps of the children nodes to decode them.
-We could slightly improve the compression ratio by not including this information
-and recalculating it during decoding, at the cost of reduced decompression speed.
+The final compressed data consists of the Huffman codes information,
+ followed by the per-node information in a deterministic tree-traversal order.
+This information, including byte-padding overheads, is included in the compression-ratio results.
+@wire provides the complete wire-format layout.

@@ -1,4 +1,4 @@
-#import "conf.typ": anote, PH, he, mf, sym, pick-cols, todo, fair-filter, h0
+#import "conf.typ": anote, PH, OOH, he, mf, sym, pick-cols, todo, fair-filter, h0
 
 = Introduction
 
@@ -43,7 +43,7 @@ In classical Huffman coding, each symbol is encoded using a code (a sequence of 
 with more frequent symbols getting shorter codes.
 @fig-huf-tree shows a Huffman tree for the word "huffman", and @fig-huf-decode
 shows a naive decoding algorithm for decoding one symbol.
-For example, to decode symbol #sym("h"), we traverse tree using bits #sym("1 0 1") to get
+For example, to decode symbol #sym("h"), we traverse the tree using bits #sym("1 0 1") to get
 to the proper leaf node representing that symbol.
 
 == Modern Huffman solutions <sota>
@@ -67,7 +67,7 @@ We measured various Huffman decoding implementations, and the most performant so
 
 - *#h0* - part of the open-source FSE (@fse) library, which is also a building block of the popular zstd compression library (@zstd).
   Implemented in pure C, permissive license.
-- *oodle-huffman* - Huffman decoder from Oodle (@giesen2021oodle) - a proprietary compression library by RAD Game Tools.
+- *#OOH* - Huffman decoder from Oodle (@giesen2021oodle) - a proprietary compression library by RAD Game Tools.
   Implemented in C with a lot of assembly optimizations.
   Oodle requires a license for most uses.
 
@@ -96,7 +96,7 @@ Here are the measured bandwidths on two example datasets on two hosts (see @test
     table.cell(rowspan: 2)[*Dataset*],
     table.cell(rowspan: 2)[*Host*],
     table.cell(colspan: 2, align: center)[*#h0*],
-    table.cell(colspan: 2, align: center)[*oodle-huffman*],
+    table.cell(colspan: 2, align: center)[*#OOH*],
     [enc MB/s],[dec MB/s],
     [enc MB/s],[dec MB/s],
   ),
@@ -107,8 +107,8 @@ Here are the measured bandwidths on two example datasets on two hosts (see @test
 )<tab-huffman-perf>
 ]
 
-This is an impressive performance.
-Still, in this paper we investigate if it could be further improved by using a completely different approach.
+This are impressive results.
+Still, in this paper we investigate if the performance could be further improved by using a completely different approach.
 
 == Motivating Example: Hash Join in Databases <hj>
 

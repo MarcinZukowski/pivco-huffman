@@ -53,7 +53,7 @@ and @dinklage2023wt apply SIMD instructions to this problem.
       [Sequential compression/decompression throughput],
     [Aux structures],
       [Usually add rank/select support per bitmap],
-      [none (unless ANS-compressed)],
+      [none],
     [Operations],
       [Navigate query positions through levels],
       [Reconstruct whole dense output stream],

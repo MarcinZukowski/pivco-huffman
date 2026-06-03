@@ -20,6 +20,7 @@
 #let data = rows.slice(1)   // drop the CSV header row
 
 #tab(
+  placement: none,
   name:    "tab-datasets",
   columns: 7,
   align:   right,
@@ -76,6 +77,44 @@ we use the following setup:
 - otherwise, two more _runs_, until the 2%
   difference goal is met, up to 40 times in total.
 - the best _run_ time is used
+
+= Compressed data organization <wire>
+
+There are 3 main components to storing data compressed by #PH:
+symbol codes, compressed data, and metadata.
+
+For symbol codes, we simply store 128 bytes containing the canonical Huffman-code
+ lengths (256 times 4 bits).
+Note, that today we limit the Huffman code lengths to 11 bits
+ (similarly to Huff0).
+For many datasets this might be suboptimal,
+ but since this part is a tiny percentage of the compressed data,
+ we keep it simple.
+From this data, we can reconstruct the canonical Huffman codes,
+ from which we can construct the actual exact #PH tree.
+
+The actual compressed data is stored in _per-8kb blocks_ (configurable).
+It starts with a 4-byte block compressed-size information, followed by the per-node data,
+ in the tree-traversal order.
+
+For the _internal nodes_, we store:
+- 2-byte (optional) symbol count of the right child - necessary to find its data in the stream.
+  Only used for nodes with both non-leaf children.
+- 1-byte FSE marker:
+  - `0` means no FSE is applied
+  - lower 7 bits - the FSE table id (starting at 1)
+  - top bit - _XOR marker_ - if set, it means that the FSE-compressed data is on _reversed_ input bits.
+    This is used when the skew in the bitmap is in the opposite direction to what the table is built for.
+- bitmap body
+  - if FSE marker is `0`, we store *ceil(n/8)* bytes.
+  - otherwise, we store a 2-byte length of FSE-compressed data followed by the FSE stream.
+
+For _flat subtree roots_, we simply store *ceil(n*D/8)* bytes containing the compressed data.
+
+The final component is file-level metadata which includes
+ total uncompressed size, checksums, block size and other necessary fields.
+We use a simple file format containing this information, allowing
+ easy testing #PH.
 
 = Failed optimizations
 

@@ -65,6 +65,7 @@
 
 #let PH="PivCo-Huffman"
 #let PHA="PivCo-Huffman+ANS"
+#let OOH="Oodle Huffman"
 #let h0="Huff0"   // display name for the huf0 baseline (stock HUF_decompress)
 #let URLBASE="githubpages/blalba/paper"
 
