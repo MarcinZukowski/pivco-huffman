@@ -14,7 +14,7 @@
     \
  ]
 #text(size: 10pt)[
-  _v.0.9, built on #datetime.today().display()_
+  _v.1.0a, 2026-06-03_
 ]
 
 #set align(left)

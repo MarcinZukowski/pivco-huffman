@@ -1,0 +1,3736 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>PIVCO Huffman Tree Viz</title>
+<style>
+* { box-sizing: border-box; }
+html, body {
+    height: 100%;
+    margin: 0;
+    font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    color: #222;
+    background: #fafafa;
+}
+header {
+    padding: 6px 12px;
+    background: #fff;
+    border-bottom: 1px solid #ddd;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    position: sticky;
+    top: 0;
+    z-index: 10;
+}
+header .row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 14px;
+}
+header .row-label {
+    color: #888;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    min-width: 56px;
+}
+header h1.viz-title {
+    margin: 0 0 0 auto;        /* auto-margin-left pushes to the right */
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    padding: 3px 10px;
+    background: linear-gradient(135deg, #e0ecff 0%, #d9e6ff 100%);
+    color: #1a3d80;
+    border: 1px solid #b8c8e8;
+    border-radius: 5px;
+    box-shadow: 0 1px 2px rgba(26, 61, 128, 0.08);
+    white-space: nowrap;
+}
+header label, header select, header input[type="file"] {
+    font-size: 13px;
+}
+header select { padding: 2px 6px; }
+header .toggle { display: flex; align-items: center; gap: 4px; }
+header .text-examples {
+    display: flex; align-items: center; gap: 8px;
+    font-size: 11px; color: #888;
+}
+header .text-example {
+    color: #2354a8;
+    text-decoration: none;
+    border-bottom: 1px dotted #88aadd;
+}
+header .text-example:hover {
+    color: #15356b;
+    border-bottom: 1px solid currentColor;
+}
+main {
+    display: grid;
+    grid-template-columns: 1fr 360px;
+    gap: 10px;
+    padding: 10px;
+}
+#tree-pane {
+    background: #fff;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    overflow: hidden;
+    min-height: 70vh;
+}
+#tree-svg { display: block; cursor: grab; }
+#tree-svg:active { cursor: grabbing; }
+#tree-svg .link { fill: none; stroke: #bbb; stroke-width: 1px; }
+#tree-svg .node-leaf rect {
+    stroke: #888;
+    stroke-width: 0.5px;
+}
+#tree-svg .node-internal circle {
+    fill: #fff;
+    stroke: #555;
+    stroke-width: 1px;
+}
+#tree-svg .node-leaf text {
+    font: 9px monospace;
+    text-anchor: middle;
+    dominant-baseline: middle;
+    pointer-events: none;
+}
+#tree-svg .node-leaf .leaf-char {
+    font-size: 10px;
+    font-weight: 600;
+}
+#tree-svg .node-leaf .leaf-char-hex {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-weight: normal;
+    font-size: 9px;
+}
+#tree-svg .flat-box {
+    fill: #22c55e;             /* green, opacity set per-element by D */
+    stroke: #d97706;
+    stroke-dasharray: 3 2;
+    stroke-width: 1.5px;
+    pointer-events: none;
+}
+#tree-svg .pair-box {
+    fill: #22c55e;
+    stroke: #94a3b8;
+    stroke-dasharray: 2 2;
+    stroke-width: 1px;
+    pointer-events: none;
+}
+#tree-svg .flat-label {
+    font: 10px monospace;
+    font-weight: 600;
+    fill: #b45309;
+    pointer-events: none;
+}
+#tree-svg .pair-label {
+    font: 9px monospace;
+    fill: #64748b;
+    pointer-events: none;
+}
+#tree-svg .skew-bar { stroke: #444; stroke-width: 0.3px; }
+#tree-svg .prim-bubble rect {
+    fill: #ffedd5;
+    stroke: #c2410c;
+    stroke-width: 0.5px;
+}
+#tree-svg .prim-bubble text {
+    font: 9px monospace;
+    font-weight: 600;
+    fill: #7c2d12;
+    text-anchor: middle;
+    dominant-baseline: middle;
+    pointer-events: none;
+}
+#stats-pane {
+    background: #fff;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    padding: 10px 12px;
+    overflow-y: auto;
+    max-height: calc(100vh - 80px);
+}
+#stats-pane h2 {
+    margin: 0 0 6px 0;
+    font-size: 13px;
+    font-weight: 600;
+    color: #444;
+}
+#stats-pane h3 {
+    margin: 14px 0 4px;
+    font-size: 12px;
+    font-weight: 600;
+    color: #666;
+}
+.summary-grid {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 2px 12px;
+    font-size: 12px;
+}
+.summary-grid b { font-weight: 500; color: #555; }
+.summary-grid span { font-family: monospace; text-align: right; }
+table.node-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 11px;
+    font-family: monospace;
+}
+table.node-table th, table.node-table td {
+    padding: 2px 4px;
+    text-align: right;
+    border-bottom: 1px solid #eee;
+}
+table.node-table th { background: #f4f4f4; font-weight: 600; }
+table.node-table tr:hover { background: #fff8e1; cursor: pointer; }
+table.node-table tr.in-flat { color: #b45309; }
+.tooltip {
+    position: absolute;
+    pointer-events: none;
+    background: #222;
+    color: #fff;
+    padding: 6px 8px;
+    border-radius: 4px;
+    font: 11px/1.3 monospace;
+    white-space: pre-wrap;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.25);
+    opacity: 0;
+    transition: opacity 90ms;
+    z-index: 100;
+    max-width: 320px;
+}
+.tooltip.visible { opacity: 1; }
+.muted { color: #888; font-size: 11px; }
+.dim { color: #aaa; }
+</style>
+</head>
+<body>
+
+<header>
+    <div class="row">
+        <span class="row-label">data</span>
+        <label>Dataset:
+            <select id="dataset-select"></select>
+        </label>
+        <label>or file: <input type="file" id="file-input"></label>
+        <label>or text: <input type="text" id="text-input" size="24"
+            placeholder="type or paste text"></label>
+        <button id="text-build" type="button">build</button>
+        <span class="text-examples">
+            try:
+            <a href="#" class="text-example" data-text="abracadabra">abracadabra</a>
+            <a href="#" class="text-example" data-text="coconut papaya">coconut papaya</a>
+            <a href="#" class="text-example" data-text="hello world">hello world</a>
+            <a href="#" class="text-example" data-text="foo bar xyzzy">foo bar xyzzy</a>
+        </span>
+        <span id="status" class="muted"></span>
+        <h1 class="viz-title">PIVCO-Huffman tree viz</h1>
+    </div>
+    <div class="row">
+        <span class="row-label">tree</span>
+        <label class="toggle">
+            mode:
+            <select id="tree-mode">
+                <option value="top-down">top-down</option>
+                <option value="bottom-up" selected>bottom-up</option>
+                <option value="encode">encode</option>
+            </select>
+        </label>
+        <label class="toggle">
+            <input type="checkbox" id="ph-opt" checked>
+            ph-optimize
+        </label>
+        <label class="toggle" title="Experimental max-skew topology for ANS: keep the optimal Huffman code lengths, but build the tree bottom-up, sorting each level by combined frequency descending and merging left-to-right (heavier child = left). Same compression ratio, but the tree leans left by frequency to push per-node bitmaps toward maximum skew. Overrides ph-optimize / within-tier order.">
+            <input type="checkbox" id="max-skew">
+            max-skew (ANS)
+        </label>
+        <label class="toggle">
+            <input type="checkbox" id="show-flat" checked>
+            flat-subtrees
+        </label>
+        <label class="toggle">
+            <input type="checkbox" id="constant-detect" checked>
+            constant
+        </label>
+        <label class="toggle">
+            <input type="checkbox" id="fuse-leaves" checked>
+            fuse-leaves
+        </label>
+        <label class="toggle" title="Within-tier ordering of leaves when building the flat-aware tree. Affects which symbols land in the deepest D-flat chunk per length tier. 'symbol' is the textbook canonical order (sort by symbol value ascending, no frequency-based reorder).">
+            keys:
+            <select id="keys-sort">
+                <option value="freq_desc">freq desc</option>
+                <option value="freq_asc">freq asc</option>
+                <option value="symbol" selected>symbol</option>
+            </select>
+        </label>
+        <label class="toggle" title="Max Huffman code length (length-limited)">
+            max-len
+            <span id="max-len-min" class="dim" style="font:10px monospace">1</span>
+            <input type="range" id="max-len" min="1" max="20" value="11"
+                style="width:96px">
+            <span id="max-len-max" class="dim" style="font:10px monospace">20</span>
+            <span id="max-len-val" style="font-family:monospace; width:14px; display:inline-block">11</span>
+        </label>
+    </div>
+    <div class="row">
+        <span class="row-label">view</span>
+        <label class="toggle">
+            view:
+            <select id="view-mode">
+                <option value="tree" selected>tree</option>
+                <option value="pivot">pivot</option>
+            </select>
+        </label>
+        <label class="toggle">
+            <input type="checkbox" id="condense-flat">
+            fold subtrees
+        </label>
+        <label class="toggle" title="Force minimum slot width per leaf so neighbouring subtrees / flat-region boxes can't overlap (tree may extend past the pane — zoom/pan to navigate)">
+            <input type="checkbox" id="no-overlap">
+            no overlap
+        </label>
+        <label class="toggle">
+            <input type="checkbox" id="splitting" checked>
+            splitting
+        </label>
+        <label class="toggle">
+            <input type="checkbox" id="show-primitives">
+            primitives
+        </label>
+        <label class="toggle" title="Show the input strip above the tree: the source characters with their codes / symbols (needs a text source).">
+            <input type="checkbox" id="input-bitmap">
+            input bitmap
+        </label>
+        <label class="toggle" title="Show the per-node bitmaps inside the tree (needs a text source).">
+            <input type="checkbox" id="show-bitmaps">
+            show bitmaps
+        </label>
+        <label class="toggle" title="What to render under each node's bitmap (only when 'show bitmaps' is on). nothing | code bits (symbol with bit-index subscript) | symbols (just the letter) | indices (output index of the symbol).">
+            bitmap label:
+            <select id="bitmap-label">
+                <option value="nothing" selected>nothing</option>
+                <option value="code_bits">code bits</option>
+                <option value="symbols">symbols</option>
+                <option value="indices">indices</option>
+            </select>
+        </label>
+        <label class="toggle" title="Draw leaf boxes with the printable character, or 'xNN' for non-printables. Off = tiny circles only.">
+            <input type="checkbox" id="show-leaf-details" checked>
+            show leaf details
+        </label>
+        <label class="toggle" title="Draw the per-node skew bar showing p_left / p_right split.">
+            <input type="checkbox" id="show-skew" checked>
+            show skew
+        </label>
+        <label class="toggle" title="Show the bit-prefix (path from root, 0=left/1=right) above each internal node.">
+            <input type="checkbox" id="show-bit-prefix">
+            internal prefix
+        </label>
+        <label class="toggle" title="Show the full Huffman code as a 0/1 string under each leaf.">
+            <input type="checkbox" id="show-leaf-code">
+            leaf code
+        </label>
+        <label class="toggle" title="Label each branch with the bit it represents (0 = left child, 1 = right child).">
+            <input type="checkbox" id="show-branch-bits">
+            branch 0/1
+        </label>
+    </div>
+    <div class="row">
+        <span class="row-label">figure</span>
+        <label class="toggle">
+            title:
+            <input type="text" id="title-input" size="18"
+                placeholder="(empty = no title)" autocomplete="off">
+        </label>
+        <label class="toggle">
+            labels:
+            <input type="text" id="show-labels" size="22"
+                placeholder="e.g. #symbols,H,ops/byte" autocomplete="off">
+        </label>
+        <button id="reset-view" type="button">reset view</button>
+        <button id="reset-params" type="button">reset params</button>
+        <button id="download-svg" type="button">download SVG</button>
+        <button id="download-txt" type="button">download tree text</button>
+        <input type="text" id="download-filename" size="22"
+               placeholder="" autocomplete="off">
+        <label class="toggle" title="Crop the exported SVG's viewBox to the top fraction of the tree height (full width kept). e.g. 0.4 exports only the top 40% (root + upper levels). Empty = whole tree.">
+            crop top:
+            <input type="text" id="crop-top" size="4"
+                   placeholder="1.0" autocomplete="off">
+        </label>
+    </div>
+</header>
+
+<main>
+    <div id="tree-pane">
+        <svg id="tree-svg" width="100%" height="100%"></svg>
+    </div>
+    <aside id="stats-pane">
+        <h2>Summary</h2>
+        <div id="summary"></div>
+        <h3>Top internal nodes by bits saved</h3>
+        <table class="node-table" id="top-nodes-table">
+            <thead><tr>
+                <th>#</th><th>depth</th><th title="% of source bytes that pass through this node">% src</th>
+                <th>p_left</th><th>H</th>
+                <th title="total bits saved at this node (1 − H) × n">saved</th>
+                <th title="bits saved per source byte (whole tree). Sums across all nodes to total bits saved.">/byte</th>
+                <th>flat?</th>
+            </tr></thead>
+            <tbody></tbody>
+        </table>
+        <p class="muted" style="margin-top:14px">
+            Hover over a node for full stats.  Click a row in the table to
+            jump to that node.  Drag to pan, scroll to zoom.
+        </p>
+    </aside>
+</main>
+
+<div class="tooltip" id="tooltip"></div>
+
+<script src="tree_viz_data.js"></script>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<script>
+// ============================================================
+//  Huffman build + code assignment
+// ============================================================
+
+/* Min-heap keyed by .freq, breaking ties by .insertOrder for
+ * deterministic tree shape.  Stores any object that has .freq. */
+class MinHeap {
+    constructor() { this.a = []; this.ord = 0; }
+    push(x) {
+        x._ord = this.ord++;
+        this.a.push(x);
+        this._up(this.a.length - 1);
+    }
+    pop() {
+        if (this.a.length === 0) return null;
+        const top = this.a[0];
+        const last = this.a.pop();
+        if (this.a.length) {
+            this.a[0] = last;
+            this._down(0);
+        }
+        return top;
+    }
+    size() { return this.a.length; }
+    _less(i, j) {
+        const A = this.a[i], B = this.a[j];
+        if (A.freq !== B.freq) return A.freq < B.freq;
+        return A._ord < B._ord;
+    }
+    _up(i) {
+        while (i > 0) {
+            const p = (i - 1) >> 1;
+            if (!this._less(i, p)) break;
+            [this.a[i], this.a[p]] = [this.a[p], this.a[i]];
+            i = p;
+        }
+    }
+    _down(i) {
+        const n = this.a.length;
+        while (true) {
+            const l = 2 * i + 1, r = 2 * i + 2;
+            let m = i;
+            if (l < n && this._less(l, m)) m = l;
+            if (r < n && this._less(r, m)) m = r;
+            if (m === i) break;
+            [this.a[i], this.a[m]] = [this.a[m], this.a[i]];
+            i = m;
+        }
+    }
+}
+
+/* Build a Huffman tree from a 256-entry frequency array.  Returns
+ * an array `lengths[0..255]` of code-length-per-symbol (0 = unused).
+ * Length-limited to `maxLen` bits via the limitCodeLengths post-pass.
+ */
+function buildHuffmanLengths(freqs, maxLen) {
+    if (!maxLen) maxLen = 16;
+    const heap = new MinHeap();
+    let n_used = 0;
+    for (let i = 0; i < 256; i++) {
+        if (freqs[i] > 0) {
+            heap.push({ freq: freqs[i], symbol: i, left: null, right: null });
+            n_used++;
+        }
+    }
+    if (n_used === 0) return new Array(256).fill(0);
+    if (n_used === 1) {
+        const lens = new Array(256).fill(0);
+        const sole = heap.pop();
+        lens[sole.symbol] = 1;
+        return lens;
+    }
+    while (heap.size() > 1) {
+        const a = heap.pop(), b = heap.pop();
+        heap.push({
+            freq: a.freq + b.freq,
+            symbol: -1, left: a, right: b,
+        });
+    }
+    const root = heap.pop();
+    const lens = new Array(256).fill(0);
+    function walk(node, d) {
+        if (node.symbol >= 0) {
+            lens[node.symbol] = d || 1;   // depth 0 happens only with 1 symbol
+            return;
+        }
+        walk(node.left, d + 1);
+        walk(node.right, d + 1);
+    }
+    walk(root, 0);
+    limitCodeLengths(lens, maxLen);
+    return lens;
+}
+
+/* Length-limiter using scaled-integer Kraft accounting.  After
+ * clamping any over-long codes to maxLen we may end up with Kraft
+ * sum > 1 (too many codes for the available code space).  Fix by
+ * iteratively bumping the longest "unmaxed" code's length up by
+ * 1 — minimal Kraft change per bump.  Then if Kraft < 1 we can
+ * shorten codes to fill the space (cosmetic, but keeps the tree
+ * canonical). */
+function limitCodeLengths(lens, maxLen) {
+    const target = 1 << maxLen;
+    /* Step 1: clamp. */
+    for (let i = 0; i < lens.length; i++)
+        if (lens[i] > maxLen) lens[i] = maxLen;
+    /* Step 2: Kraft accounting (integer). */
+    let kraft = 0;
+    for (let i = 0; i < lens.length; i++)
+        if (lens[i] > 0) kraft += (1 << (maxLen - lens[i]));
+    /* Step 3: reduce until kraft <= target.  Bump longest L < maxLen. */
+    while (kraft > target) {
+        let bestSym = -1, bestL = 0;
+        for (let i = 0; i < lens.length; i++) {
+            if (lens[i] > 0 && lens[i] < maxLen && lens[i] > bestL) {
+                bestL = lens[i]; bestSym = i;
+            }
+        }
+        if (bestSym < 0) break;
+        lens[bestSym]++;
+        kraft -= (1 << (maxLen - bestL - 1));
+    }
+    /* Step 4: tighten - while kraft < target, shorten the longest. */
+    while (kraft < target) {
+        let bestSym = -1, bestL = 0;
+        for (let i = 0; i < lens.length; i++) {
+            if (lens[i] > bestL) { bestL = lens[i]; bestSym = i; }
+        }
+        if (bestSym < 0 || bestL <= 1) break;
+        const gain = 1 << (maxLen - bestL);
+        if (kraft + gain > target) break;
+        lens[bestSym]--;
+        kraft += gain;
+    }
+}
+
+/* Textbook canonical Huffman code assignment.  Sort symbols by
+ * (length asc, symbol asc), assign codes left-to-right. */
+function assignCanonicalCodes(lens) {
+    const out = [];
+    for (let s = 0; s < 256; s++) {
+        if (lens[s] > 0) out.push({ symbol: s, len: lens[s], code: 0 });
+    }
+    out.sort((a, b) => a.len - b.len || a.symbol - b.symbol);
+    let code = 0, prevLen = 0;
+    for (const o of out) {
+        if (o.len > prevLen) code <<= (o.len - prevLen);
+        o.code = code;
+        code++;
+        prevLen = o.len;
+    }
+    return out;
+}
+
+/* ph's flat-aware code assignment.  Same code lengths as canonical
+ * but rearranged so that same-length symbols cluster into D-flat
+ * subtrees, exploiting count_L's binary decomposition.  See
+ * src/huffman_table.c "Flat-aware code assignment" comment. */
+function assignPhFlatCodes(lens, freqs, keysSort) {
+    // Per-length, gather symbols sorted per keysSort (default: symbol).
+    // 'symbol' sorts by symbol value asc (textbook canonical).
+    const max_len = lens.reduce((m, x) => Math.max(m, x), 0);
+    const perLen = []; // perLen[L] = array of {symbol, freq}
+    for (let L = 0; L <= max_len; L++) perLen[L] = [];
+    for (let s = 0; s < 256; s++) {
+        if (lens[s] > 0) perLen[lens[s]].push({ symbol: s, freq: freqs[s] });
+    }
+    const cmp = keysSort === 'freq_asc'
+        ? ((a, b) => a.freq - b.freq || a.symbol - b.symbol)
+        : keysSort === 'symbol'
+        ? ((a, b) => a.symbol - b.symbol)
+        : ((a, b) => b.freq - a.freq || a.symbol - b.symbol);  // freq_desc (default)
+    for (let L = 1; L <= max_len; L++) {
+        perLen[L].sort(cmp);
+    }
+    // Decompose each count_L by binary representation into chunks.
+    // chunk: {L, bit, depth, n, items: [{symbol,freq}...]}
+    const chunks = [];
+    for (let L = 1; L <= max_len; L++) {
+        let cur = 0;
+        const arr = perLen[L];
+        const c = arr.length;
+        for (let bit = 16; bit >= 0; bit--) {
+            if (c & (1 << bit)) {
+                const n = 1 << bit;
+                let depth;
+                if (bit >= 2) depth = L - bit;
+                else if (bit === 1) depth = L - 1;
+                else depth = L;
+                chunks.push({ L, bit, depth, n,
+                              items: arr.slice(cur, cur + n) });
+                cur += n;
+            }
+        }
+    }
+    // Sort chunks by depth asc (stable).
+    chunks.sort((a, b) => a.depth - b.depth);
+    // Canonical-assign codes per chunk.
+    const out = [];
+    let code = 0, prevDepth = 0;
+    for (const ch of chunks) {
+        if (ch.depth > prevDepth) code <<= (ch.depth - prevDepth);
+        for (let i = 0; i < ch.n; i++) {
+            const it = ch.items[i];
+            out.push({
+                symbol: it.symbol,
+                len: ch.L,
+                code: (code << ch.bit) | i,
+            });
+        }
+        code++;
+        prevDepth = ch.depth;
+    }
+    return out;
+}
+
+// ============================================================
+//  Tree construction + annotation
+// ============================================================
+
+/* Build a tree object from a list of {symbol, code, len, freq}.
+ * Tree node: { symbol, freq, depth, left, right, id }. */
+function buildTree(symbols, freqs) {
+    let nextId = 0;
+    const root = { symbol: -1, depth: 0, freq: 0, left: null, right: null,
+                    id: nextId++ };
+    for (const s of symbols) {
+        let cur = root;
+        for (let i = s.len - 1; i >= 0; i--) {
+            const bit = (s.code >> i) & 1;
+            const dir = bit === 0 ? 'left' : 'right';
+            if (!cur[dir]) {
+                cur[dir] = { symbol: -1, depth: cur.depth + 1, freq: 0,
+                             left: null, right: null, id: nextId++,
+                             parent: cur };
+            }
+            cur = cur[dir];
+        }
+        cur.symbol = s.symbol;
+        cur.freq = freqs[s.symbol];
+    }
+    return root;
+}
+
+/* Max-skew construction (experiment, for ANS).  Keeps the optimal
+ * Huffman *code lengths* (so compression ratio is unchanged) but chooses
+ * the tree TOPOLOGY to lean left by frequency:
+ *   1. compute code lengths (Huffman),
+ *   2. place each symbol as a leaf at its code-length depth,
+ *   3. bottom-up, per level: sort nodes by (combined) freq descending and
+ *      merge left-to-right into parents one level up (heavier child = left).
+ * The level populations are exactly the canonical ones (Kraft), so every
+ * level has an even node count and pairs cleanly. */
+function buildTreeMaxSkew(freqs, maxLen) {
+    const lens = buildHuffmanLengths(freqs, maxLen);
+    let nextId = 0;
+    const levels = [];               // levels[d] = nodes currently at depth d
+    let maxD = 0, nLeaves = 0;
+    let onlyLeaf = null;
+    for (let s = 0; s < lens.length; s++) {
+        const L = lens[s];
+        if (!L) continue;
+        if (L > maxD) maxD = L;
+        nLeaves++;
+        const leaf = { symbol: s, freq: freqs[s], left: null, right: null, id: nextId++ };
+        onlyLeaf = leaf;
+        (levels[L] || (levels[L] = [])).push(leaf);
+    }
+    /* Degenerate: 0 or 1 symbol -> just the leaf as root (whole block is
+     * one symbol; no internal nodes / pairing). */
+    if (nLeaves <= 1) {
+        if (onlyLeaf) { onlyLeaf.depth = 0; return onlyLeaf; }
+        return { symbol: -1, freq: 0, left: null, right: null, id: 0, depth: 0 };
+    }
+    for (let d = maxD; d >= 1; d--) {
+        const here = levels[d] || [];
+        here.sort((a, b) => b.freq - a.freq);          // heaviest first
+        const up = (levels[d - 1] || (levels[d - 1] = []));
+        for (let i = 0; i + 1 < here.length; i += 2) {
+            const Lc = here[i], Rc = here[i + 1];      // heavier = left
+            const parent = { symbol: -1, freq: Lc.freq + Rc.freq,
+                             left: Lc, right: Rc, id: nextId++ };
+            Lc.parent = parent; Rc.parent = parent;
+            up.push(parent);
+        }
+    }
+    const root = (levels[0] || [])[0];
+    (function setDepth(n, d) {
+        n.depth = d;
+        if (n.symbol < 0) { setDepth(n.left, d + 1); setDepth(n.right, d + 1); }
+    })(root, 0);
+    return root;
+}
+
+/* Post-order walk: compute subtreeCount, leftCount/rightCount,
+ * p_left, H(p_left), bitsSavedPerSymbol = (1 - H), totalBitsSaved
+ * = n_node * (1 - H).  Pre-order: prefix string and entropyPrefix
+ * (Σ H over ancestors). */
+function annotateTree(root) {
+    function pre(n, prefix, entropyPrefix) {
+        if (!n) return;
+        n.prefix = prefix;
+        n.entropyPrefix = entropyPrefix;
+        if (n.symbol >= 0) return;
+        // post-order fields are filled in `post`; do this after we know p_left
+    }
+    function post(n) {
+        if (!n) return { count: 0, leaves: 0 };
+        if (n.symbol >= 0) {
+            n.subtreeCount = n.freq;
+            n.numLeaves = 1;
+            return { count: n.freq, leaves: 1 };
+        }
+        const l = post(n.left), r = post(n.right);
+        n.leftCount = l.count;
+        n.rightCount = r.count;
+        n.subtreeCount = l.count + r.count;
+        n.numLeaves = l.leaves + r.leaves;
+        if (n.subtreeCount > 0) {
+            n.pLeft = l.count / n.subtreeCount;
+            n.bitEntropy = h_binary(n.pLeft);
+            n.bitsSavedTotal = n.subtreeCount * (1 - n.bitEntropy);
+        } else {
+            n.pLeft = 0; n.bitEntropy = 0; n.bitsSavedTotal = 0;
+        }
+        return { count: n.subtreeCount, leaves: n.numLeaves };
+    }
+    post(root);
+    /* Second walk now that pLeft is known: prefix + entropy_prefix. */
+    function pre2(n, prefix, entropyPrefix) {
+        if (!n) return;
+        n.prefix = prefix;
+        n.entropyPrefix = entropyPrefix;
+        if (n.symbol >= 0) return;
+        pre2(n.left,  prefix + '0', entropyPrefix + n.bitEntropy);
+        pre2(n.right, prefix + '1', entropyPrefix + n.bitEntropy);
+    }
+    pre2(root, '', 0);
+}
+
+/* After detectFlatSubtrees: annotate each leaf with `opsToLeaf` =
+ * number of tree-walk operations the decoder does to reach it.
+ *   - without flat opt: ops = depth (one per internal node on the
+ *     path).
+ *   - with flat opt: if the leaf is inside a maximal flat subtree
+ *     rooted at depth d_root with D levels, the flat-region lookup
+ *     replaces D level-walks with 1.  So ops = d_root + 1.
+ *   - otherwise ops = depth.
+ *
+ * Then post-order over every internal node n:
+ *   - n.opsAvgSubtree    = mean opsToLeaf over leaves below n (each leaf 1×)
+ *   - n.opsWeightedSubtree = freq-weighted avg ops over the subtree
+ *                            (per source byte passing through n) */
+/* Counts ops contributed by a single primitive at one node.
+ * - C  (constant-leaf, memset bulk-amortized) → 0 ops/byte
+ * - any other non-null primitive               → 1 op/byte
+ * - null (absorbed by parent-level primitive)  → 0 ops
+ * The leaf's own primitive (S1/C) IS included now — i.e. ops/byte
+ * counts every visible badge a byte traverses, NOT just partitions. */
+function opsForPrimitive(p) {
+    if (!p) return 0;
+    if (p === 'C') return 0;
+    return 1;
+}
+
+/* Walks the tree counting primitive ops along each root-to-leaf
+ * path.  Requires annotatePrimitives() to have been called first. */
+function annotateLeafOps(root) {
+    function walk(n, accumOps) {
+        if (!n) return;
+        const newOps = accumOps + opsForPrimitive(n._primitive);
+        if (n.symbol >= 0) {
+            n.opsToLeaf = newOps;
+            return;
+        }
+        /* For flat-roots, descendants have _primitive = null so they
+         * contribute nothing — the DX op at the flat-root is the
+         * single "scatter X levels at once" cost.  We still recurse
+         * so leaves inside the flat get their opsToLeaf set. */
+        walk(n.left,  newOps);
+        walk(n.right, newOps);
+    }
+    walk(root, 0);
+    /* Post-order aggregation per internal node. */
+    function agg(n) {
+        if (!n) return { sumOps: 0, sumWOps: 0, nLeaves: 0 };
+        if (n.symbol >= 0) {
+            return {
+                sumOps: n.opsToLeaf,
+                sumWOps: n.opsToLeaf * n.freq,
+                nLeaves: 1,
+            };
+        }
+        const l = agg(n.left), r = agg(n.right);
+        const sumOps  = l.sumOps  + r.sumOps;
+        const sumWOps = l.sumWOps + r.sumWOps;
+        const nLeaves = l.nLeaves + r.nLeaves;
+        n.opsAvgSubtree = nLeaves > 0 ? sumOps / nLeaves : 0;
+        n.opsWeightedSubtree = (n.subtreeCount > 0)
+            ? sumWOps / n.subtreeCount : 0;
+        return { sumOps, sumWOps, nLeaves };
+    }
+    agg(root);
+}
+
+function h_binary(p) {
+    if (p <= 0 || p >= 1) return 0;
+    return -p * Math.log2(p) - (1 - p) * Math.log2(1 - p);
+}
+
+/* Returns the subtree's flat depth (all leaves at same depth from
+ * here) or -1 if not flat.  Leaves return 0. */
+function subtreeFlatDepth(n) {
+    if (!n) return -1;
+    if (n.symbol >= 0) return 0;
+    const ld = subtreeFlatDepth(n.left);
+    if (ld < 0) return -1;
+    const rd = subtreeFlatDepth(n.right);
+    if (rd < 0 || rd !== ld) return -1;
+    return ld + 1;
+}
+
+/* Annotate every node with:
+ *   n.flatD          : >0 iff this node is currently being treated as a
+ *                       flat-subtree root (no override + subtree is
+ *                       D≥2 flat).  This is the EFFECTIVE flat state.
+ *   n.flatCandidate  : true iff the subtree at this node is D≥2 flat
+ *                       (regardless of override).  These are the
+ *                       "flattenable" nodes the user can click — even
+ *                       if currently unflattened-via-override.
+ *   n.naturalFlatD   : the D of the subtree if flat (or 0).
+ *   n.inFlat         : ancestor is currently a flat-root.
+ *
+ * The override _flatOverride.get(id) === 'unflatten' tells the
+ * detector "don't treat this node as a flat-root, recurse into it
+ * so its children can themselves become flat-roots."  Visibility
+ * still depends on the effective flat state of ancestors. */
+function detectFlatSubtrees(root) {
+    function walk(n, inFlat) {
+        if (!n) return;
+        n.inFlat = inFlat;
+        n.flatD = 0;
+        n.flatCandidate = false;
+        n.naturalFlatD = 0;
+        if (n.symbol < 0) {
+            const d = subtreeFlatDepth(n);
+            if (d >= 2) {
+                n.flatCandidate = true;
+                n.naturalFlatD = d;
+                if (!inFlat) {
+                    const overridden = _flatOverride.get(n.id) === 'unflatten';
+                    if (!overridden) {
+                        n.flatD = d;
+                        inFlat = true;
+                    }
+                }
+            }
+        }
+        walk(n.left, inFlat);
+        walk(n.right, inFlat);
+    }
+    walk(root, false);
+}
+
+/* Tag every node with `_primitive`: the abbreviated name of the decode
+ * primitive applied at this node, given the current optimization
+ * toggles in `meta`.  Children absorbed by a parent-level primitive
+ * (S2's two leaves, DX's whole subtree, C's leaf) get _primitive = null.
+ *
+ * Precedence (highest first):
+ *   1. flat-subtree root          → DX  (and absorb all descendants)
+ *   2. inside a flat subtree      → null
+ *   3. fuse-leaves on AND both children are leaves → S2 (and absorb both leaves)
+ *   4. constant on AND at least one child is a leaf:
+ *        - parent (TD) → half variant: PH / PRH
+ *        - parent (BU) → MCV / MVC
+ *        - the constant-side leaf → C
+ *        - the other side (if also a leaf) → S1
+ *   5. otherwise: parent = P / PR / MVV; leaves = S1.
+ *
+ * When BOTH children are leaves and constant is on AND fuse-leaves is
+ * off: pick the higher-frequency leaf as the "constant" side (gets C);
+ * the lower-frequency leaf is S1; parent is the half variant. */
+function annotatePrimitives(root, meta) {
+    /* Encode mode: top-down partition, labelled by node_type — the same
+     * dispatch the encoder uses (prim_enc_partition_*).  Classification is
+     * purely structural (children leaf-ness) + flat detection, independent of
+     * the decode-side constant / fuse-leaves toggles.  Leaves emit nothing
+     * (the encoder returns immediately at a leaf). */
+    if (meta.mode === 'encode') {
+        const isLeafE = (n) => n && n.symbol >= 0;
+        (function ewalk(n) {
+            if (!n) return;
+            n._primitive = null;
+            n._isConstantLeaf = false;
+            if (isLeafE(n)) return;
+            if (meta.showFlat && n.flatD) {        /* flat subtree -> pack N·D bits */
+                n._primitive = 'PK' + n.flatD;     /* prim_enc_pack_dN */
+                return;                            /* descendants absorbed */
+            }
+            if (meta.showFlat && n.inFlat) { ewalk(n.left); ewalk(n.right); return; }
+            const ll = isLeafE(n.left), rl = isLeafE(n.right);
+            if (ll && rl)       n._primitive = 'EPN';   /* BOTH_LEAVES: bitmap only   */
+            else if (ll && !rl) n._primitive = 'EPR';   /* HALF_RIGHT: emit right side */
+            else if (!ll && rl) n._primitive = 'EPL';   /* HALF_LEFT:  emit left side  */
+            else                n._primitive = 'EPF';   /* INTERNAL_FULL: both sides   */
+            ewalk(n.left); ewalk(n.right);
+        })(root);
+        return;
+    }
+
+    const tdMode = meta.mode !== 'bottom-up';
+
+    function isLeaf(n) { return n && n.symbol >= 0; }
+
+    /* Two "constant" models depending on mode:
+     *
+     *   TD: there's exactly ONE constant — the single globally-most-
+     *       frequent leaf.  Memset replaces its scatter; only its
+     *       direct parent uses PH/PRH.  This is the only place TD can
+     *       cheaply skip a scatter loop, so we don't proliferate.
+     *
+     *   BU: any leaf paired with a subtree sibling is a constant —
+     *       the merge uses merge_cst_vec / merge_vec_cst, with the
+     *       leaf-side broadcast as a scalar.  Multiple such leaves can
+     *       coexist independently; every leaf-vs-subtree internal
+     *       gets MCV/MVC.  Both-leaf parents don't qualify (neither side is
+     *       "the constant against a subtree"); those fall to
+     *       fuse-leaves S2 or plain MVV.
+     */
+    let tdConstantLeaf = null;
+    if (meta.constantDetect && tdMode) {
+        let best = null;
+        (function pick(n) {
+            if (!n) return;
+            if (isLeaf(n)) {
+                if (!best || n.freq > best.freq) best = n;
+                return;
+            }
+            pick(n.left); pick(n.right);
+        })(root);
+        tdConstantLeaf = best;
+    }
+    /* BU constant: always fires, independent of the constant toggle.
+     * The bcast variants (merge_cst_vec / merge_vec_cst) ARE BU's
+     * merge primitive when a leaf is paired with a subtree — there
+     * is no "non-bcast" alternative path in the real decoder, so the
+     * visualisation labels these MCV (left=cst) or MVC (right=cst). */
+    function isBuConstantLeaf(n, parent) {
+        if (tdMode) return false;
+        if (!parent || !isLeaf(n)) return false;
+        const sibling = (parent.left === n) ? parent.right : parent.left;
+        return !!sibling && !isLeaf(sibling);
+    }
+    function isConstantParent(n) {
+        if (tdMode) {
+            /* TD: gated on the constant toggle (memset-fast-path is
+             * the optimization being toggled). */
+            if (!meta.constantDetect) return false;
+            return tdConstantLeaf &&
+                (n.left === tdConstantLeaf || n.right === tdConstantLeaf);
+        }
+        /* BU: exactly one child is a leaf, the other a subtree.  Not
+         * gated on the toggle — MCV/MVC is intrinsic to BU. */
+        const L = n.left, R = n.right;
+        if (!L || !R) return false;
+        return isLeaf(L) !== isLeaf(R);
+    }
+
+    function walk(n, parent) {
+        if (!n) return;
+        n._primitive = null;
+        /* _isConstantLeaf drives the red border.  TD: the single
+         * tdConstantLeaf.  BU: every leaf whose sibling is a subtree. */
+        n._isConstantLeaf = isLeaf(n) && (tdMode
+            ? (n === tdConstantLeaf)
+            : isBuConstantLeaf(n, parent));
+
+        if (isLeaf(n)) {
+            /* Absorbed: inside a flat region. */
+            if (meta.showFlat && n.inFlat) return;
+            /* Absorbed by parent's S2 (fuse-leaves wins, both leaves
+             * disappear into S2). */
+            if (parent && meta.fuseLeaves &&
+                isLeaf(parent.left) && isLeaf(parent.right)) return;
+            /* BU: leaves have no per-leaf primitive (no scatter, no
+             * memset — the leaf value is just a scalar input to the
+             * parent's merge).  The constant marker survives via
+             * _isConstantLeaf for the red border.
+             * TD: leaves do scatter (S1) or memset (C for the
+             * single most-frequent leaf). */
+            if (!tdMode) return;
+            if (n === tdConstantLeaf) { n._primitive = 'C'; return; }
+            n._primitive = 'S1';
+            return;
+        }
+
+        /* Internal node. */
+        if (meta.showFlat && n.flatD) {
+            /* Flat-subtree primitive: same algorithmic core (read N·D
+             * bits, table-lookup leaf symbol) but the surrounding
+             * operation is different per mode:
+             *   TD: scatter N symbols to non-contiguous output indices → SF{D}
+             *   BU: write N symbols contiguously into a buffer that the
+             *       parent's merge will consume → MF{D}
+             */
+            n._primitive = (tdMode ? 'SF' : 'MF') + n.flatD;
+            /* Don't recurse — descendants are absorbed. */
+            return;
+        }
+        if (meta.showFlat && n.inFlat) {
+            walk(n.left, n); walk(n.right, n);
+            return;
+        }
+        if (meta.fuseLeaves && isLeaf(n.left) && isLeaf(n.right)) {
+            /* Fused both-leaves: TD scatter-two (S2), BU merge cst+cst (MCC).
+             * BU has no M1 because there are no per-leaf primitives in BU —
+             * leaves are just scalar inputs to the parent's merge. */
+            n._primitive = tdMode ? 'S2' : 'MCC';
+            /* Recurse so the two leaves get _primitive = null (absorbed). */
+            walk(n.left, n); walk(n.right, n);
+            return;
+        }
+        /* Internal node naming.
+         *   TD: P (full), PR (root), PH (half-partition near constant leaf).
+         *   BU: by operand shape — MVV (vec/vec), MCV (left=cst, right=vec),
+         *       MVC (left=vec, right=cst).  Mirrors the prim_merge_*_*
+         *       naming in the codec primitives. */
+        const isRoot = n.depth === 0;
+        if (tdMode) {
+            let p = 'P';
+            if (isRoot) p += 'R';                            /* PR for root */
+            if (isConstantParent(n)) p += 'H';               /* PH near constant leaf */
+            n._primitive = p;
+        } else {
+            const lLeaf = isLeaf(n.left), rLeaf = isLeaf(n.right);
+            if      (lLeaf && !rLeaf) n._primitive = 'MCV';  /* left  = cst, right = vec */
+            else if (!lLeaf && rLeaf) n._primitive = 'MVC';  /* left  = vec, right = cst */
+            else                      n._primitive = 'MVV';  /* both vec/vec */
+        }
+        walk(n.left, n); walk(n.right, n);
+    }
+    walk(root, null);
+}
+
+/* Collect all internal nodes into an array. */
+function collectInternals(root) {
+    const out = [];
+    function walk(n) {
+        if (!n || n.symbol >= 0) return;
+        out.push(n);
+        walk(n.left); walk(n.right);
+    }
+    walk(root);
+    return out;
+}
+
+/* Trace each source byte through the tree, returning an array of
+ * { sourceIdx, byte, char, code, codeLen } where code is the bit
+ * string of the leaf this byte routes to.  The code is the leaf's
+ * bitPrefix (already computed by the walkLeaves pass).
+ * Returns null if the trace can't be built (no text, or a byte that
+ * doesn't have a leaf in the current tree). */
+function buildSourceTrace(text, tree) {
+    if (!text) return null;
+    /* Build byte -> bitPrefix map by walking the tree once. */
+    const byteToBits = new Map();
+    (function walk(n) {
+        if (!n) return;
+        if (n.symbol >= 0) {
+            byteToBits.set(n.symbol, n.bitPrefix || '');
+            return;
+        }
+        walk(n.left); walk(n.right);
+    })(tree);
+    const bytes = new TextEncoder().encode(text);
+    const trace = [];
+    for (let i = 0; i < bytes.length; i++) {
+        const b = bytes[i];
+        const bits = byteToBits.get(b);
+        if (bits == null) return null;   /* tree doesn't cover this byte */
+        const ch = (b >= 32 && b <= 126) ? String.fromCharCode(b) : '·';
+        trace.push({
+            sourceIdx: i,
+            byte: b,
+            char: ch,
+            code: bits,
+            codeLen: bits.length,
+        });
+    }
+    return trace;
+}
+
+/* Attach to each internal node the "bitmap entering" it: an array of
+ * { sourceIdx, char, bitIdx, bit } describing the bits being routed
+ * at this node.  Leaves get bitmap = null.  Requires buildSourceTrace
+ * to have been called first; takes the returned trace as input. */
+function annotateBitmaps(root, trace, showFlat) {
+    function walk(node, positions, depth) {
+        if (!node) return;
+        node.bitmap = null;
+        node.bitmapD = 1;
+        if (node.symbol >= 0 || positions.length === 0) return;
+        /* Flat subtree root (D>=2): one D-bit group per element (the
+         * in-subtree local code), not a 1-bit partition -- this is the
+         * N*D packed region the wire actually carries.  Stop here; the
+         * flat leaves are absorbed (no per-node bitmaps below). */
+        if (showFlat && node.flatD >= 2) {
+            const D = node.flatD;
+            node.bitmap = positions.map(p => ({
+                sourceIdx: p.sourceIdx,
+                char: p.char,
+                bitIdx: depth,
+                code: (p.code || '').slice(depth, depth + D),
+            }));
+            node.bitmapD = D;
+            return;
+        }
+        const entries = [], left = [], right = [];
+        for (const p of positions) {
+            const bit = p.code[depth];
+            if (bit == null) continue;   /* defensive — shouldn't happen */
+            entries.push({
+                sourceIdx: p.sourceIdx,
+                char: p.char,
+                bitIdx: depth,
+                bit: bit,
+            });
+            if (bit === '0') left.push(p);
+            else            right.push(p);
+        }
+        node.bitmap = entries;
+        walk(node.left,  left,  depth + 1);
+        walk(node.right, right, depth + 1);
+    }
+    walk(root, trace || [], 0);
+}
+
+// ============================================================
+//  Rendering
+// ============================================================
+
+/* Color scale: green at p=0.5 (balanced), red by p<=0.25 or p>=0.75.
+ * Most internal nodes (non-root, non-leaf) won't exceed 75% skew so
+ * the scale stays informative. */
+const skewColor = p => {
+    if (p == null) return '#999';
+    const skew = Math.abs(p - 0.5);   // 0 (balanced) .. 0.5 (one-sided)
+    const norm = Math.min(1, skew / 0.25);   // 0 at 50/50, 1 at 75/25+
+    const hue = 120 * (1 - norm);   // 120 (green) .. 0 (red)
+    return `hsl(${hue}, 70%, 45%)`;
+};
+
+const tooltipEl = document.getElementById('tooltip');
+
+function showTooltip(html, evt) {
+    tooltipEl.innerHTML = html;
+    tooltipEl.classList.add('visible');
+    const rect = tooltipEl.getBoundingClientRect();
+    const pad = 14;
+    let x = evt.clientX + pad;
+    let y = evt.clientY + pad;
+    if (x + rect.width > window.innerWidth - 8)
+        x = evt.clientX - rect.width - pad;
+    if (y + rect.height > window.innerHeight - 8)
+        y = evt.clientY - rect.height - pad;
+    tooltipEl.style.left = x + 'px';
+    tooltipEl.style.top  = y + 'px';
+}
+function hideTooltip() { tooltipEl.classList.remove('visible'); }
+
+/* Printable ASCII (and SVG-safe) -> the character itself.  Everything else
+ * (including the SVG-unsafe printables `"<>&`) -> "xNN" with upper-case hex.
+ * Callers can detect the hex form by checking `out.length === 3` since no
+ * printable result is ever 3 characters long. */
+function fmtChar(b) {
+    if (b >= 32 && b <= 126) {
+        const c = String.fromCharCode(b);
+        if (c === '"' || c === '<' || c === '>' || c === '&') {
+            return 'x' + b.toString(16).padStart(2, '0').toUpperCase();
+        }
+        return c;
+    }
+    return 'x' + b.toString(16).padStart(2, '0').toUpperCase();
+}
+function isHexLeafLabel(s) { return s.length === 3 && s.charAt(0) === 'x'; }
+
+function nodeTooltipHtml(n, totalN) {
+    if (n.symbol >= 0) {
+        const pct = (100 * n.freq / totalN).toFixed(2);
+        const ch = fmtChar(n.symbol);
+        /* For a leaf, "ops-byte (weighted)" is just opsToLeaf since
+         * there's only one symbol in this subtree.  Still showing it
+         * for consistency. */
+        return `leaf  sym=${n.symbol} '${ch}'  0x${n.symbol.toString(16).padStart(2, '0')}\n` +
+               `depth=${n.depth}\n` +
+               `freq=${n.freq}  (${pct}% of source)\n` +
+               `code=${n.code != null ? n.code.toString(2).padStart(n.codeLen, '0') : '?'}\n` +
+               `ops to decode  : ${n.opsToLeaf}\n` +
+               `ops/byte (wgt) : ${n.opsToLeaf}.000  (single leaf)`;
+    }
+    const sharePct = (100 * n.subtreeCount / totalN).toFixed(2);
+    const pL = (100 * n.pLeft).toFixed(1);
+    const pR = (100 * (1 - n.pLeft)).toFixed(1);
+    const Hb = n.bitEntropy.toFixed(3);
+    const savedTotal = n.bitsSavedTotal.toFixed(0);
+    const savedPerByte = (n.bitsSavedTotal / totalN).toFixed(4);
+    const prefix = n.prefix || '(root)';
+    const savedPerTok = n.subtreeCount > 0
+        ? (n.bitsSavedTotal / n.subtreeCount).toFixed(3) : '0.000';
+    const opsAvg = (n.opsAvgSubtree || 0).toFixed(2);
+    const opsW   = (n.opsWeightedSubtree || 0).toFixed(3);
+    let s = `internal  depth=${n.depth}\n` +
+            `prefix    : '${prefix}'  (len=${n.depth})\n` +
+            `H-prefix  : ${n.entropyPrefix.toFixed(3)} bits  (Σ H over ancestors)\n` +
+            `subtree n : ${n.subtreeCount}  (${sharePct}% of source)\n` +
+            `leaves    : ${n.numLeaves}\n` +
+            `left  : ${n.leftCount.toString().padStart(7)}  (${pL}%)\n` +
+            `right : ${n.rightCount.toString().padStart(7)}  (${pR}%)\n` +
+            `H(p)  : ${Hb} bits\n` +
+            `bits saved : ${savedTotal} bits total\n` +
+            `             ${savedPerByte} per source byte\n` +
+            `             ${savedPerTok} per token passing here\n` +
+            `subtree ops to decode (avg / leaf)   : ${opsAvg}\n` +
+            `subtree ops/byte (freq-weighted)     : ${opsW}`;
+    if (n.flatD) {
+        s += `\n** flat-subtree root, D=${n.flatD}  (click to unflatten) **`;
+    } else if (n.flatCandidate) {
+        s += `\n** unflattened (natural D=${n.naturalFlatD}, click to re-flatten) **`;
+    } else if (n.inFlat) {
+        s += `\n   (inside a flat subtree)`;
+    }
+    return s;
+}
+
+let svg, gWorld, zoom, currentTree, currentMeta;
+let currentCodes = null, currentRawTree = null;
+let _nodeById = new Map();
+/* Per-flat-subtree-root *analysis* override.  An "unflatten" entry
+ * means "treat this node as a regular internal node, not a flat
+ * region, in detectFlatSubtrees and all downstream stats".  When a
+ * node is unflattened, its descendants may themselves become new
+ * (smaller) flat-roots if they satisfy D≥2.
+ *
+ * This is conceptually different from the visual "condense" toggle:
+ *   - unflatten = "don't treat as flat for analysis" (affects
+ *     stats: ops/leaf, tree-level Σ H, bits-saved, etc.)
+ *   - condense  = "draw flat regions as one box instead of full
+ *     subtree" (visual only, doesn't change stats)
+ *
+ * Cleared on dataset / toggle changes. */
+let _flatOverride = new Map();
+
+function initSvg() {
+    svg = d3.select('#tree-svg');
+    svg.selectAll('*').remove();
+    gWorld = svg.append('g');
+    zoom = d3.zoom()
+        .scaleExtent([0.1, 10])
+        .on('zoom', e => gWorld.attr('transform', e.transform));
+    svg.call(zoom).on('dblclick.zoom', null);
+}
+
+function renderTree(rootNode, meta) {
+    currentTree = rootNode;
+    currentMeta = meta;
+    /* Index nodes by id for table-hover lookups. */
+    _nodeById.clear();
+    function indexAll(n) {
+        if (!n) return;
+        _nodeById.set(n.id, n);
+        if (n.symbol < 0) { indexAll(n.left); indexAll(n.right); }
+    }
+    indexAll(rootNode);
+
+    /* View mode dispatch — `pivot` is a fundamentally different figure
+     * (no tree drawing; per-node bitmaps laid out as a wavelet-tree-
+     * style pivot table). */
+    if (meta.viewMode === 'pivot') {
+        renderPivot(rootNode, meta);
+        return;
+    }
+
+    const pane = document.getElementById('tree-pane');
+    const W = pane.clientWidth;
+    const H = pane.clientHeight;
+    svg.attr('viewBox', `0 0 ${W} ${H}`);
+
+    /* If a flat-root is folded (per the global "condense" toggle,
+     * possibly overridden by user clicks via _flatOverride), the
+     * hierarchy stops there — its descendants become "virtual
+     * leaves" replaced by a condensed-info box. */
+    const condenseDefault = !!meta.condenseFlat;
+    function isFoldedNode(n) {
+        if (!n.flatD) return false;
+        const explicit = _flatOverride.get(n.id);
+        if (explicit !== undefined) return explicit;
+        return condenseDefault;
+    }
+    /* Clear stale per-node _condensed tags before re-deriving. */
+    function clearCondensed(n) {
+        if (!n) return;
+        n._condensed = false;
+        if (n.symbol < 0) { clearCondensed(n.left); clearCondensed(n.right); }
+    }
+    clearCondensed(rootNode);
+
+    const root = d3.hierarchy(rootNode, n => {
+        if (n.symbol >= 0) return null;
+        if (isFoldedNode(n)) {
+            n._condensed = true;
+            return null;
+        }
+        const ch = [];
+        if (n.left) ch.push(n.left);
+        if (n.right) ch.push(n.right);
+        return ch.length ? ch : null;
+    });
+    /* For the "any folded somewhere?" check below. */
+    const condense = root.descendants().some(n => n.data._condensed);
+
+    // Compute max depth to size the tree.
+    let maxDepth = 0;
+    root.each(n => { if (n.depth > maxDepth) maxDepth = n.depth; });
+
+    /* Each visible "leaf slot" in d3's layout is one unit wide.
+     * Condensed nodes (pruned flat subtrees) render as a wider info
+     * box ("D=N, M leaves" + count line); the layout has to reserve
+     * that width via the separation function below or the boxes
+     * overlap each other.  CONDENSED_SLOTS is derived from slotSize
+     * so the box always fits — a static 3 worked for noOverlap +
+     * detailed (32 px slots → 90 px reservation) but underflowed for
+     * noOverlap + compact (14 px slots → 42 px reservation, ~28 px
+     * narrower than the 70-px box minimum) → heavy overlap. */
+    const detailed = !!meta.showLeafDetails;
+    const SLOT_MIN = detailed ? 12 : 6;
+    const SLOT_MAX = detailed ? 36 : 18;
+    const NO_OVERLAP_SLOT_W = detailed ? 32 : 14;
+    /* Condensed-box rendered dimensions (must match the rect drawn
+     * below).  COND_GAP keeps a small visual breathing room between
+     * adjacent boxes. */
+    const COND_BOX_MIN_W = 70;
+    const COND_GAP       = 6;
+
+    const leaves = root.leaves();
+    const condensedLeafCount = leaves.filter(n => n.data._condensed).length;
+    const realLeafCount = leaves.length - condensedLeafCount;
+
+    /* Pick slotSize first (independent of CONDENSED_SLOTS in
+     * noOverlap mode; for the dynamic Reingold-Tilford layout we
+     * estimate against the raw leaf count — under-counts space when
+     * many subtrees are condensed, but every non-degenerate case
+     * fits). */
+    const slotSize = meta.noOverlap
+        ? NO_OVERLAP_SLOT_W
+        : Math.max(SLOT_MIN,
+                   Math.min(SLOT_MAX,
+                            (W - 60) / Math.max(1, leaves.length)));
+    /* Derive CONDENSED_SLOTS so reservation >= rendered box + gap.
+     * Bottom-clamped at 3 to preserve the historical reservation
+     * when slotSize is large enough that 3 already fits. */
+    const CONDENSED_SLOTS = Math.max(
+        3, Math.ceil((COND_BOX_MIN_W + COND_GAP) / slotSize));
+    const effectiveSlots =
+        realLeafCount + condensedLeafCount * CONDENSED_SLOTS;
+    /* Backwards-compat name used below for sizing leaf rects + skew bars. */
+    const leafSize = slotSize;
+    /* Per-level vertical spacing: 60 px is right when leaves are
+     * boxes (need room for char + hex + skew bar above the parent
+     * circle).  Halve it when leaves are tiny circles so deep trees
+     * fit. */
+    /* When "show bitmaps" is on, each internal node gets a 2-row
+     * bitmap glyph above it that needs ~32 px of vertical room; bump
+     * the per-level spacing so the bitmap doesn't crowd the parent
+     * link or the child node. */
+    const levelH = meta.showBitmaps
+        ? (detailed ? 72 : 56)
+        : (detailed ? 60 : 30);
+    const treeH = Math.max(120, levelH * (maxDepth + 1));
+
+    /* In "no overlap" mode use d3.cluster so every leaf gets its own
+     * exclusive x-column (positions are i * slotSize for i = leaf
+     * rank in DFS order), independent of subtree depth.  Default mode
+     * stays on d3.tree (Reingold-Tilford), which compacts deeper
+     * neighbouring subtrees and can let their leaves share x-ranges
+     * — the source of the overlap the user reported.  After cluster
+     * runs we override y to depth-based positioning: cluster pins
+     * every leaf to the bottom row, but we want nodes at their actual
+     * tree depth (same y-policy as d3.tree). */
+    const layout = (meta.noOverlap ? d3.cluster() : d3.tree())
+        .size([effectiveSlots * slotSize, treeH])
+        .separation((a, b) => {
+            const aw = (a.data && a.data._condensed) ? CONDENSED_SLOTS : 1;
+            const bw = (b.data && b.data._condensed) ? CONDENSED_SLOTS : 1;
+            return (aw + bw) / 2;
+        });
+    layout(root);
+    if (meta.noOverlap) {
+        root.each(n => { n.y = n.depth * levelH; });
+    }
+
+    // Shift root to origin then add padding so it fits.
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    root.each(n => {
+        if (n.x < minX) minX = n.x;
+        if (n.x > maxX) maxX = n.x;
+        if (n.y < minY) minY = n.y;
+        if (n.y > maxY) maxY = n.y;
+    });
+    const padX = 30, padY = 30;
+    root.each(n => { n.x -= minX - padX; n.y -= minY - padY; });
+
+    const totalN = meta.totalN;
+
+    gWorld.selectAll('*').remove();
+
+    // Links (straight node-to-node segments, so the flow arrowheads
+    // below land exactly on the line).
+    const linkGen = d => `M${d.source.x},${d.source.y}L${d.target.x},${d.target.y}`;
+    /* A "fork root" renders its leaves with a fork (vertical stub from
+     * each leaf to a horizontal bar, one line from the bar to the root)
+     * instead of individual parent->leaf links: flat subtrees (D>=2) and
+     * sibling pairs (D=1).  Mirrors reality -- one flat region / one merge,
+     * not a chain of partitions. */
+    const isForkRoot = (nd) => {
+        const d = nd.data;
+        if (d.symbol >= 0 || d._condensed) return false;
+        if (meta.showFlat && d.flatD >= 2) return true;          /* D>=2 flat */
+        if (!(meta.showFlat || meta.fuseLeaves)) return false;
+        if (meta.showFlat && d.inFlat) return false;
+        return d.left && d.right && d.left.symbol >= 0 && d.right.symbol >= 0; /* D=1 pair */
+    };
+    /* A flat region = the flat root plus its internal descendants (which
+     * we leave in the layout, so the leaves keep their natural Huffman
+     * depth, but don't draw).  Their links are replaced by the fork. */
+    const inFlatRegion = nd =>
+        meta.showFlat && (nd.data.flatD >= 2 || nd.data.inFlat);
+    gWorld.selectAll('path.link')
+        .data(root.links().filter(l =>
+            !inFlatRegion(l.source) && !isForkRoot(l.source)))
+        .enter().append('path')
+            .attr('class', 'link')
+            .attr('d', linkGen);
+    /* Fork: a trunk from the flat/pair root down to a bar near the leaves,
+     * then a stub to each leaf.  Leaves stay at their natural depth (D
+     * levels down) so the flat box's height grows with D -- deep flat
+     * regions read as tall boxes. */
+    root.descendants().filter(isForkRoot).forEach(fr => {
+        const kids = fr.leaves();
+        if (!kids.length) return;
+        const leafY = Math.max(...kids.map(c => c.y));
+        const barY  = (fr.y + leafY) / 2;   /* midway between root and leaves */
+        const xs = kids.map(c => c.x);
+        const x0 = Math.min(...xs), x1 = Math.max(...xs);
+        const fg = gWorld.append('g').attr('class', 'fork');
+        const seg = dpath => fg.append('path').attr('class', 'link').attr('d', dpath);
+        seg(`M${fr.x},${fr.y}L${fr.x},${barY}`);              /* trunk root -> bar */
+        if (x1 > x0) seg(`M${x0},${barY}L${x1},${barY}`);     /* bar */
+        kids.forEach(c => seg(`M${c.x},${barY}L${c.x},${c.y}`)); /* bar -> each leaf */
+    });
+
+    // Flow arrows: a small arrowhead at each edge midpoint, pointing the
+    // way the chosen decode mode flows -- top-down = parent->child (down),
+    // bottom-up = child->parent (up).
+    const flowTD = meta.mode !== 'bottom-up';
+    // Skip arrows whose destination node sits inside a box -- flat (D>=2,
+    // inFlat/flatD) OR pair (D=1, an internal whose two children are both
+    // leaves) -- so no arrowtip lands inside a colored rectangle.
+    const boxesOn = (meta.showFlat || meta.fuseLeaves);
+    const isPairRoot = nd => {
+        const d = nd.data;
+        if (d.symbol >= 0) return false;
+        if (meta.showFlat && (d.flatD || d.inFlat)) return false;
+        if (!d.left || !d.right) return false;
+        return d.left.symbol >= 0 && d.right.symbol >= 0;
+    };
+    const inBox = nd =>
+        (meta.showFlat && (nd.data.flatD || nd.data.inFlat)) ||
+        isPairRoot(nd) || (nd.parent && isPairRoot(nd.parent));
+    // Keep the edge that *enters* a box (its arrow points at the S2/SFx
+    // box-root); drop only edges internal to a box -- i.e. those whose
+    // parent-side node is itself in the box.  (d.source is always the
+    // parent in a d3 link, regardless of flow direction.)
+    const flowLinks = root.links().filter(d => {
+        if (!boxesOn) return true;
+        return !inBox(d.source);
+    });
+    gWorld.selectAll('path.flow-arrow')
+        .data(flowLinks)
+        .enter().append('path')
+            .attr('class', 'flow-arrow')
+            .attr('d', 'M-4.5,-3.2 L0,0 L-4.5,3.2 Z')   // triangle, tip at origin (+x)
+            .attr('fill', '#888')
+            .attr('pointer-events', 'none')
+            .attr('transform', d => {
+                // Arrowtip at the destination node (child for top-down,
+                // parent for bottom-up), pulled back by that node's actual
+                // half-extent + a small gap so the tip rests on its edge
+                // rather than inside its glyph.
+                const dest = flowTD ? d.target : d.source;
+                const src  = flowTD ? d.source : d.target;
+                const dx = dest.x - src.x, dy = dest.y - src.y;
+                const L = Math.hypot(dx, dy) || 1;
+                let half;
+                if (dest.data.symbol >= 0)      // leaf
+                    half = meta.showLeafDetails ? 10 : 4.5;
+                else                            // internal node (r 4-6)
+                    half = 6.5;
+                const back = half + 2;
+                const px = dest.x - dx / L * back;
+                const py = dest.y - dy / L * back;
+                const a = Math.atan2(dy, dx) * 180 / Math.PI;  // point at dest
+                return `translate(${px},${py}) rotate(${a})`;
+            });
+    // Nodes/boxes are appended later in this render, so raise the arrows
+    // to the top once the synchronous render finishes -- otherwise the
+    // node circles paint over the arrowtips.
+    setTimeout(() => gWorld.selectAll('path.flow-arrow').raise(), 0);
+
+    // Optional 0/1 labels on each branch (off by default).  Decide
+    // bit from target's bitPrefix last char (cheaper than re-walking).
+    if (meta.showBranchBits) {
+        gWorld.selectAll('text.branch-bit')
+            .data(root.links())
+            .enter().append('text')
+                .attr('class', 'branch-bit')
+                .attr('x', d => (d.source.x + d.target.x) / 2)
+                .attr('y', d => (d.source.y + d.target.y) / 2)
+                .attr('dx', d => (d.target.x < d.source.x ? -5 : 5))
+                .attr('text-anchor', 'middle')
+                .attr('font-family', 'monospace')
+                .attr('font-size', '10px')
+                .attr('fill', '#444')
+                .attr('pointer-events', 'none')
+                .text(d => {
+                    const p = d.target.data.bitPrefix;
+                    return p && p.length > 0 ? p[p.length - 1] : '';
+                });
+    }
+
+    /* Flat-subtree boxes (D >= 2, dashed orange) and pair boxes
+     * (D = 1, two sibling leaves; lighter gray).  Drawn before nodes
+     * so nodes overlay them.  Skipped when "condense" is on because
+     * we draw the condensed-info box instead.
+     *
+     * Visibility rules:
+     *   - flat-roots and "D=1" labels: show-flat only.
+     *   - pair-boxes (the subtle box around two-leaf siblings):
+     *     show-flat OR fuse-leaves.  Fuse-leaves IS the optimization
+     *     that handles these pairs (S2), so it makes sense for the
+     *     visual cue to follow either toggle.
+     */
+    if ((meta.showFlat || meta.fuseLeaves) && !condense) {
+        const flatRoots = meta.showFlat
+            ? root.descendants().filter(n => n.data.flatD)
+            : [];
+        // Find D=1 "pair" internal nodes: both children are leaves,
+        // and this node is NOT inside a flat subtree (those are
+        // already covered by the dashed-orange box).
+        const pairRoots = root.descendants().filter(n => {
+            const d = n.data;
+            if (d.symbol >= 0) return false;          // leaf
+            if (meta.showFlat && d.flatD) return false;
+            if (meta.showFlat && d.inFlat) return false;
+            if (!d.left || !d.right) return false;
+            return d.left.symbol >= 0 && d.right.symbol >= 0;
+        });
+
+        // Subtle green fill, scaled by D: D=1 → 5% opacity (almost
+         // transparent, just a hint), D=8 → 30% opacity (clearly
+         // visible).  Linear between.  Mirrors the depth-coding in
+         // extras/figures/tree-*.svg.
+        function fillOpacityForD(D) {
+            const clamped = Math.max(1, Math.min(8, D));
+            return 0.05 + (clamped - 1) * (0.25 - 0.05) / 7.0;
+        }
+
+        function drawBox(cls, n, marginX, marginY, rx, D) {
+            let bx0 = Infinity, bx1 = -Infinity,
+                by0 = Infinity, by1 = -Infinity;
+            n.descendants().forEach(d => {
+                if (d.x < bx0) bx0 = d.x;
+                if (d.x > bx1) bx1 = d.x;
+                if (d.y < by0) by0 = d.y;
+                if (d.y > by1) by1 = d.y;
+            });
+            return gWorld.append('rect')
+                .attr('class', cls)
+                .attr('x', bx0 - marginX).attr('y', by0 - marginY)
+                .attr('width',  bx1 - bx0 + 2 * marginX)
+                .attr('height', by1 - by0 + 2 * marginY)
+                .attr('rx', rx)
+                .attr('fill-opacity', fillOpacityForD(D));
+        }
+
+        // D label goes UNDER the leaves so it's clearly attached
+        // to the subtree, not floating near the parent.
+        function placeDLabel(n, cls, text) {
+            let by1 = -Infinity, mx0 = Infinity, mx1 = -Infinity;
+            n.descendants().forEach(d => {
+                if (d.y > by1) by1 = d.y;
+                if (d.x < mx0) mx0 = d.x;
+                if (d.x > mx1) mx1 = d.x;
+            });
+            gWorld.append('text')
+                .attr('class', cls)
+                .attr('x', (mx0 + mx1) / 2)
+                .attr('y', by1 + 22)
+                .attr('text-anchor', 'middle')
+                .text(text);
+        }
+
+        // Pair boxes first (drawn behind flat boxes for layering).
+        // "D=1" label only when flat-subtree analysis is on; with
+        // just fuse-leaves we draw the box but omit the label since
+        // D-numbering is a flat-subtree concept, not an S2 concept.
+        pairRoots.forEach(n => {
+            drawBox('pair-box', n, 6, 6, 3, 1);
+            if (meta.showFlat) placeDLabel(n, 'pair-label', 'D=1');
+        });
+
+        // Flat-subtree boxes (D >= 2)
+        flatRoots.forEach(n => {
+            drawBox('flat-box', n, 8, 8, 4, n.data.flatD);
+            placeDLabel(n, 'flat-label', `D=${n.data.flatD}`);
+        });
+    }
+
+    /* When condensing, draw a single info box for each flat root
+     * in place of its subtree.  Drawn after the flat boxes so it
+     * overlays on top, but before nodes/edges so the box surrounds
+     * the placeholder node visually. */
+    if (condense) {
+        const condensedNodes = root.descendants().filter(n => n.data._condensed);
+        const totalN = meta.totalN;
+        /* Match the layout: each condensed node has CONDENSED_SLOTS
+         * leaf-slots of width reserved, so make the box just shy of
+         * that to leave a small visual gap. */
+        const BOX_W = Math.max(70, slotSize * CONDENSED_SLOTS - 6);
+        const BOX_H = 38;
+        const condG = gWorld.selectAll('g.condensed-flat')
+            .data(condensedNodes)
+            .enter().append('g')
+                .attr('class', 'condensed-flat')
+                .attr('data-node-id', d => d.data.id)
+                .attr('transform', d => `translate(${d.x},${d.y + 28})`)
+                .style('cursor', meta.showSplitting ? 'pointer' : 'default')
+                .on('mousemove', (e, d) => showTooltip(nodeTooltipHtml(d.data, totalN), e))
+                .on('mouseleave', hideTooltip);
+        if (meta.showSplitting) {
+            condG.on('click', (e, d) => {
+                e.stopPropagation();
+                toggleFlatten(d.data.id);
+            });
+        }
+        condG.append('rect')
+            .attr('x', -BOX_W / 2).attr('y', -BOX_H / 2)
+            .attr('width', BOX_W).attr('height', BOX_H)
+            .attr('rx', 5)
+            .attr('fill', '#22c55e')
+            .attr('fill-opacity', d => 0.05 + (Math.min(8, d.data.flatD) - 1) * (0.25 - 0.05) / 7.0)
+            .attr('stroke', '#d97706')
+            .attr('stroke-dasharray', '3 2')
+            .attr('stroke-width', 1.5);
+        condG.append('text')
+            .attr('y', -4)
+            .attr('text-anchor', 'middle')
+            .style('font', '11px monospace')
+            .style('font-weight', 600)
+            .style('fill', '#b45309')
+            .text(d => `D=${d.data.flatD}, ${d.data.numLeaves} leaves`);
+        condG.append('text')
+            .attr('y', 11)
+            .attr('text-anchor', 'middle')
+            .style('font', '10px monospace')
+            .style('fill', '#444')
+            .text(d => {
+                const pct = (100 * d.data.subtreeCount / totalN).toFixed(1);
+                return `${d.data.subtreeCount} sym  ${pct}%`;
+            });
+    }
+
+    // Internal nodes: circle + skew bar (skip condensed ones — they're
+    // drawn as a single info box instead).
+    const internalNodes = root.descendants().filter(n =>
+        n.data.symbol < 0 && !n.data._condensed
+        && !(meta.showFlat && n.data.inFlat));
+    const intG = gWorld.selectAll('g.node-internal')
+        .data(internalNodes)
+        .enter().append('g')
+            .attr('class', 'node-internal')
+            .attr('data-node-id', d => d.data.id)
+            .attr('transform', d => `translate(${d.x},${d.y})`)
+            .on('mousemove', (e, d) => showTooltip(nodeTooltipHtml(d.data, totalN), e))
+            .on('mouseleave', hideTooltip);
+
+    /* "Flattenable" = the subtree at this node is D≥2 flat, so it's
+     * clickable (toggles flatten/unflatten).  Includes both nodes
+     * currently treated as flat-roots AND nodes currently
+     * unflattened-via-override (so the user can re-flatten).
+     * Visually: thick stroke for flattenable nodes (filled green
+     * if currently treated as flat).
+     *
+     * Gated by meta.showFlat AND meta.showSplitting: showFlat=off
+     * makes flattenable status meaningless (every internal node is a
+     * plain circle); showSplitting=off disables the interactive
+     * affordance entirely (no thick stroke, no pointer cursor, no
+     * click handler) while leaving the green flat-indicator fill
+     * driven by showFlat. */
+    const flatActive = (d) =>
+        meta.showFlat && meta.showSplitting && d.data.flatCandidate;
+    intG.append('circle')
+        .attr('r', d => flatActive(d) ? 6 : 4)
+        .style('stroke-width', d => flatActive(d) ? '2.5px' : '1px')
+        .style('fill', d =>
+            (meta.showFlat && meta.showSplitting && d.data.flatD)
+                ? '#bbf7d0' : '#fff')
+        .style('cursor', d => flatActive(d) ? 'pointer' : 'default');
+    intG.filter(flatActive)
+        .on('click', (e, d) => {
+            e.stopPropagation();
+            toggleFlatten(d.data.id);
+        });
+
+    /* Optional internal-node bit-prefix label (off by default).
+     * Placed above the circle / above the skew bar if it's shown. */
+    if (meta.showBitPrefix) {
+        intG.append('text')
+            .attr('class', 'bit-prefix')
+            .attr('y', meta.showSkew ? -26 : -10)
+            .attr('text-anchor', 'middle')
+            .attr('font-family', 'monospace')
+            .attr('font-size', '9px')
+            .attr('fill', '#1a3d80')
+            .attr('pointer-events', 'none')
+            .text(d => d.data.bitPrefix || '∅');
+    }
+
+    // Skew indicator.  Outer frame is white with a skew-colored
+    // border.  Inside we fill the HEAVY side of the split (the
+    // child that took the bigger share) with the skew color; the
+    // light side stays white.  The black tick sits at the split
+    // boundary (= p_left · BAR_W from the left edge).  So a heavy
+    // right child shows up as a wide colored bar on the right of
+    // the tick, light side empty on the left — and vice versa.
+    // Gated by meta.showSkew so users can collapse busy trees.
+    const BAR_W = Math.max(28, leafSize * 1.0);
+    const BAR_H = 7;
+    const BAR_Y = -16;
+    if (meta.showSkew) {
+    intG.append('rect')
+        .attr('x', -BAR_W / 2).attr('y', BAR_Y)
+        .attr('width', BAR_W).attr('height', BAR_H)
+        .attr('fill', '#fff')
+        .attr('stroke', d => skewColor(d.data.pLeft))
+        .attr('stroke-width', 1.5);
+    // Heavy-side fill.  When p_left ≥ 0.5 we paint the left half of
+    // the bar (edge → tick); when p_left < 0.5 we paint the right
+    // half (tick → edge).  Fills the FULL inner height (no top/bottom
+    // gap) so that at any zoom level there's no white sliver that
+    // gets aliased.  Outer rect stroke supplies the frame.
+    intG.append('rect')
+        .attr('x', d => d.data.pLeft >= 0.5
+                            ? -BAR_W / 2
+                            : -BAR_W / 2 + BAR_W * d.data.pLeft)
+        .attr('y', BAR_Y)
+        .attr('width', d => BAR_W *
+            (d.data.pLeft >= 0.5 ? d.data.pLeft : 1 - d.data.pLeft))
+        .attr('height', BAR_H)
+        .attr('fill', d => skewColor(d.data.pLeft))
+        .attr('pointer-events', 'none');
+    // 50% midpoint tick (faint gray) — reference for "balanced".
+    intG.append('line')
+        .attr('x1', 0).attr('x2', 0)
+        .attr('y1', BAR_Y).attr('y2', BAR_Y + BAR_H)
+        .attr('stroke', '#aaa').attr('stroke-width', 0.6)
+        .attr('pointer-events', 'none');
+    // Black cutoff line at the actual split (end of the fill).
+    intG.append('line')
+        .attr('x1', d => -BAR_W / 2 + BAR_W * d.data.pLeft)
+        .attr('x2', d => -BAR_W / 2 + BAR_W * d.data.pLeft)
+        .attr('y1', BAR_Y - 1).attr('y2', BAR_Y + BAR_H + 1)
+        .attr('stroke', '#000').attr('stroke-width', 1.4)
+        .attr('pointer-events', 'none');
+    // Numeric labels to the RIGHT of the bar: left/right split % (top)
+    // and this subtree's share of all source tuples (bottom).  e.g.
+    // proba80 root -> "80/20" over "100%".
+    const LBL_X = BAR_W / 2 + 3;
+    intG.append('text')
+        .attr('x', LBL_X).attr('y', BAR_Y + 3)
+        .attr('text-anchor', 'start')
+        .attr('font-family', 'monospace').attr('font-size', '8.5px')
+        .attr('fill', '#333').attr('pointer-events', 'none')
+        .text(d => {
+            const L = d.data.pLeft * 100;
+            return `${L.toFixed(1)}/${(100 - L).toFixed(1)}`;
+        });
+    intG.append('text')
+        .attr('x', LBL_X).attr('y', BAR_Y + BAR_H + 4)
+        .attr('text-anchor', 'start')
+        .attr('font-family', 'monospace').attr('font-size', '8.5px')
+        .attr('fill', '#888').attr('pointer-events', 'none')
+        .text(d => {
+            const share = totalN > 0 ? 100 * d.data.subtreeCount / totalN : 0;
+            const txt = share >= 10 ? Math.round(share)
+                                    : Math.round(share * 10) / 10;
+            return `${txt}%`;
+        });
+    }  // end if (meta.showSkew)
+
+    // Leaves: full box (char + hex byte) when meta.showLeafDetails,
+    // otherwise tiny circle only.
+    const leafNodes = root.descendants().filter(n => n.data.symbol >= 0);
+    const lg = gWorld.selectAll('g.node-leaf')
+        .data(leafNodes)
+        .enter().append('g')
+            .attr('class', 'node-leaf')
+            .attr('transform', d => `translate(${d.x},${d.y})`)
+            .on('mousemove', (e, d) => showTooltip(nodeTooltipHtml(d.data, totalN), e))
+            .on('mouseleave', hideTooltip);
+    /* "Constant" leaves get a red border.  Set of constant leaves
+     * differs by mode:
+     *   TD: at most the one globally-most-frequent leaf (its
+     *       primitive is C; memset fast-path).
+     *   BU: every leaf whose sibling is a subtree (its parent uses
+     *       MCV/MVC and treats this leaf as the constant operand). */
+    const isConstantLeaf = d => d.data._isConstantLeaf;
+    if (meta.showLeafDetails) {
+        const W2 = leafSize - 2, H2 = 18;
+        lg.append('rect')
+            .attr('x', -W2 / 2).attr('y', -H2 / 2)
+            .attr('width', W2).attr('height', H2)
+            .attr('rx', 2)
+            .attr('fill', d => {
+                // Color leaf by frequency rank (just for visual variety).
+                const p = d.data.freq / totalN;
+                const lit = Math.min(95, 60 + 35 * (1 - Math.min(1, p * 10)));
+                return `hsl(220, 30%, ${lit}%)`;
+            })
+            .style('stroke', d => isConstantLeaf(d) ? '#dc2626' : null)
+            .style('stroke-width', d => isConstantLeaf(d) ? 2 : null);
+        /* Single line per leaf: either the printable char, or an "xNN"
+         * form for non-printables (and SVG-unsafe printables that we'd
+         * otherwise have to escape).  Hex form switches to monospace +
+         * non-bold so "x0A" reads as a tag, not as a regular glyph.
+         * Hex byte is also visible in the hover tooltip if needed. */
+        lg.append('text')
+            .attr('class', d => 'leaf-char' + (isHexLeafLabel(fmtChar(d.data.symbol)) ? ' leaf-char-hex' : ''))
+            .attr('y', 2)
+            .text(d => fmtChar(d.data.symbol));
+    } else {
+        lg.append('circle')
+            .attr('r', d => isConstantLeaf(d) ? 4 : 3)
+            .attr('fill', d => {
+                const p = d.data.freq / totalN;
+                const lit = Math.min(85, 50 + 30 * (1 - Math.min(1, p * 10)));
+                return `hsl(220, 40%, ${lit}%)`;
+            })
+            .attr('stroke', d => isConstantLeaf(d) ? '#dc2626' : '#666')
+            .attr('stroke-width', d => isConstantLeaf(d) ? 1.5 : 0.5);
+    }
+
+    /* Optional leaf-code label (off by default).  Placed below the
+     * leaf box / circle and rotated 90° so codes read top-down — keeps
+     * the horizontal slot width unaffected, which matters in dense
+     * trees where adjacent leaves are only a few px apart and even
+     * short codes would overlap horizontally.  bitPrefix is the path
+     * from root, which IS the canonical Huffman code for the leaf.
+     *
+     * Top-alignment trick: rotated text with text-anchor:start +
+     * dominant-baseline:text-before-edge puts the first character's
+     * top exactly at the translated y origin, so the code reads
+     * cleanly down from yOff without overlapping the leaf above. */
+    if (meta.showLeafCode) {
+        /* Render each bit on its own line via explicit <tspan> y
+         * positions — vastly more reliable than rotate(90) +
+         * dominant-baseline (baseline behaviour varies across
+         * browsers, especially for rotated text).  yOff places the
+         * first bit's baseline; subsequent bits step down by LINE_H. */
+        const yOff = meta.showLeafDetails ? 18 : 10;
+        const LINE_H = 9;
+        const codeText = lg.append('text')
+            .attr('class', 'leaf-code')
+            .attr('text-anchor', 'middle')
+            .attr('font-family', 'monospace')
+            .attr('font-size', '9px')
+            .attr('fill', '#1a3d80')
+            .attr('pointer-events', 'none');
+        codeText.each(function(d) {
+            const code = d.data.bitPrefix || '';
+            const sel = d3.select(this);
+            for (let i = 0; i < code.length; i++) {
+                sel.append('tspan')
+                    .attr('x', 0)
+                    .attr('y', yOff + i * LINE_H)
+                    .text(code[i]);
+            }
+        });
+    }
+
+    /* Primitive bubbles — small rounded rect with the abbreviated
+     * decode primitive (P / PH / DX / S2 / S1 / C / …) to the left of
+     * each node.  Skipped when the node's _primitive is null (absorbed
+     * by a parent-level primitive). */
+    if (meta.showPrimitives) {
+        /* Place each bubble in the UPPER-LEFT of its node so it doesn't
+         * overlap the leaf rect's char/hex text or the parent-link line
+         * dropping down to the internal node.  Anchor: bubble's lower-
+         * right corner sits just outside the node's upper-left. */
+        const drawBubble = function(d) {
+            const p = d.data._primitive;
+            if (!p) return;
+            const w = p.length * 6 + 6;
+            const h = 12;
+            /* Bubble center: (-w/2 - 4) px left of node, 12 px above. */
+            const cx = -w / 2 - 4;
+            const cy = -12;
+            const g = d3.select(this).append('g').attr('class', 'prim-bubble');
+            g.append('rect')
+                .attr('x', cx - w / 2)
+                .attr('y', cy - h / 2)
+                .attr('width', w)
+                .attr('height', h)
+                .attr('rx', 3);
+            g.append('text')
+                .attr('x', cx)
+                .attr('y', cy)
+                .text(p);
+        };
+        intG.each(drawBubble);
+        lg.each(drawBubble);
+    }
+
+    /* "show bitmaps" — per-node bitmaps above each internal node, and
+     * a 3-row source-trace strip on top of the tree.  Active only when
+     * we have a text source to trace.  letterColor maps each input
+     * character to a stable colour from a small palette. */
+    const bmActive    = !!(meta.showBitmaps && meta.sourceTrace);   /* per-node bitmaps */
+    const inputActive = !!(meta.inputBitmap && meta.sourceTrace);   /* top input strip */
+    const bmNeedsText = !!((meta.showBitmaps || meta.inputBitmap) && !meta.sourceTrace);
+    const letterColor = (bmActive || inputActive)
+        ? buildLetterColors(meta.sourceTrace) : null;
+    if (bmActive) {
+        intG.each(function(d) {
+            if (!d.data.bitmap || d.data.bitmap.length === 0) return;
+            renderNodeBitmap(d3.select(this), d.data.bitmap, letterColor, meta.bitmapLabel, d.data.bitmapD);
+        });
+    }
+
+    /* Top overlay: source strip (if showBitmaps + text), title, labels.
+     * Placed in gWorld at positions relative to the tree's bounding
+     * box so the SVG export captures them.  Stack from tree upward:
+     * strip nearest the tree, then title at the top.  Labels live
+     * separately — at the root's vertical level, off to its right —
+     * so they sit alongside the tree rather than crowding the title /
+     * source-strip column. */
+    {
+        const treeBBox = gWorld.node().getBBox();
+        const hasTitle  = !!(meta.titleText && meta.titleText.length);
+        const labelKeys = meta.showLabels
+            ? meta.showLabels.split(',').map(s => s.trim()).filter(Boolean)
+            : [];
+        const hasLabels = labelKeys.length > 0 && meta.stats;
+        const hasStrip  = inputActive && meta.sourceTrace.length > 0;
+        const labelLineH = 14;
+        const gapToTree  = hasStrip ? 22 : 8;   /* more breathing room
+                                                  when strip is shown */
+        const gapBetween = 10;
+        const titleH     = 18;
+        const stripH     = 36;  /* 3 rows × ~12 px */
+
+        /* Stack source-strip + title upward from the tree top. */
+        let bottomY = treeBBox.y - gapToTree;
+
+        if (hasStrip) {
+            const stripBottomY = bottomY;
+            renderSourceStrip(treeBBox, meta.sourceTrace,
+                               letterColor, stripBottomY);
+            /* Horizontal separator between the strip's index row and
+             * the root bitmap — spans the full tree width so the
+             * "source side" and "decode side" of the figure read as
+             * two stacked panels. */
+            const sepY = (stripBottomY + treeBBox.y) / 2;
+            gWorld.append('line')
+                .attr('class', 'source-tree-sep')
+                .attr('x1', treeBBox.x)
+                .attr('x2', treeBBox.x + treeBBox.width)
+                .attr('y1', sepY)
+                .attr('y2', sepY)
+                .style('stroke', '#888')
+                .style('stroke-width', 1);
+            bottomY = stripBottomY - stripH - gapBetween;
+        }
+        if (hasTitle) {
+            gWorld.append('text')
+                .attr('class', 'tree-title')
+                .attr('x', treeBBox.x + treeBBox.width / 2)
+                .attr('y', bottomY)
+                .attr('text-anchor', 'middle')
+                .style('font', '14px sans-serif')
+                .style('font-weight', 600)
+                .style('fill', '#222')
+                .text(meta.titleText);
+            bottomY -= titleH;
+        }
+
+        /* Labels at the ROOT's vertical level, right-aligned to the
+         * right edge of the rightmost leaf so the label column hugs
+         * the tree's right boundary regardless of width. */
+        if (hasLabels) {
+            const leafXs = root.leaves().map(n => n.x);
+            const rightmostLeafX = leafXs.length
+                ? Math.max(...leafXs)
+                : treeBBox.x + treeBBox.width;
+            const labelX = rightmostLeafX + leafSize / 2;
+            const blockH = (labelKeys.length - 1) * labelLineH;
+            let labelY0 = (root.y || treeBBox.y) - blockH / 2;
+            let y = labelY0;
+            for (const key of labelKeys) {
+                const fn = LABEL_VOCAB[key];
+                const line = fn ? fn(meta.stats) : `${key}: ?`;
+                gWorld.append('text')
+                    .attr('class', 'tree-label')
+                    .attr('x', labelX)
+                    .attr('y', y)
+                    .attr('text-anchor', 'end')
+                    .style('font', '11px monospace')
+                    .style('fill', '#444')
+                    .text(line);
+                y += labelLineH;
+            }
+        }
+
+        /* "show bitmaps requires text" error — shown when the user
+         * enabled the toggle but the data source isn't a text input. */
+        if (bmNeedsText) {
+            gWorld.append('text')
+                .attr('class', 'bm-error')
+                .attr('x', treeBBox.x + treeBBox.width / 2)
+                .attr('y', treeBBox.y - 8)
+                .attr('text-anchor', 'middle')
+                .style('font', '12px sans-serif')
+                .style('font-weight', 500)
+                .style('fill', '#b91c1c')
+                .text('"input bitmap" / "show bitmaps" need a text source (type into the text input above)');
+        }
+    }
+
+    /* crop-top preview + export box.  Draw a cut line + dimmed region
+     * over the part that the export will drop, and remember the x-extent
+     * of the kept (top) nodes so the export can also narrow the width. */
+    gWorld.selectAll('.crop-overlay').remove();
+    _cropExportBox = null;
+    const cropTop = getCropTopFrac();
+    if (cropTop) {
+        const cb = gWorld.node().getBBox();
+        const cutY = cb.y + cb.height * cropTop;
+        // x-extent of nodes kept above the cut (+ margin for bars/labels).
+        let minX = Infinity, maxX = -Infinity;
+        root.descendants().forEach(n => {
+            if (n.y <= cutY) { minX = Math.min(minX, n.x); maxX = Math.max(maxX, n.x); }
+        });
+        if (minX === Infinity) { minX = cb.x; maxX = cb.x + cb.width; }
+        const xpad = 46;   // skew bar (~28) + right-side labels
+        _cropExportBox = { x: minX - xpad, y: cb.y,
+                           w: (maxX - minX) + 2 * xpad, cutY };
+        gWorld.append('rect').attr('class', 'crop-overlay')
+            .attr('x', cb.x).attr('y', cutY)
+            .attr('width', cb.width).attr('height', cb.y + cb.height - cutY)
+            .attr('fill', '#fff').attr('opacity', 0.6)
+            .attr('pointer-events', 'none');
+        gWorld.append('line').attr('class', 'crop-overlay')
+            .attr('x1', cb.x).attr('x2', cb.x + cb.width)
+            .attr('y1', cutY).attr('y2', cutY)
+            .attr('stroke', '#c0392b').attr('stroke-width', 1.2)
+            .attr('stroke-dasharray', '5 3').attr('pointer-events', 'none');
+    }
+
+    // Initial fit-to-pane: recompute bbox so overlay is included.
+    const bbox = gWorld.node().getBBox();
+    const scale = Math.min(
+        (W - 20) / Math.max(1, bbox.width),
+        (H - 20) / Math.max(1, bbox.height),
+        1.4
+    );
+    const tx = (W - bbox.width * scale) / 2 - bbox.x * scale;
+    const ty = (H - bbox.height * scale) / 2 - bbox.y * scale;
+    _fitTransform = d3.zoomIdentity.translate(tx, ty).scale(scale);
+    svg.call(zoom.transform, _fitTransform);
+}
+let _cropExportBox = null;
+let _fitTransform = null;
+function resetView() {
+    if (_fitTransform) svg.call(zoom.transform, _fitTransform);
+}
+
+/* Click handler for a flattenable node (subtree is D≥2 flat).
+ *
+ * Two cases:
+ *   1. Node was already unflattened (override 'unflatten' set, not
+ *      currently treated as flat) → re-flatten just this one.
+ *   2. Node is currently treated as flat → unflatten it AND every
+ *      ancestor on the path to root (so the path stays "open"),
+ *      AND re-flatten every off-path sibling subtree (clear their
+ *      overrides so the auto-detector reflattens them).  This
+ *      gives "focus on a path through the tree" semantics: only
+ *      one branch from root is fully expanded, everything else
+ *      stays as compact as possible.
+ */
+function toggleFlatten(nodeId) {
+    const node = _nodeById.get(nodeId);
+    if (!node || !node.flatCandidate) return;
+
+    const isCurrentlyFlat = node.flatD > 0;
+    const wasUnflattened  = _flatOverride.get(nodeId) === 'unflatten';
+
+    /* Recursive helper used by both branches. */
+    function clearOverridesInSubtree(n) {
+        if (!n) return;
+        _flatOverride.delete(n.id);
+        if (n.symbol < 0) {
+            clearOverridesInSubtree(n.left);
+            clearOverridesInSubtree(n.right);
+        }
+    }
+
+    if (wasUnflattened && !isCurrentlyFlat) {
+        /* Re-flatten just this one node.  Also clear any stale
+         * overrides INSIDE its subtree — those are unobservable
+         * once this node is flat (subtree is absorbed), but they'd
+         * resurface unexpectedly the next time an ancestor is
+         * unflattened.  See the "click A, L, A, L → no-op" bug. */
+        _flatOverride.delete(nodeId);
+        clearOverridesInSubtree(node.left);
+        clearOverridesInSubtree(node.right);
+        refreshFromFreqs();
+        return;
+    }
+
+    /* Otherwise: unflatten this + ancestor chain.  We don't touch
+     * sibling subtrees — siblings without overrides will auto-flatten
+     * if they're structurally flat, and siblings the user explicitly
+     * unflattened earlier should stay unflattened (otherwise clicking
+     * B after A flattens A again, which is wrong). */
+    let cur = node;
+    while (cur) {
+        _flatOverride.set(cur.id, 'unflatten');
+        cur = cur.parent;
+    }
+    refreshFromFreqs();
+}
+
+// ============================================================
+//  Stats panel
+// ============================================================
+
+/* Single source of truth for tree-level aggregates.  Called once per
+ * refresh; the result is consumed by both renderStats (the summary
+ * panel) and the optional title / top-right labels overlay drawn by
+ * renderTree. */
+function computeTreeStats(rootNode, meta) {
+    const totalN = meta.totalN;
+    let totalEntropyBits = 0;
+    let totalBitsSaved = 0;
+    let nFlat = 0;
+    let flatRawBits = 0;
+    function walkAgg(n) {
+        if (!n || n.symbol >= 0) return;
+        if (meta.showFlat && n.flatD) {
+            totalEntropyBits += n.subtreeCount * n.flatD;
+            nFlat++;
+            flatRawBits += n.subtreeCount * n.flatD;
+            return;
+        }
+        totalEntropyBits += n.subtreeCount * n.bitEntropy;
+        totalBitsSaved += n.bitsSavedTotal;
+        walkAgg(n.left); walkAgg(n.right);
+    }
+    walkAgg(rootNode);
+
+    let hufWeighted = 0;
+    let byteEntropy = 0;
+    let n_leaves = 0;
+    let longestCode = 0;
+    let opsSimpleSum = 0;
+    let opsWeightedSum = 0;
+    function walkLeaves(n) {
+        if (!n) return;
+        if (n.symbol >= 0) {
+            n_leaves++;
+            if (n.depth > longestCode) longestCode = n.depth;
+            const p = n.freq / totalN;
+            /* opsToLeaf is set by annotateLeafOps based on the primitive
+             * chain — already reflects show-flat, constant, fuse-leaves. */
+            const ops = (n.opsToLeaf != null) ? n.opsToLeaf : n.depth;
+            opsSimpleSum   += ops;
+            if (p > 0) {
+                hufWeighted    += p * n.depth;
+                byteEntropy    -= p * Math.log2(p);
+                opsWeightedSum += p * ops;
+            }
+            return;
+        }
+        walkLeaves(n.left); walkLeaves(n.right);
+    }
+    walkLeaves(rootNode);
+
+    return {
+        totalN, n_leaves, longestCode,
+        totalEntropyBits, totalBitsSaved, nFlat, flatRawBits,
+        hufWeighted, byteEntropy,
+        opsSimple: n_leaves ? (opsSimpleSum / n_leaves) : 0,
+        opsW:      opsWeightedSum,
+    };
+}
+
+/* Colour palette for source-character labels in the "show bitmaps"
+ * overlay.  Stable per character within a render so x_0 and x_1
+ * share a colour distinct from y_0 etc.  Tableau-style hues, picked
+ * to stay distinguishable on white. */
+const LETTER_PALETTE = [
+    '#1f77b4', '#d62728', '#2ca02c', '#9467bd', '#ff7f0e',
+    '#8c564b', '#e377c2', '#17becf', '#bcbd22', '#7f7f7f',
+];
+function buildLetterColors(trace) {
+    const m = new Map();
+    for (const p of trace) {
+        if (!m.has(p.char)) {
+            m.set(p.char, LETTER_PALETTE[m.size % LETTER_PALETTE.length]);
+        }
+    }
+    return m;
+}
+
+/* Render a "letter_idx" tag as SVG text with the index as a true
+ * subscript (smaller font, baseline-shifted).  Centred at (x, y). */
+function appendLetterIdxTag(parent, x, y, letter, idx,
+                            fontSize, color, weight) {
+    const t = parent.append('text')
+        .attr('x', x).attr('y', y)
+        .attr('text-anchor', 'middle')
+        .style('font', `${fontSize}px monospace`)
+        .style('font-weight', weight || 400)
+        .style('fill', color);
+    t.append('tspan').text(letter);
+    t.append('tspan')
+        .attr('baseline-shift', 'sub')
+        .attr('font-size', '0.72em')
+        .text(idx);
+    return t;
+}
+
+/* Render the 3-row source-trace strip above the tree:
+ *     row 1: each character, centered over its codeLen columns
+ *     row 2: per-bit binary value
+ *     row 3: "letter_b" tag (b = bit index INSIDE that character's
+ *            code, not the global source position), coloured per
+ *            letter, with b as a true subscript.
+ * Thin vertical separators between adjacent characters so the column
+ * groups are visually distinct.  Bottom row anchored at stripBottomY
+ * (just above the tree); strip centred horizontally over treeBBox. */
+function renderSourceStrip(treeBBox, trace, letterColor, stripBottomY) {
+    const cellW = 14;
+    const charY = stripBottomY - 24;
+    const bitY  = stripBottomY - 12;
+    const idxY  = stripBottomY;
+    const totalBits = trace.reduce((s, p) => s + p.codeLen, 0);
+    if (totalBits === 0) return;
+    const stripWidth = totalBits * cellW;
+    const stripX0 = treeBBox.x + treeBBox.width / 2 - stripWidth / 2;
+    const dividerYTop    = charY - 10;
+    const dividerYBottom = idxY  + 4;
+
+    let col = 0;
+    for (let pi = 0; pi < trace.length; pi++) {
+        const p = trace[pi];
+        const color = letterColor.get(p.char) || '#333';
+        const charX0 = stripX0 + col * cellW;
+        const charX1 = charX0 + p.codeLen * cellW;
+        /* Divider BEFORE this character (skip the very first). */
+        if (pi > 0) {
+            gWorld.append('line')
+                .attr('class', 'src-divider')
+                .attr('x1', charX0).attr('y1', dividerYTop)
+                .attr('x2', charX0).attr('y2', dividerYBottom)
+                .style('stroke', '#bbb')
+                .style('stroke-width', 0.5);
+        }
+        /* Character label, centred over its codeLen-cell span. */
+        gWorld.append('text')
+            .attr('class', 'src-char')
+            .attr('x', (charX0 + charX1) / 2)
+            .attr('y', charY)
+            .attr('text-anchor', 'middle')
+            .style('font', '13px monospace')
+            .style('font-weight', 600)
+            .style('fill', color)
+            .text(p.char);
+        for (let b = 0; b < p.codeLen; b++) {
+            const cx = charX0 + (b + 0.5) * cellW;
+            gWorld.append('text')
+                .attr('class', 'src-bit')
+                .attr('x', cx).attr('y', bitY)
+                .attr('text-anchor', 'middle')
+                .style('font', '11px monospace')
+                .style('font-weight', 600)
+                .style('fill', '#222')
+                .text(p.code[b]);
+            appendLetterIdxTag(gWorld, cx, idxY, p.char, b,
+                                9, color, 500);
+        }
+        col += p.codeLen;
+    }
+    /* Final right-side divider for symmetry. */
+    gWorld.append('line')
+        .attr('class', 'src-divider')
+        .attr('x1', stripX0 + totalBits * cellW)
+        .attr('y1', dividerYTop)
+        .attr('x2', stripX0 + totalBits * cellW)
+        .attr('y2', dividerYBottom)
+        .style('stroke', '#bbb')
+        .style('stroke-width', 0.5);
+    /* Leading divider so both ends are bracketed. */
+    gWorld.append('line')
+        .attr('class', 'src-divider')
+        .attr('x1', stripX0).attr('y1', dividerYTop)
+        .attr('x2', stripX0).attr('y2', dividerYBottom)
+        .style('stroke', '#bbb')
+        .style('stroke-width', 0.5);
+}
+
+/* Render the bitmap entering one internal node.  Centred horizontally
+ * on the node; bit values on top, "letter_b" tags below with b as a
+ * subscript (b = bit-index inside that letter's code).  Positioned
+ * well above the node circle so neither the circle nor the parent
+ * link line crowds the labels. */
+function renderNodeBitmap(g, bitmap, letterColor, labelMode, D) {
+    if (!bitmap || bitmap.length === 0) return;
+    labelMode = labelMode || 'nothing';
+    D = D || 1;
+    const cellW = 12;
+    const bitY = -34;
+    const idxY = -22;
+    const bg = g.append('g').attr('class', 'node-bitmap');
+
+    if (D <= 1) {
+        /* 1-bit partition (ordinary internal node). */
+        const w = bitmap.length * cellW;
+        const x0 = -w / 2;
+        bg.append('rect')
+            .attr('x', x0 - 2).attr('y', bitY - 10)
+            .attr('width', w + 4).attr('height', 13)
+            .attr('rx', 3).attr('fill', '#f8fafc')
+            .attr('stroke', '#cbd5e1').attr('stroke-width', 0.6);
+        bitmap.forEach((e, i) => {
+            const cx = x0 + (i + 0.5) * cellW;
+            bg.append('text')
+                .attr('x', cx).attr('y', bitY)
+                .attr('text-anchor', 'middle')
+                .style('font', '10px monospace').style('font-weight', 600)
+                .style('fill', '#222').text(e.bit);
+            const color = letterColor.get(e.char) || '#666';
+            if (labelMode === 'code_bits') {
+                appendLetterIdxTag(bg, cx, idxY, e.char, e.bitIdx, 8, color, 500);
+            } else if (labelMode === 'symbols' || labelMode === 'indices') {
+                bg.append('text')
+                    .attr('x', cx).attr('y', idxY)
+                    .attr('text-anchor', 'middle')
+                    .style('font', '8px monospace').style('font-weight', 500)
+                    .style('fill', color)
+                    .text(labelMode === 'symbols' ? e.char : e.sourceIdx);
+            }
+        });
+        return;
+    }
+
+    /* Flat region: one D-bit group per element (the in-subtree local
+     * code), with a gap between groups and the symbol/index label centred
+     * under its group so labels line up with their D bits. */
+    const GROUP_GAP = 5;
+    const groupW = D * cellW;
+    const totalW = bitmap.length * groupW + Math.max(0, bitmap.length - 1) * GROUP_GAP;
+    const x0 = -totalW / 2;
+    bitmap.forEach((e, gi) => {
+        const gx = x0 + gi * (groupW + GROUP_GAP);
+        const color = letterColor.get(e.char) || '#666';
+        bg.append('rect')
+            .attr('x', gx - 1).attr('y', bitY - 10)
+            .attr('width', groupW + 2).attr('height', 13)
+            .attr('rx', 3).attr('fill', '#f8fafc')
+            .attr('stroke', '#cbd5e1').attr('stroke-width', 0.6);
+        const code = e.code || '';
+        for (let b = 0; b < D; b++) {
+            const cx = gx + (b + 0.5) * cellW;
+            bg.append('text')
+                .attr('x', cx).attr('y', bitY)
+                .attr('text-anchor', 'middle')
+                .style('font', '10px monospace').style('font-weight', 600)
+                .style('fill', '#222')
+                .text(code[b] != null ? code[b] : '');
+        }
+        if (labelMode === 'symbols' || labelMode === 'indices'
+            || labelMode === 'code_bits') {
+            bg.append('text')
+                .attr('x', gx + groupW / 2).attr('y', idxY)
+                .attr('text-anchor', 'middle')
+                .style('font', '8px monospace').style('font-weight', 500)
+                .style('fill', color)
+                .text(labelMode === 'indices' ? e.sourceIdx : e.char);
+        }
+    });
+}
+
+/* ============================================================
+ *  Pivot view — wavelet-tree-style "pivot" the ph encoder performs.
+ *
+ *  Top strip:   the source string with binary codes + letter_b tags
+ *               (chars/codes wrapped in rounded boxes per character).
+ *  Before panel (left): one ROW per source byte, each row wrapped in
+ *               a rounded box around its bits.
+ *  Arrow →
+ *  After panel (right): one ROW per tree DEPTH (depth 0 on top, then
+ *               1, 2, …).  Within a row, the per-internal-node
+ *               bitmaps at that depth sit side-by-side, each in its
+ *               own rounded box and labelled with the bit-prefix
+ *               ("0"/"1"/"10"/etc.).  Each bitmap entry shows the
+ *               bit, a colored `letter_b` tag below, and a bold left-
+ *               anchored `*` immediately after the bit when this is
+ *               the source byte's terminating bit.
+ *  Selected via `view=pivot` URL param.
+ * ============================================================ */
+function renderPivot(tree, meta) {
+    gWorld.selectAll('*').remove();
+    svg.call(zoom.transform, d3.zoomIdentity);
+
+    if (!meta.sourceTrace || meta.sourceTrace.length === 0) {
+        gWorld.append('text')
+            .attr('x', 30).attr('y', 50)
+            .style('font', '13px sans-serif')
+            .style('fill', '#b91c1c')
+            .text('pivot view requires a text data source — type a string into the text input.');
+        _fitTransform = d3.zoomIdentity;
+        return;
+    }
+
+    const trace = meta.sourceTrace;
+    const letterColor = buildLetterColors(trace);
+
+    /* Layout constants. */
+    const cellW       = 16;   /* bit cell width (top strip + before panel) */
+    const rowH        = 20;   /* per-position row height (before + after panels) */
+    const charLabelW  = 22;   /* leading "char:" col in before panel */
+    const xMargin     = 30;
+    const yMargin     = 26;
+    const groupPad    = 4;    /* padding inside each rounded codeword box */
+    const boxFill     = '#f8fafc';
+    const boxStroke   = '#cbd5e1';
+
+    /* ===== 1. Source strip ============================================
+     * Per character: a rounded box around the bits + char/tag pair. */
+    const totalBits = trace.reduce((s, p) => s + p.codeLen, 0);
+    const stripBaseX = xMargin;
+    const stripBoxY  = yMargin;
+    const stripBoxH  = 52;
+    const stripCharY = stripBoxY + 14;
+    const stripBitY  = stripBoxY + 30;
+    const stripIdxY  = stripBoxY + 46;
+    let col = 0;
+    for (let pi = 0; pi < trace.length; pi++) {
+        const p = trace[pi];
+        const color = letterColor.get(p.char) || '#333';
+        const x0 = stripBaseX + col * cellW;
+        const x1 = x0 + p.codeLen * cellW;
+        /* Rounded box around the binary code only (not the char or
+         * letter_b subscripts) — emphasizes that the code is what
+         * gets pivoted down into the after-panel bitmaps.  Inset so
+         * adjacent characters' boxes leave a visible gap. */
+        gWorld.append('rect')
+            .attr('x', x0 + 2).attr('y', stripBitY - 11)
+            .attr('width', (x1 - x0) - 4).attr('height', 16)
+            .attr('rx', 4)
+            .attr('fill', boxFill).attr('stroke', boxStroke)
+            .attr('stroke-width', 0.7);
+        gWorld.append('text')
+            .attr('x', (x0 + x1) / 2).attr('y', stripCharY)
+            .attr('text-anchor', 'middle')
+            .style('font', '13px monospace')
+            .style('font-weight', 600)
+            .style('fill', color)
+            .text(p.char);
+        for (let b = 0; b < p.codeLen; b++) {
+            const cx = x0 + (b + 0.5) * cellW;
+            gWorld.append('text')
+                .attr('x', cx).attr('y', stripBitY)
+                .attr('text-anchor', 'middle')
+                .style('font', '12px monospace')
+                .style('font-weight', 600)
+                .style('fill', '#222')
+                .text(p.code[b]);
+            appendLetterIdxTag(gWorld, cx, stripIdxY, p.char, b,
+                                10, color, 500);
+        }
+        col += p.codeLen;
+    }
+    const stripWidth = totalBits * cellW;
+    const stripBoxBottom = stripBoxY + stripBoxH;
+
+    /* ===== 2. Vertical down-arrow between top strip and before panel.
+     * Placed roughly under the first bit so it visually anchors the
+     * "this is what gets pivoted" reading order. */
+    const sepY = stripBoxBottom + 18;     /* still used as a y reference */
+    const arrowDownX  = stripBaseX + cellW + 4;
+    const arrowDownY0 = stripBoxBottom + 2;
+    const arrowDownY1 = sepY + 6;         /* tip of arrow head */
+    gWorld.append('line')
+        .attr('x1', arrowDownX).attr('y1', arrowDownY0)
+        .attr('x2', arrowDownX).attr('y2', arrowDownY1 - 4)
+        .style('stroke', '#666').style('stroke-width', 1.5);
+    gWorld.append('polygon')
+        .attr('points', [
+            [arrowDownX, arrowDownY1].join(','),
+            [arrowDownX - 4, arrowDownY1 - 7].join(','),
+            [arrowDownX + 4, arrowDownY1 - 7].join(','),
+        ].join(' '))
+        .style('fill', '#666');
+
+    /* ===== 3. Before panel — per-source-position rows =============== */
+    const beforeBaseX = xMargin;
+    const beforeBaseY = sepY + 20;
+    const maxCodeLen = Math.max(...trace.map(p => p.codeLen));
+
+    trace.forEach((p, i) => {
+        const yRow = beforeBaseY + i * rowH;
+        const color = letterColor.get(p.char) || '#333';
+        const bitsX0 = beforeBaseX + charLabelW;
+        const bitsX1 = bitsX0 + p.codeLen * cellW;
+        /* Rounded box around the bit cells (excludes the char label). */
+        gWorld.append('rect')
+            .attr('x', bitsX0 - groupPad)
+            .attr('y', yRow - rowH / 2 + 2)
+            .attr('width', (bitsX1 - bitsX0) + 2 * groupPad)
+            .attr('height', rowH - 4)
+            .attr('rx', 4)
+            .attr('fill', boxFill).attr('stroke', boxStroke)
+            .attr('stroke-width', 0.7);
+        /* Leading char (outside the box). */
+        gWorld.append('text')
+            .attr('x', beforeBaseX + 2).attr('y', yRow + 4)
+            .attr('text-anchor', 'start')
+            .style('font', '12px monospace')
+            .style('font-weight', 600)
+            .style('fill', color)
+            .text(p.char);
+        for (let b = 0; b < p.codeLen; b++) {
+            const cx = bitsX0 + (b + 0.5) * cellW;
+            gWorld.append('text')
+                .attr('x', cx).attr('y', yRow + 4)
+                .attr('text-anchor', 'middle')
+                .style('font', '12px monospace')
+                .style('font-weight', 600)
+                .style('fill', '#222')
+                .text(p.code[b]);
+        }
+    });
+    const beforeWidth = charLabelW + maxCodeLen * cellW + 2 * groupPad;
+
+    /* ===== 4. Arrow between panels =================================== */
+    const arrowX = beforeBaseX + beforeWidth + 18;
+    const arrowY = beforeBaseY + (trace.length - 1) * rowH / 2 + 4;
+    gWorld.append('text')
+        .attr('x', arrowX).attr('y', arrowY + 6)
+        .style('font', '26px sans-serif')
+        .style('fill', '#666')
+        .text('→');
+
+    /* ===== 5. After panel — per-depth COLUMNS of vertical bitmaps ==
+     * Each internal node's bitmap is rendered VERTICALLY: one entry per
+     * row, top-to-bottom.  Per row: [letter_b tag] [bit] [* if end].
+     * Bitmaps at the same tree depth (= bitPrefix.length) stack
+     * vertically within a single column; different depths sit side-by-
+     * side as separate columns. */
+    const internals = collectInternals(tree)
+        .filter(n => n.bitmap && n.bitmap.length > 0);
+    const byDepth = new Map();
+    let maxDepth = 0;
+    for (const n of internals) {
+        const d = (n.bitPrefix || '').length;
+        if (!byDepth.has(d)) byDepth.set(d, []);
+        byDepth.get(d).push(n);
+        if (d > maxDepth) maxDepth = d;
+    }
+
+    const afterBaseX        = arrowX + 40;
+    /* Lift the after-panel so its boxes start near the before-panel's
+     * top row, but not so high the bitmap label crosses the separator
+     * line above.  Tuned to leave a few px of clearance under the
+     * separator. */
+    const afterBaseY        = beforeBaseY - 18;
+    const colTagW           = 14;   /* letter_b tag column inside bitmap */
+    const colBitW           = 12;   /* bit value column */
+    const colStarW          = 14;   /* terminator marker column */
+    const bitmapInnerW      = colTagW + colBitW + colStarW;
+    const bitmapBoxPadX     = 6;
+    const bitmapBoxPadY     = 4;
+    const bitmapBoxW        = bitmapInnerW + 2 * bitmapBoxPadX;
+    const bitmapLabelH      = 16;   /* `"10":` header above each bitmap */
+    const bitmapStackGap    = 14;   /* gap between stacked same-depth bitmaps */
+    const depthColGap       = 18;   /* gap between depth columns */
+
+    for (let d = 0; d <= maxDepth; d++) {
+        const bitmaps = byDepth.get(d) || [];
+        if (!bitmaps.length) continue;
+        const colX = afterBaseX + d * (bitmapBoxW + depthColGap);
+        let yCursor = afterBaseY;
+        for (const node of bitmaps) {
+            const prefix = node.bitPrefix || '';
+            const label = prefix === '' ? '"":' : `"${prefix}":`;
+            /* Header label. */
+            gWorld.append('text')
+                .attr('x', colX + bitmapBoxPadX).attr('y', yCursor + 12)
+                .attr('text-anchor', 'start')
+                .style('font', '11px monospace')
+                .style('font-weight', 600)
+                .style('fill', '#555')
+                .text(label);
+            const boxY0 = yCursor + bitmapLabelH;
+            const nRows = node.bitmap.length;
+            const boxH = nRows * rowH + 2 * bitmapBoxPadY;
+            const tagX  = colX + bitmapBoxPadX + colTagW / 2;
+            const bitX  = colX + bitmapBoxPadX + colTagW + colBitW / 2;
+            const starX = colX + bitmapBoxPadX + colTagW + colBitW + 1;
+            /* Rounded box around the bit COLUMN only (letter_b tags
+             * and the terminator * sit outside the bubble — matches
+             * the top-strip + tree-view convention of bubbling just
+             * the digits). */
+            gWorld.append('rect')
+                .attr('x', bitX - colBitW / 2 - 3)
+                .attr('y', boxY0)
+                .attr('width', colBitW + 6)
+                .attr('height', boxH)
+                .attr('rx', 4)
+                .attr('fill', boxFill).attr('stroke', boxStroke)
+                .attr('stroke-width', 0.7);
+            node.bitmap.forEach((e, ei) => {
+                const yRow = boxY0 + bitmapBoxPadY + (ei + 0.5) * rowH + 4;
+                const color = letterColor.get(e.char) || '#333';
+                const tracedPos = trace[e.sourceIdx];
+                const isEnd = tracedPos &&
+                    tracedPos.codeLen === e.bitIdx + 1;
+                /* letter_b tag on the left of the row. */
+                appendLetterIdxTag(gWorld, tagX, yRow, e.char, e.bitIdx,
+                                    11, color, 500);
+                /* Bit value, centered. */
+                gWorld.append('text')
+                    .attr('x', bitX).attr('y', yRow)
+                    .attr('text-anchor', 'middle')
+                    .style('font', '12px monospace')
+                    .style('font-weight', 600)
+                    .style('fill', '#222')
+                    .text(e.bit);
+                /* Terminator marker — larger, bold, immediately to
+                 * the right of the bit (close to the left of the
+                 * row, not the far right). */
+                if (isEnd) {
+                    gWorld.append('text')
+                        .attr('x', starX).attr('y', yRow + 1)
+                        .attr('text-anchor', 'start')
+                        .style('font', '14px monospace')
+                        .style('font-weight', 700)
+                        .style('fill', color)
+                        .text('*');
+                }
+            });
+            yCursor = boxY0 + boxH + bitmapStackGap;
+        }
+    }
+
+    /* Title (if set) above the source strip. */
+    if (meta.titleText) {
+        gWorld.append('text')
+            .attr('x', xMargin)
+            .attr('y', yMargin - 8)
+            .attr('text-anchor', 'start')
+            .style('font', '14px sans-serif')
+            .style('font-weight', 600)
+            .style('fill', '#222')
+            .text(meta.titleText);
+    }
+
+    /* Fit-to-pane. */
+    const bbox = gWorld.node().getBBox();
+    const pane = document.getElementById('tree-pane');
+    const W = pane.clientWidth;
+    const H = pane.clientHeight;
+    const scale = Math.min(
+        (W - 20) / Math.max(1, bbox.width),
+        (H - 20) / Math.max(1, bbox.height),
+        1.4
+    );
+    const tx = (W - bbox.width * scale) / 2 - bbox.x * scale;
+    const ty = (H - bbox.height * scale) / 2 - bbox.y * scale;
+    _fitTransform = d3.zoomIdentity.translate(tx, ty).scale(scale);
+    svg.call(zoom.transform, _fitTransform);
+}
+
+/* Vocabulary for the labels overlay.  Each entry: short key the user
+ * types (label-side of show-labels), how to render it as a one-line
+ * "name: value" string given the precomputed stats object. */
+const LABEL_VOCAB = {
+    'N':         (s) => `N: ${s.totalN}`,
+    '#symbols':  (s) => `#symbols: ${s.n_leaves}`,
+    'depth':     (s) => `depth: ${s.longestCode}`,
+    'H':         (s) => `H: ${s.byteEntropy.toFixed(3)} bpb`,
+    'huff':      (s) => `Huff: ${s.hufWeighted.toFixed(3)} bpb`,
+    'saved':     (s) => `saved: ${s.totalBitsSaved.toFixed(0)} bits`,
+    'ops/leaf':  (s) => `ops/leaf: ${s.opsSimple.toFixed(2)}`,
+    'ops/byte':  (s) => `ops/byte: ${s.opsW.toFixed(3)}`,
+    '#flat':     (s) => `#flat: ${s.nFlat}`,
+    'flat-bits': (s) => `flat-bits: ${(s.flatRawBits / s.totalN).toFixed(3)} bpb`,
+};
+
+function renderStats(rootNode, meta, stats) {
+    const internals = collectInternals(rootNode);
+    const totalN = stats.totalN;
+    const totalEntropyBits = stats.totalEntropyBits;
+    const totalBitsSaved   = stats.totalBitsSaved;
+    const nFlat            = stats.nFlat;
+    const flatRawBits      = stats.flatRawBits;
+    const hufWeighted      = stats.hufWeighted;
+    const byteEntropy      = stats.byteEntropy;
+    const n_leaves         = stats.n_leaves;
+    const longestCode      = stats.longestCode;
+    const opsSimple        = stats.opsSimple;
+    const opsW             = stats.opsW;
+
+    const summary = document.getElementById('summary');
+    summary.innerHTML = '';
+    const grid = document.createElement('div');
+    grid.className = 'summary-grid';
+    function addRow(k, v, tip) {
+        const a = document.createElement('b'); a.textContent = k;
+        const b = document.createElement('span'); b.textContent = v;
+        if (tip) {
+            a.title = tip;
+            b.title = tip;
+            a.style.borderBottom = '1px dotted #aaa';
+            a.style.cursor = 'help';
+        }
+        grid.appendChild(a); grid.appendChild(b);
+    }
+    addRow('dataset', meta.name + (meta.isMain ? ' (MAIN)' : ''),
+        "Source distribution name.  '(scaled X→Y)' means input was short " +
+        "and we proportionally scaled to a standard 8K block for stable stats.");
+    addRow('N (source bytes)', totalN.toString(),
+        "Total symbol count.  8192 for built-in datasets and short inputs " +
+        "scaled up to a standard block.");
+    addRow('distinct symbols', n_leaves.toString(),
+        "Number of unique byte values with non-zero frequency.  " +
+        "Becomes the leaves of the Huffman tree.");
+    addRow('code length limit', meta.maxLen + ' bits  (slider)',
+        "Maximum Huffman code length allowed by the length-limiter.  " +
+        "The slider min is ⌈log₂(distinct symbols)⌉ (needed to address every leaf).");
+    addRow('longest code', longestCode + ' bits  (in tree)',
+        "Actual longest code length present in this tree.  ≤ the slider limit; " +
+        "often smaller if the distribution doesn't need the full range.");
+    addRow('byte entropy H', byteEntropy.toFixed(3) + ' bits/byte',
+        "Shannon entropy of the byte distribution: H = Σ p · −log₂ p.  " +
+        "Ideal lower bound on compressed size.");
+    addRow('Huffman avg len', hufWeighted.toFixed(3) + ' bits/byte',
+        "Weighted average Huffman code length: Σ p · code_len.  " +
+        "What plain Huffman achieves (always ≥ H, gap = redundancy).");
+    addRow('tree-level Σ H',
+        (totalEntropyBits / totalN).toFixed(3) + ' bits/byte' +
+        (meta.showFlat ? ' (entropy + raw flat)' : ' (≈ H, by chain rule)'),
+        "When flat-subtrees OFF: Σ over all internals of n·H(p) / N — " +
+        "equals byte entropy H exactly (chain rule).  When ON: flat " +
+        "regions are accounted as RAW (n·D bits), not entropy.  Result " +
+        "= entropy lower bound on what ph would emit today (perfect " +
+        "FSE on non-flat bitmaps + raw N·D for flat regions).  Click " +
+        "a flat-root (thick circle) to unflatten it and see the gap " +
+        "shrink.");
+    addRow('total bits saved', totalBitsSaved.toFixed(0) +
+            ' bits  (' + (totalBitsSaved / totalN).toFixed(4) + ' / source byte)',
+        "Σ over non-flat internal nodes of n_node · (1 − H(p_left)).  " +
+        "Total bits a perfect FSE per-bitmap coder would save vs raw " +
+        "1-bit-per-symbol-per-level.  Flat regions contribute zero " +
+        "savings here (ph emits them raw).");
+    addRow('# internal nodes', internals.length.toString(),
+        "Number of non-leaf nodes in the tree.  Each internal node is a " +
+        "left/right partition step at decode time.");
+    /* Operations / leaf — both simple (per-leaf avg, each leaf
+     * counted once) and frequency-weighted.  Without and with the
+     * flat-subtree fast path. */
+    addRow('ops/leaf (avg)', opsSimple.toFixed(2),
+        "Average decode primitives per distinct symbol (each leaf counted " +
+        "once).  Counts every primitive on the root-to-leaf path (P/MVV/PH/DX/S2/S1, " +
+        "but NOT C which is bulk-amortised memset).  Flip show-flat / fuse-leaves / " +
+        "constant to see the savings each optimisation contributes.");
+    addRow('ops/byte (weighted)', opsW.toFixed(3),
+        "Frequency-weighted ops per source byte: Σ p_leaf · ops_to_decode.  " +
+        "Same primitive accounting as above, weighted by source byte frequency.");
+    if (meta.showFlat) {
+        const flatPct = totalN > 0 ? (100 * flatRawBits / (8 * totalN)).toFixed(1) : '-';
+        addRow('# maximal flat subtrees', nFlat.toString(),
+            "Number of maximal D≥2 flat subtrees in the tree.  ph emits " +
+            "each as one packed N·D-bit region instead of D bitmap levels.");
+        addRow('flat region bits (raw)', flatRawBits.toFixed(0) +
+                '  (' + (flatRawBits / totalN).toFixed(3) + ' / source byte)',
+            "Bits ph emits today across all flat regions: Σ n_subtree · D.  " +
+            "Raw (no entropy coding) because the leaves under a flat subtree " +
+            "are usually near-uniform.  Compare to flat-region entropy floor " +
+            "in extras/bench_entropy_breakdown to see the gap.");
+    }
+    addRow('mode', meta.phOpt ? 'ph-flat-aware' : 'textbook canonical',
+        "Code-assignment strategy.  'ph-flat-aware' clusters same-length " +
+        "symbols into power-of-2 chunks, creating larger flat subtrees " +
+        "(same compression ratio as canonical).  Toggle the 'ph-optimize' " +
+        "checkbox to compare.");
+    summary.appendChild(grid);
+
+    // Top internal nodes table
+    const tbody = document.querySelector('#top-nodes-table tbody');
+    tbody.innerHTML = '';
+    const sorted = internals.slice().sort((a, b) =>
+        b.bitsSavedTotal - a.bitsSavedTotal);
+    const topN = Math.min(15, sorted.length);
+    for (let i = 0; i < topN; i++) {
+        const n = sorted[i];
+        const tr = document.createElement('tr');
+        if (n.inFlat || n.flatD) tr.classList.add('in-flat');
+        tr.dataset.nodeId = n.id;
+        /* /byte: bits saved by this node, normalized over the WHOLE
+         * source.  Lets you compare nodes' aggregate impact even
+         * though they have different subtree sizes — and sum across
+         * the table approximates the total bits-saved. */
+        const sptok = totalN > 0
+            ? (n.bitsSavedTotal / totalN).toFixed(4) : '-';
+        const pctSrc = totalN > 0
+            ? (100 * n.subtreeCount / totalN).toFixed(1) + '%' : '-';
+        tr.innerHTML = `<td>${i + 1}</td><td>${n.depth}</td>` +
+            `<td>${pctSrc}</td>` +
+            `<td>${n.pLeft.toFixed(3)}</td>` +
+            `<td>${n.bitEntropy.toFixed(3)}</td>` +
+            `<td>${n.bitsSavedTotal.toFixed(0)}</td>` +
+            `<td>${sptok}</td>` +
+            `<td>${n.flatD ? `flat D=${n.flatD}` : (n.inFlat ? '∈flat' : '')}</td>`;
+        tbody.appendChild(tr);
+    }
+}
+
+// ============================================================
+//  Driver
+// ============================================================
+
+let _freqs = null;
+let _name = '(none)';
+let _isMain = false;
+let _totalN = 0;
+
+function refreshFromFreqs() {
+    if (!_freqs) return;
+    const phOpt = document.getElementById('ph-opt').checked;
+    const maxSkew = document.getElementById('max-skew').checked;
+    const showFlat = document.getElementById('show-flat').checked;
+    const condenseFlat = document.getElementById('condense-flat').checked;
+    const noOverlap = document.getElementById('no-overlap').checked;
+    const showSplitting = document.getElementById('splitting').checked;
+    const showPrimitives = document.getElementById('show-primitives').checked;
+    const showBitmaps = document.getElementById('show-bitmaps').checked;
+    const inputBitmap = document.getElementById('input-bitmap').checked;
+    const bitmapLabel = document.getElementById('bitmap-label').value;
+    const titleText = document.getElementById('title-input').value;
+    const showLabels = document.getElementById('show-labels').value;
+    const showLeafDetails = document.getElementById('show-leaf-details').checked;
+    const mode = document.getElementById('tree-mode').value;
+    const viewMode = document.getElementById('view-mode').value;
+    const constantDetect = document.getElementById('constant-detect').checked;
+    const fuseLeaves = document.getElementById('fuse-leaves').checked;
+    const showSkew = document.getElementById('show-skew').checked;
+    const showBitPrefix = document.getElementById('show-bit-prefix').checked;
+    const showLeafCode = document.getElementById('show-leaf-code').checked;
+    const showBranchBits = document.getElementById('show-branch-bits').checked;
+    const keysSort = document.getElementById('keys-sort').value;
+    const maxLen = parseInt(document.getElementById('max-len').value, 10);
+    document.getElementById('max-len-val').textContent = maxLen;
+    const status = document.getElementById('status');
+    const t0 = performance.now();
+
+    let tree, codes;
+    if (maxSkew) {
+        /* Max-skew topology (same code lengths, leans left by frequency).
+         * Derive the per-symbol code array from the built tree (path =
+         * code, depth = length) so the tooltip / leaf-code views work. */
+        tree = buildTreeMaxSkew(_freqs, maxLen);
+        codes = [];
+        (function collect(n, code, len) {
+            if (!n) return;
+            if (n.symbol >= 0) { codes.push({ symbol: n.symbol, code: code, len: len }); return; }
+            collect(n.left,  code << 1,         len + 1);
+            collect(n.right, (code << 1) | 1,   len + 1);
+        })(tree, 0, 0);
+    } else {
+        const lens = buildHuffmanLengths(_freqs, maxLen);
+        codes = phOpt ?
+            assignPhFlatCodes(lens, _freqs, keysSort) :
+            assignCanonicalCodes(lens);
+        tree = buildTree(codes, _freqs);
+    }
+    annotateTree(tree);
+    detectFlatSubtrees(tree);
+
+    // Stash codes per leaf for the tooltip + bit-prefix per node for
+    // the optional "internal prefix" / "leaf code" view toggles.
+    const codeBySym = new Map();
+    codes.forEach(c => codeBySym.set(c.symbol, c));
+    function walkLeaves(n, prefix) {
+        if (!n) return;
+        n.bitPrefix = prefix;
+        if (n.symbol >= 0) {
+            const c = codeBySym.get(n.symbol);
+            if (c) { n.code = c.code; n.codeLen = c.len; }
+            return;
+        }
+        walkLeaves(n.left,  prefix + '0');
+        walkLeaves(n.right, prefix + '1');
+    }
+    walkLeaves(tree, '');
+
+    /* Stash for the text-layout export (download tree text). */
+    currentCodes = codes;
+    currentRawTree = tree;
+
+    const sourceText = (_dataSource === 'text')
+        ? document.getElementById('text-input').value
+        : null;
+    const meta = {
+        name: _name, isMain: _isMain, totalN: _totalN,
+        phOpt, maxSkew, showFlat, condenseFlat, noOverlap, showSplitting,
+        showPrimitives, showBitmaps, inputBitmap, bitmapLabel, mode, viewMode,
+        constantDetect, fuseLeaves,
+        titleText, showLabels, sourceText,
+        showLeafDetails, showSkew, showBitPrefix, showLeafCode,
+        showBranchBits, keysSort, maxLen,
+    };
+    /* Tag each node with its decode primitive, then count ops along
+     * each root-to-leaf primitive path.  Both must run before
+     * computeTreeStats so ops/byte reflects the current toggles. */
+    annotatePrimitives(tree, meta);
+    annotateLeafOps(tree);
+
+    /* Source-trace + per-node bitmaps — needed by either the
+     * "show bitmaps" overlay (tree view) or the pivot view.  Both
+     * require an actual input string, not just a frequency
+     * distribution. */
+    const needTrace = (meta.showBitmaps || meta.inputBitmap || meta.viewMode === 'pivot');
+    if (needTrace && meta.sourceText) {
+        meta.sourceTrace = buildSourceTrace(meta.sourceText, tree);
+        /* Flat-absorb (D-bit grouped bitmap on flat roots) is a tree-view
+         * rendering; the pivot view needs the full per-depth binary bitmaps,
+         * including those inside flat subtrees. */
+        annotateBitmaps(tree, meta.sourceTrace,
+                        meta.showFlat && meta.viewMode !== 'pivot');
+    } else {
+        meta.sourceTrace = null;
+        /* Clear any stale per-node bitmaps from a previous render. */
+        (function clear(n) {
+            if (!n) return;
+            n.bitmap = null;
+            clear(n.left); clear(n.right);
+        })(tree);
+    }
+    /* Compute stats up-front so both renderTree (overlay) and
+     * renderStats (panel) read from the same numbers. */
+    meta.stats = computeTreeStats(tree, meta);
+    renderTree(tree, meta);
+    renderStats(tree, meta, meta.stats);
+
+    const dt = (performance.now() - t0).toFixed(0);
+    status.textContent = `built in ${dt} ms · ${codes.length} symbols`;
+    /* Keep the filename placeholder in sync — it depends on the
+     * currently-selected data source and a couple of toggles. */
+    syncFilenamePlaceholder();
+}
+
+const STD_BLOCK = 8192;
+
+/* For short inputs (file or text < STD_BLOCK bytes), treat the
+ * frequencies as defining a distribution and scale up to a standard
+ * block.  Otherwise small subtree counts make bits-saved numbers
+ * round to 0.  Pre-built dataset distributions already come from
+ * 8192-byte samples so this is mostly a no-op for them. */
+function scaleFreqsToBlock(freqs) {
+    const total = freqs.reduce((s, x) => s + x, 0);
+    if (total === 0 || total >= STD_BLOCK) {
+        return { scaled: freqs, original: total, scaled_total: total, was_scaled: false };
+    }
+    const scale = STD_BLOCK / total;
+    const scaled = freqs.map(f => Math.round(f * scale));
+    /* Rounding drift correction so the total is exactly STD_BLOCK. */
+    let after = scaled.reduce((s, x) => s + x, 0);
+    if (after !== STD_BLOCK) {
+        const order = scaled.map((v, i) => [v, i])
+                            .filter(p => p[0] > 0)
+                            .sort((a, b) => b[0] - a[0]);
+        let drift = STD_BLOCK - after;
+        for (let i = 0; drift !== 0 && i < order.length; i++) {
+            const idx = order[i][1];
+            if (drift > 0) { scaled[idx]++; drift--; }
+            else if (scaled[idx] > 1) { scaled[idx]--; drift++; }
+        }
+    }
+    return { scaled, original: total, scaled_total: STD_BLOCK, was_scaled: true };
+}
+
+function setFreqs(freqs, name, isMain) {
+    _flatOverride.clear();
+    const sc = scaleFreqsToBlock(freqs);
+    _freqs = sc.scaled;
+    _totalN = sc.scaled_total;
+    _name = sc.was_scaled
+        ? `${name} (scaled ${sc.original}→${sc.scaled_total} for stats)`
+        : name;
+    _isMain = !!isMain;
+    /* The minimum valid max-code-length is ceil(log2(#symbols)) so
+     * the Huffman codes can address every distinct symbol.  Update
+     * the slider's min and clamp its current value if needed. */
+    const nSym = _freqs.filter(f => f > 0).length;
+    const minLen = Math.max(1, Math.ceil(Math.log2(Math.max(2, nSym))));
+    const slider = document.getElementById('max-len');
+    slider.min = minLen;
+    document.getElementById('max-len-min').textContent = minLen;
+    if (+slider.value < minLen) slider.value = minLen;
+    document.getElementById('max-len-val').textContent = slider.value;
+    refreshFromFreqs();
+}
+
+function populateDatasetSelect() {
+    const sel = document.getElementById('dataset-select');
+    sel.innerHTML = '';
+    const dists = window.PIVCO_DISTRIBUTIONS || [];
+    /* MAIN sorted alphabetically by name, then non-MAIN sorted
+     * alphabetically.  Result: calgary_pic shows up first (★). */
+    const main    = dists.filter(d =>  d.is_main).slice().sort((a,b) => a.name.localeCompare(b.name));
+    const nonMain = dists.filter(d => !d.is_main).slice().sort((a,b) => a.name.localeCompare(b.name));
+    const ordered = main.concat(nonMain);
+    ordered.forEach(d => {
+        const o = document.createElement('option');
+        o.value = d.name;
+        o.textContent = (d.is_main ? '★ ' : '   ') + d.name;
+        sel.appendChild(o);
+    });
+    sel.addEventListener('change', () => {
+        const d = (window.PIVCO_DISTRIBUTIONS || []).find(x => x.name === sel.value);
+        if (d) {
+            _dataSource = 'dataset';
+            setFreqs(d.freq, d.name, d.is_main);
+        }
+        updateUrlFromState();
+    });
+    /* Note: first-render is no longer triggered here.  loadInitialData()
+     * below picks dataset vs. text vs. URL-default after all controls
+     * have been initialised. */
+}
+
+function setupFileInput() {
+    document.getElementById('file-input').addEventListener('change', (e) => {
+        const f = e.target.files[0];
+        if (!f) return;
+        const reader = new FileReader();
+        reader.onload = ev => {
+            const buf = new Uint8Array(ev.target.result);
+            const freq = new Array(256).fill(0);
+            for (let i = 0; i < buf.length; i++) freq[buf[i]]++;
+            _dataSource = 'file';   /* file path isn't URL-capturable */
+            setFreqs(freq, `file:${f.name}`, false);
+            updateUrlFromState();
+        };
+        reader.readAsArrayBuffer(f);
+    });
+}
+
+function setupToggles() {
+    /* Every toggle change refreshes the render AND updates the URL bar
+     * so the visible permalink always reflects current state.  Toggles
+     * that affect flat-subtree state also need to clear the override
+     * set (otherwise per-node manual flatten toggles leak across
+     * unrelated control changes). */
+    const refreshAndUrl = () => { refreshFromFreqs(); updateUrlFromState(); };
+    const refreshClearAndUrl = () => {
+        _flatOverride.clear(); refreshFromFreqs(); updateUrlFromState();
+    };
+    document.getElementById('ph-opt').addEventListener('change', refreshClearAndUrl);
+    document.getElementById('max-skew').addEventListener('change', refreshClearAndUrl);
+    document.getElementById('show-flat').addEventListener('change', refreshClearAndUrl);
+    document.getElementById('condense-flat').addEventListener('change', refreshClearAndUrl);
+    document.getElementById('no-overlap').addEventListener('change', refreshAndUrl);
+    document.getElementById('splitting').addEventListener('change', refreshAndUrl);
+    document.getElementById('show-primitives').addEventListener('change', refreshAndUrl);
+    document.getElementById('show-bitmaps').addEventListener('change', refreshAndUrl);
+    document.getElementById('input-bitmap').addEventListener('change', refreshAndUrl);
+    document.getElementById('bitmap-label').addEventListener('change', refreshAndUrl);
+    document.getElementById('view-mode').addEventListener('change', refreshAndUrl);
+    document.getElementById('tree-mode').addEventListener('change', refreshAndUrl);
+    document.getElementById('constant-detect').addEventListener('change', refreshClearAndUrl);
+    document.getElementById('fuse-leaves').addEventListener('change', refreshClearAndUrl);
+    document.getElementById('title-input').addEventListener('input', refreshAndUrl);
+    document.getElementById('show-labels').addEventListener('input', refreshAndUrl);
+    document.getElementById('show-leaf-details').addEventListener('change', refreshAndUrl);
+    document.getElementById('show-skew').addEventListener('change', refreshAndUrl);
+    document.getElementById('show-bit-prefix').addEventListener('change', refreshAndUrl);
+    document.getElementById('show-leaf-code').addEventListener('change', refreshAndUrl);
+    document.getElementById('show-branch-bits').addEventListener('change', refreshAndUrl);
+    document.getElementById('keys-sort').addEventListener('change', refreshClearAndUrl);
+    document.getElementById('max-len').addEventListener('input', refreshClearAndUrl);
+    document.getElementById('reset-view').addEventListener('click', resetView);
+    document.getElementById('reset-params').addEventListener('click', resetParams);
+    /* Filename: if the user typed something, use it; else fall back to
+     * the placeholder (the auto-generated name).  Also keep the URL
+     * in sync when the user edits this field. */
+    const fnameEl = document.getElementById('download-filename');
+    fnameEl.addEventListener('input', updateUrlFromState);
+    document.getElementById('crop-top').addEventListener('input', refreshAndUrl);
+    document.getElementById('download-svg').addEventListener('click', () => {
+        const explicit = fnameEl.value.trim();
+        const fname = explicit || fnameEl.placeholder || 'tree.svg';
+        downloadCurrentSvg(fname);
+    });
+    document.getElementById('download-txt').addEventListener('click', () => {
+        const explicit = fnameEl.value.trim();
+        const base = (explicit || fnameEl.placeholder || 'tree.svg').replace(/\.svg$/i, '');
+        downloadText(base + '.txt', serializeTreeText());
+    });
+}
+
+function buildFromText(s) {
+    if (!s) return;
+    const bytes = new TextEncoder().encode(s);
+    const freq = new Array(256).fill(0);
+    for (let i = 0; i < bytes.length; i++) freq[bytes[i]]++;
+    setFreqs(freq, `text:${s.length < 30 ? s : s.slice(0, 27) + '…'}`, false);
+}
+
+function setupTextInput() {
+    const txt = document.getElementById('text-input');
+    const btn = document.getElementById('text-build');
+    const build = () => {
+        if (!txt.value) return;
+        _dataSource = 'text';
+        buildFromText(txt.value);
+        updateUrlFromState();
+    };
+    btn.addEventListener('click', build);
+    txt.addEventListener('keydown', e => { if (e.key === 'Enter') build(); });
+    /* Example chips: clicking one fills the textbox and triggers build. */
+    document.querySelectorAll('a.text-example').forEach(el => {
+        el.addEventListener('click', (e) => {
+            e.preventDefault();
+            txt.value = el.dataset.text || '';
+            build();
+        });
+    });
+}
+
+// ============================================================
+//  URL-as-state — every control's value is mirrored in the URL
+//  search string, so links capture-and-restore the exact view.
+//  See README near top of file for the param vocabulary.
+// ============================================================
+
+/* Mapping: param-name ↔ DOM id ↔ encoding ↔ tooltip-doc.
+ * Centralised so apply (URL → UI), update (UI → URL), reset, and
+ * tooltip wiring all walk the same list. */
+const URL_PARAM_MAP = [
+    /* checkboxes: 1/0 in URL, .checked in DOM */
+    { kind: 'str',  param: 'mode',           id: 'tree-mode',
+      desc: 'Which traversal / set of primitives the bubbles show (with "primitives" on); the tree shape is identical in every mode.<br><br>' +
+            '<b>top-down</b> — decode: partition input bytes left/right at each internal, scatter at leaves (P / S* primitives)<br>' +
+            '<b>bottom-up</b> — decode: recursively merge child outputs (MVV / MCV / MVC / MCC / MFx / S* primitives)<br>' +
+            '<b>encode</b> — the encoder\'s per-node partition op, by node type: ' +
+            '<b>EPF</b> full (both subtrees), <b>EPR</b>/<b>EPL</b> half (one child a leaf — emit only the subtree side), ' +
+            '<b>EPN</b> none (both leaves — build the bitmap, no scatter), <b>PK</b>{D} pack a flat D-bit subtree. ' +
+            'Leaves emit nothing.',
+      values: 'top-down | bottom-up | encode' },
+    { kind: 'bool', param: 'ph-opt',         id: 'ph-opt',
+      desc: 'Order symbols by frequency-descending within each code-length tier (ph-flat-aware). Off = canonical (byte-ascending) order.',
+      values: '1 | 0' },
+    { kind: 'bool', param: 'max-skew',       id: 'max-skew',
+      desc: 'Experimental <b>max-skew topology for ANS</b>.  Keeps the optimal Huffman <i>code lengths</i> (ratio unchanged), but rebuilds the tree bottom-up: at each level, sort nodes by combined frequency descending and merge left-to-right, so the heavier child is always on the left.<br><br>' +
+            'The tree "leans left" by frequency rather than by subtree size, pushing each internal node\'s bitmap toward maximum skew (better for an ANS/FSE bitmap coder).  Overrides ph-optimize and within-tier order.',
+      values: '1 | 0' },
+    { kind: 'bool', param: 'show-flat',      id: 'show-flat',
+      desc: 'Highlight detected flat subtrees (uniform-depth, fast-path candidates). When primitives are shown, flat-subtree roots render as <b>SFx</b> in top-down (scatter to non-contiguous output) or <b>MFx</b> in bottom-up (expand into contiguous buffer), both skipping x partition/merge levels.',
+      values: '1 | 0' },
+    { kind: 'bool', param: 'constant',       id: 'constant-detect',
+      desc: 'Toggle for the <b>top-down</b> memset-fast-path optimisation.<br><br>' +
+            '<b>Top-down</b>: when on, the single globally-most-frequent leaf is marked as the constant — its primitive is <b>C</b> (memset, skips the per-byte scatter loop), and its direct parent uses <b>PH</b> / <b>PRH</b> (genuine half-partition).  When off: every leaf is S1, every non-flat internal is P / PR, no red border.<br><br>' +
+            '<b>Bottom-up</b>: <i>this toggle has no effect</i>.  BU\'s merge primitive intrinsically takes one side as a broadcast scalar whenever a leaf is paired with a subtree (merge_cst_vec / merge_vec_cst) — there is no non-bcast alternative.  So MCV/MVC and the red border are always shown for those configurations, regardless of this toggle.',
+      values: '1 | 0' },
+    { kind: 'bool', param: 'fuse-leaves',    id: 'fuse-leaves',
+      desc: 'When an internal node\'s two children are both leaves, emit one fused S2 primitive (scatter two symbols at once) at the parent. Absorbs both leaves\' S1s. Wins over constant detection when both children are leaves.',
+      values: '1 | 0' },
+    { kind: 'bool', param: 'fold-subtrees',  id: 'condense-flat',
+      desc: 'Collapse each flat subtree into a single "D=N, M leaves" info box. Combine with no-overlap for clean layout.',
+      values: '1 | 0' },
+    { kind: 'bool', param: 'no-overlap',     id: 'no-overlap',
+      desc: 'Pin every leaf to a fixed-width slot so neighbouring subtrees and folded boxes cannot overlap. Tree may extend past the pane — zoom/pan to navigate.',
+      values: '1 | 0' },
+    { kind: 'bool', param: 'splitting',      id: 'splitting',
+      desc: 'Enable interactive tree splitting: flattenable nodes draw with a thick stroke and clicking toggles flatten/unflatten. Off = nodes are plain circles and clicks do nothing.',
+      values: '1 | 0' },
+    { kind: 'str',  param: 'view',           id: 'view-mode',
+      desc: 'Switch between figure types.<br><br>' +
+            '<b>tree</b> — the full Huffman tree with optional primitives, bitmaps, and decode-time annotations.<br><br>' +
+            '<b>pivot</b> — the ph "pivot" view: each input byte\'s code laid out per row, an arrow, then the same bits pivoted into the per-internal-node bitmaps that ph actually emits.  Requires a text data source.',
+      values: 'tree | pivot' },
+    { kind: 'bool', param: 'input-bitmap',   id: 'input-bitmap',
+      desc: 'Show the input strip above the tree: each source character with ' +
+            'its binary code, plus a colored <b>letter_index</b> tag under each bit.<br><br>' +
+            'Requires a "text" data source.',
+      values: '1 | 0' },
+    { kind: 'bool', param: 'show-bitmaps',   id: 'show-bitmaps',
+      desc: 'Show the per-node bitmaps inside the tree: above each internal ' +
+            'node, the bitmap entering it (the bits routed at that depth), with ' +
+            'letter_index tags so you can follow individual source bits through ' +
+            'the tree.<br><br>' +
+            'Requires a "text" data source — shows an error if a dataset (frequency-only) is selected.',
+      values: '1 | 0' },
+    { kind: 'str',  param: 'bmlabel',        id: 'bitmap-label',
+      desc: 'What to render under each internal node\'s bitmap (only when <b>show bitmaps</b> is on). Cells keep their per-symbol colour in every mode.<br><br>' +
+            '<b>nothing</b> — just the routed bits, no labels.<br>' +
+            '<b>code bits</b> — the symbol with its bit-index as a subscript (which bit of the code is routed at this node).<br>' +
+            '<b>symbols</b> — just the symbol letter (handy when reading bottom-up).<br>' +
+            '<b>indices</b> — the symbol\'s output index (the "indices going down" value).',
+      values: 'nothing | code_bits | symbols | indices' },
+    { kind: 'bool', param: 'primitives',     id: 'show-primitives',
+      desc: 'Draw a small badge to the left of each node showing the decode primitive used.<br><br>' +
+            '<b>Internal — top-down</b> (P = partition):<br>' +
+            '&nbsp;&nbsp;<b>P</b>          — general internal partition<br>' +
+            '&nbsp;&nbsp;<b>PR</b>         — root partition<br>' +
+            '&nbsp;&nbsp;<b>PH</b>         — half-partition: skip work on the constant leaf side<br>' +
+            '&nbsp;&nbsp;<b>PRH</b>        — root + half<br><br>' +
+            '<b>Internal — bottom-up</b> (M = merge; named by operand shape):<br>' +
+            '&nbsp;&nbsp;<b>MVV</b>        — merge two vectors (both children are subtrees)<br>' +
+            '&nbsp;&nbsp;<b>MCV</b>        — left child is a constant leaf, right is a vector<br>' +
+            '&nbsp;&nbsp;<b>MVC</b>        — left child is a vector, right is a constant leaf<br><br>' +
+            '<b>Flat-subtree</b> (different operation per mode):<br>' +
+            '&nbsp;&nbsp;<b>SFx</b>        — TD: scatter N symbols to non-contiguous output indices via N·x packed bits<br>' +
+            '&nbsp;&nbsp;<b>MFx</b>        — BU: expand N·x packed bits into a contiguous buffer for the parent\'s merge<br><br>' +
+            '<b>Fused two-leaf</b> (parent of two sibling leaves with <b>fuse-leaves</b> on):<br>' +
+            '&nbsp;&nbsp;<b>S2</b>         — TD: scatter both symbols<br>' +
+            '&nbsp;&nbsp;<b>MCC</b>        — BU: merge two constant scalar inputs<br><br>' +
+            '<b>Leaf-side</b> (TD only — BU leaves are just scalar inputs, no badge):<br>' +
+            '&nbsp;&nbsp;<b>S1</b>         — scatter one leaf<br>' +
+            '&nbsp;&nbsp;<b>C</b>          — memset of the constant leaf<br><br>' +
+            'In BU the constant leaf gets a red border but no badge — it\'s the constant-scalar operand to MCV/MVC/MCC.',
+      values: '1 | 0' },
+    { kind: 'str',  param: 'title',          id: 'title-input',
+      desc: 'Optional title rendered centred above the tree. Leave empty to omit. Free text (no metric substitution).',
+      values: 'any string, URL-encoded' },
+    { kind: 'str',  param: 'labels',         id: 'show-labels',
+      desc: 'Comma-separated metric labels rendered as a column in the ' +
+            'top-right corner above the tree.<br><br>' +
+            'Available keys:<br>' +
+            '&nbsp;&nbsp;<b>N</b>          — total source bytes<br>' +
+            '&nbsp;&nbsp;<b>#symbols</b>   — distinct symbols (= tree leaves)<br>' +
+            '&nbsp;&nbsp;<b>depth</b>      — longest code length in bits<br>' +
+            '&nbsp;&nbsp;<b>H</b>          — byte entropy (bits/byte)<br>' +
+            '&nbsp;&nbsp;<b>huff</b>       — Huffman avg code length (bits/byte)<br>' +
+            '&nbsp;&nbsp;<b>saved</b>      — total bits saved by perfect FSE on bitmaps<br>' +
+            '&nbsp;&nbsp;<b>ops/leaf</b>   — avg decode ops per distinct symbol<br>' +
+            '&nbsp;&nbsp;<b>ops/byte</b>   — frequency-weighted decode ops per byte<br>' +
+            '&nbsp;&nbsp;<b>#flat</b>      — number of maximal flat subtrees (needs flat-subtrees)<br>' +
+            '&nbsp;&nbsp;<b>flat-bits</b>  — flat-region raw bits / source byte (needs flat-subtrees)',
+      values: 'comma-separated keys, e.g. #symbols,H,ops/byte' },
+    { kind: 'bool', param: 'leaf-details',   id: 'show-leaf-details',
+      desc: 'Draw each leaf as a char + hex byte box. Off = tiny circles only (denser layout).',
+      values: '1 | 0' },
+    { kind: 'bool', param: 'show-skew',      id: 'show-skew',
+      desc: 'Draw the per-node skew bar showing the p_left / p_right split at each internal node.',
+      values: '1 | 0' },
+    { kind: 'bool', param: 'show-prefix',    id: 'show-bit-prefix',
+      desc: 'Annotate each internal node with its bit-prefix (path from root, 0 = left, 1 = right).',
+      values: '1 | 0' },
+    { kind: 'bool', param: 'show-code',      id: 'show-leaf-code',
+      desc: 'Annotate each leaf with its full Huffman code as a 0/1 string.',
+      values: '1 | 0' },
+    { kind: 'bool', param: 'show-bits',      id: 'show-branch-bits',
+      desc: 'Label each branch with the bit it represents (0 = left child, 1 = right child).',
+      values: '1 | 0' },
+    /* selects + range: .value as a string */
+    { kind: 'str',  param: 'keys',           id: 'keys-sort',
+      desc: 'Within-tier ordering of leaves when building the flat-aware tree. Affects which symbols land in the deepest D-flat chunk per length tier.',
+      values: 'freq_desc | freq_asc | symbol' },
+    { kind: 'str',  param: 'max-len',        id: 'max-len',
+      desc: 'Maximum Huffman code length (length-limited).',
+      values: 'integer 1..20' },
+    { kind: 'str',  param: 'filename',       id: 'download-filename',
+      desc: 'Output filename for the downloaded SVG. Leave empty to use the auto-generated name (shown as placeholder).',
+      values: 'string, e.g. tree.svg' },
+    { kind: 'str',  param: 'crop-top',       id: 'crop-top',
+      desc: 'Crop the exported SVG viewBox to the top fraction of the tree height (full width kept) — useful to show only the root + upper levels. Empty or >=1 exports the whole tree.',
+      values: 'fraction 0-1, e.g. 0.4' },
+];
+
+/* Documentation for non-URL-MAP controls (data source + buttons). */
+const DATA_PARAM_DOCS = [
+    { id: 'dataset-select', param: 'dataset',
+      desc: 'Pre-built distribution to visualise (from tree_viz_data.js).',
+      values: 'one of the dataset names' },
+    { id: 'text-input',     param: 'text',
+      desc: 'Custom input string. Frequencies counted from its UTF-8 bytes. Press build (or Enter) to apply.',
+      values: 'any string, URL-encoded' },
+    { id: 'download-svg',   param: 'download',
+      desc: 'Download the current view as a standalone .svg file. Setting <b>download</b> in the URL also auto-triggers (works headless; regular browsers may block without a user gesture).',
+      values: 'filename, e.g. tree.svg' },
+];
+
+function parseUrlParams() {
+    return new URLSearchParams(window.location.search);
+}
+
+/* Apply URL → control values.  Called once at load, before data is
+ * picked, so the first render happens with URL-driven settings. */
+function applyUrlParamsToControls() {
+    const q = parseUrlParams();
+    for (const m of URL_PARAM_MAP) {
+        if (!q.has(m.param)) continue;
+        const el = document.getElementById(m.id);
+        if (!el) continue;
+        const v = q.get(m.param);
+        if (m.kind === 'bool') {
+            el.checked = (v === '1' || v === 'true');
+        } else {
+            el.value = v;
+        }
+    }
+}
+
+/* Reset every URL-managed control to its HTML-default state and
+ * trigger a re-render + URL-bar update.  Per-node flat-overrides are
+ * cleared too so the "show me the default flat detection" view is
+ * restored. */
+function resetParams() {
+    for (const m of URL_PARAM_MAP) {
+        const el = document.getElementById(m.id);
+        if (!el) continue;
+        if (m.kind === 'bool') {
+            el.checked = el.defaultChecked;
+        } else if (el.tagName === 'SELECT') {
+            /* Find the option marked default-selected in HTML. */
+            for (const o of el.options) {
+                if (o.defaultSelected) { el.value = o.value; break; }
+            }
+        } else {
+            el.value = el.defaultValue;
+        }
+    }
+    _flatOverride.clear();
+    refreshFromFreqs();
+    updateUrlFromState();
+    /* Filename input has no HTML default value other than '' — clear it
+     * so the placeholder (auto-generated name) shows. */
+    document.getElementById('download-filename').value = '';
+    syncFilenamePlaceholder();
+}
+
+/* Keep the filename input's placeholder in sync with the auto-generated
+ * default so users see what would be written if they leave it empty. */
+function syncFilenamePlaceholder() {
+    const el = document.getElementById('download-filename');
+    if (!el) return;
+    el.placeholder = defaultDownloadFilename();
+}
+
+/* Tooltip wiring: hover any control with documentation in URL_PARAM_MAP
+ * or DATA_PARAM_DOCS → show a rich tooltip with the description + the
+ * URL parameter name and possible values in bold at the bottom. */
+function tooltipHtmlFor(doc) {
+    return `${doc.desc}<br><br>URL: <b>${doc.param}=${doc.values}</b>`;
+}
+function setupControlTooltips() {
+    const all = URL_PARAM_MAP.concat(DATA_PARAM_DOCS);
+    for (const m of all) {
+        const el = document.getElementById(m.id);
+        if (!el) continue;
+        /* Attach to the wrapping <label> if present (covers checkbox +
+         * its text), else to the element itself. */
+        const target = el.closest('label') || el;
+        target.addEventListener('mousemove', (e) => showTooltip(tooltipHtmlFor(m), e));
+        target.addEventListener('mouseleave', hideTooltip);
+        /* Strip any pre-existing native title attribute so the browser
+         * doesn't double-show the truncated text version. */
+        target.removeAttribute('title');
+    }
+}
+
+/* Tracks which UI affordance produced the currently-displayed data,
+ * so updateUrlFromState() knows whether to write text=, dataset=, or
+ * neither (file-loaded data isn't capturable in a URL). */
+let _dataSource = 'dataset';   /* one of 'dataset' | 'text' | 'file' */
+
+// ============================================================
+//  SVG export — clone the current view, strip the zoom transform,
+//  embed the SVG-relevant CSS, set width/height/viewBox to the
+//  content bbox, then trigger a download.  Output is a standalone
+//  .svg file suitable for paper inclusion.
+// ============================================================
+
+/* Collect the page's CSS rules that target #tree-svg so the exported
+ * file renders the same standalone.  Walks document.styleSheets at
+ * runtime so we stay in sync with the source CSS without duplication. */
+function collectTreeSvgCss() {
+    const out = [];
+    for (const sheet of document.styleSheets) {
+        let rules;
+        try { rules = sheet.cssRules; } catch (e) { continue; }  /* CORS */
+        if (!rules) continue;
+        for (const rule of rules) {
+            if (!rule.selectorText) continue;
+            if (rule.selectorText.indexOf('#tree-svg') === -1) continue;
+            out.push(rule.cssText);
+        }
+    }
+    return out.join('\n');
+}
+
+/* The crop-top export fraction (top portion of the tree to keep), or
+ * null when unset / >=1 (whole tree).  Shared by the SVG export and the
+ * live fit-to-pane preview so the on-screen framing matches the export. */
+function getCropTopFrac() {
+    const el = document.getElementById('crop-top');
+    const v = el ? parseFloat(el.value) : NaN;
+    return (!isNaN(v) && v > 0 && v < 1) ? v : null;
+}
+
+/* Serialize the built tree as text, for cross-checking the JS-rendered
+ * figure against the C production builder (extras/dump_tree_text).  Two
+ * sections, both deterministic from the code lengths (toggle-invariant):
+ *   ## codes  — per-symbol (symbol, length, canonical code), sorted by symbol
+ *   ## tree   — pre-order walk (0=left,1=right): each LEAF and each maximal
+ *               FLAT subtree (D>=2), the latter with its member symbols in
+ *               local-code order.  Flat roots are not descended into, mirroring
+ *               the production tree which does not materialize flat leaves. */
+function serializeTreeText() {
+    const m = currentMeta, codes = currentCodes, tree = currentRawTree;
+    if (!m || !codes || !tree) return '';
+    const out = [];
+    const actualMaxLen = codes.reduce((mx, c) => Math.max(mx, c.len), 0);
+    out.push('# tree_viz tree layout dump');
+    out.push(`# dist=${m.name} phOpt=${m.phOpt ? 1 : 0} maxSkew=${m.maxSkew ? 1 : 0}`
+           + ` keysSort=${m.keysSort} maxLen=${actualMaxLen} nsyms=${codes.length}`);
+    out.push('## codes  (symbol length code)');
+    codes.slice().sort((a, b) => a.symbol - b.symbol).forEach(c => {
+        out.push(`${c.symbol} ${c.len} ${(c.code >>> 0).toString(2).padStart(c.len, '0')}`);
+    });
+    out.push('## tree  (path kind detail; path 0=left 1=right, "." = root)');
+    (function walk(n) {
+        if (!n) return;
+        const path = n.bitPrefix === '' ? '.' : n.bitPrefix;
+        if (n.symbol < 0 && n.flatD >= 2) {
+            const syms = [];
+            (function leaves(x) {
+                if (!x) return;
+                if (x.symbol >= 0) { syms.push(x.symbol); return; }
+                leaves(x.left); leaves(x.right);
+            })(n);
+            out.push(`${path} FLAT D=${n.flatD} syms=${syms.join(',')}`);
+            return;                       /* maximal — don't descend */
+        }
+        if (n.symbol >= 0) {
+            out.push(`${path} LEAF sym=${n.symbol} len=${n.bitPrefix.length}`);
+            return;
+        }
+        walk(n.left); walk(n.right);
+    })(tree);
+    return out.join('\n') + '\n';
+}
+
+function downloadText(filename, text) {
+    const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    a.href = url; a.download = filename || 'tree.txt';
+    a.style.display = 'none';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+}
+
+function downloadCurrentSvg(filename) {
+    if (!filename) filename = 'tree.svg';
+    const orig = document.getElementById('tree-svg');
+    if (!orig) return;
+
+    /* Clone the SVG subtree and strip the pan/zoom transform on gWorld
+     * — we want the exported file at 1:1 with no scroll state baked in. */
+    const clone = orig.cloneNode(true);
+    const gWorldClone = clone.querySelector('g');
+    if (gWorldClone) gWorldClone.removeAttribute('transform');
+    /* The crop preview (cut line + dimmed region) is a live-view aid,
+     * not part of the figure — drop it from the exported clone. */
+    clone.querySelectorAll('.crop-overlay').forEach(e => e.remove());
+
+    /* Measure unzoomed content via the LIVE gWorld (the clone isn't in
+     * the document so getBBox would return zeros).  Pad a little. */
+    const bbox = gWorld.node().getBBox();
+    const pad = 12;
+
+    /* Optional top-crop: keep only the top fraction of the tree height
+     * AND narrow the width to the kept nodes' x-extent (_cropExportBox,
+     * computed in the tree render).  Content outside is clipped by the
+     * SVG viewport.  Empty / >=1 / no box = whole tree. */
+    const cropTop = getCropTopFrac();
+    const contentH = cropTop ? bbox.height * cropTop : bbox.height;
+    const cb = (cropTop && _cropExportBox) ? _cropExportBox : null;
+    const vbX = cb ? cb.x : bbox.x;
+    const vbW = cb ? cb.w : bbox.width;
+
+    const exportW = Math.max(1, Math.ceil(vbW      + 2 * pad));
+    const exportH = Math.max(1, Math.ceil(contentH + 2 * pad));
+    clone.setAttribute('width',  exportW);
+    clone.setAttribute('height', exportH);
+    clone.setAttribute('viewBox',
+        `${vbX - pad} ${bbox.y - pad} ${exportW} ${exportH}`);
+
+    /* Inline the #tree-svg stylesheet so the .svg renders without the
+     * page's <style> block.  Prepended via SVG <style> element. */
+    const css = collectTreeSvgCss();
+    if (css) {
+        const styleEl = document.createElementNS(
+            'http://www.w3.org/2000/svg', 'style');
+        styleEl.textContent = css;
+        clone.insertBefore(styleEl, clone.firstChild);
+    }
+
+    clone.setAttribute('xmlns',       'http://www.w3.org/2000/svg');
+    clone.setAttribute('xmlns:xlink', 'http://www.w3.org/1999/xlink');
+
+    const svgText = '<?xml version="1.0" standalone="no"?>\n' +
+                     new XMLSerializer().serializeToString(clone);
+
+    /* Trigger download via a temporary anchor.  Note: in regular
+     * browsers this requires a recent user gesture (clicking the
+     * download button); when the page is driven by a headless tool
+     * like Playwright the gesture-or-permission check is bypassed. */
+    const blob = new Blob([svgText], { type: 'image/svg+xml;charset=utf-8' });
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.style.display = 'none';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    /* Revoke after a short delay so the browser has time to consume
+     * the blob (some browsers race on instant revoke). */
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+/* Default download filename: derived from the data source + a
+ * couple of distinguishing toggles, so multiple downloads from
+ * the same session don't collide. */
+function defaultDownloadFilename() {
+    let stem;
+    if (_dataSource === 'text') {
+        const t = document.getElementById('text-input').value || 'text';
+        stem = 'text-' + t.replace(/[^a-z0-9]+/gi, '_').slice(0, 20);
+    } else if (_dataSource === 'dataset') {
+        stem = document.getElementById('dataset-select').value || 'tree';
+    } else {
+        stem = 'tree';
+    }
+    if (document.getElementById('ph-opt').checked) stem += '-phopt';
+    if (document.getElementById('condense-flat').checked) stem += '-folded';
+    return stem + '.svg';
+}
+
+/* Build a URL search string from current control state.  Includes
+ * data source: text=... if a text was built, dataset=... if a preset
+ * is selected, neither for file-loaded data.  Booleans only included
+ * when they differ from the HTML-default state, so default-shaped
+ * URLs stay short. */
+function updateUrlFromState() {
+    const q = new URLSearchParams();
+    if (_dataSource === 'text') {
+        const t = document.getElementById('text-input').value;
+        if (t) q.set('text', t);
+    } else if (_dataSource === 'dataset') {
+        const n = document.getElementById('dataset-select').value;
+        if (n) q.set('dataset', n);
+    }
+    /* Controls — include only if they differ from HTML defaults so
+     * default views produce clean URLs. */
+    for (const m of URL_PARAM_MAP) {
+        const el = document.getElementById(m.id);
+        if (!el) continue;
+        if (m.kind === 'bool') {
+            const cur = !!el.checked;
+            const def = el.hasAttribute('checked');
+            if (cur !== def) q.set(m.param, cur ? '1' : '0');
+        } else {
+            const cur = el.value;
+            const def = el.defaultValue;
+            if (cur !== def) q.set(m.param, cur);
+        }
+    }
+    const s = q.toString();
+    const url = s ? `${window.location.pathname}?${s}` : window.location.pathname;
+    history.replaceState(null, '', url);
+}
+
+/* Choose initial data: URL text= → URL dataset= → first dataset.
+ * Run AFTER applyUrlParamsToControls so the render uses URL settings. */
+function loadInitialData() {
+    const q = parseUrlParams();
+    const dists = window.PIVCO_DISTRIBUTIONS || [];
+
+    if (q.has('text')) {
+        const s = q.get('text');
+        document.getElementById('text-input').value = s;
+        _dataSource = 'text';
+        buildFromText(s);
+        return;
+    }
+    if (q.has('dataset')) {
+        const name = q.get('dataset');
+        const d = dists.find(x => x.name === name);
+        if (d) {
+            const sel = document.getElementById('dataset-select');
+            sel.value = name;
+            _dataSource = 'dataset';
+            setFreqs(d.freq, d.name, d.is_main);
+            return;
+        }
+    }
+    /* Default: first dataset (preserves pre-URL-params behaviour). */
+    if (dists.length > 0) {
+        /* Replicate the MAIN-first ordering used in populateDatasetSelect. */
+        const main    = dists.filter(d =>  d.is_main).slice().sort((a,b) => a.name.localeCompare(b.name));
+        const nonMain = dists.filter(d => !d.is_main).slice().sort((a,b) => a.name.localeCompare(b.name));
+        const first = main.concat(nonMain)[0];
+        _dataSource = 'dataset';
+        setFreqs(first.freq, first.name, first.is_main);
+    }
+}
+
+/* Hover over a row in the top-N table → temporarily highlight the
+ * corresponding internal node in the SVG. */
+let _highlightedNodeId = null;
+function highlightNode(nodeId) {
+    if (_highlightedNodeId != null) {
+        const old = gWorld.select(`g.node-internal[data-node-id="${_highlightedNodeId}"]`);
+        if (!old.empty()) {
+            /* Use .style() because the base CSS has `fill: #fff` for
+             * .node-internal circle and CSS selectors beat attribute
+             * defaults; inline style overrides them. */
+            old.select('circle')
+                .attr('r', 4)
+                .style('fill', null)
+                .style('stroke', null);
+        }
+    }
+    _highlightedNodeId = nodeId;
+    if (nodeId == null) return;
+    const sel = gWorld.select(`g.node-internal[data-node-id="${nodeId}"]`);
+    if (sel.empty()) return;
+    sel.select('circle')
+        .attr('r', 8)
+        .style('fill', '#e53935')        /* red fill */
+        .style('stroke', '#a31515');     /* darker red border */
+    /* Bring into view: pan if outside the visible area.  Get the
+     * node's screen-space position. */
+    const node = sel.datum();
+    const t = d3.zoomTransform(svg.node());
+    const sx = t.applyX(node.x), sy = t.applyY(node.y);
+    const pane = document.getElementById('tree-pane');
+    const W = pane.clientWidth, H = pane.clientHeight;
+    if (sx < 40 || sx > W - 40 || sy < 40 || sy > H - 40) {
+        const cx = W / 2, cy = H / 2;
+        const newT = d3.zoomIdentity.translate(cx - t.k * node.x,
+                                                cy - t.k * node.y).scale(t.k);
+        svg.transition().duration(220).call(zoom.transform, newT);
+    }
+}
+
+function setupTopTableHover() {
+    const tbody = document.querySelector('#top-nodes-table tbody');
+    tbody.addEventListener('mouseover', e => {
+        const tr = e.target.closest('tr');
+        if (!tr) return;
+        const id = tr.dataset.nodeId;
+        if (id == null) return;
+        highlightNode(+id);
+        const node = _nodeById.get(+id);
+        if (node) showTooltip(nodeTooltipHtml(node, _totalN), e);
+    });
+    tbody.addEventListener('mousemove', e => {
+        const tr = e.target.closest('tr');
+        if (!tr) return;
+        const id = tr.dataset.nodeId;
+        if (id == null) return;
+        const node = _nodeById.get(+id);
+        if (node) showTooltip(nodeTooltipHtml(node, _totalN), e);
+    });
+    tbody.addEventListener('mouseleave', () => { highlightNode(null); hideTooltip(); });
+}
+
+window.addEventListener('load', () => {
+    initSvg();
+    populateDatasetSelect();   /* fills the dropdown but does NOT pick data */
+    setupFileInput();
+    setupTextInput();
+    setupToggles();
+    setupTopTableHover();
+    setupControlTooltips();
+    /* URL params drive both the control state AND the initial data
+     * source.  Apply controls first, THEN load data so the first
+     * render reflects URL-driven settings. */
+    applyUrlParamsToControls();
+    loadInitialData();
+    /* Optional auto-download: when ?download=filename.svg is in the
+     * URL, fire off a download after the first render settles.  Works
+     * reliably under Playwright/Puppeteer; regular browsers may block
+     * the download without a user gesture, which is fine — the user
+     * can click the button instead. */
+    const q = parseUrlParams();
+    if (q.has('download')) {
+        setTimeout(() => downloadCurrentSvg(q.get('download')), 150);
+    }
+});
+window.addEventListener('resize', () => {
+    if (currentTree) renderTree(currentTree, currentMeta);
+});
+</script>
+
+</body>
+</html>

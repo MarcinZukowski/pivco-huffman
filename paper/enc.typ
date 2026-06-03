@@ -1,4 +1,4 @@
-#import "conf.typ": PH, mf, he, fair-cell, h0
+#import "conf.typ": PH, OOH, mf, he, fair-cell, h0
 #import "style.typ": colors-tab
 #import "tab.typ": tab
 

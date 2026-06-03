@@ -114,7 +114,7 @@ For _flat subtree roots_, we simply store `ceil(n*D/8)` bytes containing the com
 The final component is file-level metadata which includes
  total uncompressed size, checksums, block size and other necessary fields.
 We use a simple file format containing this information, allowing
- easy testing #PH.
+ easy testing of #PH.
 
 = Failed optimizations
 

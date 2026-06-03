@@ -1,4 +1,4 @@
-#import "conf.typ": anote, PH, he, mf, sym, pick-cols, todo, fair-cell
+#import "conf.typ": anote, PH, OOH, he, mf, sym, pick-cols, todo, fair-cell
 #import "style.typ": colors-tab
 #import "tab.typ": tab
 
@@ -112,8 +112,8 @@ caption: [Primitives used in bottom-up processing and their top-down equivalents
 Bottom-up processing uses two families of _merge_ operations.
 First are binary `merge_X_Y` primitives,
  where both `X` and `Y` can be `vec` (a vector of symbols) or `cst` (a constant symbol).
-The other are N-ary `merge_flat_D` primitives, specialized for `D` values.
-@fig-bu-ops shows how they are used to build tree,
+The second family consists of N-ary `merge_flat_D` primitives, specialized for `D` values.
+@fig-bu-ops shows how they are used to build the tree,
 and @bu-symbols discusses how these primitives correspond to the top-down primitives.
 
 A naive implementation of e.g. `merge_vec_vec` would be directly symmetrical to `partition` from @naive:
@@ -164,16 +164,16 @@ For the lookup, on M4 we use the family of `vqtbl*` operations
 for D=1..6, chained with `vqtbx*` operations for D=7..8.
 Here's an example for D=4 (16 symbols):
 ```c
-// Before loop - load the code-to-symbol mapping into a vector
-uint8x16_t c2s_vec = vld1q_u8(c2s);
+  // Before loop - load the code-to-symbol mapping into a vector
+  uint8x16_t c2s_vec = vld1q_u8(c2s);
 
-// In a loop, for 16 (!) elements
-// Unpack 16 nibbles (8 bytes) into 16 code-index bytes
-uint8x16_t codes = flat_d4_unpack(bitmap + (i / 2));
-// Fetch the symbols we need
-uint8x16_t syms  = vqtbl1q_u8(c2s_vec, codes);
-// Save 16 symbols at once
-vst1q_u8(symbols + i, syms);
+  // In a loop, for 16 (!) elements
+  // Unpack 16 nibbles (8 bytes) into 16 code-index bytes
+  uint8x16_t codes = flat_d4_unpack(bitmap + (i / 2));
+  // Fetch the symbols we need
+  uint8x16_t syms  = vqtbl1q_u8(c2s_vec, codes);
+  // Save 16 symbols at once
+  vst1q_u8(symbols + i, syms);
 ```
 See how we can decode 16 symbols with just bit-unpacking and 3 extra instructions.
 

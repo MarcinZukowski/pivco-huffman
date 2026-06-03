@@ -16,22 +16,22 @@ but rather "canonical" coding from @schwartz1964canonical.
 #table(
   columns: (50%, 50%),
   stroke: 0pt,
-  align: center,
+  align: (center+horizon, left+horizon),
   [#figure(
     mf("huf-tree"),
     caption: [Classical Huffman tree for the word "huffman"]
    )<fig-huf-tree>],
   [#figure(
     [```js
-    node = root
+  node = root
 
-    while not is_leaf(node)
-      if read_bit() == 1:
-        node = node->right
-      else:
-        node = node->left
-    return node.symbol
-      ```
+  while not is_leaf(node)
+    if read_bit() == 1:
+      node = node->right
+    else:
+      node = node->left
+  return node.symbol
+  ```
     ],
     caption: [Naive Huffman decoding for one symbol]
   )<fig-huf-decode>
@@ -136,22 +136,22 @@ each node in the state machine not for one, but for a _vector_ of records,
 presented in this pseudocode:
 
 ```js
-misses = []                          // miss input positions
-hits = []                            // hits input positions
-hash = compute_hash(keys)            // all input hash values
-active = hash_table_first(hash)      // input positions we're still looking up
-while not active.empty():            // if we still have work to do
-  // move empty slots to misses, reduce active
-  hash_table_split_empty(&active, &misses)
-  // get all values from the hash table for active indices
-  vals = hash_table_vals(active)
-  // compute comparisons
-  comp_results = compare(vals, keys, active)
-  // split into hits if equal, active if not - those need more work
-  split_on_equality(comp_results, &active, &hits)
-  // get all the next positions for all still active records
-  active = hash_table_next(active)
-// misses have all miss positions, hits have all hit positions
+  misses = []                          // miss input positions
+  hits = []                            // hits input positions
+  hash = compute_hash(keys)            // all input hash values
+  active = hash_table_first(hash)      // input positions we're still looking up
+  while not active.empty():            // if we still have work to do
+    // move empty slots to misses, reduce active
+    hash_table_split_empty(&active, &misses)
+    // get all values from the hash table for active indices
+    vals = hash_table_vals(active)
+    // compute comparisons
+    comp_results = compare(vals, keys, active)
+    // split into hits if equal, active if not - those need more work
+    split_on_equality(comp_results, &active, &hits)
+    // get all the next positions for all still active records
+    active = hash_table_next(active)
+  // misses have all miss positions, hits have all hit positions
 ```
 
 This approach, while more complex and seemingly labor-intensive (definitely issues more CPU instructions),

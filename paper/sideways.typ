@@ -98,20 +98,20 @@ as its list of indices is the complete input.
 
 The `partition` primitive can be expressed naively with:
 ```c
-for (i = 0; i < n; i++) {
-  bit = get_bit(bitmap, i);
-  if (bit) indices_right[n_right++] = indices[i];
-  else     indices_left[n_left++] = indices[i];
-}
+  for (i = 0; i < n; i++) {
+    bit = get_bit(bitmap, i);
+    if (bit) indices_right[n_right++] = indices[i];
+    else     indices_left[n_left++] = indices[i];
+  }
 ```
 
 *`scatter(output, indices, symbol)`* -- fills all positions in the output stream
 with a given symbol.
 
 ```c
-for (i = 0; i < n; i++) {
-  output[indices[i]] = symbol;
-}
+  for (i = 0; i < n; i++) {
+    output[indices[i]] = symbol;
+  }
 ```
 
 We measured the decoding performance of such a naive implementation on Apple M4 CPU,
@@ -220,9 +220,9 @@ all input indices with the symbol based on the bitmap.
 This results in a *`scatter_two(output, indices, bitmap, symbol0, symbol1)`* primitive:
 
 ```c
-for (i = 0; i < n; i++) {
-  output[indices[i]] = get_bit(bitmap, i) ? symbol1 : symbol0;
-}
+  for (i = 0; i < n; i++) {
+    output[indices[i]] = get_bit(bitmap, i) ? symbol1 : symbol0;
+  }
 ```
 
 @treeopt-fuse shows the benefit in reduced operations per decoded byte going from 4.071 to 3.286.
@@ -276,10 +276,10 @@ bits packed contiguously.
 Also, note that `scatter_two` is a special case of this approach, with _D=1_.
 
 ```c
-bit_unpack(bitmap, D, code_indices);
-for (i = 0; i < n; i++) {
-  output[indices[i]] = code_to_symbols[code_indices[i]];
-}
+  bit_unpack(bitmap, D, code_indices);
+  for (i = 0; i < n; i++) {
+    output[indices[i]] = code_to_symbols[code_indices[i]];
+  }
 ```
 
 #he("gridtable")[
@@ -412,23 +412,23 @@ Partitioning performance can be further improved with SIMD. For example, here's 
 implementation (just an 8-value kernel with a given 8-bit `mask` from the bitmap).
 
 ```c
-    uint8x16_t data = vld1q_u8((const uint8_t *)indices);
+  uint8x16_t data = vld1q_u8((const uint8_t *)indices);
 
-    /* Load shuffle patterns for right/left side - they are stored together */
-    const uint8_t *tab = compress_tab[mask];
-    uint8x16_t shuf_r = vld1q_u8(tab);       /* bytes 0-15: right */
-    uint8x16_t shuf_l = vld1q_u8(tab + 16);  /* bytes 16-31: left */
+  /* Load shuffle patterns for right/left side - they are stored together */
+  const uint8_t *tab = compress_tab[mask];
+  uint8x16_t shuf_r = vld1q_u8(tab);       /* bytes 0-15: right */
+  uint8x16_t shuf_l = vld1q_u8(tab + 16);  /* bytes 16-31: left */
 
-    /* Save input indices in either right or left */
-    uint8x16_t right = vqtbl1q_u8(data, shuf_r);
-    uint8x16_t left  = vqtbl1q_u8(data, shuf_l);
+  /* Save input indices in either right or left */
+  uint8x16_t right = vqtbl1q_u8(data, shuf_r);
+  uint8x16_t left  = vqtbl1q_u8(data, shuf_l);
 
-    /* Compute how many values went right */
-    int n_right = compress_popcnt[mask];
+  /* Compute how many values went right */
+  int n_right = compress_popcnt[mask];
 
-    /* Store both results - always 16 bytes */
-    vst1q_u8((uint8_t *)right_out, right);
-    vst1q_u8((uint8_t *)left_out, left);
+  /* Store both results - always 16 bytes */
+  vst1q_u8((uint8_t *)right_out, right);
+  vst1q_u8((uint8_t *)left_out, left);
 ```
 
 How it works:

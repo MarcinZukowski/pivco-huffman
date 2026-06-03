@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>fig-web — pivco figure redirector</title>
+<style>
+  body { font: 13px/1.4 system-ui, sans-serif; margin: 24px; }
+  #status { color: #444; }
+  .err   { color: #b91c1c; }
+  details { margin-top: 16px; }
+  code  { background: #f3f4f6; padding: 1px 4px; border-radius: 3px; }
+  ul    { line-height: 1.6; }
+</style>
+</head>
+<body>
+
+<h1>fig-web</h1>
+<p id="status">redirecting…</p>
+
+<details id="help">
+  <summary>usage</summary>
+  <p>Append <code>?name=&lt;figure&gt;</code> to the URL.  This page loads
+     <code>figures.json</code>, looks up the figure's tool, merges
+     tool defaults with figure params, and redirects to the tool's
+     HTML viewer with those params.</p>
+  <p>Available figures:</p>
+  <ul id="fig-list"></ul>
+</details>
+
+<script>
+/* ROOT_PREFIX is prepended to figures.json's project-root-relative
+ * tool.web paths (e.g. "figures/tree_viz.html").  Two modes:
+ *
+ *   dev:  fig-web.html lives at paper/figures/, fetches figures.json
+ *         at runtime, walks "../../" back to the project root.
+ *   dist: paper/Makefile's `dist` target overwrites the CFG sentinel
+ *         below with the inlined contents of figures.json and copies
+ *         both this file and the tool viewers into out/figures/.
+ *         "../" walks to out/ which then plays the role of the
+ *         project root for tool.web resolution. */
+const CFG = {"_comment": "Paper figure registry. Two layers: tools = viz programs (HTML viewer + capture CLI + tool-wide defaults); figures = named instances of a tool with parameter overrides. Paths in this file are project-root-relative; fig.py / fig-web.html resolve them.", "tools": {"tree_viz": {"cli": "extras/figures/capture_tree_viz.py", "web": "figures/tree_viz.html", "defaults": {"splitting": 0, "fold-subtrees": 0, "no-overlap": 1, "show-skew": 0}}, "plot_viz": {"_comment": "LATER"}}, "figures": [{"name": "treeopt-naive", "tool": "tree_viz", "params": {"text": "coconut-papaya", "mode": "top-down", "ph-opt": 0, "show-flat": 0, "constant": 0, "fuse-leaves": 0, "primitives": 1, "title": "coconut-papaya \u2014 naive tree", "labels": "ops/byte"}}, {"name": "treeopt-fuse", "tool": "tree_viz", "params": {"text": "coconut-papaya", "mode": "top-down", "ph-opt": 0, "show-flat": 0, "constant": 0, "fuse-leaves": 1, "primitives": 1, "title": "coconut-papaya \u2014 fused leaves", "labels": "ops/byte"}}, {"name": "treeopt-constant", "tool": "tree_viz", "params": {"text": "coconut-papaya", "mode": "top-down", "ph-opt": 0, "show-flat": 0, "constant": 1, "fuse-leaves": 1, "primitives": 1, "title": "coconut-papaya \u2014 constant nodes", "labels": "ops/byte"}}, {"name": "treeopt-flat", "tool": "tree_viz", "params": {"text": "coconut-papaya", "mode": "top-down", "ph-opt": 0, "show-flat": 1, "primitives": 1, "title": "coconut-papaya \u2014 flat subtrees", "labels": "ops/byte"}}, {"name": "treeopt-opt", "tool": "tree_viz", "params": {"text": "coconut-papaya", "mode": "top-down", "ph-opt": 1, "show-flat": 1, "primitives": 1, "title": "coconut-papaya \u2014 optimized subtrees", "labels": "ops/byte"}}, {"name": "bu-ops", "tool": "tree_viz", "params": {"text": "coconut-papaya", "ph-opt": 0, "show-flat": 1, "primitives": 1, "title": "coconut-papaya \u2014 bottom up", "labels": "ops/byte", "mode": "bottom-up"}}, {"name": "enc-ops", "tool": "tree_viz", "params": {"text": "coconut-papaya", "ph-opt": 0, "show-flat": 1, "primitives": 1, "title": "coconut-papaya \u2014 encode", "labels": "", "mode": "encode"}}, {"name": "pivot-bitmaps", "tool": "tree_viz", "params": {"title": "Pivoting \"huffman\"", "text": "huffman", "view": "pivot"}}, {"name": "pivot-tree", "tool": "tree_viz", "params": {"title": "Pivoted \"huffman\" tree", "text": "huffman", "mode": "top-down", "ph-opt": 0, "show-flat": 0, "fuse-leaves": 0, "constant": 0, "leaf-details": 1, "show-bitmaps": 1, "bmlabel": "indices", "input-bitmap": 1}}, {"title": "Bottom-up huffman tree", "name": "bu-tree", "tool": "tree_viz", "params": {"text": "huffman", "mode": "bottom-up", "ph-opt": 0, "show-flat": 0, "fuse-leaves": 1, "constant": 1, "leaf-details": 1, "show-bitmaps": 1, "bmlabel": "symbols", "input-bitmap": 1}}, {"name": "huf-tree", "tool": "tree_viz", "params": {"text": "huffman", "mode": "top-down", "ph-opt": 0, "show-flat": 0, "fuse-leaves": 0, "constant": 0, "leaf-details": 1, "show-bitmaps": 0, "show-bits": 1, "input-bitmap": 1}}, {"name": "skew-dna-fasta", "tool": "tree_viz", "params": {"dataset": "dna_fasta", "mode": "bottom-up", "ph-opt": 1, "show-flat": 0, "fuse-leaves": 1, "constant": 1, "leaf-details": 1, "show-bitmaps": 0, "show-skew": 1, "no-overlap": 0, "crop-top": 0.35}}, {"name": "skew-calgary", "tool": "tree_viz", "params": {"dataset": "calgary_pic", "mode": "bottom-up", "ph-opt": 1, "show-flat": 0, "fuse-leaves": 1, "constant": 1, "leaf-details": 1, "show-bitmaps": 0, "show-skew": 1, "no-overlap": 0, "crop-top": 0.22, "fold-subtrees": 1}}]};
+const ROOT_PREFIX = CFG ? '../' : '../../';
+
+const status = document.getElementById('status');
+const help   = document.getElementById('help');
+const list   = document.getElementById('fig-list');
+
+function setError(msg) {
+    status.textContent = msg;
+    status.classList.add('err');
+    help.open = true;
+}
+
+async function main() {
+    const q = new URLSearchParams(window.location.search);
+    const name = q.get('name');
+
+    let cfg = CFG;
+    if (cfg === null) {
+        try {
+            cfg = await (await fetch('figures.json')).json();
+        } catch (e) {
+            setError(`failed to load figures.json: ${e}`);
+            return;
+        }
+    }
+
+    /* Always populate the help list. */
+    const figs = cfg.figures || [];
+    for (const f of figs) {
+        if (!f.name) continue;
+        const li = document.createElement('li');
+        const a = document.createElement('a');
+        a.href = `?name=${encodeURIComponent(f.name)}`;
+        a.textContent = f.name;
+        const tool = document.createElement('span');
+        tool.style.color = '#888';
+        tool.textContent = ` — ${f.tool}`;
+        li.appendChild(a);
+        li.appendChild(tool);
+        list.appendChild(li);
+    }
+
+    if (!name) {
+        setError("no figure name specified (use ?name=<figure>)");
+        return;
+    }
+
+    const fig = figs.find(f => f.name === name);
+    if (!fig) {
+        setError(`unknown figure: ${name}`);
+        return;
+    }
+    const tool = (cfg.tools || {})[fig.tool];
+    if (!tool || !tool.web) {
+        setError(`tool ${fig.tool} has no web viewer in figures.json`);
+        return;
+    }
+
+    /* Merge tool.defaults <- figure.params (figure overrides win). */
+    const merged = Object.assign({}, tool.defaults || {}, fig.params || {});
+    const url = ROOT_PREFIX + tool.web + '?' + new URLSearchParams(merged);
+    status.textContent = `redirecting to ${tool.web}…`;
+    window.location.replace(url);
+}
+
+main();
+</script>
+
+</body>
+</html>

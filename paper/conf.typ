@@ -58,7 +58,7 @@
     inset: 10pt,
     radius: 4pt,
     width: 100%,
-    it
+    if _pdf { align(left, it) } else { it }
   )
   body
 }
@@ -67,7 +67,7 @@
 #let PHA="PivCo-Huffman+ANS"
 #let OOH="Oodle Huffman"
 #let h0="Huff0"   // display name for the huf0 baseline (stock HUF_decompress)
-#let URLBASE="githubpages/blalba/paper"
+#let URLBASE="https://marcinzukowski.github.io/pivco-huffman/paper-1.0/"
 
 // HTML element with a provided class name
 #let he(cname, style:none, body) = {

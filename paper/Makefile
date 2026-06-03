@@ -78,3 +78,8 @@ dist: $(PDF) $(HTML)
 
 zip: out dist
 	cd out && zip -r ../ph.zip .
+
+WEB_PAPER=../web/paper-1.0
+web: clean dist
+	rm -rf $(WEB_PAPER)
+	cp -R out $(WEB_PAPER)

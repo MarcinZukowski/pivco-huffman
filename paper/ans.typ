@@ -23,9 +23,9 @@ The typical tANS decoding is actually quite similar to an optimized
 Huffman decoding routine from @sota:
 
 ```c
-t = decoding_table[state];
-state = t.newX + read_bits(t.numBits);  //state transition
-emit_symbol(t.symbol);                  //decoded symbol
+  t = decoding_table[state];
+  state = t.newX + read_bits(t.numBits);  //state transition
+  emit_symbol(t.symbol);                  //decoded symbol
 ```
 
 While similar, the critical difference is that we see a `state` variable which
