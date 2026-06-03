@@ -80,12 +80,12 @@ It also provides compression ratios approaching the ANS-based methods at signifi
 Anthropic Claude was used extensively during development of this project, especially in areas
 like coding, testing, automation and research.
 It also contributed many small ideas and improvements, especially around SIMD code.
-At the same time, Author declares that the vast majority of the key ideas and concepts here are human-invented.
+At the same time, the author declares that the vast majority of the key ideas and concepts here are human-invented.
 This document is purely human-written (except for spellcheck etc.).
 
 == Acknowledgments
 
-Author would like to thank Fabian "Ryg" Giesen for his help with Oodle and his comments on an early draft of the paper.
+The author would like to thank Fabian "Ryg" Giesen for his help with Oodle and his comments on an early draft of the paper.
 
 #bibliography("refs.bib")
 

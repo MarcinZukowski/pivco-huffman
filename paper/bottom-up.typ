@@ -31,7 +31,7 @@ bitmaps we used for *bitmap-based partitioning*, but now using *bitmap-based mer
 This process proceeds all the way to the top, resulting in the final sequence
 of codes equal to the complete expected output.
 #footnote[Note that a similar symmetry of _partitioning_ vs _merging_ can be found
-in other places, e.g. sorting or joins in databases].
+in other places, e.g. sorting or joins in databases.]
 
 In this approach, leaf nodes do not require any processing, as they just produce a constant value.
 This is different from the top-down approach, where we had to apply a `scatter` primitive.

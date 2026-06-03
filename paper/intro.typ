@@ -107,7 +107,7 @@ Here are the measured bandwidths on two example datasets on two hosts (see @test
 )<tab-huffman-perf>
 ]
 
-This are impressive results.
+These are impressive results.
 Still, in this paper we investigate if the performance could be further improved by using a completely different approach.
 
 == Motivating Example: Hash Join in Databases <hj>

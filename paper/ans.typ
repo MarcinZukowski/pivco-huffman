@@ -124,7 +124,7 @@ This means that for most datasets no ANS overhead is paid, and when it is applie
 A concrete implementation of which node should be FSE-selected is currently as follows:
 - node needs to have at least `PIVCO_FSE_MIN_BITMAP_BYTES` (32 bytes/ 256 bits default)
 - node skew needs to be higher than `PIVCO_FSE_MIN_THRESHOLD` (0.625 default)
-- fse _benefit_ needs to be better than `PIVCO_FSE_MIN_RATIO` (0.95 default)  with benefit computed as
+- fse _benefit_ needs to be better than `PIVCO_FSE_MIN_RATIO` (0.95 default) with benefit computed as
   `(depth + fse_H) / (depth + 1)`, where *fse_H* is the average bit-cost of fse-encoding (close to _H_, but usually a bit higher).
   The motivation here is that while saving e.g. 0.2 bits for a root-node makes sense, doing it for a
   node at depth 5 (so already 5-bits long) is probably not worth it.
@@ -147,7 +147,7 @@ Depending on the actual distribution of bits, this can result
  in compression efficiency lower than if we actually
  built the table for a specific dataset.
 For example, let us take a collection of 300 `0xFF` and 100 `0x00` values.
-If the decoding table was custom-built, these values
+If the decoding table were custom-built, these values
  would take 75% and 25%, respectively, of the frequencies.
 However, since the pre-built partitions assume random bit distribution,
  these symbols' expected frequencies
@@ -168,7 +168,7 @@ This approach to FSE application in #PHA has the following benefits:
 - Compression ratio vs performance can actually be _tuned_ (slightly) depending on the actual FSE-triggering
   strategy
 - There is no FSE table construction
-- The FSE table selection can be done for every decompression block separately (8kb).
+- The FSE table selection can be done for every decompression block separately (8KB).
   This allows exploiting locally-optimum distributions.
   Stock FSE decides on the decoding table every 128KB, and so it will not exploit these local properties.
 

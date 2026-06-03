@@ -93,7 +93,7 @@ For many datasets this might be suboptimal,
 From this data, we can reconstruct the canonical Huffman codes,
  from which we can construct the actual exact #PH tree.
 
-The actual compressed data is stored in _per-8kb blocks_ (configurable).
+The actual compressed data is stored in _per-8KB blocks_ (configurable).
 It starts with a 4-byte block compressed-size information, followed by the per-node data,
  in the tree-traversal order.
 
@@ -106,10 +106,10 @@ For the _internal nodes_, we store:
   - top bit - _XOR marker_ - if set, it means that the FSE-compressed data is on _reversed_ input bits.
     This is used when the skew in the bitmap is in the opposite direction to what the table is built for.
 - bitmap body
-  - if FSE marker is `0`, we store *ceil(n/8)* bytes.
+  - if FSE marker is `0`, we store `ceil(n/8)` bytes.
   - otherwise, we store a 2-byte length of FSE-compressed data followed by the FSE stream.
 
-For _flat subtree roots_, we simply store *ceil(n*D/8)* bytes containing the compressed data.
+For _flat subtree roots_, we simply store `ceil(n*D/8)` bytes containing the compressed data.
 
 The final component is file-level metadata which includes
  total uncompressed size, checksums, block size and other necessary fields.

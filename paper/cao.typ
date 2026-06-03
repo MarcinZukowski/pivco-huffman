@@ -56,7 +56,7 @@ For example, we have seen optimizations that provided
 
 While per-bitmap FSE is a promising optimization,
  other strategies are possible.
-Alternative bitmap-compressions methods
+Alternative bitmap-compression methods
  could provide an interesting design point
  in a performance/compression ratio space.
 
@@ -77,7 +77,7 @@ In our experiments FSE often took more than 50% of the decode time,
  suggesting that an implementation using #PHA instead _could_
  be an interesting point in the size/speed space.
 At the same time, due to #PH's much higher implementation complexity than that of e.g. zstd,
- author does not believe it is a good building block for a general-purpose codec.
+ the author does not believe it is a good building block for a general-purpose codec.
 
 == CPU development trends
 
