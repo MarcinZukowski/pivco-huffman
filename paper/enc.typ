@@ -1,4 +1,6 @@
 #import "conf.typ": PH, mf, he, fair-cell, h0
+#import "style.typ": colors-tab
+#import "tab.typ": tab
 
 = Encoding <encoding>
 
@@ -65,14 +67,12 @@ A small difference is that the elements we partition are not 16-bit _indices in 
 //    ).flatten()
 }).flatten()
 
-#he("tab-enc")[
-
-#figure(
-table(
-    columns: 9,
-    align: (col, _) => if col == 0 { left } else { right },
-    table.header(
-
+#tab(
+  name:        "tab-enc",
+  columns:     9,
+  header_rows: 3,
+  placement: top,
+  header: (
     table.cell(rowspan: 3)[*Dataset*],
     table.cell(colspan: 4)[*#PH*],
     table.cell(colspan: 2, rowspan: 2)[*#h0*],
@@ -82,15 +82,22 @@ table(
     table.cell(colspan: 2)[*prebuilt tree*],
 
     [M4], [c8i], [M4], [c8i], [M4], [c8i], [M4], [c8i],
-
-    ),
-    .._body,
-),
-caption: [Encoding performance on M4 and c8i (MB/s).
-For #PH, we report both "end-to-end" and "prebuilt tree" results],
-)<tab-enc>]
+  ),
+  body: _body,
+  caption: [Encoding performance on M4 and c8i (MB/s).
+            For #PH, we report both "end-to-end" and "prebuilt tree" results],
+  rules: (
+    ((y:"h"),            (align: center+horizon)),
+    ((x:0),              (align: left)),
+    ((x:(1,2)),          (fill: colors-tab.ph)),
+    ((x:(3,4)),          (fill: colors-tab.ph_pb)),
+    ((x:(5,6)),          (fill: colors-tab.huf0)),
+    ((x:(7,8)),          (fill: colors-tab.oo_huff)),
+  )
+)
 
 #figure(
+  placement: bottom,
   [
     #image("plots/enc-bars-m4.svg", width: 100%)
 
@@ -101,7 +108,7 @@ For #PH, we report both "end-to-end" and "prebuilt tree" results],
     On c8i the `ph-pb` proba80 bar exceeds the axis cap and is clipped (true value labeled).],
 )<fig-enc-bars>
 
-@tab-enc shows the encoding performance on various datasets and hosts.
+@tab-enc and @fig-enc-bars show the encoding performance on various datasets and hosts.
 End-to-end results show a fair comparison with other solutions.
 #PH's performance is hindered here by the Huffman-code creation time,
 dominated by symbol frequency counting.
@@ -110,8 +117,8 @@ showing e.g. how highly-skewed datasets can achieve
 very high "raw" encoding performance.
 
 One compression ratio / performance tradeoff we have made
-is that every bitmap (which needs it) stores additional information
-about the length of its right child (equivalent to the number of 1s in the bitmap).
+ is that every bitmap (which needs it) stores additional information
+ about the length of its right child (equivalent to the number of 1s in the bitmap).
 This is necessary during decoding, as we need to know where to locate the
  bitmaps of the children nodes to decode them.
 We could slightly improve the compression ratio by not including this information

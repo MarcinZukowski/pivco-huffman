@@ -25,7 +25,7 @@ for it to achieve satisfying performance on hardware platforms or in programming
 languages that do not provide such capabilities.
 
 On the flip side, branch-free, SIMD-friendly code in #PH
-suggest this approach might perform well on GPUs.
+suggests this approach might perform well on GPUs.
 
 == Primitive optimization
 
@@ -82,6 +82,7 @@ At the same time, due to #PH's much higher implementation complexity than e.g. z
 == CPU development trends
 
 #figure(
+  placement: top,
   image("plots/sweep_uarch_dec_op.svg"),
   caption: [#PH performance over Huff0 on 3 CPU families on AWS (across datasets from @datasets)]
 )<fig-trends>

@@ -143,15 +143,17 @@ Then, we simply choose a table based on the symbol skew during encoding/decoding
 
 An interesting aspect of this decision is that the tables above are built for _bytes_
  constructed using a random _bit_ distribution.
-Depending on the actual distribution of bits, this can reduce
- compression efficiency.
-For example, let us take a sequence of 600 zero-bits and 200 one-bits.
-If the decoding table was built on that actual byte sequence, values `0x00` and `0xFF`
+Depending on the actual distribution of bits, this can result
+ in compression efficiency lower than if we actually
+ built the table for a specific dataset.
+For example, let us take a collection of 300 `0xFF` and 100 `0x00` values.
+If the decoding table was custom-built, these values
  would take 75% and 25%, respectively, of the frequencies.
-However, with pre-built partitions assuming random bit distribution, their expected frequencies
+However, since the pre-built partitions assume random bit distribution,
+these symbols expected frequencies
  will be much lower, resulting in more bits assigned to them during encoding.
-While this in theory can result in decreased FSE's compression ratios, we have not
- noticed any significant impact of that in our testing.
+This shows that our approach might not be able to exploit some order-based compression ratio
+ opportunities in the data.
 
 Note, we use a _tuned_ version of FSE (_x8y1_), as we found that the default implementation
 can be significantly improved for our needs, see @tuning-fse.

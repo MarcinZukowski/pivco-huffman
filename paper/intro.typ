@@ -87,16 +87,16 @@ Here are the measured bandwidths on two example datasets on two hosts (see @test
   (_na(hf.at(0)), _na(hf.at(1)), _na(oo.at(0)), _na(oo.at(1)))
 }
 
-#align(center)[
+#figure(numbering: none)[
 #table(
   columns: 6,
   inset: 5pt,
-  align: (left, right, right, right, right, right, right),
+  align: (left, center, right, right, right, right, right),
   table.header(
     table.cell(rowspan: 2)[*Dataset*],
     table.cell(rowspan: 2)[*Host*],
-    table.cell(colspan: 2)[*#h0*],
-    table.cell(colspan: 2)[*oodle-huffman*],
+    table.cell(colspan: 2, align: center)[*#h0*],
+    table.cell(colspan: 2, align: center)[*oodle-huffman*],
     [enc MB/s],[dec MB/s],
     [enc MB/s],[dec MB/s],
   ),

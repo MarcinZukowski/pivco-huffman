@@ -1,4 +1,5 @@
 #import "conf.typ": PH, he, anote
+#import "tab.typ": tab
 
 = Related work <related>
 
@@ -33,51 +34,47 @@ that ideas from wavelet-trees research could be applied to #PH and the other way
 For example, @dinklage2021jea proposes a _bottom-up building_ of wavelet trees,
 and @dinklage2023wt apply SIMD instructions to this problem.
 
-#he("tab-wavelet",
-  style: "
-  .tab-wavelet td { text-align: left; }
-  .tab-wavelet td:nth-child(1) { font-weight: bold; }
-
-  "
-)[
-#figure(
-table(
-  stroke: 1pt,
-  align: (left, left, left),
+#tab(
+  name:    "tab-wavelet",
   columns: 3,
-  table.header(
-    table.cell(align:center)[*Dimension*],
-    table.cell(align:center)[*Wavelet Trees*],
-    table.cell(align:center)[*#PH*],
+  align:   left,
+  stroke:  1pt,
+  header: (
+    table.cell(align: center)[*Dimension*],
+    table.cell(align: center)[*Wavelet Trees*],
+    table.cell(align: center)[*#PH*],
   ),
-  [Core representation],
-    [Alphabet tree with node bitmaps],
-    [Code tree with node bitmaps],
-  [Primary purpose],
-    [Indexed sequence representation: access, rank, select, range queries, etc.],
-    [Sequential compression/decompression throughput],
-  [Aux structures],
-    [Usually add rank/select support per bitmap],
-    [none (unless ANS-compressed)],
-  [Operations],
-    [Navigate query positions through levels],
-    [Reconstruct whole dense output stream],
-  [Node bitmap constraints],
-    [Often must remain rank/select-friendly, e.g. use RRR @rrr2007],
-    [Can use decode-friendly encodings, including FSE/ANS],
-  [Tree shape],
-    [Fixed/balanced, Huffman-shaped, wavelet matrix variants, etc.],
-    [Huffman-derived with flat subtrees],
-  [Performance target],
-    [Query latency/space tradeoff],
-    [GB/s-scale sequential decode throughput],
-  [Block model],
-    [Often whole sequence/static text index],
-    [Block codec, streaming possible]
-),
-caption: [Comparison of wavelet trees and #PH]
-)<tab-wavelet>
-]
+  body: (
+    [Core representation],
+      [Alphabet tree with node bitmaps],
+      [Code tree with node bitmaps],
+    [Primary purpose],
+      [Indexed sequence representation: access, rank, select, range queries, etc.],
+      [Sequential compression/decompression throughput],
+    [Aux structures],
+      [Usually add rank/select support per bitmap],
+      [none (unless ANS-compressed)],
+    [Operations],
+      [Navigate query positions through levels],
+      [Reconstruct whole dense output stream],
+    [Node bitmap constraints],
+      [Often must remain rank/select-friendly, e.g. use RRR @rrr2007],
+      [Can use decode-friendly encodings, including FSE/ANS],
+    [Tree shape],
+      [Fixed/balanced, Huffman-shaped, wavelet matrix variants, etc.],
+      [Huffman-derived with flat subtrees],
+    [Performance target],
+      [Query latency/space tradeoff],
+      [GB/s-scale sequential decode throughput],
+    [Block model],
+      [Often whole sequence/static text index],
+      [Block codec, streaming possible],
+  ),
+  rules: (
+    ((x: 0), (weight: "bold")),
+  ),
+  caption: [Comparison of wavelet trees and #PH],
+)
 
 == Bit-packing <bitpack>
 

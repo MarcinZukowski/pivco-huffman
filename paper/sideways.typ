@@ -9,6 +9,7 @@ bits from the stream, a different data layout is needed.
 We found a great solution for this in the _wavelet tree_ structure @grossi2003wt.
 
 #figure(
+numbering: none,
 placement: top,
 he("gridtable")[
   #table(
@@ -139,13 +140,14 @@ and, as expected, the performance is very sub-par.
 }
 
 #show table.cell.where(x: 6): strong
-#align(center,
-table(
+#figure(numbering: none)[
+#table(
   columns: 7,
+  align: (left, right,right,right,right,right,right),
   table.header(
-    table.cell(rowspan: 2)[*Data*],
-    table.cell(colspan: 3)[*M4 Max* (GB/s)],
-    table.cell(colspan: 3)[*Sapphire Rapids c8i* (GB/s)],
+    table.cell(rowspan: 2, align: center)[*Data*],
+    table.cell(colspan: 3, align: center)[*M4 * (GB/s)],
+    table.cell(colspan: 3, align: center)[*c8i* (GB/s)],
     [naive], [#h0], [naive/#h0],
     [naive], [#h0], [naive/#h0],
   ),
@@ -155,7 +157,8 @@ table(
   [prose_pride],
   tdg("m4", "prose_pride", "naive"), h0g("m4", "prose_pride"), tdr("m4", "prose_pride", "naive"),
   tdg("c8i", "prose_pride", "naive"), h0g("c8i", "prose_pride"), tdr("c8i", "prose_pride", "naive"),
-))
+)
+]
 
 There are two main reasons for this:
 
@@ -321,10 +324,11 @@ together, further reducing ops/byte.
 #figure(
   table(
     columns: 9,
+    align: (left, right,right,right,right,right,right,right,right),
     table.header(
-      table.cell(rowspan: 2)[*Data*],
-      table.cell(colspan: 4)[*M4* (GB/s)],
-      table.cell(colspan: 4)[*c8i* (GB/s)],
+      table.cell(rowspan: 2, align:center)[*Data*],
+      table.cell(colspan: 4, align:center)[*M4* (GB/s)],
+      table.cell(colspan: 4, align:center)[*c8i* (GB/s)],
       [naive], [opt], [#h0], [opt/#h0],
       [naive], [opt], [#h0], [opt/#h0],
     ),
@@ -358,13 +362,14 @@ In this Section we'll discuss how some of them are implemented using SIMD instru
 #let data = rows.slice(1)
 #figure(
   table(
-    columns: 5,
+    columns: (20%,10%,10%,10%,10%),
+    align: (left, right,right,right,right),
     table.header(
-      table.cell(rowspan: 2)[*Primitive*],
-      table.cell(colspan: 2)[*proba80*],
-      table.cell(colspan: 2)[*prose_pride*],
-      [M4],   [c8i],
-      [M4],   [c8i],
+      table.cell(rowspan: 2, align:center)[*Primitive*],
+      table.cell(colspan: 2, align:center)[*proba80*],
+      table.cell(colspan: 2, align:center)[*prose_pride*],
+      table.cell(align:center)[M4],   table.cell(align:center)[c8i],
+      table.cell(align:center)[M4],   table.cell(align:center)[c8i],
     ),
     ..data.flatten()
   ),
@@ -524,10 +529,11 @@ as they only work with 32- and 64-bit values.
   placement: top,
   table(
     columns: 5,
+    align: (left, right, right, right, right),
     table.header(
-      table.cell(rowspan: 2)[*Primitive*],
-      table.cell(colspan: 2)[*proba80*],
-      table.cell(colspan: 2)[*prose_pride*],
+      table.cell(rowspan: 2, align:center+horizon)[*Primitive*],
+      table.cell(colspan: 2, align:center)[*proba80*],
+      table.cell(colspan: 2, align:center)[*prose_pride*],
       [M4], [c8i],
       [M4], [c8i],
     ),
@@ -572,10 +578,10 @@ In the next Section we'll discuss a different approach to #PH that works around 
   table(
     columns: 6,
     table.header(
-      table.cell(rowspan: 2)[*Dataset*],
-      table.cell(rowspan: 2)[*Tree*],
-      table.cell(colspan: 2)[*M4*],
-      table.cell(colspan: 2)[*c8i*],
+      table.cell(rowspan: 2, align:center+horizon)[*Dataset*],
+      table.cell(rowspan: 2, align:center+horizon)[*Tree*],
+      table.cell(colspan: 2, align:center+horizon)[*M4*],
+      table.cell(colspan: 2, align:center+horizon)[*c8i*],
       [scalar],[simd],[scalar],[simd],
     ),
     table.cell(rowspan: 2)[proba80],

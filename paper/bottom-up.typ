@@ -1,4 +1,6 @@
 #import "conf.typ": anote, PH, he, mf, sym, pick-cols, todo, fair-cell
+#import "style.typ": colors-tab
+#import "tab.typ": tab
 
 = Going Bottom-Up<bottom-up>
 
@@ -58,12 +60,12 @@ With a different processing model, let us see how tree optimizations from @ph-op
     columns: 9,
     align: (left, right, right, right, right, right, right, right, right),
     table.header(
-      table.cell(rowspan: 2)[*Dataset*],
-      table.cell(rowspan: 2)[*H*],
-      table.cell(rowspan: 2)[*L*],
-      table.cell(colspan: 2)[*naive*],
-      table.cell(colspan: 2)[*flat*],
-      table.cell(colspan: 2)[*flat-opt*],
+      table.cell(rowspan: 2, align:center+horizon)[*Dataset*],
+      table.cell(rowspan: 2, align:center+horizon)[*H*],
+      table.cell(rowspan: 2, align:center+horizon)[*L*],
+      table.cell(colspan: 2, align:center)[*naive*],
+      table.cell(colspan: 2, align:center)[*flat*],
+      table.cell(colspan: 2, align:center)[*flat-opt*],
       [nodes], [ops/B],
       [nodes], [ops/B],
       [nodes], [ops/B],
@@ -73,7 +75,7 @@ With a different processing model, let us see how tree optimizations from @ph-op
   caption: [The impact of tree optimizations on the decoding cost. *L* - the average (weighted) Huffman code symbol.]
 )<bu-tree-stats>
 
-Table @bu-tree-stats shows the impact of flat-subtrees and fully-optimized non-canonical trees.
+@bu-tree-stats shows the impact of flat-subtrees and fully-optimized non-canonical trees.
 The significant reduction in _ops/B_ results in a better encoding and decoding performance.
 Additionally, the reduction of the number of nodes helps tree construction time and tree traversal overheads.
 See also @tab-tree-modes for the actual decoding performance.
@@ -81,15 +83,19 @@ See also @tab-tree-modes for the actual decoding performance.
 == Bottom-up tree operations
 
 #figure(
+  placement: bottom,
   mf("bu-ops"),
   caption: [Upside-down tree operations (_optimized flat trees_ off)]
 )<fig-bu-ops>
 
 #figure(
+  placement:top,
   table(
-    columns: 3,
+    columns: (15%, 15%, 40%),
     align: (center, center, left),
-    table.header([*Top-down equivalent*], [*Bottom-up operation*], [*Explanation*]),
+    table.header([*Top-down \ equivalent*], [*Bottom-up \ operation*],
+      table.cell(align:center+horizon)[*Explanation*]
+    ),
 
     [`P`],  [`MVV`], [`merge_vec_vec` is symmetrical to two-sided `partition`],
     [`PR`], [`MVV`], [`merge_vec_vec` for the root node is identical to other cases],
@@ -102,14 +108,13 @@ See also @tab-tree-modes for the actual decoding performance.
 caption: [Primitives used in bottom-up processing and their top-down equivalents]
 )<bu-symbols>
 
-@fig-bu-ops shows the example tree we used before, but this time with operations used for the bottom-up processing.
-Again, it is directly symmetrical to @treeopt-flat.
 
-== Bottom-up primitives
-
-Bottom-up processing uses two main fami in only one family of operations: binary `merge_X_Y` family,
-where both `X` and `Y` can be `vec` (a vector of symbols) or `cst` (a constant symbol),
-and N-ary `merge_flat_D` primitives, specialized for `D` values.
+Bottom-up processing uses two families of _merge_ operations.
+First are binary `merge_X_Y` primitives,
+ where both `X` and `Y` can be `vec` (a vector of symbols) or `cst` (a constant symbol).
+The other and N-ary `merge_flat_D` primitives, specialized for `D` values.
+@fig-bu-ops shows how they are used to build tree,
+and @bu-symbols discusses how these primitives correspond to the top-down primitives.
 
 A naive implementation of e.g. `merge_vec_vec` would be directly symmetrical to `partition` from @naive:
 ```c
@@ -194,38 +199,35 @@ See how we can decode 16 symbols with just bit-unpacking and 3 extra instruction
 */
 #let _bp = csv("data/bu-prim-bits.csv")
 
-#he("prim-bu", style:"
-  .prim-bu td:nth-child(1) { text-align: left; }
-  .prim-bu td,th {padding: 3pt; font-size: ;}
-  .prim-bu td:nth-child(1) { font-weight: bold; border-right: solid 2px black;}
-  .prim-bu td:nth-child(5) { font-weight: bold; border-left: solid 2px black;}
-  .prim-bu td:nth-child(9) { font-weight: bold; border-left: solid 2px black;}
-")[
-#figure(
-  table(
-    columns: 12,
-    inset: (x: 0.25em, y: 0.4em),
-    align: (left, right, right, right, right, right, right, right, right, right, right, right),
-    table.header(
-      table.cell(colspan: 4, align: center)[*primitive*],
-      table.cell(colspan: 4, align: center)[*M4*],
-      table.cell(colspan: 4, align: center)[*c8i*],
-      [name], [in_b], [out_b], [lut_b],
-      [ns/el], [in_bw], [out_bw], [lut_bw],
-      [ns/el], [in_bw], [out_bw], [lut_bw],
-    ),
-    ..(_bp.slice(1).flatten()),
+#tab(
+  name:        "prim-bu",
+  columns:     12,
+  align:       (left, right, right, right, right, right, right, right, right, right, right, right),
+  inset:       (x: 0.25em, y: 0.4em),
+  header_rows: 2,
+  placement: top,
+  header: (
+    table.cell(colspan: 4, align: center)[*primitive*],
+    table.cell(colspan: 4, align: center)[*M4*],
+    table.cell(colspan: 4, align: center)[*c8i*],
+    [name], [in_b], [out_b], [lut_b],
+    [ns/el], [in_bw], [out_bw], [lut_bw],
+    [ns/el], [in_bw], [out_bw], [lut_bw],
+  ),
+  body: _bp.slice(1).flatten(),
+  rules: (
+    ((x: 0),      (weight: "bold", border-right: 2pt + black)),
+    ((x: 4),      (weight: "bold", border-left:  2pt + black)),
+    ((x: 8),      (weight: "bold", border-left:  2pt + black)),
   ),
   caption: [Bottom-up primitive performance on M4 and c8i. *in_b / out_b / lut_b* - input /output / lookup table *bits* used per element.
-  *in_bw / out_bw / lut_bw* - respective memory bandwidths achieved in *GB/s*.]
-)<prim-bu>
-]
+            *in_bw / out_bw / lut_bw* - respective memory bandwidths achieved in *GB/s*.],
+)
 
 @prim-bu demonstrates bottom-up primitive-performance.
 Looking at the *ns/elem* metric, we see that all primitives
 achieve performance comparable or better to the fast `partition` primitives from @prim-td-opt, and none
 pay the memory-overload penalty that the slow `scatter` primitives suffered from.
-
 
 == Bottom-up decoding performance
 
@@ -238,42 +240,42 @@ pay the memory-overload penalty that the slow `scatter` primitives suffered from
     _engs_tm.map(e => fair-cell(fair, h, d, e, "dec_op"))).flatten()
 }).flatten()
 
-#he("tab-tree-nodes", style:"
-  .tab-tree-nodes td:nth-child(1) { text-align: left; }
-  .tab-tree-nodes td,th {padding: 3pt; font-size: ;}
-  .tab-tree-nodes td:nth-child(1) { font-weight: bold; }
-  .tab-tree-nodes td:nth-child(4) { font-weight: bold; }
-  .tab-tree-nodes td:nth-child(9) { font-weight: bold; }
-")[
+#tab(
+  name:        "tab-tree-modes",
+  columns:     11,
+  align:       (col, _) => if col == 0 { left } else { right },
+  inset:       (x: 0.2em, y: 0.5em),
+  placement:   top,
+  header_rows: 3,
+  header: (
+    table.cell(rowspan: 3, align:center)[*Dataset*],
+    table.cell(colspan: 5, align:center)[*M4*],
+    table.cell(colspan: 5, align:center)[*c8i*],
 
-  #figure(
-    table(
-      columns: 11,
-      inset: (x: 0.2em, y: 0.5em),
+    table.cell(colspan: 3, align:center)[*#PH \ tree opt.*],
+    table.cell(rowspan: 2, align:horizon)[*Huff0*],
+    table.cell(rowspan: 2, align:horizon)[*Oo-Huff*],
+    table.cell(colspan: 3, align:center)[*#PH \ tree opt.*],
+    table.cell(rowspan: 2, align:horizon)[*Huff0*],
+    table.cell(rowspan: 2, align:horizon)[*Oo-Huff*],
 
-      align: (col, _) => if col == 0 { left } else { right },
-      table.header(
-        table.cell(rowspan: 3)[*Dataset*],
-        table.cell(colspan: 5)[*M4*],
-        table.cell(colspan: 5)[*c8i*],
-
-        table.cell(colspan: 3)[*#PH tree opt.*],
-        table.cell(rowspan: 2)[*Huff0*],
-        table.cell(rowspan: 2)[*Oo-Huff*],
-        table.cell(colspan: 3)[*#PH tree opt.*],
-        table.cell(rowspan: 2)[*Huff0*],
-        table.cell(rowspan: 2)[*Oo-Huff*],
-
-        [*naive*],  [*flat*],  [*flat-opt*],
-        [*naive*],  [*flat*],  [*flat-opt*],
-      ),
-      .._body_tm,
-    ),
-    placement: top,
-    caption: [#PH (bottom-up) decode bandwidth (MB/s) for different tree optimization levels.
-    We compare naive, fused-leaves, flat-tables and optimized flat-tables against Huff0 and Oodle-Huffman.]
-  )<tab-tree-modes>
-]
+    [*naive*], [*flat*], [*flat-opt*],
+    [*naive*], [*flat*], [*flat-opt*],
+  ),
+  body: _body_tm,
+  rules: (
+    ((x: 0),             (weight: "bold", align:left )),
+    ((x: (3, 8)),        (weight: "bold")),    // flat-opt columns highlighted
+    ((y:"h"),            (align: center+horizon)),
+    ((x:(1,6)),          (fill: colors-tab.ph_naive)),
+    ((x:(2,7)),          (fill: colors-tab.ph_flat)),
+    ((x:(3,8)),          (fill: colors-tab.ph)),
+    ((x:(4,9)),          (fill: colors-tab.huf0)),
+    ((x:(5,10)),         (fill: colors-tab.oo_huff)),
+  ),
+  caption: [#PH (bottom-up) decode bandwidth (MB/s) for different tree optimization levels.
+            We compare naive, flat-tables and optimized flat-tables against Huff0 and Oodle-Huffman.],
+)
 
 #figure(
   [
@@ -288,10 +290,11 @@ To evaluate the performance of bottom-up #PH decoding we looked at our datasets 
 We're also testing the impact of tree-complexity optimizations from @ph-opt.
 @tab-tree-modes and @plot-tree-nodes show the results.
 We can see that #PH decisively beats decoding performance of Huff0 and Oodle Huffman on all datasets and platforms.
-The magnitude of #PH benefits depends on three factors:
+The magnitude of the #PH benefits depends on three factors:
 - tree level optimization - we see that both flat subtrees and their optimized versions provide significant benefits.
   This makes sense, as with the reduction of the number of operations, the performance improves.
 - dataset - skewed datasets benefit most, as on these #PH can reduce the number of operations for shorter codes / more frequent symbols.
   In particular, tree optimizations have no impact on _proba80_ and only marginal on _dna_fasta_.
-- CPU - on c8i, with its worse OoO capabilities, Huff0 and Oodle Huffman perform worse.
-  On the other hand, with its better SIMD capabilities of AVX-512, #PH actually performs better here, magnifying its win over other algorithms.
+- CPU - M4 provides great OoO scalar evaluation, helping traditional algorithms more.
+  On the other hand, c8i has weaker scalar procesisng, but more performant SIMD - with AVX-512 - this benefis #PH.
+  As a result, while #PH is consistently better on M4, that difference is even more pronounced on c8i.

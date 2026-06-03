@@ -27,13 +27,14 @@ ubiquitous in compression algorithms since its invention.
 In this paper we propose a new approach to Huffman
 coding, based on a data structure from _wavelet trees_.
 The resulting _pivot-coded Huffman_ (*#PH*) allows utilizing high-performance
-encoding and decoding operations, providing
-significant performance improvements.
+SIMD-friendly encoding and decoding operations.
+In our tests #PH consistently outperforms
+ the decoding performance of state-of-the-art Huffman codecs
+ by a large margin.
 Additionally, we show how ANS-coding can be _selectively_
-applied to this structure when it is actually useful.
-The end result is a novel algorithm that consistently beats
-the decoding performance of state-of-the-art Huffman codecs,
-while also often providing compression ratios comparable to ANS-based solutions.
+ applied to _skewed_ nodes in this structure,
+ approaching the ANS-level compression ratios,
+ while preserving very high decompression speeds.
 
 #if _html { outline() }
 

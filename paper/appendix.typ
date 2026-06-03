@@ -1,4 +1,5 @@
 #import "conf.typ": PH, he
+#import "tab.typ": tab
 
 #heading(numbering:none, level: 1)[Appendices]
 
@@ -18,49 +19,45 @@
 #let rows = csv("data/dist-stats.overview.csv")
 #let data = rows.slice(1)   // drop the CSV header row
 
-#he("tab-datasets", style:"
-.tab-datasets td:nth-child(1) { text-align: left; font-weight: bold;}
-.tab-datasets td:nth-child(7) { text-align: left; }
-")[
-#figure(
-  table(
-    columns: 7,
-    align: (col, _) => if col == 0 or col == 6 { left } else { right },
-    table.header(
-      [*Name*], [*\#syms*], [_H_ (bits)], [*Huffman* (bits)],
-      [*min*], [*max*], [*Source / description*],
-    ),
-    ..data.flatten(),
+#tab(
+  name:    "tab-datasets",
+  columns: 7,
+  align:   right,
+  header: ([*Name*], [*\#syms*], [_H_ (bits)], [*Huffman*\ (bits)],
+           [*min*], [*max*], [*Source / description*]),
+  body:   data.flatten(),
+  rules: (
+    ((y: "h"), (align: center, weight: "bold")),
+    ((x: 0), (align: left, weight: "bold")),
+    ((x: 6), (align: left)),
   ),
   caption: [Used datasets: alphabet size, entropy _H_, mean Huffman
-            code length, code-length min/max, and source. Available #link("https://github.com/MarcinZukowski/pivco-huffman/blob/main/extras/datasets/README.md")[in #PH repo] ],
-)<tab-datasets>
-]
+            code length, code-length min/max, and source. Available
+            #link("https://github.com/MarcinZukowski/pivco-huffman/blob/main/extras/datasets/README.md")[in #PH repo]],
+)
 
 = Machines Tested <machines>
 
 // Test machines used for the benchmarks.  CPU strings verified from the
 // hosts: M4 = `sysctl machdep.cpu.brand_string`; EC2 = `lscpu` model name.
 // AWS instances are .large (2 vCPU).
-#he("tab-machines", style:"
-.tab-machines td {text-align: center}
-.tab-machines td:nth-child(1) { font-weight: bold; }
-.tab-machines td:nth-child(2) { text-align: left; }
-.tab-machines td:nth-child(4) { text-align: left; }
-")[
-#table(
+#tab(
+  name:    "tab-machines",
   columns: 5,
-  inset: 5pt,
-  align: (left, left, left, left, right),
-  table.header(
-    [*Symbol*], [*Machine type*], [*Arch*], [*CPU family*], [*CPU year*],
-  ),
-  [M4],  [Apple MacBook Pro (Mac16,6)], [aarch64], [Apple M4 Max],                  [2024],
+  align:   center,
+  inset:   5pt,
+  header:  ([*Symbol*], [*Machine type*], [*Arch*], [*CPU family*], [*CPU year*]),
+  body: (
+    [M4],  [Apple MacBook Pro (Mac16,6)], [aarch64], [Apple M4 Max],                  [2024],
 //  [c8g], [AWS EC2 c8g.large],           [aarch64], [AWS Graviton4 (Neoverse V2)],   [2024],
-  [c8i], [AWS EC2 c8i.large],           [x86-64],  [Intel Xeon 6 (Granite Rapids)], [2024],
+    [c8i], [AWS EC2 c8i.large],           [x86-64],  [Intel Xeon 6 (Granite Rapids)], [2024],
 //  [c6a], [AWS EC2 c6a.large],           [x86-64],  [AMD EPYC 7R13 (Milan, Zen 3)],  [2021],
-)<tab-machines>
-]
+  ),
+  rules: (
+    ((x: 0),      (weight: "bold")),
+    ((x: (1, 3)), (align: left)),
+  ),
+)
 
 = Testing methodology <testing-method>
 
@@ -129,7 +126,7 @@ When working with FSE for @ans, we noticed that the FSE overhead had a more seve
 As a result, we performed a side experiment where we tuned FSE's main loop.
 By default, it looks like this (slightly simplified):
 ```c
-  while ((BIT_reloadDStream(&bitD) == BIT_DStream_unfinished)   // reload once at top
+  while ((BIT_reloadDStream(&bitD) == BIT_DStream_unfinished)   // reload bits
           & (op + 4 <= olim)) {
       op[0] = FSE_decodeSymbolFast(&states[0], &bitD);
       op[1] = FSE_decodeSymbolFast(&states[1], &bitD);
