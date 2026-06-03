@@ -316,6 +316,37 @@ static int decode_tunstall64(const uint8 *bitptr, uint8 *decoded8, size_t n_byte
     return 0;
 }
 
+/* ============================================================
+ * Decoder 5 — branch-free Tunstall64.  Same table as decoder 4 but the
+ *             per-byte `if (byte != 0)` branch is replaced with an
+ *             unconditional write + a ternary carry update that the
+ *             compiler folds into a CMOV / CSEL.  Eliminates the branch
+ *             mispredict tax that decoder 4 pays once the input has
+ *             enough zero-bytes that the predictor can't lock onto a
+ *             direction (see the per-p analysis we did earlier).
+ *
+ *             For byte == 0, `values` from the all-zero table entry is
+ *             also 0, so the `values + carry` store harmlessly writes 8
+ *             carry-padded values that are immediately overwritten by
+ *             the next nonzero byte's emission (popcnt(0) == 0, so `i`
+ *             doesn't advance).  The cost: ~1 wasted 8-byte store per
+ *             zero byte — much cheaper than a mispredict.
+ * ============================================================ */
+static int decode_tunstall64_bf(const uint8 *bitptr, uint8 *decoded8, size_t n_bytes) {
+    size_t i = 0;
+    uint64 carry = 0;
+
+    while (i < n_bytes) {
+        uint8 byte = *bitptr++;
+        uint64 values = g_unary_table[byte];
+        write64LE(decoded8 + i, values + carry);
+        i += popcnt32(byte);
+        carry = (byte != 0) ? (values >> 56) : (carry + 8);
+    }
+    if (carry >= 57) ERROR_RETURN("too many 0s in a row");
+    return 0;
+}
+
 /* ---------- harness ---------- */
 
 /* ============================================================
@@ -669,10 +700,11 @@ int main(int argc, char **argv) {
     uint8  *dec_p    = calloc((size_t)N, 1);
     uint8  *dec_t    = calloc((size_t)N, 1);
     uint8  *dec_t64b = calloc((size_t)N + 64, 1);
+    uint8  *dec_t64bf = calloc((size_t)N + 64, 1);
     uint8  *dec_pv   = calloc((size_t)N, 1);
     uint8  *dec_pvn  = calloc((size_t)N, 1);
     uint8  *enc      = malloc(OUT_CAP);
-    if (!src || !dec_s || !dec_p || !dec_t || !dec_t64b || !dec_pv || !dec_pvn || !enc) die("oom");
+    if (!src || !dec_s || !dec_p || !dec_t || !dec_t64b || !dec_t64bf || !dec_pv || !dec_pvn || !enc) die("oom");
 
     uint64 rng = 0x243F6A8885A308D3ull;
     for (int i = 0; i < N; i++) src[i] = sample_geom(&rng, p);
@@ -692,7 +724,7 @@ int main(int argc, char **argv) {
      * (calloc returns lazy-zeroed mmap pages on Linux/macOS). */
     g_pivco_child = malloc(N);
     if (!g_pivco_child) die("oom");
-    uint8 *touch[] = { g_pivco_child, dec_s, dec_p, dec_t, dec_t64b, dec_pv, dec_pvn };
+    uint8 *touch[] = { g_pivco_child, dec_s, dec_p, dec_t, dec_t64b, dec_t64bf, dec_pv, dec_pvn };
     for (size_t i = 0; i < sizeof(touch)/sizeof(touch[0]); i++) memset(touch[i], 0, N);
 
     /* run each decoder REPS times back-to-back; print every run so warm vs
@@ -712,6 +744,7 @@ int main(int argc, char **argv) {
     BENCH("decode_pair",       decode_pair(enc, dec_p, N));
     BENCH("decode_tunstall",   decode_tunstall(enc, dec_t, N));
     BENCH("decode_tunstall64", decode_tunstall64(enc, dec_t64b, N));
+    BENCH("decode_tunstall64_bf", decode_tunstall64_bf(enc, dec_t64bf, N));
     BENCH("decode_pivco",      decode_pivco(&ps, dec_pv, N));
 #if defined(__aarch64__) && defined(__ARM_NEON)
     BENCH("decode_pivco_neon", decode_pivco_neon(&ps, dec_pvn, N));
@@ -728,11 +761,11 @@ int main(int argc, char **argv) {
                 return 1;                                                            \
             }                                                                        \
     } while (0)
-    CHECK(dec_s); CHECK(dec_p); CHECK(dec_t); CHECK(dec_t64b); CHECK(dec_pv); CHECK(dec_pvn);
+    CHECK(dec_s); CHECK(dec_p); CHECK(dec_t); CHECK(dec_t64b); CHECK(dec_t64bf); CHECK(dec_pv); CHECK(dec_pvn);
     printf("OK: all decoders agree with encoder over %d codes\n", N);
 
     pivco_free(&ps);
     free(g_pivco_child);
-    free(src); free(dec_s); free(dec_p); free(dec_t); free(dec_t64b); free(dec_pv); free(dec_pvn); free(enc);
+    free(src); free(dec_s); free(dec_p); free(dec_t); free(dec_t64b); free(dec_t64bf); free(dec_pv); free(dec_pvn); free(enc);
     return 0;
 }

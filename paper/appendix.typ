@@ -196,29 +196,30 @@ This way, when decoding a bitmap, values with `1` set will get an output symbol 
 and bitmap values of `0` will get the input symbols increased by 1.
 
   #figure(
-    table(
-      columns: 7,
+  table(
+      columns: 9,
       align: (col, _) => if col == 0 { left } else { right },
       table.header(
         table.cell(rowspan: 2)[*avg code length*],
-        table.cell(colspan: 3)[*M4* (ns/symbol)],
-        table.cell(colspan: 3)[*c8i* (ns/symbol)],
-        [naive], [tunstall-64], [PivCo-Golomb],
-        [naive], [tunstall-64], [PivCo-Golomb],
+        table.cell(colspan: 4)[*M4* (ns/symbol)],
+        table.cell(colspan: 4)[*c8i* (ns/symbol)],
+        [naive], [tunstall64], [t64-bf], [PivCo-G],
+        [naive], [tunstall64], [t64-bf], [PivCo-G],
       ),
-      [1.5], [2.23], [0.09], [0.07], [2.28], [0.11], [0.03],
-      [2],   [1.70], [0.10], [0.08], [2.26], [0.15], [0.05],
-      [3],   [1.66], [0.22], [0.13], [2.27], [0.32], [0.08],
-      [4],   [1.64], [0.43], [0.17], [2.26], [0.62], [0.11],
-      [5],   [1.68], [0.74], [0.23], [2.27], [1.03], [0.13],
-      [6],   [1.72], [1.08], [0.26], [2.27], [1.51], [0.17],
+      [1.25], [2.14], [0.08], [0.09], [0.05], [2.27], [0.09], [0.09], [0.02],
+      [1.5],  [1.77], [0.08], [0.10], [0.06], [2.27], [0.11], [0.11], [0.03],
+      [2],    [1.68], [0.10], [0.13], [0.08], [2.26], [0.15], [0.15], [0.04],
+      [3],    [1.64], [0.20], [0.19], [0.12], [2.28], [0.31], [0.23], [0.07],
+      [4],    [1.64], [0.39], [0.26], [0.17], [2.26], [0.62], [0.30], [0.10],
+      [5],    [1.64], [0.68], [0.33], [0.22], [2.27], [1.03], [0.38], [0.13],
     ),
-    caption: [Comparing Golomb-decoding implementation: naive and Tunstall-style 64-bit table from @ryg-golomb and PivCo-Golomb],
+    caption: [Comparing Golomb-decoding implementation: naive, Tunstall-style 64-bit table from @ryg-golomb, branch-free version, and PivCo-Golomb],
   )<tab-pivco-golomb>
 
 In @tab-pivco-golomb we can see that also in this application our approach can provide excellent performance.
 It is especially visible on longer average code lengths,
- where _tunstall-64_ from @ryg-golomb slows down, mostly because of branch mispredictions.
+ where _tunstall64_ (our name) from @ryg-golomb slows down, mostly because of branch mispredictions.
+We also created a branch-free _t64-bf_ version, which provides more stable performance.
 PivCo-Golomb's performance scales linearly with the length of the code, with the per-bit cost
  comparable to the `merge_vec_cst` performance we measured in @prim-bu.
 
