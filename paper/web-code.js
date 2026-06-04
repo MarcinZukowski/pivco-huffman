@@ -35,10 +35,29 @@
             }
             headings.push(h);
         }
+        /* Appendix folding: Typst emits every appendix entry (A..G) as h2,
+         * same level as the "Appendices" heading itself, so by default they
+         * sit flat in the TOC.  Bump every heading between "Appendices" and
+         * the next top-level non-appendix heading by 1 level, so A..G fold
+         * under "Appendices" and their h3 subsections fold under each A..G.
+         * Sentinel: "Comments" (runtime-added end-of-doc widget heading)
+         * ends the appendix range. */
+        var inAppendix = false;
+        var levels = headings.map(function (h) {
+            var L = parseInt(h.tagName.substring(1), 10);
+            var txt = h.textContent.trim();
+            if (txt === 'Appendices') {
+                inAppendix = true;
+            } else if (inAppendix) {
+                if (L === 2 && txt === 'Comments') inAppendix = false;
+                else L = L + 1;
+            }
+            return L;
+        });
         var root = { level: 1, children: [] };
         var stack = [root];
-        headings.forEach(function (h) {
-            var level = parseInt(h.tagName.substring(1), 10);
+        headings.forEach(function (h, idx) {
+            var level = levels[idx];
             while (stack[stack.length - 1].level >= level) stack.pop();
             var node = {
                 level: level,
