@@ -1,5 +1,5 @@
 // import variables, functions
-#import "conf.typ": _html, _pdf, _fmt, anote, setup, PH
+#import "conf.typ": _html, _pdf, _fmt, anote, setup, PH, URLBASE
 // run the side effects (style injection, page setup, show rules)
 #include "conf.typ"
 
@@ -16,6 +16,10 @@
 #text(size: 10pt)[
   _v.1.0a, 2026-06-03_
 ]
+#if (_pdf) {
+  footnote[An interactive HTML version of this paper is available at #link(URLBASE+"ph.html")[#URLBASE/ph.html].
+  Comments are welcome there.]
+}
 
 #set align(left)
 #set par(justify: true)
@@ -36,10 +40,6 @@ Additionally, we show how ANS-coding can be _selectively_
  yielding compression ratios approaching those of ANS-based codecs
  while preserving very high decompression speeds.
 
-#if _html { outline() }
-
-#set heading(numbering: "1.")
-
 #anote[
 This document is mostly a verbatim copy of the arXiv paper.
 
@@ -49,8 +49,13 @@ thoughts that might not be fitting a scientific paper.
 The HTML version has some nice _quality-of-life_ features:
 - clicking the tree images takes the reader to a visualizer
 - simd code has intrinsics tooltips via #link("https://simd.dev")[simd.dev]
-- active ToC
+- active table of contents on the right
+- #link("#comments")[comments!]
 ]
+
+#if _html { outline() }
+
+#set heading(numbering: "1.")
 
 #include "intro.typ"
 #include "sideways.typ"

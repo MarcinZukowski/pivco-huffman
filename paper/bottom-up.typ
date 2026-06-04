@@ -85,7 +85,7 @@ See also @tab-tree-modes for the actual decoding performance.
 #figure(
   placement: bottom,
   mf("bu-ops"),
-  caption: [Upside-down tree operations (_optimized flat trees_ off)]
+  caption: [Bottom-up tree operations (_optimized flat trees_ off)]
 )<fig-bu-ops>
 
 #figure(

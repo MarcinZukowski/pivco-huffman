@@ -169,6 +169,7 @@ pre code {
       border-radius: 5px;
       margin: 0.8em 0;
       border-left: 5px solid black;     /* optional accent — looks nice */
+      font-size: smaller;
 }
 .anote::before {
       content: "Author's note";
@@ -177,8 +178,7 @@ pre code {
       right: 0.5em;
       font: bold 0.62em/1 sans-serif;
       letter-spacing: 0.05em;
-      text-transform: uppercase;
-      background: red;
+      background: green;
       color: gold;
       padding: 2px;
 }
