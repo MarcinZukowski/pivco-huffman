@@ -14,7 +14,7 @@
     \
  ]
 #text(size: 10pt)[
-  _v.1.0a, 2026-06-03_
+  _v.1.0, 2026-06-04_
 ]
 #if (_pdf) {
   footnote[An interactive HTML version of this paper is available at #link(URLBASE+"ph.html")[#URLBASE/ph.html].
