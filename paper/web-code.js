@@ -147,6 +147,21 @@
     }
 
     function init() {
+        /* --- Comments heading + Hyvor widget relocation ---
+         * Typst emits <section role="doc-endnotes"> as the very last body
+         * child, so the Hyvor element from the Typst source lands BEFORE
+         * the endnotes.  We move it (with a fresh "Comments" h2) past
+         * the endnotes here, BEFORE building the TOC, so the heading is
+         * picked up like any other section. */
+        var hyvor    = document.querySelector('hyvor-talk-comments');
+        var endnotes = document.querySelector('section[role="doc-endnotes"]');
+        if (hyvor && endnotes) {
+            var commentsHdr = document.createElement('h2');
+            commentsHdr.id = 'comments';
+            commentsHdr.textContent = 'Comments';
+            endnotes.after(commentsHdr, hyvor);
+        }
+
         /* --- floating container --- */
         var tools = document.createElement('div');
         tools.id = 'ph-tools';

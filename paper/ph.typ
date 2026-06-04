@@ -90,3 +90,13 @@ The author would like to thank Fabian "Ryg" Giesen for his help with Oodle and h
 #bibliography("refs.bib")
 
 #include "appendix.typ"
+
+#if (_html) {
+  // The "Comments" heading + the relocation past the endnotes section
+  // happen in web-code.js at runtime.
+  html.elem("hyvor-talk-comments", attrs: (
+    website-id: "15509",
+    page-id: "pivco-huffman-html",
+    loading: "lazy"
+  ));
+}

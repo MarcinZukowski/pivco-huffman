@@ -18,6 +18,13 @@
   // later).  Inlined the same way as style.css — keeps the HTML
   // build self-contained, PDF build never sees it.
   html.elem("script", read("web-code.js"))
+
+// Hyvor
+  html.elem("script", attrs: (
+    async: "",
+    src: "https://talk.hyvor.com/embed/embed.js",
+    type: "module"
+  ))
 }
 
 #if _pdf {
