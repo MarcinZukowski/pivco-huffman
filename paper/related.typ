@@ -8,7 +8,7 @@
 Entropy-based encoding systems have been intensely researched for many decades,
  with Huffman, arithmetic compression and (recently) ANS-family being the most popular,
  both in research and in applications.
-Other well-known approaches include Golomb-Rice (@golomb1966, @rice1971), Elias-Fano (@ottaviano2014pef), Tunstall (@tunstall1967) and others (@sayood2017).
+Other well-known approaches include Golomb-Rice (@golomb1966, @rice1971), Elias-Fano (@ottaviano2014pef), Tunstall (@tunstall1967), lightweight integer compression (@for, @lemire2017streamvbyte), and others (@sayood2017).
 
 In this context, #PH can be seen as a performance-focused variant of Huffman.
 The ANS application, while useful, is more of an extension to this core idea.

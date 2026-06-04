@@ -163,7 +163,7 @@ See also @fuse-fse-merge for another possible optimization.
 
 This approach to FSE application in #PHA has the following benefits:
 - FSE is slower than Huffman, but since each FSE-symbol we decode covers 8 Huffman-symbols from our main tree, we pay only 1/8th of the cost
-  per bitmap
+  per bitmap.
 - It can be applied _only_ to nodes where it actually matters (mostly highly skewed)
 - Compression ratio vs performance can actually be _tuned_ (slightly) depending on the actual FSE-triggering
   strategy
@@ -244,6 +244,8 @@ This approach to FSE application in #PHA has the following benefits:
 We see that for non-skewed datasets, *PH* and *PHA* achieve the same performance, but for skewed datasets
 *PHA* detects an opportunity to _selectively_ apply FSE - this brings the compression ratio close to full FSE,
 while still achieving significantly higher decode performance.
+Interestingly, for _dna_fasta_ we see that the FSE performance impact is relatively low,
+ as FSE is applied to a non-root node covering only 25% of the symbols.
 Finally, the compression ratio of the _calgary_ dataset (a scanned text-on-white image)
  showcases the impact of #PHA utilizing locally-optimal decompression tables.
 #footnote[The author by no means suggests #PHA is better than FSE - it just occasionally has this slightly unexpected property]

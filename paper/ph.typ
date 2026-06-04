@@ -33,7 +33,7 @@ In our tests #PH consistently outperforms
  in decoding throughput.
 Additionally, we show how ANS-coding can be _selectively_
  applied to _skewed_ nodes in this structure,
- yielding compression ratios approaching ANS codecs,
+ yielding compression ratios approaching those of ANS-based codecs
  while preserving very high decompression speeds.
 
 #if _html { outline() }

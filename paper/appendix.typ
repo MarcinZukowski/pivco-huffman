@@ -80,7 +80,7 @@ we use the following setup:
 
 = Compressed data organization <wire>
 
-There are 3 main components to storing data compressed by #PH:
+There are three main components to storing data compressed by #PH:
 symbol codes, compressed data, and metadata.
 
 For symbol codes, we simply store 128 bytes containing the canonical Huffman-code
