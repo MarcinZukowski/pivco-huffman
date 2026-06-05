@@ -2,22 +2,10 @@
 
 > # 🚧 WIP — work in progress 🚧
 >
-> PIVCO-Huffman is a research vehicle for what SIMD Huffman decoding
-> can do at the algorithmic edge.  The paper in [`paper/`](paper/) is
-> the canonical write-up; numbers, kernel layout, and APIs are still
-> moving.  Expect drift between docs and code until this notice is
-> removed.
-
-SIMD Huffman decoder that walks the tree top-down and partitions the
-whole block at each internal node, instead of decoding one symbol at
-a time.  Plus a **flat-subtree fast path**: every maximal flat subtree
-of depth D ≥ 2 in the Huffman tree emits a single N·D-bit packed
-region instead of D levels of bitmaps, decoded via direct lookup.
-
-PIVCO-Huffman is a research vehicle for what SIMD Huffman decoding
-can do at the algorithmic edge, not a tool people will compress with.
-The paper (in [`paper/`](paper/)) is the canonical write-up; this
-README is a short pointer.
+> PivCo-Huffman is a research project optimizing Huffman coding performance. While it provides a library and a lot of code, it is not production-ready by any means.
+>
+> The paper ([HTML](https://marcinzukowski.github.io/pivco-huffman/paper-1.0/ph.html), [PDF](https://marcinzukowski.github.io/pivco-huffman/paper-1.0/ph.pdf)) is the canonical write-up; this
+README is a short summary.
 
 ## TL;DR
 
