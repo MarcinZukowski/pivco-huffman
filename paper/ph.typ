@@ -41,14 +41,15 @@ Additionally, we show how ANS-coding can be _selectively_
  while preserving very high decompression speeds.
 
 #anote[
-This document is mostly a verbatim copy of the arXiv paper.
+This document is mostly a verbatim copy of
+ the #link("https://arxiv.org/abs/2606.05765")[arXiv:2606.05765] paper.
 
 However, in boxes like this you'll see some additional author's
-thoughts that might not be fitting a scientific paper.
+ thoughts that might not fit an "official" scientific paper.
 
-The HTML version has some nice _quality-of-life_ features:
+This HTML version also has some nice _quality-of-life_ features:
 - clicking the tree images takes the reader to a visualizer
-- simd code has intrinsics tooltips via #link("https://simd.dev")[simd.dev]
+- simd code has intrinsics tooltips via #link("https://simd.dev")[simd.dev], e.g. `vqtbl2_u8`
 - active table of contents on the right
 - #link("#comments")[comments!]
 ]
@@ -79,6 +80,12 @@ The main contributions are:
 The resulting approach, while slightly slower on the encoding side,
  in our tests consistently beats the decoding speeds of the state-of-the-art solutions by a large margin.
 It also provides compression ratios approaching the ANS-based methods at significantly better speeds.
+
+#anote[
+  So there we have it.
+  I think it's cool, but how useful is it in the real world? Not sure, frankly.
+  Let me know!
+]
 
 == AI disclosure
 

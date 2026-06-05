@@ -18,6 +18,8 @@ together with the _indices_ all the way back to the root.
 That particular idea was quickly dropped due to a high cost of merging added to already significant
 cost of tree traversal.
 
+#anote[If I ever had a single "Eureka!" moment in my life, this was probably it.]
+
 However, it led to another realization.
 We can use the idea of *bottom-up* merging without the first partitioning stage at all.
 This idea led to a new variant of #PH, which is the actual proposed solution.
