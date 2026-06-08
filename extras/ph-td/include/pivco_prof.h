@@ -71,6 +71,13 @@ typedef enum {
     PROF_BU_TREE_MERGE_BCAST_RIGHT,
     PROF_BU_MERGE_BOTH_CONST,
     PROF_BU_FLAT_DECODE,
+    /* New BU names introduced upstream; kept here as no-op slot identifiers
+     * so the shared headers compile inside the TD slice. */
+    PROF_BU_MERGE_VEC_VEC,
+    PROF_BU_MERGE_CST_VEC,
+    PROF_BU_MERGE_VEC_CST,
+    PROF_BU_MERGE_CST_CST,
+    PROF_BU_MERGE_FLAT,
 
     PROF_NR_SLOTS,
     PROF_COUNT = PROF_NR_SLOTS
