@@ -27,29 +27,24 @@
 #if defined(PIVCO_HAS_AVX2)
 #include <immintrin.h>
 
-/* D=2 AVX2 unpack: 16 codes from 4 bytes.  Broadcast the 4-byte window to all
- * eight 32-bit lanes; two vpsrlvd groups (shifts {0,2,..,14} and {16,..,30})
- * drop codes 0-7 and 8-15 into their lanes' low bits.  Low byte of each lane
- * gathered to contiguous, the two halves interleaved into 16 bytes. */
+/* D=2 AVX2 unpack: 16 codes from 4 bytes.  Broadcast the window to four 32-bit
+ * lanes and vpsrlvd lane j by 2*j ({0,2,4,6}), so lane j byte b holds code
+ * (4*b + j) in its low bits.  pshufb transposes that 4x4 byte matrix and the
+ * 0x3 mask clears the upper 6 bits, leaving code i in byte i. */
 static inline __m128i flat_d2_unpack_avx2(const uint8_t *bm_ptr)
 {
+    const __m128i s = _mm_setr_epi32(0, 2, 4, 6);
+    const __m128i m = _mm_set1_epi8(0x3);
+    const __m128i shuf = _mm_setr_epi8(
+         0,  4,  8, 12,
+         1,  5,  9, 13,
+         2,  6, 10, 14,
+         3,  7, 11, 15);
+
     uint32_t packed; memcpy(&packed, bm_ptr, 4);
-    __m256i v = _mm256_set1_epi32((int)packed);
-    const __m256i s0 = _mm256_setr_epi32(0, 2, 4, 6, 8, 10, 12, 14);
-    const __m256i s1 = _mm256_setr_epi32(16, 18, 20, 22, 24, 26, 28, 30);
-    const __m256i m  = _mm256_set1_epi32(0x3);
-    __m256i v0 = _mm256_and_si256(_mm256_srlv_epi32(v, s0), m);
-    __m256i v1 = _mm256_and_si256(_mm256_srlv_epi32(v, s1), m);
-    const __m256i bshuf = _mm256_setr_epi8(
-        0,4,8,12, -1,-1,-1,-1, -1,-1,-1,-1, -1,-1,-1,-1,
-        0,4,8,12, -1,-1,-1,-1, -1,-1,-1,-1, -1,-1,-1,-1);
-    __m256i p0 = _mm256_shuffle_epi8(v0, bshuf);
-    __m256i p1 = _mm256_shuffle_epi8(v1, bshuf);
-    __m128i c0 = _mm_unpacklo_epi32(_mm256_castsi256_si128(p0),
-                                    _mm256_extracti128_si256(p0, 1)); /* codes 0-7  */
-    __m128i c1 = _mm_unpacklo_epi32(_mm256_castsi256_si128(p1),
-                                    _mm256_extracti128_si256(p1, 1)); /* codes 8-15 */
-    return _mm_unpacklo_epi64(c0, c1);
+    __m128i v = _mm_srlv_epi32(_mm_set1_epi32((int)packed), s);
+
+    return _mm_and_si128(_mm_shuffle_epi8(v, shuf), m);
 }
 
 /* D=5 AVX2 unpack: 8 codes from 5 bytes.  A D=5 code at sub-offset s ≤ 7
