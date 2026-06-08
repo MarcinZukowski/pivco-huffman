@@ -35,8 +35,9 @@
  *     shared pivco_huffman_avx512_flat.h helpers (D=5/6 use
  *     vpmultishiftqb / vpermb -- the AVX-512-only fast paths).
  *
- *   - pack_dN_avx512: D=2..7 via vpcompressw + sllv across 8 uint64
- *     lanes per iter; D=8 via vpmovwb byte narrow.
+ *   - pack_dN_avx512: D=2..7 via 64-codes-per-zmm byte-laid +
+ *     vpmultishiftqb (D=3,5,6,7) or vpermb-stride + shift (D=2,4).  See
+ *     pivco_huffman_avx512_pack.h.  D=8 via vpmovwb byte narrow.
  *
  * Internal header.  Included by pivco_huffman_primitives.h when
  * PIVCO_BACKEND_AVX512 is defined.  Not part of the public API.
@@ -56,7 +57,7 @@
 #include "pivco_huffman_common.h"
 #include "pivco_huffman_x86_tables.h"      /* expand_tab for BU tail */
 #include "pivco_huffman_avx512_flat.h"     /* flat_d{2,3,4,5,6}_unpack_avx512* */
-#include "pivco_huffman_pack_bmi2.h"       /* pack_dN_bmi2 (pext pack) */
+#include "pivco_huffman_avx512_pack.h"     /* pack_d{2..7}_avx512 — vpmultishiftqb */
 #include "pivco_prof.h"
 
 #include <immintrin.h>
@@ -851,39 +852,10 @@ static inline void enc_init_avx512(uint16_t *codes_la, int n,
 
 /* ---------- Encode primitives (flat-subtree pack) ----------
  *
- * D=2..7: 8 codes per iter via uint64 lanes (max shift 7*7=49 < 64),
- * one vpcompressw + sllv per call.
+ * D=2..7: 64 codes per zmm iter via byte-laid intermediate +
+ * vpmultishiftqb (D=3,5,6,7) or vpermb-stride gather + shift (D=2,4).
+ * See pivco_huffman_avx512_pack.h for the per-D helpers.
  * D=8: byte-aligned, 32 codes per iter via vpmovwb narrow + store. */
-
-#define PACK_DN_AVX512_UNIFIED(NAME, D_VAL, BITS_OUT)                          \
-static inline int NAME(uint8_t *out, const uint16_t *codes_la,                 \
-                       int n, int right_shift)                                 \
-{                                                                              \
-    static const int64_t shifts[8] = {                                         \
-        0, D_VAL, 2*D_VAL, 3*D_VAL, 4*D_VAL, 5*D_VAL, 6*D_VAL, 7*D_VAL         \
-    };                                                                         \
-    __m512i shift_vec = _mm512_loadu_si512((const __m512i *)shifts);           \
-    __m512i mask_vec  = _mm512_set1_epi64((1ULL << D_VAL) - 1);                \
-    int i = 0;                                                                 \
-    for (; i + 8 <= n; i += 8) {                                               \
-        __m128i v16 = _mm_loadu_si128((const __m128i *)(codes_la + i));        \
-        __m512i v64 = _mm512_cvtepu16_epi64(v16);                              \
-        v64 = _mm512_srli_epi64(v64, right_shift);                             \
-        v64 = _mm512_and_si512(v64, mask_vec);                                 \
-        v64 = _mm512_sllv_epi64(v64, shift_vec);                               \
-        uint64_t packed = _mm512_reduce_add_epi64(v64);                        \
-        int bi = i * D_VAL / 8;                                                \
-        memcpy(out + bi, &packed, (BITS_OUT + 7) / 8);                         \
-    }                                                                          \
-    return i;                                                                  \
-}
-PACK_DN_AVX512_UNIFIED(pack_d2_avx512, 2, 16)
-PACK_DN_AVX512_UNIFIED(pack_d3_avx512, 3, 24)
-PACK_DN_AVX512_UNIFIED(pack_d4_avx512, 4, 32)
-PACK_DN_AVX512_UNIFIED(pack_d5_avx512, 5, 40)
-PACK_DN_AVX512_UNIFIED(pack_d6_avx512, 6, 48)
-PACK_DN_AVX512_UNIFIED(pack_d7_avx512, 7, 56)
-#undef PACK_DN_AVX512_UNIFIED
 
 static inline int pack_d8_avx512(uint8_t *out, const uint16_t *codes_la,
                                    int n, int right_shift)
@@ -908,13 +880,6 @@ static inline void pack_dN_avx512(uint8_t *out, const uint16_t *codes_la,
     int right_shift = 16 - depth - D;
 
     int i = 0;
-#if defined(__BMI2__)
-    /* BMI2 pext pack beats the vector spread (no cross-lane reduce) for the
-     * sub-byte D's; D=8 stays on the byte-narrow path. */
-    if (D >= 2 && D <= 7) {
-        i = pack_dN_bmi2(out, codes_la, n, D, right_shift);
-    } else
-#endif
     switch (D) {
     case 2: i = pack_d2_avx512(out, codes_la, n, right_shift); break;
     case 3: i = pack_d3_avx512(out, codes_la, n, right_shift); break;
