@@ -342,19 +342,28 @@ static inline uint32_t extract_D_bits_avx512(const uint8_t *in,
  * Per-D unpack helpers (flat_d{2,3,4,5,6,7}_unpack_avx512*) come from
  * pivco_huffman_avx512_flat.h. */
 
-/* D=2: 4 packed codes per byte -> 16 codes (__m128i), 1 pshufb on a
- * 4-byte c2s broadcast into all 4 lanes. */
+/* D=2: c2s = 4 entries; codes < 4 use only low 2 bits so vpermb on a
+ * 64-byte register whose first 4 bytes are c2s works.  Wide 64-at-a-time
+ * path first, then existing 16-wide tail + scalar nibble unpack. */
 static inline void merge_flat_d2_avx512(uint8_t *symbols, int n,
                                                   const uint8_t *bm,
                                                   const uint8_t *c2s)
 {
     uint32_t c2s_lo;
     memcpy(&c2s_lo, c2s, 4);
-    __m128i c2s_vec = _mm_set1_epi32((int32_t)c2s_lo);
+    __m128i c2s_xmm = _mm_set1_epi32((int32_t)c2s_lo);
+    __m512i c2s_zmm = _mm512_castsi128_si512(c2s_xmm);
     int i = 0;
+    /* Slack: strict bound is ceil(32*8/2)=128 codes — happens to match the
+     * "i + 128" symmetry of the other widths exactly. */
+    for (; i + 128 <= n; i += 64) {
+        __m512i codes = flat_d2_unpack64_avx512_fast(bm + (i >> 2));
+        __m512i syms  = _mm512_permutexvar_epi8(codes, c2s_zmm);
+        _mm512_storeu_si512((__m512i *)(symbols + i), syms);
+    }
     for (; i + 16 <= n; i += 16) {
         __m128i codes = flat_d2_unpack_avx512(bm + (i >> 2));
-        __m128i syms  = _mm_shuffle_epi8(c2s_vec, codes);
+        __m128i syms  = _mm_shuffle_epi8(c2s_xmm, codes);
         _mm_storeu_si128((__m128i *)(symbols + i), syms);
     }
     for (; i + 4 <= n; i += 4) {
@@ -370,26 +379,35 @@ static inline void merge_flat_d2_avx512(uint8_t *symbols, int n,
     }
 }
 
-/* D=3: c2s = 8 entries fits in low 8 bytes of an xmm; 16-elem chunk
- * via pshufb on an 8-byte c2s broadcast (only low 3 bits of each lane
- * matter, c2s is loaded into low 8 bytes). */
+/* D=3: c2s = 8 entries fits in low 8 bytes of an xmm; codes < 8 use only
+ * the low 3 bits so vpermb against a 64-byte register whose first 8 bytes
+ * are c2s (the rest don't-care) lands on the right entry.  Wide 64-at-a
+ * -time path first (using flat_d3_unpack64), then existing 16-wide tail. */
 static inline void merge_flat_d3_avx512(uint8_t *symbols, int n,
                                                   const uint8_t *bm,
                                                   const uint8_t *c2s)
 {
     uint64_t c2s_lo;
     memcpy(&c2s_lo, c2s, 8);
-    __m128i c2s_vec = _mm_cvtsi64_si128((int64_t)c2s_lo);
+    __m128i c2s_xmm = _mm_cvtsi64_si128((int64_t)c2s_lo);
+    __m512i c2s_zmm = _mm512_castsi128_si512(c2s_xmm);
     int i = 0;
+    /* Slack: strict bound is ceil(32*8/3)=86 codes; use 128 to drop cleanly
+     * into the 16-wide tail (same pattern as merge_flat_d5_avx512). */
+    for (; i + 128 <= n; i += 64) {
+        __m512i codes = flat_d3_unpack64_avx512_fast(bm + ((i * 3) >> 3));
+        __m512i syms  = _mm512_permutexvar_epi8(codes, c2s_zmm);
+        _mm512_storeu_si512((__m512i *)(symbols + i), syms);
+    }
     int fast_end = n >= 16 ? n - 16 : 0;
     for (; i + 16 <= fast_end; i += 16) {
         __m128i codes = flat_d3_unpack_avx512_fast(bm + ((i * 3) >> 3));
-        __m128i syms  = _mm_shuffle_epi8(c2s_vec, codes);
+        __m128i syms  = _mm_shuffle_epi8(c2s_xmm, codes);
         _mm_storeu_si128((__m128i *)(symbols + i), syms);
     }
     if (i + 16 <= n) {
         __m128i codes = flat_d3_unpack_avx512_safe(bm + ((i * 3) >> 3));
-        __m128i syms  = _mm_shuffle_epi8(c2s_vec, codes);
+        __m128i syms  = _mm_shuffle_epi8(c2s_xmm, codes);
         _mm_storeu_si128((__m128i *)(symbols + i), syms);
         i += 16;
     }
@@ -399,16 +417,29 @@ static inline void merge_flat_d3_avx512(uint8_t *symbols, int n,
     }
 }
 
-/* D=4: c2s = 16 entries fits in an xmm; pshufb directly. */
+/* D=4: c2s = 16 entries; codes < 16 use only low 4 bits so vpermb on a
+ * 64-byte register whose first 16 bytes are c2s (rest don't-care) works.
+ * Wide 64-at-a-time path first, then existing 16-wide tail.  No
+ * over-read concern for the wide path since flat_d4_unpack64's 32-byte
+ * load only consumes bytes 0..31 = 32 valid bytes, but ymm read of bm
+ * still over-reads past the bm region. */
 static inline void merge_flat_d4_avx512(uint8_t *symbols, int n,
                                                   const uint8_t *bm,
                                                   const uint8_t *c2s)
 {
-    __m128i c2s_vec = _mm_loadu_si128((const __m128i *)c2s);
+    __m128i c2s_xmm = _mm_loadu_si128((const __m128i *)c2s);
+    __m512i c2s_zmm = _mm512_castsi128_si512(c2s_xmm);
     int i = 0;
+    /* Slack: strict bound is ceil(32*8/4)=64 codes; use 128 to drop into
+     * the 16-wide tail and stay symmetric with the other widths. */
+    for (; i + 128 <= n; i += 64) {
+        __m512i codes = flat_d4_unpack64_avx512_fast(bm + ((i * 4) >> 3));
+        __m512i syms  = _mm512_permutexvar_epi8(codes, c2s_zmm);
+        _mm512_storeu_si512((__m512i *)(symbols + i), syms);
+    }
     for (; i + 16 <= n; i += 16) {
         __m128i codes = flat_d4_unpack_avx512(bm + (i >> 1));
-        __m128i syms  = _mm_shuffle_epi8(c2s_vec, codes);
+        __m128i syms  = _mm_shuffle_epi8(c2s_xmm, codes);
         _mm_storeu_si128((__m128i *)(symbols + i), syms);
     }
     for (; i < n; i++) {
@@ -417,25 +448,40 @@ static inline void merge_flat_d4_avx512(uint8_t *symbols, int n,
     }
 }
 
-/* D=5: c2s = 32 entries needs vpermb over an ymm. */
+/* D=5: c2s = 32 entries.  Fast path uses the 64-at-a-time zmm unpack
+ * (flat_d5_unpack64_avx512_fast) + vpermb over a zmm broadcast of the
+ * 32-byte c2s; codes < 32 keep the high half don't-care so the cast is
+ * safe.  Tail of 16..63 codes drops to the 16-at-a-time vpermb-ymm
+ * form, and the last <16 codes go scalar. */
 static inline void merge_flat_d5_avx512(uint8_t *symbols, int n,
                                                   const uint8_t *bm,
                                                   const uint8_t *c2s)
 {
-    __m256i c2s_vec = _mm256_loadu_si256((const __m256i *)c2s);
+    __m256i c2s_ymm = _mm256_loadu_si256((const __m256i *)c2s);
+    __m512i c2s_zmm = _mm512_castsi256_si512(c2s_ymm);
     int i = 0;
-    int fast_end = n >= 16 ? n - 16 : 0;
-    for (; i + 16 <= fast_end; i += 16) {
+    /* 64-wide fast loop.  Leave a 64-element safety margin so the
+     * 64-byte zmm load past bm[i*5/8] never reads into uninitialised
+     * pages — the tail handles the remainder. */
+    int fast64_end = n >= 64 ? n - 64 : 0;
+    for (; i + 64 <= fast64_end; i += 64) {
+        __m512i codes = flat_d5_unpack64_avx512_fast(bm + ((i * 5) >> 3));
+        __m512i syms  = _mm512_permutexvar_epi8(codes, c2s_zmm);
+        _mm512_storeu_si512((__m512i *)(symbols + i), syms);
+    }
+    /* 16-wide fast loop drains down to ≤16 remaining. */
+    int fast16_end = n >= 16 ? n - 16 : 0;
+    for (; i + 16 <= fast16_end; i += 16) {
         __m128i codes = flat_d5_unpack_avx512_fast(bm + ((i * 5) >> 3));
         __m256i codes_ext = _mm256_zextsi128_si256(codes);
-        __m256i syms_full = _mm256_permutexvar_epi8(codes_ext, c2s_vec);
+        __m256i syms_full = _mm256_permutexvar_epi8(codes_ext, c2s_ymm);
         _mm_storeu_si128((__m128i *)(symbols + i),
                          _mm256_castsi256_si128(syms_full));
     }
     if (i + 16 <= n) {
         __m128i codes = flat_d5_unpack_avx512_safe(bm + ((i * 5) >> 3));
         __m256i codes_ext = _mm256_zextsi128_si256(codes);
-        __m256i syms_full = _mm256_permutexvar_epi8(codes_ext, c2s_vec);
+        __m256i syms_full = _mm256_permutexvar_epi8(codes_ext, c2s_ymm);
         _mm_storeu_si128((__m128i *)(symbols + i),
                          _mm256_castsi256_si128(syms_full));
         i += 16;
@@ -446,25 +492,33 @@ static inline void merge_flat_d5_avx512(uint8_t *symbols, int n,
     }
 }
 
-/* D=6: c2s = 64 entries fits in a zmm, use vpermb. */
+/* D=6: c2s = 64 entries fits in a zmm.  Wide 64-at-a-time path first
+ * (flat_d6_unpack64 + vpermb-zmm), then existing 16-wide tail. */
 static inline void merge_flat_d6_avx512(uint8_t *symbols, int n,
                                                   const uint8_t *bm,
                                                   const uint8_t *c2s)
 {
-    __m512i c2s_vec = _mm512_loadu_si512((const __m512i *)c2s);
+    __m512i c2s_zmm = _mm512_loadu_si512((const __m512i *)c2s);
     int i = 0;
+    /* Slack: strict bound is ceil(64*8/6)=86 codes; use 128 to match the
+     * other widths and drop into the 16-wide tail. */
+    for (; i + 128 <= n; i += 64) {
+        __m512i codes = flat_d6_unpack64_avx512_fast(bm + ((i * 6) >> 3));
+        __m512i syms  = _mm512_permutexvar_epi8(codes, c2s_zmm);
+        _mm512_storeu_si512((__m512i *)(symbols + i), syms);
+    }
     int fast_end = n >= 16 ? n - 16 : 0;
     for (; i + 16 <= fast_end; i += 16) {
         __m128i codes = flat_d6_unpack_avx512_fast(bm + ((i * 6) >> 3));
         __m512i codes_ext = _mm512_castsi128_si512(codes);
-        __m512i syms_full = _mm512_permutexvar_epi8(codes_ext, c2s_vec);
+        __m512i syms_full = _mm512_permutexvar_epi8(codes_ext, c2s_zmm);
         _mm_storeu_si128((__m128i *)(symbols + i),
                          _mm512_castsi512_si128(syms_full));
     }
     if (i + 16 <= n) {
         __m128i codes = flat_d6_unpack_avx512_safe(bm + ((i * 6) >> 3));
         __m512i codes_ext = _mm512_castsi128_si512(codes);
-        __m512i syms_full = _mm512_permutexvar_epi8(codes_ext, c2s_vec);
+        __m512i syms_full = _mm512_permutexvar_epi8(codes_ext, c2s_zmm);
         _mm_storeu_si128((__m128i *)(symbols + i),
                          _mm512_castsi512_si128(syms_full));
         i += 16;
@@ -476,7 +530,8 @@ static inline void merge_flat_d6_avx512(uint8_t *symbols, int n,
 }
 
 /* D=7: c2s = 128 entries spans two zmm tables.  One vpermi2b looks up
- * the full 128-byte table in a single op. */
+ * the full 128-byte table in a single op.  Wide 64-at-a-time path first
+ * (flat_d7_unpack64 + vpermi2b), then existing 16-wide tail. */
 static inline void merge_flat_d7_avx512(uint8_t *symbols, int n,
                                                   const uint8_t *bm,
                                                   const uint8_t *c2s)
@@ -484,6 +539,13 @@ static inline void merge_flat_d7_avx512(uint8_t *symbols, int n,
     __m512i c2s_lo = _mm512_loadu_si512((const __m512i *)c2s);
     __m512i c2s_hi = _mm512_loadu_si512((const __m512i *)(c2s + 64));
     int i = 0;
+    /* Slack: strict bound is ceil(64*8/7)=74 codes; use 128 for symmetry
+     * with the other widths. */
+    for (; i + 128 <= n; i += 64) {
+        __m512i codes = flat_d7_unpack64_avx512_fast(bm + ((i * 7) >> 3));
+        __m512i syms  = _mm512_permutex2var_epi8(c2s_lo, codes, c2s_hi);
+        _mm512_storeu_si512((__m512i *)(symbols + i), syms);
+    }
     int fast_end = n >= 16 ? n - 16 : 0;
     for (; i + 16 <= fast_end; i += 16) {
         __m128i codes = flat_d7_unpack_avx512_fast(bm + ((i * 7) >> 3));
