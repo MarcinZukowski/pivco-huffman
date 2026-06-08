@@ -736,7 +736,8 @@ int main(int argc, char **argv) {
         else if (!strncmp(argv[i], "--G=", 4)) g_table_G = (size_t)atoi(argv[i]+4) * 1024;
         else if (!strncmp(argv[i], "--engines=", 10)) eng_filter = argv[i] + 10;
         else if (!strncmp(argv[i], "--dist=", 7)) { dist_filter = argv[i] + 7; }
-        else if (!strcmp(argv[i], "--list") || !strcmp(argv[i], "--help")) {
+        else if (!strcmp(argv[i], "--list") || !strcmp(argv[i], "--help")
+                 || !strcmp(argv[i], "-h")) {
             bench_init();
             printf("usage: pivco_fair_bench [--all] [--G=KB] [--engines=a,b] [--dist=x,y]\n\n");
             printf("engines:");
@@ -745,6 +746,10 @@ int main(int argc, char **argv) {
             for (int d = 0; d < bench_num_distributions(); d++)
                 printf("  %s%s\n", bench_dist_name(d), bench_dist_is_main(d) ? " *" : "");
             return 0;
+        }
+        else {
+            fprintf(stderr, "unknown arg: %s (try --help)\n", argv[i]);
+            return 1;
         }
     }
     bench_init();
