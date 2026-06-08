@@ -71,11 +71,13 @@ void pivco_prof_reset(void) {
     memset(pivco_prof_counters, 0, sizeof(pivco_prof_counters));
 }
 
+#ifdef PIVCO_PROF
 static double now_sec(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
 }
+#endif
 
 double pivco_prof_probe_tick_freq(void) {
 #ifdef PIVCO_PROF

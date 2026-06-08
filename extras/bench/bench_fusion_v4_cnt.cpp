@@ -26,6 +26,7 @@
 // function-call overhead.  Results should match end-to-end behavior much
 // better than v3.
 
+#pragma clang diagnostic ignored "-Wunused-lambda-capture"
 #include "counters/bench.h"
 #include <arm_neon.h>
 #include <cstdint>

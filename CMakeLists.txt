@@ -60,6 +60,15 @@ CPMAddPackage(
     GITHUB_REPOSITORY lemire/counters
     VERSION 4.1.0
 )
+# Mark the counters headers as SYSTEM so its -Wunused-variable noise from
+# template instantiations doesn't drown out warnings in our own code.
+if(TARGET counters)
+    get_target_property(_counters_incs counters INTERFACE_INCLUDE_DIRECTORIES)
+    if(_counters_incs)
+        set_target_properties(counters PROPERTIES INTERFACE_INCLUDE_DIRECTORIES "")
+        target_include_directories(counters SYSTEM INTERFACE ${_counters_incs})
+    endif()
+endif()
 
 # Compiler flags
 add_compile_options(-Wall -Wextra -O3)

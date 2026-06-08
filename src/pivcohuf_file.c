@@ -37,6 +37,7 @@ static inline uint32_t rotl32(uint32_t x, int r) {
     return (x << r) | (x >> (32 - r));
 }
 
+__attribute__((unused))
 static uint32_t xxh32(const void *data, size_t len)
 {
     const uint8_t *p = (const uint8_t *)data;
@@ -85,7 +86,7 @@ static uint32_t xxh32(const void *data, size_t len)
 /* ============================================================
  * Little-endian field readers/writers.
  * ============================================================ */
-static inline void put_u8 (uint8_t *p, uint8_t v)  { p[0] = v; }
+__attribute__((unused)) static inline void put_u8 (uint8_t *p, uint8_t v)  { p[0] = v; }
 static inline void put_u16(uint8_t *p, uint16_t v) { p[0] = v & 0xff; p[1] = (v >> 8) & 0xff; }
 static inline void put_u32(uint8_t *p, uint32_t v) {
     p[0] = v & 0xff; p[1] = (v>>8) & 0xff;
@@ -95,7 +96,7 @@ static inline void put_u64(uint8_t *p, uint64_t v) {
     put_u32(p, (uint32_t)v);
     put_u32(p + 4, (uint32_t)(v >> 32));
 }
-static inline uint8_t  get_u8 (const uint8_t *p) { return p[0]; }
+__attribute__((unused)) static inline uint8_t  get_u8 (const uint8_t *p) { return p[0]; }
 static inline uint16_t get_u16(const uint8_t *p) { return (uint16_t)p[0] | ((uint16_t)p[1] << 8); }
 static inline uint32_t get_u32(const uint8_t *p) {
     return (uint32_t)p[0] | ((uint32_t)p[1] << 8)

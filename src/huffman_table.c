@@ -173,10 +173,7 @@ static void limit_code_lengths(uint8_t *lengths, int n_symbols, int max_len)
     while (kraft < target && count[max_len] > 0) {
         /* Find the shortest length where we can add capacity */
         for (int len = max_len - 1; len >= 1; len--) {
-            uint64_t gain = ((uint64_t)1 << (max_len - len)) -
-                            ((uint64_t)1 << (max_len - len - 1));
-            /* gain = 2^(max_len-len) - 2^(max_len-len-1) = 2^(max_len-len-1) */
-            /* But moving from max_len to len changes kraft by:
+            /* Moving one code from max_len to len changes kraft by:
                +2^(max_len-len) - 2^(max_len-max_len) = 2^(max_len-len) - 1 */
             uint64_t delta = ((uint64_t)1 << (max_len - len)) - 1;
             if (kraft + delta <= target && count[max_len] > 0) {

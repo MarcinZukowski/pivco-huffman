@@ -76,6 +76,7 @@ static double huff_ratio(const uint8_t *buf, size_t len)
  *
  * Adds a small fixed per-stream header allowance (~32 B × 5 streams)
  * for the per-field code-length tables. */
+__attribute__((unused))
 static size_t lz4_semantic_split_projected(const uint8_t *lz4, size_t lz4_size,
                                             size_t src_len)
 {

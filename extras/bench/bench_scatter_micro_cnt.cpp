@@ -148,6 +148,7 @@ static inline void scatter_bare(uint8_t *symbols, const uint16_t *indices,
 }
 
 // Reference: sequential write — the easy case for the store buffer.
+__attribute__((unused))
 static inline void scatter_seq(uint8_t *symbols, int n, uint8_t sym) {
     std::memset(symbols, sym, (size_t)n);
 }

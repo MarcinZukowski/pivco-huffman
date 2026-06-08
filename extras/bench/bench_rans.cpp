@@ -9,6 +9,7 @@
 
 // ryg_rans uses __rdtsc and timer() — stub them out
 #ifdef __aarch64__
+__attribute__((unused))
 static inline uint64_t __rdtsc() { uint64_t v; __asm__ volatile("mrs %0, cntvct_el0" : "=r"(v)); return v; }
 #endif
 
@@ -187,6 +188,7 @@ size_t rans_alias_encode(void *ctx, const uint8_t *symbols, size_t n,
 size_t rans_alias_decode(void *ctx, const uint8_t *in, size_t in_len,
                          uint8_t *symbols, size_t n)
 {
+    (void)in_len;
     rans_ctx_t *c = (rans_ctx_t *)ctx;
     uint8_t *ptr = (uint8_t *)in;
 
@@ -204,6 +206,7 @@ size_t rans_alias_decode(void *ctx, const uint8_t *in, size_t in_len,
 size_t rans_alias_decode_x2(void *ctx, const uint8_t *in, size_t in_len,
                             uint8_t *symbols, size_t n)
 {
+    (void)in_len;
     rans_ctx_t *c = (rans_ctx_t *)ctx;
     uint8_t *ptr = (uint8_t *)in;
 

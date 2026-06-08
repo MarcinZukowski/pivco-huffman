@@ -17,6 +17,7 @@
 //
 // Tiny working set, all L1-resident.
 
+#pragma clang diagnostic ignored "-Wunused-lambda-capture"
 #include "counters/bench.h"
 #include <arm_neon.h>
 #include <cstdint>

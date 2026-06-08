@@ -142,6 +142,7 @@ static double bench_dispatch_latency(id<MTLCommandQueue> q,
 }
 
 int main(int argc, const char **argv) {
+    (void)argc; (void)argv;
     @autoreleasepool {
         id<MTLDevice> device = MTLCreateSystemDefaultDevice();
         if (!device) {

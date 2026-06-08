@@ -278,7 +278,7 @@ int main() {
         double ns_call_best = agg.fastest_elapsed_ns() / (double)N_GROUPS;
         double ns_call_avg  = agg.elapsed_ns() / (double)N_GROUPS;
         std::printf("%-30s %10.3f  (avg %.3f, inner_count=%zu)\n",
-                    name, ns_call_best, ns_call_avg, agg.inner_count);
+                    name, ns_call_best, ns_call_avg, (size_t)agg.inner_count);
     };
 
     print_lemire("L1 lemire baseline (vec)",   lemire_baseline(v_src, v_L, v_R, v_m));

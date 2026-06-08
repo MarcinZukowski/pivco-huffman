@@ -91,10 +91,8 @@ static void analyze_distribution(int d)
     }
 
     uint64_t w_total_flat = 0;
-    int      c_total_flat = 0;
     for (int i = 0; i < 16; i++) {
         w_total_flat += w_by_depth[i];
-        c_total_flat += c_by_depth[i];
     }
 
     printf("%-14s | min=%d max=%d ", name, min_len, max_len);

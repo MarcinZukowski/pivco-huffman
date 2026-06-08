@@ -36,6 +36,7 @@ static int compute_local_min(const pivco_huffman_table_t *t, int16_t node_id)
 }
 
 /* Deepest leaf depth relative to this node. */
+__attribute__((unused))
 static int compute_local_max(const pivco_huffman_table_t *t, int16_t node_id)
 {
     const pivco_tree_node_t *n = &t->tree[node_id];
