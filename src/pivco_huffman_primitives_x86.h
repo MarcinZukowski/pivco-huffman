@@ -33,6 +33,9 @@
 #include "pivco_huffman_common.h"
 #include "pivco_huffman_x86_tables.h"   /* compress_tab*, expand_tab* */
 #include "pivco_huffman_x86_flat.h"     /* flat_d4_unpack_x86 */
+#ifdef PIVCO_HAS_AVX2
+#include "pivco_huffman_avx2_pack.h"    /* pack_d{2,3,5,6,7}_avx2_x86 (ryg pack) */
+#endif
 #include "pivco_prof.h"
 
 #include <smmintrin.h>                  /* SSE4.1 */
@@ -701,43 +704,12 @@ static inline void enc_init_x86(uint16_t *codes_la, int n,
  * ceil(n / stride) * stride elements).  The dispatcher pack_dN_x86
  * below handles the residual scalar tail. */
 
-#ifdef PIVCO_HAS_AVX2
-/* AVX2 D=3,5,6,7: 8 codes per iter via __m256i uint64 lanes (4 lanes
- * × 2 halves = 8 codes; max shift 7*7 = 49 < 64). */
-#define PACK_DN_AVX2_UNIFIED_X86(NAME, D_VAL, BITS_OUT)                        \
-static inline int NAME(uint8_t *out, const uint16_t *codes_la,                 \
-                       int n, int right_shift)                                 \
-{                                                                              \
-    static const int64_t shifts_lo[4] = {0,         D_VAL,   2*D_VAL, 3*D_VAL};\
-    static const int64_t shifts_hi[4] = {4*D_VAL, 5*D_VAL, 6*D_VAL, 7*D_VAL};  \
-    __m256i sl = _mm256_loadu_si256((const __m256i *)shifts_lo);               \
-    __m256i sh = _mm256_loadu_si256((const __m256i *)shifts_hi);               \
-    __m256i mask_vec = _mm256_set1_epi64x((1LL << D_VAL) - 1);                 \
-    int i = 0;                                                                 \
-    for (; i + 8 <= n; i += 8) {                                               \
-        __m128i v16 = _mm_loadu_si128((const __m128i *)(codes_la + i));        \
-        __m256i lo = _mm256_cvtepu16_epi64(v16);                               \
-        __m256i hi = _mm256_cvtepu16_epi64(_mm_unpackhi_epi64(v16, v16));      \
-        lo = _mm256_and_si256(_mm256_srli_epi64(lo, right_shift), mask_vec);   \
-        hi = _mm256_and_si256(_mm256_srli_epi64(hi, right_shift), mask_vec);   \
-        lo = _mm256_sllv_epi64(lo, sl);                                        \
-        hi = _mm256_sllv_epi64(hi, sh);                                        \
-        __m256i sum = _mm256_add_epi64(lo, hi);                                \
-        __m128i s128 = _mm_add_epi64(_mm256_castsi256_si128(sum),              \
-                                      _mm256_extracti128_si256(sum, 1));       \
-        uint64_t packed = _mm_cvtsi128_si64(s128)                              \
-                        + _mm_cvtsi128_si64(_mm_unpackhi_epi64(s128, s128));   \
-        int bi = i * D_VAL / 8;                                                \
-        memcpy(out + bi, &packed, (BITS_OUT + 7) / 8);                         \
-    }                                                                          \
-    return i;                                                                  \
-}
-PACK_DN_AVX2_UNIFIED_X86(pack_d3_avx2_x86, 3, 24)
-PACK_DN_AVX2_UNIFIED_X86(pack_d5_avx2_x86, 5, 40)
-PACK_DN_AVX2_UNIFIED_X86(pack_d6_avx2_x86, 6, 48)
-PACK_DN_AVX2_UNIFIED_X86(pack_d7_avx2_x86, 7, 56)
-#undef PACK_DN_AVX2_UNIFIED_X86
-#endif  /* PIVCO_HAS_AVX2 */
+/* AVX2 D=2,3,5,6,7: 32 codes per ymm iter via ryg's multiply-as-shift
+ * pack (pmaddubsw + pmaddwd + psrlq + and/andn/or + vpshufb compact
+ * + 2x movdqu).  Helpers live in pivco_huffman_avx2_pack.h.  Beats the
+ * prior sllv+reduce_add path by 3-3.5x on Zen 3 (c6a).  D=4 stays on
+ * the SSE _mm_maddubs_epi16 "2 codes per byte" path which is intrinsically
+ * cheap and beats v3 by ~20%. */
 
 /* SSE4.1 D=2: 16 codes -> 4 bytes.  _mm_maddubs_epi16 weighted pair-add
  * with weights {1, 4, 16, 64} (int8 max 127, so 64 fits). */
@@ -855,15 +827,16 @@ static inline void pack_dN_x86(uint8_t *out, const uint16_t *codes_la,
      * backend instead (Intel Xeon + AMD Zen4, both fast-pext). */
     int i = 0;
     switch (D) {
-    case 2: i = pack_d2_sse_x86(out, codes_la, n, right_shift); break;
     case 4: i = pack_d4_sse_x86(out, codes_la, n, right_shift); break;
     case 8: i = pack_d8_sse_x86(out, codes_la, n, right_shift); break;
 #ifdef PIVCO_HAS_AVX2
+    case 2: i = pack_d2_avx2_x86(out, codes_la, n, right_shift); break;
     case 3: i = pack_d3_avx2_x86(out, codes_la, n, right_shift); break;
     case 5: i = pack_d5_avx2_x86(out, codes_la, n, right_shift); break;
     case 6: i = pack_d6_avx2_x86(out, codes_la, n, right_shift); break;
     case 7: i = pack_d7_avx2_x86(out, codes_la, n, right_shift); break;
 #else
+    case 2: i = pack_d2_sse_x86(out, codes_la, n, right_shift); break;
     case 3: i = pack_d3_sse_x86(out, codes_la, n, right_shift); break;
     /* D=5,6,7 fall through to scalar tail on SSE4.1-only hosts. */
 #endif
