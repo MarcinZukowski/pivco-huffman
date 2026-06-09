@@ -5,7 +5,7 @@ SIMD path (via the shared `flat_d{2..6}_unpack_avx512` helpers), not just the
 scalar `AVX512_FLAT_UNPACK_SWITCH` fallback.  `dec-ph` IS what ph runs today
 for D ≤ 6; for D ≥ 7 ph falls back to scalar (same as `dec-cls`).
 
-## Sapphire Rapids (test-c8i, Xeon 6975P-C)
+## Granite Rapids (test-c8i, Xeon 6975P-C)
 
 ```
 decode (ns/sym; baseline = ph-simd for D<=6, scalar for D>=7):

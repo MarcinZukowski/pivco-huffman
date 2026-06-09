@@ -1,5 +1,5 @@
 // AVX-512 microbenches: partition + scatter + dual + fusion.  For
-// Xeon Sapphire Rapids and Zen 5 EPYC.
+// Xeon Granite Rapids and Zen 5 EPYC.
 //
 // Kernels copied from src/pivco_huffman_avx512.c (partition_32_full,
 // partition_32_right/left, scatter_write_avx512).

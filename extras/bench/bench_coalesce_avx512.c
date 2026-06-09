@@ -92,7 +92,7 @@ static void bench_compressstoreu(const uint16_t *src, const uint32_t *masks,
  *
  * Place at byte offset `cum*2` via vpermb with a runtime control:
  *   shuf[i] = i - cum*2  (mod 256, vpermb maps >=64 → 0 with maskz)
- * On Sapphire Rapids vpermb is 3 cycles latency / 1 op throughput. */
+ * On Granite Rapids vpermb is 3 cycles latency / 1 op throughput. */
 __attribute__((noinline))
 static void bench_macro(const uint16_t *src, const uint32_t *masks,
                          uint16_t *left, uint16_t *right,

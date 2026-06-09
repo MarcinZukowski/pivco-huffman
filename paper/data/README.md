@@ -51,7 +51,7 @@ matches the layout you want, headers are hand-written in the `.typ`.
   table.header(
     table.cell(rowspan: 2)[*Distribution*],
     table.cell(colspan: 4)[*M4 Max* (GB/s)],
-    table.cell(colspan: 4)[*Sapphire Rapids c8i* (GB/s)],
+    table.cell(colspan: 4)[*Granite Rapids c8i* (GB/s)],
     [naive], [opt], [huf0_x2], [opt/huf0],
     [naive], [opt], [huf0_x2], [opt/huf0],
   ),

@@ -2077,7 +2077,7 @@ ratio (X2 / X1) on the real-text cluster (`prose_pride`, `english`,
 | M4            | Apple Avalanche NEON     | 0.85      | 0.81–0.89   |
 | Graviton 4    | Neoverse V2 NEON         | 0.76      | 0.73–0.84   |
 | Zen 3         | x86 SSE4.1               | 0.78      | 0.67–1.00   |
-| Xeon SR       | Sapphire Rapids AVX-512  | 0.79      | 0.73–0.87   |
+| Xeon GR       | Granite Rapids AVX-512   | 0.79      | 0.73–0.87   |
 | Zen 5 (EPYC)  | AVX-512                  | 0.59      | 0.50–0.71   |
 
 ### Why it didn't pay off
@@ -2444,9 +2444,9 @@ Results — fusion saving (sum-of-parts minus serial), positive = win:
 | Zen 5 SSE4.1 (c8a)    | 3.88 (8e)          | 0.97               | **+10%**          |
 | Zen 5 AVX-512 (c8a)   | 10.01 (32e)        | 0.98               | **+14%**          |
 
-**Wins on Zen 5 + Graviton 4. Hurts on M4 + Xeon SR.**  Apple M4
+**Wins on Zen 5 + Graviton 4. Hurts on M4 + Xeon GR.**  Apple M4
 already runs scatter at the 2-stores/cyc port ceiling so there's no
-slack to absorb partition; Sapphire Rapids interferes destructively
+slack to absorb partition; Granite Rapids interferes destructively
 (probably store-buffer / µop-cache pressure on the larger combined
 kernel, evident also in `dual_indep` running 4.09× single rather than
 2× — Xeon SR has a specific scheduling hazard around `vpcompressw`
@@ -2480,7 +2480,7 @@ the experiments:
 - **Scatter store-throughput tier list** (stores/cyc on byte-scattered
   16-store loop): Apple M4 1.86 (port-saturated), Zen 5 0.97, everyone
   else ~0.56.  Apple Silicon and Zen 5 have meaningfully better
-  scatter throughput than Sapphire Rapids / Neoverse V2 / Zen 3.
+  scatter throughput than Granite Rapids / Neoverse V2 / Zen 3.
 - **Lane-extracts are free everywhere we measured** — halving them
   (variant D of bench_scatter_split_cnt) changed nothing.  The
   bottleneck is purely the byte stores.
@@ -2599,7 +2599,7 @@ platform:
 |---|---|---:|
 | Apple M4 (NEON) | 1-sided macro coalesce | 0.88× |
 | Graviton 4 (NEON) | 1-sided macro coalesce | 0.96× (closest) |
-| Xeon AVX-512 (Sapphire Rapids) | 2-iter macro coalesce | 0.75× |
+| Xeon AVX-512 (Granite Rapids) | 2-iter macro coalesce | 0.75× |
 
 Each variant ruled out one suspected failure mode and exposed the
 next: indirect-branch mispredict (switch) → cross-iter dep chain
@@ -2612,7 +2612,7 @@ the more favorable SIMD-to-store ratio): still loses by 23%.
 
 **Bonus AVX-512 finding:** `_mm512_mask_compressstoreu_epi16` (the
 single-instruction compress-and-store) is **2× SLOWER** than the
-production `vpcompressw` + `vmovdqu64` — Sapphire Rapids decomposes
+production `vpcompressw` + `vmovdqu64` — Granite Rapids decomposes
 it to ~6 µops vs production's 2 µops.  Don't migrate the AVX-512
 backend to compressstoreu.
 
@@ -2977,7 +2977,7 @@ trick.
 - Existing decoder already beats huf0 by 1.0-5× depending on
   distribution; no urgent bottleneck.
 
-If revisiting: prototype on test-c8i first (Sapphire Rapids), 1-2 hrs
+If revisiting: prototype on test-c8i first (Granite Rapids), 1-2 hrs
 to validate the 1.4× claim.  If real, the design pivots from
 partition+scatter to BU-reconstruct + sequential c2s with runtime
 backend selection per architecture.

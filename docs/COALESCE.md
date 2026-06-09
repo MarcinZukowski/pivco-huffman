@@ -16,7 +16,7 @@ the standalone binary.
 
 Six NEON variants + three AVX-512 variants tested across three
 modern uarches (Apple M4 P-core, AWS Graviton 4 Neoverse-V2, Intel
-Xeon Sapphire Rapids).  **All variants lose to baseline on every
+Xeon Granite Rapids).  **All variants lose to baseline on every
 platform**, even after eliminating every obvious failure mode (branch
 mispredict, cross-iter dep chains, depth-3 OR-chain latency,
 1-sided specialization, AVX-512 single-instruction compress-store).
@@ -322,7 +322,7 @@ What this tells us: the loss is from raw **SIMD throughput consumption**
 pipes / 2-wide G4 SIMD pipes), not from any specific dependency
 chain.  Reducing latency doesn't help when throughput is the limit.
 
-## AVX-512 (Xeon Sapphire Rapids)
+## AVX-512 (Xeon Granite Rapids)
 
 A separate AVX-512 port lives at
 [`extras/bench/bench_coalesce_avx512.c`](extras/bench/bench_coalesce_avx512.c) —
@@ -338,7 +338,7 @@ Three variants:
                        iterations into one zmm via `vpermb`-based
                        runtime byte-shift, store always at the end.
 
-Xeon 6975P (Sapphire Rapids), random 32-bit masks:
+Xeon 6975P (Granite Rapids), random 32-bit masks:
 
 | Variant | GB/s | vs baseline |
 |---|---:|---:|
@@ -348,7 +348,7 @@ Xeon 6975P (Sapphire Rapids), random 32-bit masks:
 
 Two findings worth recording:
 
-1. **`vpcompressw mem, k, zmm` is microcoded on Sapphire Rapids.**
+1. **`vpcompressw mem, k, zmm` is microcoded on Granite Rapids.**
    Per Agner Fog / uops.info, the memory-form decomposes to ~6
    micro-ops (internally: compress + masked-store + address-adjust),
    while the production register-form `vpcompressw` is 1 µop and
@@ -359,18 +359,18 @@ Two findings worth recording:
    compressstoreu.
 
 2. **The macro coalesce variant loses by 25%** — same shape as the
-   NEON results.  `vpermb` is 1/cycle on Sapphire Rapids; the SIMD
+   NEON results.  `vpermb` is 1/cycle on Granite Rapids; the SIMD
    work to compute the place-shift exceeds the saved store cycle, even
    on the platform where the compress instruction is "free."
 
 So AVX-512 confirms the conclusion: **store coalescing fails on every
-modern uarch tested** (M4, Graviton 4, Xeon Sapphire Rapids).  The
+modern uarch tested** (M4, Graviton 4, Xeon Granite Rapids).  The
 pattern is consistent regardless of SIMD ISA: the SIMD overhead to
 enable coalescing always exceeds the saved store cycle.
 
 ## Could it win on another platform?
 
-Tested on M4, Graviton 4, and Xeon Sapphire Rapids — all lose.
+Tested on M4, Graviton 4, and Xeon Granite Rapids — all lose.
 Remaining candidate:
 
 - **Zen 3 SSE4.1**: store port is the documented bottleneck on the
