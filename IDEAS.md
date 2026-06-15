@@ -9,6 +9,9 @@
 
 **General**
 - [Cross-port post-June-5 x86 optimizations to NEON](#cross-port-post-june-5-x86-optimizations-to-neon-2026-06-13)
+- [Partial final block in the file format](#partial-final-block-in-the-file-format-2026-06-15)
+- [SIMD-ify scalar tails (overwrite or masked stores)](#simd-ify-scalar-tails-overwrite-or-masked-stores-2026-06-15)
+- [Faster flat unpack via ryg-style multiply-as-shift](#faster-flat-unpack-via-ryg-style-multiply-as-shift-2026-06-15)
 - [Golomb/Rice tier for very-high-skew nodes (p > 0.95)](#golombrice-tier-for-very-high-skew-nodes-p--095-2026-05-16-research)
 - [pivcohuf block-structured file format + tiny-input header](#pivcohuf-block-structured-file-format--tiny-input-header-2026-05-17-parked)
 - [v0.2 FSE marker byte unconditional overhead](#v02-fse-marker-byte-unconditional-overhead-2026-05-13)
@@ -114,6 +117,15 @@
 
 ### Cross-port post-June-5 x86 optimizations to NEON, 2026-06-13
 Recent x86 wins targeted SSE/AVX2 + AVX-512 only: AVX-512 pack_d{2..7} multishift 64 codes/iter (`0c80e3a`), AVX-512 merge_flat_d{2..7} widened to 64 codes/iter (`e5a199a`), x86 AVX2 pack_d{2,3,5,6,7} via ryg multiply-as-shift (`a1aa6b9`), x86 partition 2x-unrolled stride-16 (`83e23a0`).  Open question on NEON (M4 + Graviton 4): is the analogous primitive already at width ceiling, or is there headroom?  Multishift has no NEON analogue (x86-only), and the multiply-as-shift trick is irrelevant on NEON (`vshlq_u32` is native).  But the merge_flat widening pattern and the 2x partition unroll may transfer.  Action: per-primitive bench (`bench_prim`) before/after a NEON 64-codes/iter sketch + fair_bench A/B on c8g.
+
+### Partial final block in the file format, 2026-06-15
+`pivcohuf_file.c:233` handles a short final block by **padding to full BLK with `prefill_sym`** (8192/4096 on ARM-AVX-512/x86) and encoding the whole padded buffer; the decoder truncates via a separate uncompressed-length field.  For a 7-byte input the encoder does ~4089 bytes of extra work and emits encoded bits for all 4096 symbols.  Wire-format cost to fix: **2 bytes per block** — every non-flat internal node already stores a `K_right` uint16 (`kr_header_needed`, since commit `5828ddb`), but the root's `K_total` is implicit (decoder gets `N=BLK` from the caller).  Add a uint16 `N` at the block start (or extend root's header to carry K_total), and BLK leaves the codec entirely.  Then `pivco_huffman_codec.c:243` / `:440` (currently `const int N = PIVCO_BLOCK_SIZE`) take `N` from the wire instead; primitives unchanged (they already take `n`/`K` with tails internal).  Scratch buffers sized for BLK at compile time work for any N ≤ BLK.  Bloat: 2/4096 = 0.05% at x86 BLK, 0.024% at ARM/AVX-512 BLK.  Also relevant for the LZ4+ph prototype where residual literal streams are commonly << BLK.
+
+### SIMD-ify scalar tails (overwrite or masked stores), 2026-06-15
+Most primitives (partition, merge, pack, unpack) drop to scalar for the final 1..K-1 elements where K is the SIMD stride (8/16/32 depending on primitive).  At small block sizes (deep recursion or short final block) those tails dominate.  Two general approaches: (a) **overwrite tails** — round n up to the next stride boundary, write valid+garbage past the real n, then truncate via cursor adjustment (already done in some AVX-512 paths; works when downstream readers know n).  (b) **masked SIMD** — `vmaskmovps`/AVX-512 `k` masks / NEON's `vbslq_u8` on a tail-mask vector to do exactly n elements per SIMD op.  AVX-512 full-tail masked partition shipped 2026-05-08 (+23% on c8i); same pattern hasn't been tried on NEON/SSE/AVX2 tails of merge / pack / unpack / scatter primitives.
+
+### Faster flat unpack via ryg-style multiply-as-shift, 2026-06-15
+The AVX2 `pack_d{2,3,5,6,7}` win (commit `a1aa6b9`) used ryg's multiply-as-shift trick: replace per-lane variable shifts with a single `vpmullw` (per-lane multiply by precomputed per-D constants) that places each D-bit field at its target position in one instruction.  The complementary unpack — given a packed N×D-bit stream, recover N codes — currently uses `_mm_srlv_epi16` / `_mm256_srlv_epi16` + masks per element width.  Worth checking whether a multiply-or-divide-by-constant trick gives a one-shot unpack analogous to the pack.  Also applies on SSE4.1 where there's no `vpsrlv` — the AVX2 pack works on SSE via the multiply trick; the unpack might too.  Touches the flat-decode hot path on dna_fasta / proba80 / image_jpeg.
 
 ### Golomb/Rice tier for very-high-skew nodes (p > 0.95), 2026-05-16, research
 Bench (`bench_golomb.c`): Rice loses to FSE at p ≤ 0.95 but wins at p ≥ 0.97 — **p=0.99: Rice 6.3 GB/s vs FSE 2.0 GB/s, AND 25% smaller** (74 B vs 99 B, since static FSE tables don't extrapolate past ~0.94).  Crossover ~0.97.  Verdict: ship Rice as a third tier only for the extreme-skew tail (FSE marker `0=raw / 1=Rice / 2=FSE`), not as a general FSE replacement.  Encode is bit-by-bit scalar (not pivco's hot path).
