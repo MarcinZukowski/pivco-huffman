@@ -10,7 +10,6 @@
 **General**
 - [Cross-port post-June-5 x86 optimizations to NEON](#cross-port-post-june-5-x86-optimizations-to-neon-2026-06-13)
 - [SIMD-ify scalar tails (overwrite or masked stores)](#simd-ify-scalar-tails-overwrite-or-masked-stores-2026-06-15)
-- [Faster flat unpack via ryg-style multiply-as-shift](#faster-flat-unpack-via-ryg-style-multiply-as-shift-2026-06-15)
 - [Golomb/Rice tier for very-high-skew nodes (p > 0.95)](#golombrice-tier-for-very-high-skew-nodes-p--095-2026-05-16-research)
 - [pivcohuf block-structured file format + tiny-input header](#pivcohuf-block-structured-file-format--tiny-input-header-2026-05-17-parked)
 - [v0.2 FSE marker byte unconditional overhead](#v02-fse-marker-byte-unconditional-overhead-2026-05-13)
@@ -60,6 +59,7 @@
 - [SSE root both-leaves vectorisation](#sse-root-both-leaves-vectorisation-2026-04-27)
 - [x86 AVX2 pack_d{2,3,5,6,7} via ryg multiply-as-shift](#x86-avx2-pack_d23567-via-ryg-multiply-as-shift-2026-06)
 - [x86 partition 2x-unrolled stride-16](#x86-partition-2x-unrolled-stride-16-2026-06)
+- [SSE/AVX2 flat unpack via ryg multiply-as-shift](#sseavx2-flat-unpack-via-ryg-multiply-as-shift-2026-06-15)
 
 **AVX-512**
 - [AVX-512 leaf-fusion port](#avx-512-leaf-fusion-port-2026-04-27)
@@ -120,9 +120,6 @@ Recent x86 wins targeted SSE/AVX2 + AVX-512 only: AVX-512 pack_d{2..7} multishif
 
 ### SIMD-ify scalar tails (overwrite or masked stores), 2026-06-15
 Most primitives (partition, merge, pack, unpack) drop to scalar for the final 1..K-1 elements where K is the SIMD stride (8/16/32 depending on primitive).  At small block sizes (deep recursion or short final block) those tails dominate.  Two general approaches: (a) **overwrite tails** — round n up to the next stride boundary, write valid+garbage past the real n, then truncate via cursor adjustment (already done in some AVX-512 paths; works when downstream readers know n).  (b) **masked SIMD** — `vmaskmovps`/AVX-512 `k` masks / NEON's `vbslq_u8` on a tail-mask vector to do exactly n elements per SIMD op.  AVX-512 full-tail masked partition shipped 2026-05-08 (+23% on c8i); same pattern hasn't been tried on NEON/SSE/AVX2 tails of merge / pack / unpack / scatter primitives.
-
-### Faster flat unpack via ryg-style multiply-as-shift, 2026-06-15
-The AVX2 `pack_d{2,3,5,6,7}` win (commit `a1aa6b9`) used ryg's multiply-as-shift trick: replace per-lane variable shifts with a single `vpmullw` (per-lane multiply by precomputed per-D constants) that places each D-bit field at its target position in one instruction.  The complementary unpack — given a packed N×D-bit stream, recover N codes — currently uses `_mm_srlv_epi16` / `_mm256_srlv_epi16` + masks per element width.  Worth checking whether a multiply-or-divide-by-constant trick gives a one-shot unpack analogous to the pack.  Also applies on SSE4.1 where there's no `vpsrlv` — the AVX2 pack works on SSE via the multiply trick; the unpack might too.  Touches the flat-decode hot path on dna_fasta / proba80 / image_jpeg.
 
 ### Golomb/Rice tier for very-high-skew nodes (p > 0.95), 2026-05-16, research
 Bench (`bench_golomb.c`): Rice loses to FSE at p ≤ 0.95 but wins at p ≥ 0.97 — **p=0.99: Rice 6.3 GB/s vs FSE 2.0 GB/s, AND 25% smaller** (74 B vs 99 B, since static FSE tables don't extrapolate past ~0.94).  Crossover ~0.97.  Verdict: ship Rice as a third tier only for the extreme-skew tail (FSE marker `0=raw / 1=Rice / 2=FSE`), not as a general FSE replacement.  Encode is bit-by-bit scalar (not pivco's hot path).
@@ -240,6 +237,9 @@ AVX2 pack helpers shipped in commit `a1aa6b9` using the multiply-as-shift trick 
 
 ### x86 partition 2x-unrolled stride-16, 2026-06
 2x unroll of the SSE/AVX2 partition inner loop in `enc_node_full`.  Commit `83e23a0`.  Small encoder gain on text dists on c5 (Cascade Lake) + c6a (Zen 3).
+
+### SSE/AVX2 flat unpack via ryg multiply-as-shift, 2026-06-15
+Replaced the AVX2 `vpsrlvd`-based `flat_d{2,3,5,6}_unpack` with ryg's PSHUFB + PMULLO_EPI16 + PSRLI + PAND pattern, plus a 3-op SSE2 trick for D=4 (`srli_epi16` + `unpacklo_epi8` + `and`).  Works on SSE4.1+ — drops the `#ifdef PIVCO_HAS_AVX2` gate that previously left c3 (Ivy Bridge) on a scalar fallback for D=2/3/5/6.  Idea via email from Fabian Giesen (ryg), pattern adapted from his Oodle BC7 `simd_multigetbits` extractor.  Primitive-level wins (bench_prim `merge_flat sse/avx2` median across 3 rounds): c3 D=2 -72% / D=3 -65% / D=5 -59% / D=6 -40%; c5a Zen 2 D=2 -39% / D=3 -29% / D=5 -40%; c6a Zen 3 D=5 -29% / D=6 -19%.  End-to-end fair_bench A/B on c3 dec_pb (3-round medians): english **+29%**, html_wiki **+23%**, chinese_text **+23%**, json_api +16%, prose_pride +14%, image_jpeg +11%.  Other hosts smaller (the pshufb-based c2s scatter dominates merge_flat there).
 
 **AVX-512**
 

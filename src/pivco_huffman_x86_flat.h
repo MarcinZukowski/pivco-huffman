@@ -1,15 +1,22 @@
 /* pivco_huffman_x86_flat.h — flat-subtree D-bit code unpacker (SSE4.1).
  *
- * Internal header.  Only D=4 has a SIMD unpack under pure SSE4.1: there
- * is no per-byte variable shift (no `_mm_srlv_epi8` / no `vpsrlvw` until
- * AVX2) and no `vpmultishiftqb` (VBMI2), so D=2/3/5/6 require ~4-8
- * separate pshufb + immediate shifts + blends — slower than the
- * scalar `FLAT_UNPACK_SWITCH_IDX` fallback.  D=4 is the special case
- * (duplicate + mask + single-immediate-shift + blend).
+ * One unpack helper per D in {2,3,4,5,6}.  All use ryg's PSHUFB+PMULLO
+ * "multiply-as-shift" trick: gather two adjacent bytes per uint16 lane,
+ * multiply by a per-lane constant `1 << (16 - D - (pos & 7))` so the
+ * field lands at the MSB of the lane, then PSRLI by (16 - D) and AND
+ * the mask to LSB-align.  Works on SSE4.1 — no AVX2 vpsrlv, no VBMI2
+ * vpmultishiftqb needed.
  *
- * Used by the production decoder (pivco_huffman_x86.c) and the
- * per-D microbench (bench/bench_micro.c) so both share a single
- * source of truth.
+ * D=4 has a SSE2 3-op specialisation (psrlw + punpcklbw + and) that
+ * extracts all 16 codes in one shot from 8 bytes.
+ *
+ * Replaces the earlier vpsrlvd-based AVX2 paths: ryg's pattern was
+ * measured uniformly faster on c3 (Ivy Bridge SSE), c4 (Haswell),
+ * c5 (Cascade Lake), c5a (Zen 2, -43% to -53%), c6a (Zen 3, -25%).
+ *
+ * Internal header.  Used by the production decoder
+ * (pivco_huffman_primitives_x86.h::merge_flat_x86_impl) and the
+ * per-D microbench (bench/bench_micro.c).
  *
  * Not part of the public API.
  */
@@ -24,113 +31,91 @@
 #include <stdint.h>
 #include <string.h>
 #include <smmintrin.h>
-#if defined(PIVCO_HAS_AVX2)
-#include <immintrin.h>
 
-/* D=2 AVX2 unpack: 16 codes from 4 bytes.  Broadcast the 4-byte window to all
- * eight 32-bit lanes; two vpsrlvd groups (shifts {0,2,..,14} and {16,..,30})
- * drop codes 0-7 and 8-15 into their lanes' low bits.  Low byte of each lane
- * gathered to contiguous, the two halves interleaved into 16 bytes. */
-static inline __m128i flat_d2_unpack_avx2(const uint8_t *bm_ptr)
-{
-    uint32_t packed; memcpy(&packed, bm_ptr, 4);
-    __m256i v = _mm256_set1_epi32((int)packed);
-    const __m256i s0 = _mm256_setr_epi32(0, 2, 4, 6, 8, 10, 12, 14);
-    const __m256i s1 = _mm256_setr_epi32(16, 18, 20, 22, 24, 26, 28, 30);
-    const __m256i m  = _mm256_set1_epi32(0x3);
-    __m256i v0 = _mm256_and_si256(_mm256_srlv_epi32(v, s0), m);
-    __m256i v1 = _mm256_and_si256(_mm256_srlv_epi32(v, s1), m);
-    const __m256i bshuf = _mm256_setr_epi8(
-        0,4,8,12, -1,-1,-1,-1, -1,-1,-1,-1, -1,-1,-1,-1,
-        0,4,8,12, -1,-1,-1,-1, -1,-1,-1,-1, -1,-1,-1,-1);
-    __m256i p0 = _mm256_shuffle_epi8(v0, bshuf);
-    __m256i p1 = _mm256_shuffle_epi8(v1, bshuf);
-    __m128i c0 = _mm_unpacklo_epi32(_mm256_castsi256_si128(p0),
-                                    _mm256_extracti128_si256(p0, 1)); /* codes 0-7  */
-    __m128i c1 = _mm_unpacklo_epi32(_mm256_castsi256_si128(p1),
-                                    _mm256_extracti128_si256(p1, 1)); /* codes 8-15 */
-    return _mm_unpacklo_epi64(c0, c1);
-}
-
-/* D=5 AVX2 unpack: 8 codes from 5 bytes.  A D=5 code at sub-offset s ≤ 7
- * spans at most 2 bytes (s+5 ≤ 12 < 16), so each lane is filled with a
- * 2-byte window starting at the code's start-byte (gathered via pshufb from
- * a broadcast 16-byte load), then vpsrlvd by the sub-offset isolates it. */
-static inline __m128i flat_d5_unpack_avx2(const uint8_t *bm_ptr)
-{
-    __m128i raw128 = _mm_loadu_si128((const __m128i *)bm_ptr);
-    __m256i src = _mm256_broadcastsi128_si256(raw128);
-    /* lane j (32-bit) gets bytes {start_byte_j, start_byte_j+1}; rest zeroed. */
-    const __m256i byteidx = _mm256_setr_epi8(
-        0,1,-1,-1, 0,1,-1,-1, 1,2,-1,-1, 1,2,-1,-1,   /* lanes 0-3 */
-        2,3,-1,-1, 3,4,-1,-1, 3,4,-1,-1, 4,5,-1,-1);  /* lanes 4-7 */
-    __m256i bytes = _mm256_shuffle_epi8(src, byteidx);
-    const __m256i sub = _mm256_setr_epi32(0, 5, 2, 7, 4, 1, 6, 3);
-    __m256i v = _mm256_and_si256(_mm256_srlv_epi32(bytes, sub),
-                                 _mm256_set1_epi32(0x1F));
-    const __m256i bshuf = _mm256_setr_epi8(
-        0,4,8,12, -1,-1,-1,-1, -1,-1,-1,-1, -1,-1,-1,-1,
-        0,4,8,12, -1,-1,-1,-1, -1,-1,-1,-1, -1,-1,-1,-1);
-    __m256i p = _mm256_shuffle_epi8(v, bshuf);
-    return _mm_unpacklo_epi32(_mm256_castsi256_si128(p),
-                              _mm256_extracti128_si256(p, 1));
-}
-
-/* D=6 AVX2 unpack: 8 codes from 6 bytes.  Same 2-byte-window scheme as D=5. */
-static inline __m128i flat_d6_unpack_avx2(const uint8_t *bm_ptr)
-{
-    __m128i raw128 = _mm_loadu_si128((const __m128i *)bm_ptr);
-    __m256i src = _mm256_broadcastsi128_si256(raw128);
-    const __m256i byteidx = _mm256_setr_epi8(
-        0,1,-1,-1, 0,1,-1,-1, 1,2,-1,-1, 2,3,-1,-1,   /* lanes 0-3 */
-        3,4,-1,-1, 3,4,-1,-1, 4,5,-1,-1, 5,6,-1,-1);  /* lanes 4-7 */
-    __m256i bytes = _mm256_shuffle_epi8(src, byteidx);
-    const __m256i sub = _mm256_setr_epi32(0, 6, 4, 2, 0, 6, 4, 2);
-    __m256i v = _mm256_and_si256(_mm256_srlv_epi32(bytes, sub),
-                                 _mm256_set1_epi32(0x3F));
-    const __m256i bshuf = _mm256_setr_epi8(
-        0,4,8,12, -1,-1,-1,-1, -1,-1,-1,-1, -1,-1,-1,-1,
-        0,4,8,12, -1,-1,-1,-1, -1,-1,-1,-1, -1,-1,-1,-1);
-    __m256i p = _mm256_shuffle_epi8(v, bshuf);
-    return _mm_unpacklo_epi32(_mm256_castsi256_si128(p),
-                              _mm256_extracti128_si256(p, 1));
-}
-
-/* D=3 AVX2 unpack: 8 codes from 3 bytes.  Code i is at bit 3i of the packed
- * LSB-first stream, so broadcasting the 4-byte window and doing a per-lane
- * variable right-shift by {0,3,..,21} (vpsrlvd) drops each code into its
- * lane's low bits -- no shuffle-into-windows needed.  Returns the 8 codes in
- * the low 8 bytes of the result. */
-static inline __m128i flat_d3_unpack_avx2(const uint8_t *bm_ptr)
-{
-    uint32_t packed; memcpy(&packed, bm_ptr, 4);   /* 3 used + 1 slop byte */
-    __m256i v = _mm256_set1_epi32((int)packed);
-    const __m256i sh = _mm256_setr_epi32(0, 3, 6, 9, 12, 15, 18, 21);
-    v = _mm256_and_si256(_mm256_srlv_epi32(v, sh), _mm256_set1_epi32(0x7));
-    /* low byte of each 32-bit lane -> contiguous; lanes 0-3 then 4-7 */
-    const __m256i bshuf = _mm256_setr_epi8(
-        0,4,8,12, -1,-1,-1,-1, -1,-1,-1,-1, -1,-1,-1,-1,
-        0,4,8,12, -1,-1,-1,-1, -1,-1,-1,-1, -1,-1,-1,-1);
-    __m256i s = _mm256_shuffle_epi8(v, bshuf);
-    return _mm_unpacklo_epi32(_mm256_castsi256_si128(s),
-                              _mm256_extracti128_si256(s, 1));
-}
-#endif /* PIVCO_HAS_AVX2 */
-
-/* D=4 SSE4.1 unpack: 16 codes from 8 bytes of bm.
- * 8 bytes loaded, duplicated to 16 bytes via pshufb: [b0,b0,b1,b1,..].
- * Treat each pair as uint16: mask & 0xF00F → (b&0x0F, b&0xF0); shift right 4
- * → (0, b>>4); blend with 0xFF00 mask picks (b&0x0F, b>>4) per pair. */
+/* D=4 SSE2 unpack: 16 codes from 8 bytes via 3 ops.
+ *   raw     = 8-byte load (8 bytes, 16 nibbles)
+ *   top_nib = srli_epi16(raw, 4)        — top nibble of each byte moves down
+ *   merged  = unpacklo_epi8(raw, top_nib) — interleave: [b0_lo, b0_hi, b1_lo, b1_hi, ...]
+ *   final   = and(merged, 0xF)
+ * Returns __m128i with codes in all 16 lanes (low byte = code value). */
 static inline __m128i flat_d4_unpack_x86(const uint8_t *bm_ptr)
 {
-    __m128i raw = _mm_loadl_epi64((const __m128i *)bm_ptr);
-    const __m128i dup_idx = _mm_setr_epi8(
-        0,0, 1,1, 2,2, 3,3, 4,4, 5,5, 6,6, 7,7);
-    __m128i dup = _mm_shuffle_epi8(raw, dup_idx);
-    __m128i masked = _mm_and_si128(dup, _mm_set1_epi16(0xF00F));
-    __m128i shifted = _mm_srli_epi16(masked, 4);
-    __m128i blend_mask = _mm_set1_epi16((int16_t)0xFF00);
-    return _mm_blendv_epi8(masked, shifted, blend_mask);
+    __m128i raw     = _mm_loadl_epi64((const __m128i *)bm_ptr);
+    __m128i top_nib = _mm_srli_epi16(raw, 4);
+    __m128i merged  = _mm_unpacklo_epi8(raw, top_nib);
+    return _mm_and_si128(merged, _mm_set1_epi8(0xF));
+}
+
+/* D=2 SSE4.1 unpack: 8 codes from 2 bytes via ryg multiply-as-shift.
+ * Reads up to 16 bytes (loadu); caller must ensure tail safety.
+ * Returns __m128i with 8 codes in low 8 bytes. */
+static inline __m128i flat_d2_unpack_x86(const uint8_t *bm_ptr)
+{
+    __m128i raw = _mm_loadu_si128((const __m128i *)bm_ptr);
+    /* per-lane shuf: bytes (pos>>3, pos>>3 + 1) for pos = 0,2,4,...,14 */
+    const __m128i shuf = _mm_setr_epi8(
+        0,1, 0,1, 0,1, 0,1,
+        1,2, 1,2, 1,2, 1,2);
+    __m128i gathered = _mm_shuffle_epi8(raw, shuf);
+    /* mult = 1 << (16 - D - (pos & 7)), pos&7 = 0,2,4,6 */
+    const __m128i mult = _mm_setr_epi16(
+        1<<14, 1<<12, 1<<10, 1<<8,
+        1<<14, 1<<12, 1<<10, 1<<8);
+    __m128i mh = _mm_mullo_epi16(gathered, mult);
+    __m128i lsb = _mm_srli_epi16(mh, 14);              /* 16 - D = 14 */
+    /* PSRLI by 14 already leaves only 2 bits, no AND needed.  Pack u16 -> u8. */
+    return _mm_packus_epi16(lsb, _mm_setzero_si128());
+}
+
+/* D=3 SSE4.1 unpack: 8 codes from 3 bytes (+1 slop) via ryg multiply-as-shift.
+ * Returns __m128i with 8 codes in low 8 bytes. */
+static inline __m128i flat_d3_unpack_x86(const uint8_t *bm_ptr)
+{
+    __m128i raw = _mm_loadu_si128((const __m128i *)bm_ptr);
+    /* pos = 0,3,6,9,12,15,18,21.  pos>>3 = 0,0,0,1,1,1,2,2 */
+    const __m128i shuf = _mm_setr_epi8(
+        0,1, 0,1, 0,1, 1,2, 1,2, 1,2, 2,3, 2,3);
+    __m128i gathered = _mm_shuffle_epi8(raw, shuf);
+    /* (pos & 7) = 0,3,6,1,4,7,2,5.  mult = 1 << (16 - 3 - (pos&7)) */
+    const __m128i mult = _mm_setr_epi16(
+        1<<13, 1<<10, 1<<7, 1<<12, 1<<9, 1<<6, 1<<11, 1<<8);
+    __m128i mh = _mm_mullo_epi16(gathered, mult);
+    __m128i lsb = _mm_srli_epi16(mh, 13);
+    return _mm_packus_epi16(lsb, _mm_setzero_si128());
+}
+
+/* D=5 SSE4.1 unpack: 8 codes from 5 bytes via ryg multiply-as-shift.
+ * 16-byte loadu over-reads up to 11 bytes — caller bounds the loop. */
+static inline __m128i flat_d5_unpack_x86(const uint8_t *bm_ptr)
+{
+    __m128i raw = _mm_loadu_si128((const __m128i *)bm_ptr);
+    /* pos = 0,5,10,15,20,25,30,35.  pos>>3 = 0,0,1,1,2,3,3,4 */
+    const __m128i shuf = _mm_setr_epi8(
+        0,1, 0,1, 1,2, 1,2, 2,3, 3,4, 3,4, 4,5);
+    __m128i gathered = _mm_shuffle_epi8(raw, shuf);
+    /* (pos & 7) = 0,5,2,7,4,1,6,3.  mult = 1 << (16 - 5 - (pos&7)) */
+    const __m128i mult = _mm_setr_epi16(
+        1<<11, 1<<6, 1<<9, 1<<4, 1<<7, 1<<10, 1<<5, 1<<8);
+    __m128i mh = _mm_mullo_epi16(gathered, mult);
+    __m128i lsb = _mm_srli_epi16(mh, 11);
+    return _mm_packus_epi16(lsb, _mm_setzero_si128());
+}
+
+/* D=6 SSE4.1 unpack: 8 codes from 6 bytes via ryg multiply-as-shift.
+ * 16-byte loadu over-reads up to 10 bytes — caller bounds the loop. */
+static inline __m128i flat_d6_unpack_x86(const uint8_t *bm_ptr)
+{
+    __m128i raw = _mm_loadu_si128((const __m128i *)bm_ptr);
+    /* pos = 0,6,12,18,24,30,36,42.  pos>>3 = 0,0,1,2,3,3,4,5 */
+    const __m128i shuf = _mm_setr_epi8(
+        0,1, 0,1, 1,2, 2,3, 3,4, 3,4, 4,5, 5,6);
+    __m128i gathered = _mm_shuffle_epi8(raw, shuf);
+    /* (pos & 7) = 0,6,4,2,0,6,4,2.  mult = 1 << (16 - 6 - (pos&7)) */
+    const __m128i mult = _mm_setr_epi16(
+        1<<10, 1<<4, 1<<6, 1<<8, 1<<10, 1<<4, 1<<6, 1<<8);
+    __m128i mh = _mm_mullo_epi16(gathered, mult);
+    __m128i lsb = _mm_srli_epi16(mh, 10);
+    return _mm_packus_epi16(lsb, _mm_setzero_si128());
 }
 
 #endif /* PIVCO_HUFFMAN_X86_FLAT_H */

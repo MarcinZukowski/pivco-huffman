@@ -32,7 +32,7 @@
 #include "pivco_huffman.h"
 #include "pivco_huffman_common.h"
 #include "pivco_huffman_x86_tables.h"   /* compress_tab*, expand_tab* */
-#include "pivco_huffman_x86_flat.h"     /* flat_d4_unpack_x86 */
+#include "pivco_huffman_x86_flat.h"     /* flat_d{2,3,4,5,6}_unpack_x86 */
 #ifdef PIVCO_HAS_AVX2
 #include "pivco_huffman_avx2_pack.h"    /* pack_d{2,3,5,6,7}_avx2_x86 (ryg pack) */
 #endif
@@ -443,16 +443,23 @@ static inline void merge_flat_x86_impl(uint8_t *symbols, int n,
         }
         return;
     }
-#ifdef PIVCO_HAS_AVX2
+    /* D=2/3/5/6 SIMD paths via ryg's PSHUFB+PMULLO unpack (SSE4.1+, no AVX2
+     * needed).  Replaced the previous AVX2 vpsrlvd-based unpack: ryg's path
+     * measured uniformly faster on c3 (Ivy Bridge, no AVX2 — gains full SIMD
+     * coverage instead of scalar), c4/c5 (Haswell/Cascade Lake, -21%),
+     * c5a (Zen 2, -43% to -54%), c6a (Zen 3, -25%). */
     if (D == 2) {
-        /* 16 codes/iter: vpsrlvd unpack + 4-entry pshufb scatter.  Unpack reads
-         * a 4-byte window; stop the fast loop a few groups early. */
+        /* 16 codes/iter: 2x ryg D=2 unpack + 4-entry pshufb scatter.  Each
+         * unpack reads a 16-byte window (slop), so stop the fast loop a few
+         * groups early. */
         __m128i c2s_vec = _mm_loadl_epi64((const __m128i *)c2s);  /* 4 entries */
         int i = 0;
         int fast_end = n >= 16 ? n - 16 : 0;
         for (; i + 16 <= fast_end; i += 16) {
-            __m128i codes = flat_d2_unpack_avx2(bm + ((i * 2) >> 3));
-            __m128i syms  = _mm_shuffle_epi8(c2s_vec, codes);
+            __m128i lo_codes = flat_d2_unpack_x86(bm + ((i      * 2) >> 3));
+            __m128i hi_codes = flat_d2_unpack_x86(bm + (((i + 8) * 2) >> 3));
+            __m128i codes    = _mm_unpacklo_epi64(lo_codes, hi_codes);
+            __m128i syms     = _mm_shuffle_epi8(c2s_vec, codes);
             _mm_storeu_si128((__m128i *)(symbols + i), syms);
         }
         for (; i < n; i++) {
@@ -462,14 +469,13 @@ static inline void merge_flat_x86_impl(uint8_t *symbols, int n,
         return;
     }
     if (D == 3) {
-        /* 8 codes/iter: vpsrlvd unpack + 8-entry pshufb scatter.  The unpack
-         * reads a 4-byte window (3 used + 1 slop), so stop the fast loop one
-         * group early and let the scalar tail finish without over-reading. */
+        /* 8 codes/iter: ryg D=3 unpack + 8-entry pshufb scatter.  The unpack
+         * reads a 16-byte window — keep a generous scalar tail. */
         __m128i c2s_vec = _mm_loadl_epi64((const __m128i *)c2s);  /* 8 entries */
         int i = 0;
-        int fast_end = n >= 8 ? n - 8 : 0;
+        int fast_end = n >= 16 ? n - 16 : 0;
         for (; i + 8 <= fast_end; i += 8) {
-            __m128i codes = flat_d3_unpack_avx2(bm + ((i * 3) >> 3));
+            __m128i codes = flat_d3_unpack_x86(bm + ((i * 3) >> 3));
             __m128i syms  = _mm_shuffle_epi8(c2s_vec, codes);
             _mm_storel_epi64((__m128i *)(symbols + i), syms);
         }
@@ -480,16 +486,15 @@ static inline void merge_flat_x86_impl(uint8_t *symbols, int n,
         return;
     }
     if (D == 5) {
-        /* 8 codes/iter: 2-byte-window unpack + 2-table pshufb scatter (codes
-         * 0-31).  pshufb on either table uses code&15; blend by bit 4.  16-byte
-         * loadu in the unpack over-reads, so keep a generous scalar tail. */
+        /* 8 codes/iter: ryg D=5 unpack + 2-table pshufb scatter (codes 0-31).
+         * pshufb on either table uses code&15; blend by bit 4. */
         __m128i lo = _mm_loadu_si128((const __m128i *)c2s);        /* c2s[0..15]  */
         __m128i hi = _mm_loadu_si128((const __m128i *)(c2s + 16)); /* c2s[16..31] */
         const __m128i b4 = _mm_set1_epi8(0x10);
         int i = 0;
         int fast_end = n >= 24 ? n - 24 : 0;
         for (; i + 8 <= fast_end; i += 8) {
-            __m128i codes = flat_d5_unpack_avx2(bm + ((i * 5) >> 3));
+            __m128i codes = flat_d5_unpack_x86(bm + ((i * 5) >> 3));
             __m128i rlo = _mm_shuffle_epi8(lo, codes);
             __m128i rhi = _mm_shuffle_epi8(hi, codes);
             __m128i sel = _mm_cmpeq_epi8(_mm_and_si128(codes, b4), b4);
@@ -503,9 +508,9 @@ static inline void merge_flat_x86_impl(uint8_t *symbols, int n,
         return;
     }
     if (D == 6) {
-        /* 8 codes/iter: 2-byte-window unpack + 4-table pshufb scatter (codes
-         * 0-63).  Four pshufb (code&15 into each quarter) then a 2-level blend
-         * by bits 5,4 selects the right quarter. */
+        /* 8 codes/iter: ryg D=6 unpack + 4-table pshufb scatter (codes 0-63).
+         * Four pshufb (code&15 into each quarter) then a 2-level blend by
+         * bits 5,4 selects the right quarter. */
         __m128i t0 = _mm_loadu_si128((const __m128i *)c2s);
         __m128i t1 = _mm_loadu_si128((const __m128i *)(c2s + 16));
         __m128i t2 = _mm_loadu_si128((const __m128i *)(c2s + 32));
@@ -515,7 +520,7 @@ static inline void merge_flat_x86_impl(uint8_t *symbols, int n,
         int i = 0;
         int fast_end = n >= 24 ? n - 24 : 0;
         for (; i + 8 <= fast_end; i += 8) {
-            __m128i codes = flat_d6_unpack_avx2(bm + ((i * 6) >> 3));
+            __m128i codes = flat_d6_unpack_x86(bm + ((i * 6) >> 3));
             __m128i r0 = _mm_shuffle_epi8(t0, codes);
             __m128i r1 = _mm_shuffle_epi8(t1, codes);
             __m128i r2 = _mm_shuffle_epi8(t2, codes);
@@ -538,7 +543,6 @@ static inline void merge_flat_x86_impl(uint8_t *symbols, int n,
      * faster than the scalar-unrolled inner (~0.38 ns/elem on Zen 3).  Unlike
      * NEON (vqtbl4) and AVX-512 (vpermi2b), x86 has no cheap wide table lookup.
      * Falls through to the scalar X86_FLAT_UNPACK_SWITCH below. */
-#endif
 #define DST_DIRECT(k) symbols[k]
     X86_FLAT_UNPACK_SWITCH(DST_DIRECT)
 #undef DST_DIRECT
