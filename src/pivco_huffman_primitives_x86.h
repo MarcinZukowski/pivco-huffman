@@ -592,7 +592,7 @@ static inline int build_bitmap_partition_x86(uint16_t *codes_la, int n,
                                                uint8_t *bm,
                                                uint16_t *right_out)
 {
-    int n_left = 0, n_right = 0;
+    uint16_t *lp = codes_la, *rp = right_out;
     int j = 0;
     __m128i shift_count = _mm_cvtsi32_si128(depth);
 
@@ -620,13 +620,13 @@ static inline int build_bitmap_partition_x86(uint16_t *codes_la, int n,
         int nr0 = compress_popcnt[m0];
         int nr1 = compress_popcnt[m1];
 
-        _mm_storeu_si128((__m128i *)(right_out + n_right),       r0);
-        _mm_storeu_si128((__m128i *)(right_out + n_right + nr0), r1);
-        _mm_storeu_si128((__m128i *)(codes_la  + n_left),        l0);
-        _mm_storeu_si128((__m128i *)(codes_la  + n_left + (8 - nr0)), l1);
+        _mm_storeu_si128((__m128i *)rp,                r0);
+        _mm_storeu_si128((__m128i *)(rp + nr0),        r1);
+        _mm_storeu_si128((__m128i *)lp,                l0);
+        _mm_storeu_si128((__m128i *)(lp + (8 - nr0)),  l1);
 
-        n_right += nr0 + nr1;
-        n_left  += (8 - nr0) + (8 - nr1);
+        rp += nr0 + nr1;
+        lp += (8 - nr0) + (8 - nr1);
     }
 
     /* Stride-8 residual (n mod 16 ∈ [8, 16)). */
@@ -641,16 +641,16 @@ static inline int build_bitmap_partition_x86(uint16_t *codes_la, int n,
         __m128i right  = _mm_shuffle_epi8(code_vec, shuf_r);
         __m128i left   = _mm_shuffle_epi8(code_vec, shuf_l);
         int nr = compress_popcnt[mask];
-        _mm_storeu_si128((__m128i *)(right_out + n_right), right);
-        _mm_storeu_si128((__m128i *)(codes_la  + n_left ), left);
-        n_right += nr;
-        n_left  += (8 - nr);
+        _mm_storeu_si128((__m128i *)rp, right);
+        _mm_storeu_si128((__m128i *)lp, left);
+        rp += nr;
+        lp += (8 - nr);
         j += 8;
     }
 
     /* Scalar tail.  Read all tail codes into a temporary before writing
      * back, since the in-place left write can overlap the read when
-     * n_left + 8 > j. */
+     * the left cursor + 8 > j. */
     if (j < n) {
         int tail = n - j;
         uint16_t tail_buf[8];
@@ -664,12 +664,12 @@ static inline int build_bitmap_partition_x86(uint16_t *codes_la, int n,
         bm[j >> 3] = mask;
         for (int k = 0; k < tail; k++) {
             if (mask & (1 << k))
-                right_out[n_right++] = tail_buf[k];
+                *rp++ = tail_buf[k];
             else
-                codes_la[n_left++] = tail_buf[k];
+                *lp++ = tail_buf[k];
         }
     }
-    return n_right;
+    return (int)(rp - right_out);
 }
 
 /* part_core_x86 — shared partition loop for the right/left/none variants (and
