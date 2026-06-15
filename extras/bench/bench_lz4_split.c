@@ -324,6 +324,7 @@ static codec_result_t bench_ph(const uint8_t *src, size_t len, int iters)
         size_t out_len = enc_cap_per;
         int rc = pivco_huffman_encode(
             padded_src + (size_t)b * PIVCO_BLOCK_SIZE,
+            PIVCO_BLOCK_SIZE,
             &table, enc + enc_off[b], &out_len);
         if (rc != PIVCO_OK) {
             r.note = "encode failed";

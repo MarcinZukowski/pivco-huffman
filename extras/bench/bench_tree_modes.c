@@ -76,7 +76,7 @@ static void measure_mode(pivco_tree_mode_t mode, const uint8_t *sym, size_t n,
     size_t blocks = n / BLK;
     for (size_t b = 0; b < blocks; b++) {
         size_t got;
-        int r = pivco_huffman_encode(sym + b * BLK, table, enc + total_enc, &got);
+        int r = pivco_huffman_encode(sym + b * BLK, BLK, table, enc + total_enc, &got);
         if (r != PIVCO_OK) { fprintf(stderr, "encode err blk %zu: %d\n", b, r); goto out; }
         total_enc += got;
     }

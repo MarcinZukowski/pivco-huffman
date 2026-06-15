@@ -151,17 +151,17 @@ int main(int argc, char **argv)
             uint8_t *enc = (uint8_t *)malloc(PIVCO_MAX_ENCODED_SIZE);
             uint8_t *dec = (uint8_t *)malloc(BLK);
             size_t len, consumed;
-            pivco_huffman_encode_scalar(symbols, table, enc, &len);
+            pivco_huffman_encode_scalar(symbols, BLK, table, enc, &len);
             pivco_huffman_decode_scalar(enc, len, table, dec, &consumed);
             if (memcmp(symbols, dec, BLK) != 0) {
                 fprintf(stderr, "  %s: pivco_s encode roundtrip FAILED\n", name);
                 free(enc); free(dec); goto skip;
             }
-            pivco_huffman_encode(symbols, table, enc, &len);
+            pivco_huffman_encode(symbols, BLK, table, enc, &len);
             /* Cross-compare against scalar encoder's output. */
             uint8_t *enc_scalar = (uint8_t *)malloc(PIVCO_MAX_ENCODED_SIZE);
             size_t len_scalar;
-            pivco_huffman_encode_scalar(symbols, table, enc_scalar, &len_scalar);
+            pivco_huffman_encode_scalar(symbols, BLK, table, enc_scalar, &len_scalar);
             if (len != len_scalar) {
                 fprintf(stderr, "  %s: enc len mismatch neon=%zu scalar=%zu\n",
                         name, len, len_scalar);
@@ -207,7 +207,7 @@ int main(int argc, char **argv)
             for (int b = 0; b < NBLOCKS; b++) {
                 size_t len;
                 pivco_huffman_encode_scalar(
-                    symbols + (size_t)b * BLK, table,
+                    symbols + (size_t)b * BLK, BLK, table,
                     pivco_s_buf + (size_t)b * PIVCO_MAX_ENCODED_SIZE, &len);
             }
         }, "pivco_s");
@@ -216,7 +216,7 @@ int main(int argc, char **argv)
             for (int b = 0; b < NBLOCKS; b++) {
                 size_t len;
                 pivco_huffman_encode(
-                    symbols + (size_t)b * BLK, table,
+                    symbols + (size_t)b * BLK, BLK, table,
                     pivco_buf + (size_t)b * PIVCO_MAX_ENCODED_SIZE, &len);
             }
         }, "pivco");

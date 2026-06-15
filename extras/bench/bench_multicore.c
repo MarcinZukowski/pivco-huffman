@@ -186,7 +186,7 @@ int main(int argc, char **argv)
     pivco_off[0] = 0;
     for (int b = 0; b < NBLOCKS; b++) {
         size_t elen;
-        pivco_huffman_encode(symbols + (size_t)b * BLOCKSZ, &pivco_table,
+        pivco_huffman_encode(symbols + (size_t)b * BLOCKSZ, BLOCKSZ, &pivco_table,
                              pivco_enc + pivco_off[b], &elen);
         pivco_off[b + 1] = pivco_off[b] + elen;
     }

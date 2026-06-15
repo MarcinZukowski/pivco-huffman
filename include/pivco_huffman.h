@@ -260,9 +260,17 @@ int pivco_huffman_build_table_from_code_lens(
  * production tree-walk decoder does not need it). */
 void pivco_huffman_build_traditional_table(pivco_huffman_table_t *table);
 
-/* ---------- PIVCO Huffman encode/decode (block of PIVCO_BLOCK_SIZE symbols) ---------- */
+/* ---------- PIVCO Huffman encode/decode (variable-N blocks, N ≤ PIVCO_BLOCK_SIZE) ----------
+ *
+ * Encode takes the symbol count `n` and writes a 2-byte LE N header at the
+ * start of the encoded stream (see pivco_huffman_wire.h).  Decode reads N
+ * from the wire — no `n` parameter — and writes N symbols to `symbols`,
+ * which must have room for at least N bytes (caller must size for the
+ * worst case, typically PIVCO_BLOCK_SIZE).  N must satisfy
+ * 1 ≤ N ≤ PIVCO_BLOCK_SIZE; values outside that range return error.
+ */
 
-int pivco_huffman_encode(const uint8_t *symbols,
+int pivco_huffman_encode(const uint8_t *symbols, size_t n,
                          const pivco_huffman_table_t *table,
                          uint8_t *out, size_t *out_len);
 
@@ -270,7 +278,7 @@ int pivco_huffman_decode(const uint8_t *in, size_t in_len,
                          const pivco_huffman_table_t *table,
                          uint8_t *symbols, size_t *consumed);
 
-int pivco_huffman_encode_scalar(const uint8_t *symbols,
+int pivco_huffman_encode_scalar(const uint8_t *symbols, size_t n,
                                 const pivco_huffman_table_t *table,
                                 uint8_t *out, size_t *out_len);
 
@@ -279,7 +287,7 @@ int pivco_huffman_decode_scalar(const uint8_t *in, size_t in_len,
                                 uint8_t *symbols, size_t *consumed);
 
 #ifdef PIVCO_HAS_NEON
-int pivco_huffman_encode_neon(const uint8_t *symbols,
+int pivco_huffman_encode_neon(const uint8_t *symbols, size_t n,
                               const pivco_huffman_table_t *table,
                               uint8_t *out, size_t *out_len);
 
@@ -290,7 +298,7 @@ int pivco_huffman_decode_bu_neon(const uint8_t *in, size_t in_len,
 #endif
 
 #ifdef PIVCO_HAS_SSE4
-int pivco_huffman_encode_x86(const uint8_t *symbols,
+int pivco_huffman_encode_x86(const uint8_t *symbols, size_t n,
                               const pivco_huffman_table_t *table,
                               uint8_t *out, size_t *out_len);
 
@@ -311,7 +319,7 @@ int pivco_huffman_decode_bu_x86(const uint8_t *in, size_t in_len,
  * docs/PREFIX_RADIX.md for the historical design record. */
 
 #ifdef PIVCO_HAS_SVE
-int pivco_huffman_encode_sve(const uint8_t *symbols,
+int pivco_huffman_encode_sve(const uint8_t *symbols, size_t n,
                               const pivco_huffman_table_t *table,
                               uint8_t *out, size_t *out_len);
 
@@ -321,7 +329,7 @@ int pivco_huffman_decode_sve(const uint8_t *in, size_t in_len,
 #endif
 
 #ifdef PIVCO_HAS_AVX512
-int pivco_huffman_encode_avx512(const uint8_t *symbols,
+int pivco_huffman_encode_avx512(const uint8_t *symbols, size_t n,
                                  const pivco_huffman_table_t *table,
                                  uint8_t *out, size_t *out_len);
 

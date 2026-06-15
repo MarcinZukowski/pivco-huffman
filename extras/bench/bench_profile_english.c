@@ -84,7 +84,7 @@ int main(int argc, char **argv)
     enc_off[0] = 0;
     for (int b = 0; b < NBLOCKS; b++) {
         size_t elen;
-        pivco_huffman_encode(symbols + b * N, &table,
+        pivco_huffman_encode(symbols + b * N, N, &table,
                              enc_buf + enc_off[b], &elen);
         enc_off[b + 1] = enc_off[b] + elen;
     }
@@ -147,7 +147,7 @@ int main(int argc, char **argv)
         for (int r = 0; r < REPS; r++) {
             for (int b = 0; b < NBLOCKS; b++) {
                 size_t elen;
-                pivco_huffman_encode(symbols + b * N, &table,
+                pivco_huffman_encode(symbols + b * N, N, &table,
                                      enc_buf + enc_off[b], &elen);
             }
         }

@@ -223,31 +223,36 @@ static int pivcohuf_compress_impl(const uint8_t *in, size_t in_len,
     double _te = TIC(tm);
     while (off < in_len) {
         size_t blk_in = in_len - off;
+        size_t this_n;
         const uint8_t *blk_src;
         uint8_t *len_field;
         { PROF_TIC();
           if (blk_in >= B) {
               blk_src = in + off;
+              this_n  = B;
               off += B;
           } else {
-              /* Final (short) block: pad to full B with prefill_sym. */
-              if (blk_in > 0) memcpy(block_buf, in + off, blk_in);
-              memset(block_buf + blk_in, pad_byte, B - blk_in);
-              blk_src = block_buf;
+              /* Final (short) block: encode it at its actual size.  The
+               * codec writes a 2-byte N header at the start of the encoded
+               * stream so the decoder recovers the count without any
+               * out-of-band channel. */
+              blk_src = in + off;
+              this_n  = blk_in;
               off = in_len;
           }
+          (void)pad_byte; (void)block_buf;  /* padding path retired */
           len_field = p; p += 4;
-          PROF_TOC(PROF_FILE_BLOCK_PROLOGUE, (uint64_t)B); }
+          PROF_TOC(PROF_FILE_BLOCK_PROLOGUE, (uint64_t)this_n); }
 
         { PROF_TIC();
           size_t enc_len = 0;
-          if (pivco_huffman_encode(blk_src, &table, p, &enc_len) != PIVCO_OK) {
+          if (pivco_huffman_encode(blk_src, this_n, &table, p, &enc_len) != PIVCO_OK) {
               free(block_buf);
               return PIVCOHUF_ERR_INTERNAL;
           }
           put_u32(len_field, (uint32_t)enc_len);
           p += enc_len;
-          PROF_TOC(PROF_FILE_BLOCK_ENCODE, (uint64_t)B); }
+          PROF_TOC(PROF_FILE_BLOCK_ENCODE, (uint64_t)this_n); }
     }
     TOC(tm, codec_ns, _te);
     free(block_buf);

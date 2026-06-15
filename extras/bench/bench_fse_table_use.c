@@ -58,6 +58,7 @@ static int run_one(const char *path)
     for (int b = 0; b < nblocks; b++) {
         size_t out_len = 0;
         int rc = pivco_huffman_encode(buf + (size_t)b * PIVCO_BLOCK_SIZE,
+                                       PIVCO_BLOCK_SIZE,
                                        &table, enc + cur, &out_len);
         if (rc != PIVCO_OK) { fprintf(stderr, "encode %d failed: %d\n", b, rc); break; }
         cur += out_len;

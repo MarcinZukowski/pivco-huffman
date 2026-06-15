@@ -206,7 +206,7 @@ static void analyze_dist(int dist_idx, int blocks)
         for (int i = 0; i < BLK; i++) hist[symbols[b * BLK + i]]++;
 
         size_t enc_len;
-        if (pivco_huffman_encode(symbols + (size_t)b * BLK, &table,
+        if (pivco_huffman_encode(symbols + (size_t)b * BLK, BLK, &table,
                                  enc, &enc_len) == PIVCO_OK) {
             s.encoded_bytes += enc_len;
         }

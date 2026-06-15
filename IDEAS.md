@@ -9,7 +9,6 @@
 
 **General**
 - [Cross-port post-June-5 x86 optimizations to NEON](#cross-port-post-june-5-x86-optimizations-to-neon-2026-06-13)
-- [Partial final block in the file format](#partial-final-block-in-the-file-format-2026-06-15)
 - [SIMD-ify scalar tails (overwrite or masked stores)](#simd-ify-scalar-tails-overwrite-or-masked-stores-2026-06-15)
 - [Faster flat unpack via ryg-style multiply-as-shift](#faster-flat-unpack-via-ryg-style-multiply-as-shift-2026-06-15)
 - [Golomb/Rice tier for very-high-skew nodes (p > 0.95)](#golombrice-tier-for-very-high-skew-nodes-p--095-2026-05-16-research)
@@ -48,6 +47,7 @@
 - [FSE wide-cursor decoder (x8y1) productionized](#fse-wide-cursor-decoder-x8y1-productionized-2026-05-15)
 - [LZ4 + ph decode-speed probe](#lz4--ph-decode-speed-probe-2026-05-17-probe-done)
 - [Oodle huff6 reference + ARM ASM kernels integrated](#oodle-huff6-reference--arm-asm-kernels-integrated-2026-05-15)
+- [Arbitrary-sized blocks (variable-N codec)](#arbitrary-sized-blocks-variable-n-codec-2026-06-15)
 - [Profiling overhead caveat (documented)](#profiling-overhead-caveat-2026-05-11)
 
 **NEON**
@@ -117,9 +117,6 @@
 
 ### Cross-port post-June-5 x86 optimizations to NEON, 2026-06-13
 Recent x86 wins targeted SSE/AVX2 + AVX-512 only: AVX-512 pack_d{2..7} multishift 64 codes/iter (`0c80e3a`), AVX-512 merge_flat_d{2..7} widened to 64 codes/iter (`e5a199a`), x86 AVX2 pack_d{2,3,5,6,7} via ryg multiply-as-shift (`a1aa6b9`), x86 partition 2x-unrolled stride-16 (`83e23a0`).  Open question on NEON (M4 + Graviton 4): is the analogous primitive already at width ceiling, or is there headroom?  Multishift has no NEON analogue (x86-only), and the multiply-as-shift trick is irrelevant on NEON (`vshlq_u32` is native).  But the merge_flat widening pattern and the 2x partition unroll may transfer.  Action: per-primitive bench (`bench_prim`) before/after a NEON 64-codes/iter sketch + fair_bench A/B on c8g.
-
-### Partial final block in the file format, 2026-06-15
-`pivcohuf_file.c:233` handles a short final block by **padding to full BLK with `prefill_sym`** (8192/4096 on ARM-AVX-512/x86) and encoding the whole padded buffer; the decoder truncates via a separate uncompressed-length field.  For a 7-byte input the encoder does ~4089 bytes of extra work and emits encoded bits for all 4096 symbols.  Wire-format cost to fix: **2 bytes per block** — every non-flat internal node already stores a `K_right` uint16 (`kr_header_needed`, since commit `5828ddb`), but the root's `K_total` is implicit (decoder gets `N=BLK` from the caller).  Add a uint16 `N` at the block start (or extend root's header to carry K_total), and BLK leaves the codec entirely.  Then `pivco_huffman_codec.c:243` / `:440` (currently `const int N = PIVCO_BLOCK_SIZE`) take `N` from the wire instead; primitives unchanged (they already take `n`/`K` with tails internal).  Scratch buffers sized for BLK at compile time work for any N ≤ BLK.  Bloat: 2/4096 = 0.05% at x86 BLK, 0.024% at ARM/AVX-512 BLK.  Also relevant for the LZ4+ph prototype where residual literal streams are commonly << BLK.
 
 ### SIMD-ify scalar tails (overwrite or masked stores), 2026-06-15
 Most primitives (partition, merge, pack, unpack) drop to scalar for the final 1..K-1 elements where K is the SIMD stride (8/16/32 depending on primitive).  At small block sizes (deep recursion or short final block) those tails dominate.  Two general approaches: (a) **overwrite tails** — round n up to the next stride boundary, write valid+garbage past the real n, then truncate via cursor adjustment (already done in some AVX-512 paths; works when downstream readers know n).  (b) **masked SIMD** — `vmaskmovps`/AVX-512 `k` masks / NEON's `vbslq_u8` on a tail-mask vector to do exactly n elements per SIMD op.  AVX-512 full-tail masked partition shipped 2026-05-08 (+23% on c8i); same pattern hasn't been tried on NEON/SSE/AVX2 tails of merge / pack / unpack / scatter primitives.
@@ -212,6 +209,9 @@ zstd is structurally LZ4 + huf0 + FSE; substituting ph for huf0 was the hypothes
 
 ### Oodle huff6 reference + ARM ASM kernels integrated, 2026-05-15
 ph optionally links OodleUE via `ext/oodle` symlink (don't rsync — see CLAUDE.md).  Cross-platform sweep at 1440 B / pmaj=0.80: Oodle huff6 ASM 750–1458 MB/s vs FSE x*y 1172–2300 vs huf4X2 full 227–439 (with per-call setup).  Crossover at ~16 KB: above this, Oodle's amortized ASM wins.  Validates ph's framing: the 1-byte-table-id wire format (static FSE tables) is the architectural feature that wins the small-bitmap regime by 2–5×.  EULA reviewed 2026-05-15: bench + publish OK; vendoring not (hence the symlink-as-clone pattern).  Results in `results/fse_xy_full-*-20260515-*`.
+
+### Arbitrary-sized blocks (variable-N codec), 2026-06-15
+The codec was hardcoded to BLK (8192/4096 on ARM-AVX-512/x86), and `pivcohuf_file.c:233` padded short final blocks to full BLK with `prefill_sym` — a 7-byte input did ~4089 bytes of extra encoder work.  Shipped a small wire-format addition: a uint16 `N` prefix at the start of each encoded block (helpers in `pivco_huffman_wire.h`).  `pivco_huffman_encode` gains an explicit `size_t n` parameter; decode reads N from the wire.  Codec entries (`pivco_huffman_codec.c:243`/`:440`) take N at runtime; primitives untouched (they already accept any K with tails internal).  File codec drops the padding path entirely.  Bloat: 2 bytes per block (0.05% at x86 BLK, 0.024% at ARM/AVX-512 BLK).  7-byte input now encodes to 177 B (was ~206 B); more importantly, encoder work is proportional to N, not BLK.  Enables future LZ4+ph residual-stream handling.
 
 ### Profiling overhead caveat, 2026-05-11
 Documented, not a code change.  `PROF_TIC`/`TOC` overhead varies 60× across platforms: M4 ~0%, Zen 3 +11%, **c8i Granite Rapids +61.6%** on prose_pride (Granite Rapids RDTSC is the most serializing of any modern core).  Microbench predicts well except on aggressive-OOO cores (c8a 0.2× pred, c8g 0.25×, M4 0×).  Rules going forward: bench numbers from `pivco_huffman_bench` (no `-DPIVCO_PROF=1`) are the ONLY authoritative headline; prof output is RELATIVE only.  Subtract ~25–30 ns/call on c8i, ~15 ns on older Intel, ~10 ns on Zen 3 when comparing primitive ns/call.

@@ -85,7 +85,7 @@ static codec_result_t bench_pivco(const uint8_t *symbols, int total,
         double t0 = now_sec();
         for (int b = 0; b < nblocks; b++) {
             size_t out_len = 0;
-            int rc = pivco_huffman_encode(symbols + (size_t)b * BLK,
+            int rc = pivco_huffman_encode(symbols + (size_t)b * BLK, BLK,
                                            table_in, enc + cur, &out_len);
             if (rc != PIVCO_OK) { free(enc); free(off); return r; }
             off[b + 1] = cur + out_len;

@@ -115,23 +115,23 @@ static pivco_impl_t resolve_impl(void)
 #endif
 }
 
-int pivco_huffman_encode(const uint8_t *symbols,
+int pivco_huffman_encode(const uint8_t *symbols, size_t n,
                          const pivco_huffman_table_t *table,
                          uint8_t *out, size_t *out_len)
 {
     switch (resolve_impl()) {
     case PIVCO_IMPL_NEON:
 #ifdef PIVCO_HAS_AVX512
-        return pivco_huffman_encode_avx512(symbols, table, out, out_len);
+        return pivco_huffman_encode_avx512(symbols, n, table, out, out_len);
 #elif defined(PIVCO_HAS_SVE)
-        return pivco_huffman_encode_sve(symbols, table, out, out_len);
+        return pivco_huffman_encode_sve(symbols, n, table, out, out_len);
 #elif defined(PIVCO_HAS_NEON)
-        return pivco_huffman_encode_neon(symbols, table, out, out_len);
+        return pivco_huffman_encode_neon(symbols, n, table, out, out_len);
 #elif defined(PIVCO_HAS_SSE4)
-        return pivco_huffman_encode_x86(symbols, table, out, out_len);
+        return pivco_huffman_encode_x86(symbols, n, table, out, out_len);
 #endif
     default:
-        return pivco_huffman_encode_scalar(symbols, table, out, out_len);
+        return pivco_huffman_encode_scalar(symbols, n, table, out, out_len);
     }
 }
 

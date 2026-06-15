@@ -6,8 +6,18 @@
  * which led to silent drift (scalar+NEON added the FSE marker byte in
  * 2026-05-13, x86+AVX-512 didn't — broke scalar↔SSE cross-decoding).
  *
- * Wire format (v0.2+):
+ * Wire format (v0.5+):
  *
+ * Per-block header (once, at the very start of each encoded block):
+ *   [block_N: uint16 LE, 2 bytes]                  symbol count N for this
+ *                                                  block; the decoder reads
+ *                                                  it before starting the
+ *                                                  tree walk.  Lets the
+ *                                                  codec encode any N up to
+ *                                                  65535 — no longer pinned
+ *                                                  to PIVCO_BLOCK_SIZE.
+ *
+ * Per non-flat internal node:
  *   [optional K_right_header: uint16 LE, 2 bytes]   if kr_header_needed()
  *   [FSE marker byte:        uint8,    1 byte]    always
  *   [bitmap body]                                  marker == 0: raw n-bit
@@ -34,6 +44,30 @@
 
 #include <stdint.h>
 #include <string.h>
+
+#define PIVCO_BLOCK_N_BYTES 2  /* per-block N header: uint16 little-endian */
+
+/* ---------- Per-block N header ---------- */
+
+/* Encode: write the block's symbol count N as the first 2 bytes of the
+ * encoded stream.  N <= 65535 (the existing PIVCO_BLOCK_SIZE of 8192/4096
+ * leaves plenty of headroom; uint16 caps any future variable-block work
+ * at the same 65535 limit). */
+static inline void wire_write_block_n(uint8_t *out_ptr, int n)
+{
+    out_ptr[0] = (uint8_t)(n & 0xFF);
+    out_ptr[1] = (uint8_t)((n >> 8) & 0xFF);
+}
+
+/* Decode: read the block's symbol count N from the first 2 bytes and
+ * advance *in_ptr. */
+static inline int wire_read_block_n(const uint8_t **in_ptr)
+{
+    uint16_t v;
+    memcpy(&v, *in_ptr, 2);
+    *in_ptr += PIVCO_BLOCK_N_BYTES;
+    return (int)v;
+}
 
 /* ---------- Encode side: reserve / commit slots ----------
  *

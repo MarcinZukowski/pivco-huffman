@@ -216,7 +216,7 @@ int main(int argc, char **argv)
         pivco_enc_off[0] = 0;
         for (int b = 0; b < NBLOCKS; b++) {
             size_t len;
-            pivco_huffman_encode_scalar(symbols + (size_t)b * BLK, table,
+            pivco_huffman_encode_scalar(symbols + (size_t)b * BLK, BLK, table,
                                         pivco_enc_buf + pivco_enc_off[b], &len);
             pivco_enc_off[b + 1] = pivco_enc_off[b] + len;
         }
@@ -227,7 +227,7 @@ int main(int argc, char **argv)
         neon_enc_off[0] = 0;
         for (int b = 0; b < NBLOCKS; b++) {
             size_t len;
-            pivco_huffman_encode(symbols + (size_t)b * BLK, table,
+            pivco_huffman_encode(symbols + (size_t)b * BLK, BLK, table,
                                       neon_enc_buf + neon_enc_off[b], &len);
             neon_enc_off[b + 1] = neon_enc_off[b] + len;
         }

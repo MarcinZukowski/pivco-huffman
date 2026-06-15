@@ -92,7 +92,7 @@ static int test_single_symbol(void)
     /* PIVCO roundtrip */
     uint8_t encoded[PIVCO_MAX_ENCODED_SIZE];
     size_t enc_len;
-    int rc = pivco_huffman_encode_scalar(symbols, &table, encoded, &enc_len);
+    int rc = pivco_huffman_encode_scalar(symbols, PIVCO_BLOCK_SIZE, &table, encoded, &enc_len);
     if (rc != PIVCO_OK) FAIL("encode returned %d", rc);
 
     uint8_t decoded[PIVCO_BLOCK_SIZE];
@@ -158,7 +158,7 @@ static int test_roundtrip_dist(const char *name, const uint64_t freq[PIVCO_MAX_S
     /* PIVCO scalar roundtrip */
     uint8_t encoded[PIVCO_MAX_ENCODED_SIZE];
     size_t enc_len;
-    rc = pivco_huffman_encode_scalar(symbols, &table, encoded, &enc_len);
+    rc = pivco_huffman_encode_scalar(symbols, PIVCO_BLOCK_SIZE, &table, encoded, &enc_len);
     if (rc != PIVCO_OK) FAIL("pivco encode returned %d", rc);
 
     uint8_t decoded[PIVCO_BLOCK_SIZE];
@@ -201,7 +201,7 @@ static int test_roundtrip_dist(const char *name, const uint64_t freq[PIVCO_MAX_S
     /* NEON encode + BU NEON decode roundtrip (the production path). */
     uint8_t neon_enc[PIVCO_MAX_ENCODED_SIZE];
     size_t neon_len;
-    rc = pivco_huffman_encode_neon(symbols, &table, neon_enc, &neon_len);
+    rc = pivco_huffman_encode_neon(symbols, PIVCO_BLOCK_SIZE, &table, neon_enc, &neon_len);
     if (rc != PIVCO_OK) FAIL("neon encode returned %d", rc);
 
     {
@@ -245,7 +245,7 @@ static int test_roundtrip_dist(const char *name, const uint64_t freq[PIVCO_MAX_S
     {
         uint8_t sse_enc[PIVCO_MAX_ENCODED_SIZE];
         size_t sse_len;
-        rc = pivco_huffman_encode_x86(symbols, &table, sse_enc, &sse_len);
+        rc = pivco_huffman_encode_x86(symbols, PIVCO_BLOCK_SIZE, &table, sse_enc, &sse_len);
         if (rc != PIVCO_OK) FAIL("sse encode returned %d", rc);
 
         uint8_t bu_dec[PIVCO_BLOCK_SIZE];

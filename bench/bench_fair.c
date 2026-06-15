@@ -199,7 +199,7 @@ static result_t measure_ph(const uint8_t *sym, size_t n, int fse_on,
     off[0] = 0;
     for (size_t b = 0; b < nblk; b++) {
         size_t L = 0;
-        if (pivco_huffman_encode(sym + b * BLK, gtbl, enc + off[b], &L) != 0) goto done_fail;
+        if (pivco_huffman_encode(sym + b * BLK, BLK, gtbl, enc + off[b], &L) != 0) goto done_fail;
         off[b + 1] = off[b] + L;
     }
     /* pre-encode opaque stream (per-window tables) */
@@ -207,7 +207,7 @@ static result_t measure_ph(const uint8_t *sym, size_t n, int fse_on,
     for (size_t w = 0; w < nwin; w++)
         for (size_t i = 0, wb = WBPW(w); i < wb; i++) {
             size_t b = w * bpw + i, L = 0;
-            if (pivco_huffman_encode(sym + b * BLK, &wtbls[w], enco + offo[b], &L) != 0) goto done_fail;
+            if (pivco_huffman_encode(sym + b * BLK, BLK, &wtbls[w], enco + offo[b], &L) != 0) goto done_fail;
             offo[b + 1] = offo[b] + L;
         }
 
@@ -227,7 +227,7 @@ static result_t measure_ph(const uint8_t *sym, size_t n, int fse_on,
     double best;
     /* ---- encode prebuilt: global table, just emit ---- */
     BEST_MBPS({
-        for (size_t b = 0; b < nblk; b++) { size_t L=0; pivco_huffman_encode(sym + b*BLK, gtbl, enc + off[b], &L); }
+        for (size_t b = 0; b < nblk; b++) { size_t L=0; pivco_huffman_encode(sym + b*BLK, BLK, gtbl, enc + off[b], &L); }
     });
     R.enc_pb = best;
     /* ---- encode opaque: rebuild table per window + emit ---- */
@@ -235,7 +235,7 @@ static result_t measure_ph(const uint8_t *sym, size_t n, int fse_on,
         for (size_t w = 0; w < nwin; w++) {
             uint64_t wf[256]; histo_u64(sym + w*G, WSZ(w), wf);
             pivco_huffman_build_table(wf, wtbl);
-            for (size_t i = 0, wb = WBPW(w); i < wb; i++) { size_t b=w*bpw+i, L=0; pivco_huffman_encode(sym + b*BLK, wtbl, enco + offo[b], &L); }
+            for (size_t i = 0, wb = WBPW(w); i < wb; i++) { size_t b=w*bpw+i, L=0; pivco_huffman_encode(sym + b*BLK, BLK, wtbl, enco + offo[b], &L); }
         }
     });
     R.enc_op = best;

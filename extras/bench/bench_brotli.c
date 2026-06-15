@@ -209,7 +209,7 @@ static void bench_one_dist(int dist_idx, int repeats, dist_result_t *out)
     /* Pre-encode for decode timing + roundtrip sanity. */
     for (int b = 0; b < blocks; b++) {
         size_t enc_len;
-        if (pivco_huffman_encode(symbols + (size_t)b * BLK, &table,
+        if (pivco_huffman_encode(symbols + (size_t)b * BLK, BLK, &table,
                                  pivco_enc + (size_t)b * enc_slot, &enc_len) != PIVCO_OK)
         { out->roundtrip_ok = 0; goto cleanup; }
         pivco_lens[b] = enc_len;
@@ -240,7 +240,7 @@ static void bench_one_dist(int dist_idx, int repeats, dist_result_t *out)
     for (int r = 0; r < repeats; r++) {
         for (int b = 0; b < blocks; b++) {
             size_t enc_len;
-            pivco_huffman_encode(symbols + (size_t)b * BLK, &table,
+            pivco_huffman_encode(symbols + (size_t)b * BLK, BLK, &table,
                                  pivco_enc + (size_t)b * enc_slot, &enc_len);
         }
     }

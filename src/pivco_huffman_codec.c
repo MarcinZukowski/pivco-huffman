@@ -233,14 +233,21 @@ static void codec_encode_node(const pivco_huffman_table_t *table,
                        out_ptr, tmp + n_right);
 }
 
-int CODEC_ENCODE_ENTRY(const uint8_t *symbols,
+int CODEC_ENCODE_ENTRY(const uint8_t *symbols, size_t n,
                        const pivco_huffman_table_t *table,
                        uint8_t *out, size_t *out_len)
 {
     if (!symbols || !table || !out || !out_len) return PIVCO_ERR_NULL;
+    if (n == 0 || n > PIVCO_BLOCK_SIZE) return PIVCO_ERR_OVERFLOW;
     prim_codec_init();
 
-    const int N = PIVCO_BLOCK_SIZE;
+    const int N = (int)n;
+
+    /* Block header: write N as the first 2 bytes so the decoder can
+     * recover it without an out-of-band channel. */
+    uint8_t *ptr = out;
+    wire_write_block_n(ptr, N);
+    ptr += PIVCO_BLOCK_N_BYTES;
 
     /* Per-block left-aligned codes.  Built once per block via
      * prim_enc_init (a gather from table->code_la[symbols[i]]). */
@@ -263,7 +270,6 @@ int CODEC_ENCODE_ENTRY(const uint8_t *symbols,
     uint16_t *tmp = (uint16_t *)malloc(tmp_capacity * sizeof(uint16_t));
     if (!tmp) return PIVCO_ERR_NULL;
 
-    uint8_t *ptr = out;
     codec_encode_node(table, table->tree_root, codes_la, N, 0, &ptr, tmp);
 
     free(tmp);
@@ -437,9 +443,11 @@ int CODEC_DECODE_ENTRY(const uint8_t *in, size_t in_len,
     (void)in_len;
     prim_codec_init();
 
-    const int N = PIVCO_BLOCK_SIZE;
-    const pivco_tree_node_t *root = &table->tree[table->tree_root];
+    /* Block header: first 2 bytes are N (symbol count for this block). */
     const uint8_t *ptr = in;
+    const int N = wire_read_block_n(&ptr);
+    if (N <= 0 || N > PIVCO_BLOCK_SIZE) return PIVCO_ERR_CORRUPT;
+    const pivco_tree_node_t *root = &table->tree[table->tree_root];
 
     /* Root-is-leaf: fill everything with the single symbol. */
     if (root->symbol >= 0) {
