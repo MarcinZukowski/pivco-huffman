@@ -196,73 +196,53 @@ static inline int pack_d4_avx512(uint8_t *out, const uint16_t *codes_la,
     return i;
 }
 
-/* D=5: 3 groups (codes mod 3: A={0,3,6}, B={1,4,7}, C={2,5}). */
-static inline int pack_d5_avx512(uint8_t *out, const uint16_t *codes_la,
-                                   int n, int right_shift)
-{
-    const __m512i mA = _mm512_set1_epi64((int64_t)0x001F00001F00001FULL);
-    const __m512i mB = _mm512_set1_epi64((int64_t)0x1F00001F00001F00ULL);
-    const __m512i mC = _mm512_set1_epi64((int64_t)0x00001F00001F0000ULL);
-    const __m512i cA = _mm512_set1_epi64((int64_t)0x000000322A191100ULL); /* {0,17,25,42,50,...} */
-    const __m512i cB = _mm512_set1_epi64((int64_t)0x00000035241C0B03ULL); /* {3,11,28,36,53,...} */
-    const __m512i cC = _mm512_set1_epi64((int64_t)0x0000000027000E00ULL); /* {0,14,0,39,...} */
-    int i = 0;
-    for (; i + 64 <= n; i += 64) {
-        __m512i cb = pivco_pack_load_codes_byte(codes_la + i, right_shift);
-        __m512i a = _mm512_multishift_epi64_epi8(cA, _mm512_and_si512(cb, mA));
-        __m512i b = _mm512_multishift_epi64_epi8(cB, _mm512_and_si512(cb, mB));
-        __m512i c = _mm512_multishift_epi64_epi8(cC, _mm512_and_si512(cb, mC));
-        __m512i packed = _mm512_or_si512(_mm512_or_si512(a, b), c);
-        __m512i compact = _mm512_permutexvar_epi8(
-            _mm512_load_si512((const __m512i *)pivco_pack_compact_d5), packed);
-        _mm512_mask_storeu_epi8(out + ((i * 5) >> 3),
-                                 (__mmask64)0xFFFFFFFFFFULL, compact);
-    }
-    return i;
+/* D=5/6/7 pack via ryg multiply-as-shift (port of AVX2 a1aa6b9):
+ *   - mask byte-laid codes to D bits
+ *   - vpmaddubsw c0   word[i] = cb[2i]   + cb[2i+1]   * 2^D    (2D bits)
+ *   - vpmaddwd   c1   dword[i] = word[2i] + word[2i+1] * 2^(2D) (4D bits)
+ *   - vpsrlq + vpternlogq 0xE4 to merge dword[2i+1] into dword[2i]'s
+ *     u64 lane: bits [0..4D-1] = dword[2i], bits [4D..8D-1] = dword[2i+1]
+ *   - vpermb compact + masked store
+ *
+ * Beats the per-group multishift path on Intel (Granite Rapids -16 to
+ * -23% cyc/elem, Sapphire Rapids -10 to -18%); ties or marginally loses
+ * on AMD (Zen 4 D=5 -24% else tied, Zen 5 D=5 -10% / D=6,7 +5%).  See
+ * scratch bench results in the commit message.
+ *
+ * For D=5 only, the two-byte mults of vpmaddubsw can produce u16 lanes
+ * up to 31 + 31*32 = 1023 (fits u16), then vpmaddwd up to 1023 + 1023 *
+ * 1024 ≈ 1.05M (fits u32) -- 4D = 20 bits is the maximum used.  Same
+ * envelope analysis for D=6 (24 bits) and D=7 (28 bits). */
+#define PIVCO_PACK_AVX512_RYG_DN(NAME, D_VAL, COMPACT_TAB, STORE_MASK)            \
+static inline int NAME(uint8_t *out, const uint16_t *codes_la,                  \
+                       int n, int right_shift)                                    \
+{                                                                                 \
+    const __m512i c0 = _mm512_set1_epi16(                                         \
+        (int16_t)(((1 << (D_VAL)) << 8) | 1));                                    \
+    const __m512i c1 = _mm512_set1_epi32(                                         \
+        (int32_t)(((int32_t)1 << (2*(D_VAL))) << 16) | 1);                        \
+    const __m512i c3 = _mm512_set1_epi64(                                         \
+        (int64_t)(((int64_t)1 << (4*(D_VAL))) - 1));                              \
+    const __m512i d_mask = _mm512_set1_epi8((char)((1 << (D_VAL)) - 1));          \
+    int i = 0;                                                                    \
+    for (; i + 64 <= n; i += 64) {                                                \
+        __m512i cb = pivco_pack_load_codes_byte(codes_la + i, right_shift);       \
+        cb = _mm512_and_si512(cb, d_mask);                                        \
+        __m512i x  = _mm512_maddubs_epi16(c0, cb);                                \
+        x = _mm512_madd_epi16(x, c1);                                             \
+        __m512i xs = _mm512_srli_epi64(x, 32 - 4*(D_VAL));                        \
+        /* (x & c3) | (xs & ~c3)  via vpternlogq 0xE4 */                          \
+        x = _mm512_ternarylogic_epi64(x, xs, c3, 0xE4);                           \
+        __m512i compact = _mm512_permutexvar_epi8(                                \
+            _mm512_load_si512((const __m512i *)COMPACT_TAB), x);                  \
+        _mm512_mask_storeu_epi8(out + ((i * (D_VAL)) >> 3),                       \
+                                 (__mmask64)(STORE_MASK), compact);               \
+    }                                                                             \
+    return i;                                                                     \
 }
-
-/* D=6: 2 groups (even/odd). */
-static inline int pack_d6_avx512(uint8_t *out, const uint16_t *codes_la,
-                                   int n, int right_shift)
-{
-    const __m512i mA = _mm512_set1_epi64((int64_t)0x003F003F003F003FULL);
-    const __m512i mB = _mm512_set1_epi64((int64_t)0x3F003F003F003F00ULL);
-    const __m512i cA = _mm512_set1_epi64((int64_t)0x0000342C20140C00ULL); /* {0,12,20,32,44,52,...} */
-    const __m512i cB = _mm512_set1_epi64((int64_t)0x0000362A22160A02ULL); /* {2,10,22,34,42,54,...} */
-    int i = 0;
-    for (; i + 64 <= n; i += 64) {
-        __m512i cb = pivco_pack_load_codes_byte(codes_la + i, right_shift);
-        __m512i a = _mm512_multishift_epi64_epi8(cA, _mm512_and_si512(cb, mA));
-        __m512i b = _mm512_multishift_epi64_epi8(cB, _mm512_and_si512(cb, mB));
-        __m512i packed = _mm512_or_si512(a, b);
-        __m512i compact = _mm512_permutexvar_epi8(
-            _mm512_load_si512((const __m512i *)pivco_pack_compact_d6), packed);
-        _mm512_mask_storeu_epi8(out + ((i * 6) >> 3),
-                                 (__mmask64)0xFFFFFFFFFFFFULL, compact);
-    }
-    return i;
-}
-
-/* D=7: 2 groups (even/odd). */
-static inline int pack_d7_avx512(uint8_t *out, const uint16_t *codes_la,
-                                   int n, int right_shift)
-{
-    const __m512i mA = _mm512_set1_epi64((int64_t)0x007F007F007F007FULL);
-    const __m512i mB = _mm512_set1_epi64((int64_t)0x7F007F007F007F00ULL);
-    const __m512i cA = _mm512_set1_epi64((int64_t)0x00362E241C120A00ULL); /* {0,10,18,28,36,46,54,...} */
-    const __m512i cB = _mm512_set1_epi64((int64_t)0x00372D251B130901ULL); /* {1,9,19,27,37,45,55,...} */
-    int i = 0;
-    for (; i + 64 <= n; i += 64) {
-        __m512i cb = pivco_pack_load_codes_byte(codes_la + i, right_shift);
-        __m512i a = _mm512_multishift_epi64_epi8(cA, _mm512_and_si512(cb, mA));
-        __m512i b = _mm512_multishift_epi64_epi8(cB, _mm512_and_si512(cb, mB));
-        __m512i packed = _mm512_or_si512(a, b);
-        __m512i compact = _mm512_permutexvar_epi8(
-            _mm512_load_si512((const __m512i *)pivco_pack_compact_d7), packed);
-        _mm512_mask_storeu_epi8(out + ((i * 7) >> 3),
-                                 (__mmask64)0x00FFFFFFFFFFFFFFULL, compact);
-    }
-    return i;
-}
+PIVCO_PACK_AVX512_RYG_DN(pack_d5_avx512, 5, pivco_pack_compact_d5, 0xFFFFFFFFFFULL)
+PIVCO_PACK_AVX512_RYG_DN(pack_d6_avx512, 6, pivco_pack_compact_d6, 0xFFFFFFFFFFFFULL)
+PIVCO_PACK_AVX512_RYG_DN(pack_d7_avx512, 7, pivco_pack_compact_d7, 0x00FFFFFFFFFFFFFFULL)
+#undef PIVCO_PACK_AVX512_RYG_DN
 
 #endif /* PIVCO_HUFFMAN_AVX512_PACK_H */
