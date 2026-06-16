@@ -110,30 +110,42 @@ static inline uint64_t get_u64(const uint8_t *p) {
  * compress_bound + compress
  * ============================================================ */
 
-size_t pivcohuf_compress_bound(size_t in_len)
+size_t pivcohuf_compress_bound_blk(size_t in_len, size_t block_size)
 {
     /* Per-block worst case is the full block size (no compression) plus
      * a small overhead for the encoded format.  We bound generously at
-     * 2x block size; the K_right header adds <1%. */
-    const size_t B = PIVCO_BLOCK_SIZE;
+     * 2x block size; the K_right header adds <1%.  Smaller blocks mean
+     * more per-block overhead, so the bound must use the actual block
+     * size the caller will compress with. */
+    if (block_size < 1) block_size = 1;
+    if (block_size > PIVCO_WIRE_MAX_N) block_size = PIVCO_WIRE_MAX_N;
+    const size_t B = block_size;
     size_t nblocks = (in_len + B - 1) / B;
     if (nblocks == 0) nblocks = 1;  /* zero-byte input still produces one header */
-    size_t worst_per_block = 4 /* length prefix */ + PIVCO_MAX_ENCODED_SIZE;
+    size_t worst_per_block = 4 /* length prefix */ + 2 * B + 64;
     return PIVCOHUF_HEADER_SIZE      /* header */
          + 8 + 2 + 128                /* body header: usize + blk + code-len nibbles */
          + nblocks * worst_per_block;
 }
 
+size_t pivcohuf_compress_bound(size_t in_len)
+{
+    return pivcohuf_compress_bound_blk(in_len, PIVCO_BLOCK_SIZE);
+}
+
 static int pivcohuf_compress_impl(const uint8_t *in, size_t in_len,
                                   uint8_t *out, size_t *out_len,
+                                  size_t block_size,
                                   pivcohuf_timing_t *tm)
 {
     if (!in && in_len > 0) return PIVCOHUF_ERR_NULL;
     if (!out || !out_len) return PIVCOHUF_ERR_NULL;
-    if (*out_len < pivcohuf_compress_bound(in_len))
+    if (block_size < 1 || block_size > PIVCO_WIRE_MAX_N)
+        return PIVCOHUF_ERR_BAD_BLOCK_SIZE;
+    if (*out_len < pivcohuf_compress_bound_blk(in_len, block_size))
         return PIVCOHUF_ERR_OUTPUT_TOO_SMALL;
 
-    const size_t B = PIVCO_BLOCK_SIZE;
+    const size_t B = block_size;
 
     /* Build histogram over real input.
      *
@@ -279,33 +291,45 @@ static int pivcohuf_compress_impl(const uint8_t *in, size_t in_len,
  * Decompress needs no flag — it auto-detects FSE markers per block. */
 static int compress_dispatch(const uint8_t *in, size_t in_len,
                              uint8_t *out, size_t *out_len,
-                             int use_ans, pivcohuf_timing_t *tm)
+                             int use_ans, size_t block_size,
+                             pivcohuf_timing_t *tm)
 {
     if (tm) memset(tm, 0, sizeof(*tm));
     int prev = pivco_huffman_get_fse_enabled();
     pivco_huffman_set_fse_enabled(use_ans);
-    int r = pivcohuf_compress_impl(in, in_len, out, out_len, tm);
+    int r = pivcohuf_compress_impl(in, in_len, out, out_len, block_size, tm);
     pivco_huffman_set_fse_enabled(prev);
     return r;
+}
+
+int pivcohuf_compress_blk(const uint8_t *in, size_t in_len,
+                          uint8_t *out, size_t *out_len,
+                          int use_ans, size_t block_size,
+                          pivcohuf_timing_t *timing)
+{
+    return compress_dispatch(in, in_len, out, out_len, use_ans, block_size, timing);
 }
 
 int pivcohuf_compress_ex(const uint8_t *in, size_t in_len,
                          uint8_t *out, size_t *out_len, int use_ans)
 {
-    return compress_dispatch(in, in_len, out, out_len, use_ans, NULL);
+    return compress_dispatch(in, in_len, out, out_len, use_ans,
+                             PIVCO_BLOCK_SIZE, NULL);
 }
 
 int pivcohuf_compress(const uint8_t *in, size_t in_len,
                       uint8_t *out, size_t *out_len)
 {
-    return compress_dispatch(in, in_len, out, out_len, 0, NULL);
+    return compress_dispatch(in, in_len, out, out_len, 0,
+                             PIVCO_BLOCK_SIZE, NULL);
 }
 
 int pivcohuf_compress_timed(const uint8_t *in, size_t in_len,
                             uint8_t *out, size_t *out_len,
                             int use_ans, pivcohuf_timing_t *timing)
 {
-    return compress_dispatch(in, in_len, out, out_len, use_ans, timing);
+    return compress_dispatch(in, in_len, out, out_len, use_ans,
+                             PIVCO_BLOCK_SIZE, timing);
 }
 
 /* ============================================================
@@ -354,7 +378,11 @@ static int pivcohuf_decompress_impl(const uint8_t *in, size_t in_len,
     if (body_len < 8 + 2 + 128) return PIVCOHUF_ERR_TOO_SHORT;
     size_t uncomp_size = (size_t)get_u64(body);
     uint16_t file_blk = get_u16(body + 8);
-    if (file_blk != (uint16_t)PIVCO_BLOCK_SIZE) return PIVCOHUF_ERR_BAD_BLOCK_SIZE;
+    /* The block size is read from the file, not fixed at compile time: the
+     * codec sizes its scratch dynamically off the per-block wire N header,
+     * so any block size the encoder could write is decodable here.  Only a
+     * zero block size (impossible from a valid encoder) is rejected. */
+    if (file_blk == 0) return PIVCOHUF_ERR_BAD_BLOCK_SIZE;
     const size_t B = (size_t)file_blk;
 
     if (*out_len < uncomp_size) return PIVCOHUF_ERR_OUTPUT_TOO_SMALL;

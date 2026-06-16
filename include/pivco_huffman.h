@@ -10,15 +10,25 @@ extern "C" {
 
 /* ---------- Constants ---------- */
 
+/* PIVCO_BLOCK_SIZE is the *default* per-block symbol count chosen by the
+ * file codec / CLI / benchmarks.  It is no longer a hard codec limit: the
+ * codec sizes its scratch dynamically off the runtime N (carried in the
+ * per-block uint16 wire header), so any block size in [1, PIVCO_WIRE_MAX_N]
+ * works without a recompile.  Defaults are the per-arch sweet spots measured
+ * across M4 / Granite Rapids / Zen5 (see issue #2): bigger blocks amortise
+ * per-block table/tree reload, which dominates on the smaller-L1 x86 parts. */
 #ifndef PIVCO_BLOCK_SIZE
-#if defined(__aarch64__)
-#define PIVCO_BLOCK_SIZE 8192   /* 128KB L1D on Apple M-series */
-#elif defined(__AVX512F__)
-#define PIVCO_BLOCK_SIZE 8192   /* 48KB+ L1D on Intel Granite Rapids etc. */
-#else
-#define PIVCO_BLOCK_SIZE 4096   /* 32KB L1D on x86 (Zen, etc.) */
+/* 32K is the cross-arch sweet spot measured across the full fleet (12 EC2
+ * parts + M4): every uarch peaks at or near 32K, and the fast modern AVX-512
+ * parts regress past it (cache cliff).  See docs/BLOCK_SIZE.md.  Apple
+ * M-series specifically prefers 16K (32K regresses its text dists) — a
+ * runtime gate for that is a planned follow-up; the default stays 32K. */
+#define PIVCO_BLOCK_SIZE 32768
 #endif
-#endif
+
+/* Hard upper bound on a block's symbol count: the per-block wire header
+ * stores N as a uint16 little-endian field, so N must fit in 16 bits. */
+#define PIVCO_WIRE_MAX_N 65535
 
 #define PIVCO_MAX_SYMBOLS   256
 

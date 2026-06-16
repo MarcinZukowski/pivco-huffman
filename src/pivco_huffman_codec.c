@@ -30,6 +30,25 @@
 #include <string.h>
 #include <assert.h>
 
+/* Thread-local growable decode scratch arena.  Replaces the former fixed
+ * `static __thread` array sized at PIVCO_BLOCK_SIZE so the block size is a
+ * pure runtime parameter (the wire N header carries the per-block count).
+ * Grows on demand and is reused across blocks; never shrinks.  One instance
+ * per backend translation unit, which is exactly what we want. */
+static __thread uint8_t *g_decode_scratch     = NULL;
+static __thread size_t   g_decode_scratch_cap = 0;
+
+static uint8_t *decode_scratch_ensure(size_t need)
+{
+    if (need > g_decode_scratch_cap) {
+        uint8_t *p = (uint8_t *)realloc(g_decode_scratch, need);
+        if (!p) return NULL;
+        g_decode_scratch     = p;
+        g_decode_scratch_cap = need;
+    }
+    return g_decode_scratch;
+}
+
 /* ---------- FSE dispatch parameters ----------
  *
  * The thresholds match the NEON encoder's settings so the wire format
@@ -117,14 +136,14 @@ static inline void codec_maybe_fse_attempt(uint8_t *marker_slot,
     assert(t_id < PIVCO_FSE_STATS_SLOTS);  /* guards the g_pivco_fse_* indexing */
 
     int xor_flag = (n_right > n_left);
-    uint8_t scratch[PIVCO_BLOCK_SIZE / 8 + 16];
+    uint8_t scratch[(size_t)nbytes + 16];
     if (xor_flag) {
         for (int i = 0; i < nbytes; i++) scratch[i] = (uint8_t)~bm[i];
     } else {
         memcpy(scratch, bm, (size_t)nbytes);
     }
 
-    uint8_t fse_out[PIVCO_BLOCK_SIZE];
+    uint8_t fse_out[(size_t)nbytes + 64];
     size_t fse_len = 0;
     pivco_fse_status_t rc = pivco_fse_compress(t_id, scratch, (size_t)nbytes,
                                                 fse_out, sizeof(fse_out),
@@ -238,7 +257,7 @@ int CODEC_ENCODE_ENTRY(const uint8_t *symbols, size_t n,
                        uint8_t *out, size_t *out_len)
 {
     if (!symbols || !table || !out || !out_len) return PIVCO_ERR_NULL;
-    if (n == 0 || n > PIVCO_BLOCK_SIZE) return PIVCO_ERR_OVERFLOW;
+    if (n == 0 || n > PIVCO_WIRE_MAX_N) return PIVCO_ERR_OVERFLOW;
     prim_codec_init();
 
     const int N = (int)n;
@@ -257,22 +276,21 @@ int CODEC_ENCODE_ENTRY(const uint8_t *symbols, size_t n,
      * doesn't need the padding but it costs us 16 bytes of stack per
      * call.  Same trick + same rationale as the legacy NEON encoder
      * carried since dense-codes_la landed (b31d269 2026-05-11). */
-    uint16_t codes_la[PIVCO_BLOCK_SIZE + 16];
-    prim_enc_init(codes_la, N, symbols, table->code_la);
+    /* codes_la (N+16) and the recursion scratch arena ((MAX_CODE_LEN+2)*N)
+     * are both sized off the runtime N and allocated together in one heap
+     * block (no compile-time block-size cap; N up to PIVCO_WIRE_MAX_N). */
+    const size_t codes_capacity = (size_t)N + 16;
+    const size_t tmp_capacity   = (size_t)N * (PIVCO_MAX_CODE_LEN + 2);
+    uint16_t *codes_la = (uint16_t *)malloc(
+        (codes_capacity + tmp_capacity) * sizeof(uint16_t));
+    if (!codes_la) return PIVCO_ERR_NULL;
+    uint16_t *tmp = codes_la + codes_capacity;
 
-    /* Scratch arena for the right-half partitions at each recursion
-     * level.  Worst-case usage on a skewed tree: every recursion
-     * pushes ~n_right elements which can be near n if the partition
-     * is one-sided.  Size for (MAX_CODE_LEN+2) * BLOCK_SIZE — matches
-     * the bound used elsewhere in the codec. */
-    const size_t tmp_capacity =
-        (size_t)PIVCO_BLOCK_SIZE * (PIVCO_MAX_CODE_LEN + 2);
-    uint16_t *tmp = (uint16_t *)malloc(tmp_capacity * sizeof(uint16_t));
-    if (!tmp) return PIVCO_ERR_NULL;
+    prim_enc_init(codes_la, N, symbols, table->code_la);
 
     codec_encode_node(table, table->tree_root, codes_la, N, 0, &ptr, tmp);
 
-    free(tmp);
+    free(codes_la);
     *out_len = (size_t)(ptr - out);
     return PIVCO_OK;
 }
@@ -330,7 +348,7 @@ static void codec_decode_subtree(const pivco_huffman_table_t *table,
 
     case PIVCO_NODE_BOTH_LEAVES: {
         /* No K_right header (kr_header_needed returns false). */
-        uint8_t bm_scratch[PIVCO_BLOCK_SIZE / 8 + 16];
+        uint8_t bm_scratch[(size_t)bitmap_bytes(K) + 16];
         const uint8_t *bm = wire_read_bitmap(in_ptr, K, bm_scratch);
         prim_merge_cst_cst(bm, K,
                                (uint8_t)table->tree[node->left].symbol,
@@ -341,7 +359,7 @@ static void codec_decode_subtree(const pivco_huffman_table_t *table,
 
     case PIVCO_NODE_HALF_RIGHT: {
         int K_right = wire_read_kr_header(table, node_id, in_ptr);
-        uint8_t bm_scratch[PIVCO_BLOCK_SIZE / 8 + 16];
+        uint8_t bm_scratch[(size_t)bitmap_bytes(K) + 16];
         const uint8_t *bm = wire_read_bitmap(in_ptr, K, bm_scratch);
 
         /* If the right child is also a leaf, no recursion needed:
@@ -363,7 +381,7 @@ static void codec_decode_subtree(const pivco_huffman_table_t *table,
 
     case PIVCO_NODE_HALF_LEFT: {
         int K_right = wire_read_kr_header(table, node_id, in_ptr);
-        uint8_t bm_scratch[PIVCO_BLOCK_SIZE / 8 + 16];
+        uint8_t bm_scratch[(size_t)bitmap_bytes(K) + 16];
         const uint8_t *bm = wire_read_bitmap(in_ptr, K, bm_scratch);
 
         if (table->node_type[node->left] == (uint8_t)PIVCO_NODE_LEAF) {
@@ -384,7 +402,7 @@ static void codec_decode_subtree(const pivco_huffman_table_t *table,
     case PIVCO_NODE_INTERNAL_FULL:
     default: {
         int K_right = wire_read_kr_header(table, node_id, in_ptr);
-        uint8_t bm_scratch[PIVCO_BLOCK_SIZE / 8 + 16];
+        uint8_t bm_scratch[(size_t)bitmap_bytes(K) + 16];
         const uint8_t *bm = wire_read_bitmap(in_ptr, K, bm_scratch);
 
         int left_kind  = table->node_type[node->left];
@@ -446,7 +464,7 @@ int CODEC_DECODE_ENTRY(const uint8_t *in, size_t in_len,
     /* Block header: first 2 bytes are N (symbol count for this block). */
     const uint8_t *ptr = in;
     const int N = wire_read_block_n(&ptr);
-    if (N <= 0 || N > PIVCO_BLOCK_SIZE) return PIVCO_ERR_CORRUPT;
+    if (N <= 0 || N > PIVCO_WIRE_MAX_N) return PIVCO_ERR_CORRUPT;
     const pivco_tree_node_t *root = &table->tree[table->tree_root];
 
     /* Root-is-leaf: fill everything with the single symbol. */
@@ -470,7 +488,7 @@ int CODEC_DECODE_ENTRY(const uint8_t *in, size_t in_len,
      * all hosts. */
     if ((pivco_node_type_t)table->node_type[table->tree_root]
         == PIVCO_NODE_BOTH_LEAVES) {
-        uint8_t bm_scratch[PIVCO_BLOCK_SIZE / 8 + 16];
+        uint8_t bm_scratch[(size_t)bitmap_bytes(N) + 16];
         const uint8_t *bm = wire_read_bitmap(&ptr, N, bm_scratch);
         const pivco_tree_node_t *left_child  = &table->tree[root->left];
         const pivco_tree_node_t *right_child = &table->tree[root->right];
@@ -484,9 +502,11 @@ int CODEC_DECODE_ENTRY(const uint8_t *in, size_t in_len,
 
     /* Scratch arena.  Worst case at a heavily-skewed node, the
      * partition is one-sided so a single recursion can consume up to
-     * N bytes.  Bounded by (MAX_CODE_LEN+2) * N. */
-    static __thread uint8_t scratch[(size_t)PIVCO_BLOCK_SIZE *
-                                     (PIVCO_MAX_CODE_LEN + 2)];
+     * N bytes.  Bounded by (MAX_CODE_LEN+2) * N.  Grown on demand from a
+     * thread-local heap buffer so block size is a runtime parameter. */
+    uint8_t *scratch =
+        decode_scratch_ensure((size_t)N * (PIVCO_MAX_CODE_LEN + 2));
+    if (!scratch) return PIVCO_ERR_NULL;
 
     codec_decode_subtree(table, table->tree_root, N,
                           symbols, &ptr, scratch);

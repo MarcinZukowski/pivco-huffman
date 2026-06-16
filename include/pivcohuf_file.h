@@ -63,8 +63,14 @@ typedef enum {
     PIVCOHUF_ERR_INTERNAL = -9,
 } pivcohuf_status_t;
 
-/* Worst-case output size given input size.  Overestimates; never lies low. */
+/* Worst-case output size given input size.  Overestimates; never lies low.
+ * Uses the default block size (PIVCO_BLOCK_SIZE). */
 size_t pivcohuf_compress_bound(size_t in_len);
+
+/* As pivcohuf_compress_bound, but for a specific block size.  Smaller blocks
+ * carry more per-block overhead and need a larger bound, so callers of
+ * pivcohuf_compress_blk must size the output buffer with this. */
+size_t pivcohuf_compress_bound_blk(size_t in_len, size_t block_size);
 
 /* Compress in[0..in_len) into out (capacity *out_len).  On success,
  * sets *out_len to the actual encoded length and returns PIVCOHUF_OK.
@@ -108,6 +114,18 @@ typedef struct {
 int pivcohuf_compress_timed(const uint8_t *in, size_t in_len,
                             uint8_t *out, size_t *out_len,
                             int use_ans, pivcohuf_timing_t *timing);
+
+/* As pivcohuf_compress_timed, but with a caller-chosen block size (symbol
+ * count per block, 1..PIVCO_WIRE_MAX_N).  The block size is recorded in the
+ * stream header, so pivcohuf_decompress reads it back automatically — no
+ * matching build flag required.  Larger blocks amortise per-block table/tree
+ * reload (a big decode win on small-L1 x86; see issue #2).  Size the output
+ * buffer with pivcohuf_compress_bound_blk(in_len, block_size).  timing may be
+ * NULL. */
+int pivcohuf_compress_blk(const uint8_t *in, size_t in_len,
+                          uint8_t *out, size_t *out_len,
+                          int use_ans, size_t block_size,
+                          pivcohuf_timing_t *timing);
 int pivcohuf_decompress_timed(const uint8_t *in, size_t in_len,
                               uint8_t *out, size_t *out_len,
                               pivcohuf_timing_t *timing);

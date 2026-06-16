@@ -13,6 +13,7 @@
  */
 
 #include "pivcohuf_file.h"
+#include "pivco_huffman.h"
 #include "pivco_prof.h"
 
 #include <errno.h>
@@ -140,7 +141,7 @@ static const char *err_msg(int rc) {
     case PIVCOHUF_ERR_BAD_VERSION:         return "unsupported version";
     case PIVCOHUF_ERR_BAD_HEADER_CHECKSUM: return "header checksum mismatch";
     case PIVCOHUF_ERR_BAD_BODY_CHECKSUM:   return "body checksum mismatch (data corruption)";
-    case PIVCOHUF_ERR_BAD_BLOCK_SIZE:      return "encoded block size does not match this build's codec";
+    case PIVCOHUF_ERR_BAD_BLOCK_SIZE:      return "invalid block size (must be 1..65535)";
     case PIVCOHUF_ERR_OUTPUT_TOO_SMALL:    return "output buffer too small";
     case PIVCOHUF_ERR_INTERNAL:            return "internal error";
     default:                                return "unknown error";
@@ -190,6 +191,8 @@ static void usage(FILE *out) {
         "Flags:\n"
         "  -a, --ans             compress with PHA (ANS-coded bitmaps; better\n"
         "                        ratio on skewed data).  decompress auto-detects.\n"
+        "  -b, --block-size N    symbols per block (1..65535; default per-arch).\n"
+        "                        recorded in the stream; decompress reads it back.\n"
         "  -f                    overwrite OUT if it exists\n"
         "  -r N                  re-run codec N times into the same buffer\n"
         "                        (no extra I/O); reports per-iter timing\n"
@@ -201,6 +204,7 @@ int main(int argc, char **argv)
     int force = 0;
     int repeat = 1;
     int use_ans = 0;   /* -a / --ans : compress with #PHA (ANS-coded bitmaps) */
+    size_t block_size = PIVCO_BLOCK_SIZE;  /* -b / --block-size : symbols/block */
     /* First pass: pluck flags anywhere on the command line. */
     const char *positionals[4] = {0};
     int npos = 0;
@@ -216,6 +220,15 @@ int main(int argc, char **argv)
             repeat = atoi(argv[i + 1]);
             if (repeat < 1) repeat = 1;
             i++;   /* skip the N */
+        } else if ((argv[i][0] == '-' && argv[i][1] == 'b' && argv[i][2] == '\0'
+                    && i + 1 < argc)) {
+            block_size = (size_t)strtoul(argv[i + 1], NULL, 0);
+            i++;   /* skip the N */
+        } else if (strncmp(argv[i], "--block-size=", 13) == 0) {
+            block_size = (size_t)strtoul(argv[i] + 13, NULL, 0);
+        } else if (strcmp(argv[i], "--block-size") == 0 && i + 1 < argc) {
+            block_size = (size_t)strtoul(argv[i + 1], NULL, 0);
+            i++;
         } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
             usage(stdout);
             return 0;
@@ -234,6 +247,11 @@ int main(int argc, char **argv)
         }
     }
     if (npos < 2) { usage(stderr); return 1; }
+    if (block_size < 1 || block_size > PIVCO_WIRE_MAX_N) {
+        fprintf(stderr, "pivcohuf: --block-size must be in 1..%d\n",
+                PIVCO_WIRE_MAX_N);
+        return 1;
+    }
     const char *cmd = positionals[0];
     const char *in_path = positionals[1];
     char default_out[4096];
@@ -272,14 +290,14 @@ int main(int argc, char **argv)
     double io_read_ms = (now_sec() - _rd0) * 1000.0;
 
     if (cmd[0] == 'c') {
-        size_t bound = pivcohuf_compress_bound(in_len);
+        size_t bound = pivcohuf_compress_bound_blk(in_len, block_size);
         double _m0 = now_sec();
         uint8_t *out_buf = (uint8_t *)xmalloc(bound);
         double cli_malloc_ms = (now_sec() - _m0) * 1000.0;
         size_t out_len = bound;
         pivcohuf_timing_t tm;
         double t0 = now_sec();
-        int rc = pivcohuf_compress_timed(in_buf, in_len, out_buf, &out_len, use_ans, &tm);
+        int rc = pivcohuf_compress_blk(in_buf, in_len, out_buf, &out_len, use_ans, block_size, &tm);
         double t1 = now_sec();
         if (rc != PIVCOHUF_OK) {
             fprintf(stderr, "pivcohuf: compress failed: %s\n", err_msg(rc));
@@ -296,7 +314,7 @@ int main(int argc, char **argv)
             for (int r = 1; r < repeat; r++) {
                 size_t rep_out_len = bound;
                 double rt0 = now_sec();
-                pivcohuf_compress_ex(in_buf, in_len, out_buf, &rep_out_len, use_ans);
+                pivcohuf_compress_blk(in_buf, in_len, out_buf, &rep_out_len, use_ans, block_size, NULL);
                 double rt1 = now_sec();
                 int ms = (int)((rt1 - rt0) * 1000.0 + 0.5);
                 fprintf(stderr, "  iter %2d: comp:%dms  comp_bw in=%d MB/s out=%d MB/s\n",

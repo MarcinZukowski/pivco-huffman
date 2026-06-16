@@ -72,7 +72,12 @@ extern int          bench_dist_size(int dist_idx, int min_n, int block_align);
                                            as-is if >= 1 MB; cycled to
                                            >= 1 MB if smaller). */
 #define TOTAL_MAX  (16 * 1024 * 1024)   /* generous alloc ceiling */
-#define BLK        PIVCO_BLOCK_SIZE     /* ph decode sub-block (4-8 KB) */
+/* ph decode sub-block.  Runtime-selectable via --blk= (the codec reads N
+ * from the wire header, so no recompile is needed); defaults to the
+ * compiled PIVCO_BLOCK_SIZE.  Capped at PIVCO_BLOCK_SIZE because the codec's
+ * internal scratch buffers are sized at compile time. */
+static size_t g_blk = PIVCO_BLOCK_SIZE;
+#define BLK        g_blk
 #define HUF_CHUNK  (128 * 1024)         /* huf0 hard cap; FSE controlled chunk */
 
 /* Per-distribution buffer size, set in main() before each engine row is
@@ -783,6 +788,15 @@ int main(int argc, char **argv) {
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--all")) run_all = 1;
         else if (!strncmp(argv[i], "--G=", 4)) g_table_G = (size_t)atoi(argv[i]+4) * 1024;
+        else if (!strncmp(argv[i], "--blk=", 6)) {
+            long v = atol(argv[i] + 6);
+            if (v < 1 || v > PIVCO_WIRE_MAX_N) {
+                fprintf(stderr, "--blk must be in 1..%d (uint16 wire N limit)\n",
+                        PIVCO_WIRE_MAX_N);
+                return 1;
+            }
+            g_blk = (size_t)v;
+        }
         else if (!strncmp(argv[i], "--engines=", 10)) eng_filter = argv[i] + 10;
         else if (!strncmp(argv[i], "--dist=", 7)) { dist_filter = argv[i] + 7; }
         else if (!strcmp(argv[i], "--timer=cyc")) {
@@ -795,7 +809,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--list") || !strcmp(argv[i], "--help")
                  || !strcmp(argv[i], "-h")) {
             bench_init();
-            printf("usage: pivco_fair_bench [--all] [--G=KB] [--engines=a,b] [--dist=x,y] [--timer=cyc]\n\n");
+            printf("usage: pivco_fair_bench [--all] [--G=KB] [--blk=N] [--engines=a,b] [--dist=x,y] [--timer=cyc]\n\n");
             printf("engines:");
             for (int e = 0; e < N_ENGINES; e++) printf(" %s", ENGINES[e].name);
             printf("\n\ndistributions (* = in default 'main' set):\n");
@@ -815,9 +829,9 @@ int main(int argc, char **argv) {
     phtd_set_fse_enabled(0);   /* TD grid: raw bitmaps, isolate tree x prims */
     printf("fair-bench: buffer >= %d KB (real-file dists may be larger), "
            "adaptive %d-%d runs x %d reps (top-2 within %d%% stops), "
-           "ph table-G=%zu KB, BLK=%d  timer=%s\n",
+           "ph table-G=%zu KB, BLK=%zu  timer=%s\n",
            TOTAL/1024, _BMA_MIN, _BMA_MAX, REPEATS,
-           (int)(_BMA_TOL*100), g_table_G/1024, BLK,
+           (int)(_BMA_TOL*100), g_table_G/1024, (size_t)BLK,
            g_use_cyc ? "CPU_CYCLES (units: MB/Gcyc)" : "wall ns (units: MB/s)");
     if (eng_filter)  printf("  engines: %s\n", eng_filter);
     if (dist_filter) printf("  dists:   %s\n", dist_filter);
@@ -832,7 +846,7 @@ int main(int argc, char **argv) {
         if (!include) continue;
         /* Align only to the codec's sub-block size BLK.  measure_ph /
            measure_phtd handle a possibly-short last window via WBPW/WSZ. */
-        int align = BLK;
+        int align = (int)BLK;
         int n = bench_dist_size(d, TOTAL, align);
         if (n > TOTAL_MAX) n = TOTAL_MAX - (TOTAL_MAX % align);
         g_total = (size_t)n;
