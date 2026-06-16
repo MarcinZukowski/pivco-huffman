@@ -573,6 +573,291 @@ static inline void merge_neon_unroll8(const uint8_t *bm, int K,
 static void simd_merge_vec_vec_unroll8 (const ctx_t *c){
     merge_neon_unroll8(c->bm, c->n, c->merge_left, c->merge_right, c->out);
 }
+
+/* ---- 128-bit bitmap load + multiply-prefix-sum cursor decoupling ----
+ *
+ * Per outer iter (128 outputs):
+ *   - ONE vld1q_u8 of 16 bitmap bytes; ONE vcntq_u8 for all 16 popcounts.
+ *   - bitmap + popcount each spilled to 2x u64 GPRs (low/high 8 bytes), so
+ *     m0/m1/nr0 per block become ubfx (register bitfield extract) instead
+ *     of per-byte memory loads + the dependent expand_popcnt[] load.
+ *   - vpaddlq_u8 folds adjacent byte-popcounts into 8 per-16-elem-block
+ *     right-counts (nr0+nr1); reinterpreted as 2x u64 (4x u16 lanes each),
+ *     each multiplied by 0x0001000100010001 to get inclusive prefix sums
+ *     in the 16-bit lanes (each lane <= 64, no inter-lane carry).
+ *   - 8 production-shaped 16-elem blocks, fully unrolled.  Each block's
+ *     L_full/R_full load address is base + the exclusive prefix pulled from
+ *     the prefix word (a ubfx), so there is NO loop-carried lc/rc chain
+ *     across blocks.  iter-0 (vqtbl1) and iter-1 (vqtbl2 +
+ *     expand_tab_pre[nr0][m1]) bodies are byte-identical to production
+ *     merge_vec_vec_neon.
+ *   - bases advance once per 64-elem (8-byte) half by (rights, 64-rights).
+ * Tail (j+16 / j+8 / scalar) reuses the production loop shapes, continuing
+ * from the live lc/rc. */
+static inline void merge_neon_prefix128(const uint8_t *bm, int K,
+                                        const uint8_t *left, const uint8_t *right,
+                                        uint8_t *out) {
+    int lc = 0, rc = 0, j = 0;
+    for (; j + 128 <= K; j += 128) {
+        uint8x16_t bmv = vld1q_u8(bm + (j >> 3));
+        uint8x16_t pcv = vcntq_u8(bmv);
+
+        uint64x2_t bm64 = vreinterpretq_u64_u8(bmv);
+        uint64_t bm_lo = vgetq_lane_u64(bm64, 0);
+        uint64_t bm_hi = vgetq_lane_u64(bm64, 1);
+        uint64x2_t pc64 = vreinterpretq_u64_u8(pcv);
+        uint64_t pc_lo = vgetq_lane_u64(pc64, 0);
+        uint64_t pc_hi = vgetq_lane_u64(pc64, 1);
+
+        uint16x8_t pair = vpaddlq_u8(pcv);          /* 8 block right-counts */
+        uint64x2_t pr64 = vreinterpretq_u64_u16(pair);
+        uint64_t pref_lo = vgetq_lane_u64(pr64, 0) * 0x0001000100010001ULL;
+        uint64_t pref_hi = vgetq_lane_u64(pr64, 1) * 0x0001000100010001ULL;
+
+        /* One 16-elem production block.  EXCL = exclusive prefix (rights
+           consumed by earlier blocks in this half); EBASE = output offset
+           of the half (0 or 64).  base lc/rc are the half's start cursors. */
+        #define PFX_BLOCK(BMW, PCW, K_, EXCL, EBASE)                            \
+        do {                                                                    \
+            uint32_t excl_ = (EXCL);                                            \
+            uint8_t  m0  = (uint8_t)((BMW) >> (16 * (K_)));                      \
+            uint8_t  m1  = (uint8_t)((BMW) >> (16 * (K_) + 8));                  \
+            uint8_t  nr0 = (uint8_t)((PCW) >> (16 * (K_)));                      \
+            uint8x16_t L = vld1q_u8(left  + lc + (16 * (K_) - excl_));           \
+            uint8x16_t R = vld1q_u8(right + rc + excl_);                         \
+            uint8x16_t both0 = vcombine_u8(vget_low_u8(L), vget_low_u8(R));      \
+            uint8x8_t  o0 = vqtbl1_u8(both0, vld1_u8(expand_tab[m0]));           \
+            vst1_u8(out + j + (EBASE) + 16 * (K_), o0);                          \
+            uint8x16x2_t src = {{ L, R }};                                       \
+            uint8x8_t  o1 = vqtbl2_u8(src, vld1_u8(expand_tab_pre[nr0][m1]));    \
+            vst1_u8(out + j + (EBASE) + 16 * (K_) + 8, o1);                      \
+        } while (0)
+
+        /* low half: blocks 0..3, base = entry lc/rc */
+        PFX_BLOCK(bm_lo, pc_lo, 0, 0,                        0);
+        PFX_BLOCK(bm_lo, pc_lo, 1, (pref_lo)       & 0xFFFF, 0);
+        PFX_BLOCK(bm_lo, pc_lo, 2, (pref_lo >> 16) & 0xFFFF, 0);
+        PFX_BLOCK(bm_lo, pc_lo, 3, (pref_lo >> 32) & 0xFFFF, 0);
+        uint32_t r_lo = (uint32_t)(pref_lo >> 48);
+        rc += r_lo; lc += 64 - r_lo;
+
+        /* high half: blocks 4..7 -> indices 0..3 of bm_hi, base = updated lc/rc */
+        PFX_BLOCK(bm_hi, pc_hi, 0, 0,                        64);
+        PFX_BLOCK(bm_hi, pc_hi, 1, (pref_hi)       & 0xFFFF, 64);
+        PFX_BLOCK(bm_hi, pc_hi, 2, (pref_hi >> 16) & 0xFFFF, 64);
+        PFX_BLOCK(bm_hi, pc_hi, 3, (pref_hi >> 32) & 0xFFFF, 64);
+        uint32_t r_hi = (uint32_t)(pref_hi >> 48);
+        rc += r_hi; lc += 64 - r_hi;
+        #undef PFX_BLOCK
+    }
+    /* ---- production tail, continuing from the live lc/rc ---- */
+    for (; j + 16 <= K; j += 16) {
+        uint8x16_t L_full = vld1q_u8(left + lc);
+        uint8x16_t R_full = vld1q_u8(right + rc);
+        uint8_t m0 = bm[j >> 3];
+        uint8x16_t both0 = vcombine_u8(vget_low_u8(L_full), vget_low_u8(R_full));
+        uint8x8_t  o0    = vqtbl1_u8(both0, vld1_u8(expand_tab[m0]));
+        vst1_u8(out + j, o0);
+        int nr0 = expand_popcnt[m0];
+        uint8_t m1 = bm[(j >> 3) + 1];
+        uint8x16x2_t src = {{ L_full, R_full }};
+        uint8x8_t o1 = vqtbl2_u8(src, vld1_u8(expand_tab_pre[nr0][m1]));
+        vst1_u8(out + j + 8, o1);
+        int nr1 = expand_popcnt[m1];
+        rc += nr0 + nr1;
+        lc += (16 - nr0 - nr1);
+    }
+    for (; j + 8 <= K; j += 8) {
+        uint8_t m  = bm[j >> 3];
+        uint8x8_t  L    = vld1_u8(left + lc);
+        uint8x8_t  R    = vld1_u8(right + rc);
+        uint8x16_t both = vcombine_u8(L, R);
+        uint8x8_t  o    = vqtbl1_u8(both, vld1_u8(expand_tab[m]));
+        vst1_u8(out + j, o);
+        int nr = expand_popcnt[m];
+        rc += nr;
+        lc += (8 - nr);
+    }
+    for (; j < K; j++) {
+        int mb = (bm[j >> 3] >> (j & 7)) & 1;
+        out[j] = mb ? right[rc++] : left[lc++];
+    }
+}
+static void simd_merge_vec_vec_prefix (const ctx_t *c){
+    merge_neon_prefix128(c->bm, c->n, c->merge_left, c->merge_right, c->out);
+}
+
+/* cst_vec: left is a broadcast constant, right is the vector.  Single cursor
+   rc advances by right-counts (= popcount), so the prefix sum is over pcv
+   directly and rc advances by (pref >> 48) per half.  L side is Lbcast. */
+static inline void merge_neon_prefix128_cst_vec(const uint8_t *bm, int K,
+                                                uint8_t left_sym,
+                                                const uint8_t *right,
+                                                uint8_t *out) {
+    int rc = 0, j = 0;
+    uint8x8_t  Lbcast   = vdup_n_u8(left_sym);
+    uint8x16_t Lbcast_q = vdupq_n_u8(left_sym);
+    for (; j + 128 <= K; j += 128) {
+        uint8x16_t bmv = vld1q_u8(bm + (j >> 3));
+        uint8x16_t pcv = vcntq_u8(bmv);
+
+        uint64x2_t bm64 = vreinterpretq_u64_u8(bmv);
+        uint64_t bm_lo = vgetq_lane_u64(bm64, 0);
+        uint64_t bm_hi = vgetq_lane_u64(bm64, 1);
+        uint64x2_t pc64 = vreinterpretq_u64_u8(pcv);
+        uint64_t pc_lo = vgetq_lane_u64(pc64, 0);
+        uint64_t pc_hi = vgetq_lane_u64(pc64, 1);
+
+        uint16x8_t pair = vpaddlq_u8(pcv);          /* block right-counts */
+        uint64x2_t pr64 = vreinterpretq_u64_u16(pair);
+        uint64_t pref_lo = vgetq_lane_u64(pr64, 0) * 0x0001000100010001ULL;
+        uint64_t pref_hi = vgetq_lane_u64(pr64, 1) * 0x0001000100010001ULL;
+
+        #define PFX_BLOCK_CV(BMW, PCW, K_, EXCL, EBASE)                         \
+        do {                                                                    \
+            uint32_t excl_ = (EXCL);                                            \
+            uint8_t  m0  = (uint8_t)((BMW) >> (16 * (K_)));                      \
+            uint8_t  m1  = (uint8_t)((BMW) >> (16 * (K_) + 8));                  \
+            uint8_t  nr0 = (uint8_t)((PCW) >> (16 * (K_)));                      \
+            uint8x16_t R = vld1q_u8(right + rc + excl_);                         \
+            uint8x16_t both0 = vcombine_u8(Lbcast, vget_low_u8(R));              \
+            uint8x8_t  o0 = vqtbl1_u8(both0, vld1_u8(expand_tab[m0]));           \
+            vst1_u8(out + j + (EBASE) + 16 * (K_), o0);                          \
+            uint8x16x2_t src = {{ Lbcast_q, R }};                               \
+            uint8x8_t  o1 = vqtbl2_u8(src, vld1_u8(expand_tab_pre[nr0][m1]));    \
+            vst1_u8(out + j + (EBASE) + 16 * (K_) + 8, o1);                      \
+        } while (0)
+
+        PFX_BLOCK_CV(bm_lo, pc_lo, 0, 0,                        0);
+        PFX_BLOCK_CV(bm_lo, pc_lo, 1, (pref_lo)       & 0xFFFF, 0);
+        PFX_BLOCK_CV(bm_lo, pc_lo, 2, (pref_lo >> 16) & 0xFFFF, 0);
+        PFX_BLOCK_CV(bm_lo, pc_lo, 3, (pref_lo >> 32) & 0xFFFF, 0);
+        rc += (uint32_t)(pref_lo >> 48);
+
+        PFX_BLOCK_CV(bm_hi, pc_hi, 0, 0,                        64);
+        PFX_BLOCK_CV(bm_hi, pc_hi, 1, (pref_hi)       & 0xFFFF, 64);
+        PFX_BLOCK_CV(bm_hi, pc_hi, 2, (pref_hi >> 16) & 0xFFFF, 64);
+        PFX_BLOCK_CV(bm_hi, pc_hi, 3, (pref_hi >> 32) & 0xFFFF, 64);
+        rc += (uint32_t)(pref_hi >> 48);
+        #undef PFX_BLOCK_CV
+    }
+    for (; j + 16 <= K; j += 16) {
+        uint8x16_t R_full = vld1q_u8(right + rc);
+        uint8_t m0 = bm[j >> 3];
+        uint8x16_t both0 = vcombine_u8(Lbcast, vget_low_u8(R_full));
+        uint8x8_t  o0    = vqtbl1_u8(both0, vld1_u8(expand_tab[m0]));
+        vst1_u8(out + j, o0);
+        int nr0 = expand_popcnt[m0];
+        uint8_t m1 = bm[(j >> 3) + 1];
+        uint8x16x2_t src = {{ Lbcast_q, R_full }};
+        uint8x8_t o1 = vqtbl2_u8(src, vld1_u8(expand_tab_pre[nr0][m1]));
+        vst1_u8(out + j + 8, o1);
+        rc += nr0 + expand_popcnt[m1];
+    }
+    for (; j + 8 <= K; j += 8) {
+        uint8_t m  = bm[j >> 3];
+        uint8x8_t  R    = vld1_u8(right + rc);
+        uint8x16_t both = vcombine_u8(Lbcast, R);
+        uint8x8_t  o    = vqtbl1_u8(both, vld1_u8(expand_tab[m]));
+        vst1_u8(out + j, o);
+        rc += expand_popcnt[m];
+    }
+    for (; j < K; j++) {
+        int mb = (bm[j >> 3] >> (j & 7)) & 1;
+        out[j] = mb ? right[rc++] : left_sym;
+    }
+}
+static void simd_merge_cst_vec_prefix (const ctx_t *c){
+    merge_neon_prefix128_cst_vec(c->bm, c->n, MERGE_LEFT_SYM, c->merge_right, c->out);
+}
+
+/* vec_cst: left is the vector, right is a broadcast constant.  Single cursor
+   lc advances by left-counts (= 8 - popcount).  Subtract 8 - pcv BEFORE the
+   addp so the prefix sum is over left-counts directly: per-block offset is the
+   exclusive left-prefix as-is and lc advances by (pref >> 48) per half (no
+   16*k-excl, no 64-x).  R side is Rbcast.  nr0 still comes from raw pcv. */
+static inline void merge_neon_prefix128_vec_cst(const uint8_t *bm, int K,
+                                                const uint8_t *left,
+                                                uint8_t right_sym,
+                                                uint8_t *out) {
+    int lc = 0, j = 0;
+    uint8x8_t  Rbcast   = vdup_n_u8(right_sym);
+    uint8x16_t Rbcast_q = vdupq_n_u8(right_sym);
+    uint8x16_t eight    = vdupq_n_u8(8);
+    for (; j + 128 <= K; j += 128) {
+        uint8x16_t bmv = vld1q_u8(bm + (j >> 3));
+        uint8x16_t pcv = vcntq_u8(bmv);
+        uint8x16_t lcv = vsubq_u8(eight, pcv);      /* per-byte LEFT counts */
+
+        uint64x2_t bm64 = vreinterpretq_u64_u8(bmv);
+        uint64_t bm_lo = vgetq_lane_u64(bm64, 0);
+        uint64_t bm_hi = vgetq_lane_u64(bm64, 1);
+        uint64x2_t pc64 = vreinterpretq_u64_u8(pcv);
+        uint64_t pc_lo = vgetq_lane_u64(pc64, 0);
+        uint64_t pc_hi = vgetq_lane_u64(pc64, 1);
+
+        uint16x8_t pair = vpaddlq_u8(lcv);          /* block LEFT-counts */
+        uint64x2_t pr64 = vreinterpretq_u64_u16(pair);
+        uint64_t pref_lo = vgetq_lane_u64(pr64, 0) * 0x0001000100010001ULL;
+        uint64_t pref_hi = vgetq_lane_u64(pr64, 1) * 0x0001000100010001ULL;
+
+        #define PFX_BLOCK_VC(BMW, PCW, K_, EXCL, EBASE)                         \
+        do {                                                                    \
+            uint32_t excl_ = (EXCL);                                            \
+            uint8_t  m0  = (uint8_t)((BMW) >> (16 * (K_)));                      \
+            uint8_t  m1  = (uint8_t)((BMW) >> (16 * (K_) + 8));                  \
+            uint8_t  nr0 = (uint8_t)((PCW) >> (16 * (K_)));                      \
+            uint8x16_t L = vld1q_u8(left + lc + excl_);                          \
+            uint8x16_t both0 = vcombine_u8(vget_low_u8(L), Rbcast);              \
+            uint8x8_t  o0 = vqtbl1_u8(both0, vld1_u8(expand_tab[m0]));           \
+            vst1_u8(out + j + (EBASE) + 16 * (K_), o0);                          \
+            uint8x16x2_t src = {{ L, Rbcast_q }};                               \
+            uint8x8_t  o1 = vqtbl2_u8(src, vld1_u8(expand_tab_pre[nr0][m1]));    \
+            vst1_u8(out + j + (EBASE) + 16 * (K_) + 8, o1);                      \
+        } while (0)
+
+        PFX_BLOCK_VC(bm_lo, pc_lo, 0, 0,                        0);
+        PFX_BLOCK_VC(bm_lo, pc_lo, 1, (pref_lo)       & 0xFFFF, 0);
+        PFX_BLOCK_VC(bm_lo, pc_lo, 2, (pref_lo >> 16) & 0xFFFF, 0);
+        PFX_BLOCK_VC(bm_lo, pc_lo, 3, (pref_lo >> 32) & 0xFFFF, 0);
+        lc += (uint32_t)(pref_lo >> 48);
+
+        PFX_BLOCK_VC(bm_hi, pc_hi, 0, 0,                        64);
+        PFX_BLOCK_VC(bm_hi, pc_hi, 1, (pref_hi)       & 0xFFFF, 64);
+        PFX_BLOCK_VC(bm_hi, pc_hi, 2, (pref_hi >> 16) & 0xFFFF, 64);
+        PFX_BLOCK_VC(bm_hi, pc_hi, 3, (pref_hi >> 32) & 0xFFFF, 64);
+        lc += (uint32_t)(pref_hi >> 48);
+        #undef PFX_BLOCK_VC
+    }
+    for (; j + 16 <= K; j += 16) {
+        uint8x16_t L_full = vld1q_u8(left + lc);
+        uint8_t m0 = bm[j >> 3];
+        uint8x16_t both0 = vcombine_u8(vget_low_u8(L_full), Rbcast);
+        uint8x8_t  o0    = vqtbl1_u8(both0, vld1_u8(expand_tab[m0]));
+        vst1_u8(out + j, o0);
+        int nr0 = expand_popcnt[m0];
+        uint8_t m1 = bm[(j >> 3) + 1];
+        uint8x16x2_t src = {{ L_full, Rbcast_q }};
+        uint8x8_t o1 = vqtbl2_u8(src, vld1_u8(expand_tab_pre[nr0][m1]));
+        vst1_u8(out + j + 8, o1);
+        lc += (16 - nr0 - expand_popcnt[m1]);
+    }
+    for (; j + 8 <= K; j += 8) {
+        uint8_t m  = bm[j >> 3];
+        uint8x8_t  L    = vld1_u8(left + lc);
+        uint8x16_t both = vcombine_u8(L, Rbcast);
+        uint8x8_t  o    = vqtbl1_u8(both, vld1_u8(expand_tab[m]));
+        vst1_u8(out + j, o);
+        lc += (8 - expand_popcnt[m]);
+    }
+    for (; j < K; j++) {
+        int mb = (bm[j >> 3] >> (j & 7)) & 1;
+        out[j] = mb ? right_sym : left[lc++];
+    }
+}
+static void simd_merge_vec_cst_prefix (const ctx_t *c){
+    merge_neon_prefix128_vec_cst(c->bm, c->n, c->merge_left, MERGE_RIGHT_SYM, c->out);
+}
 #endif
 
 #if defined(HAVE_NEON_KERNELS)   /* partition family + unfused comparison (NEON only) */
@@ -794,6 +1079,9 @@ int main(int argc, char **argv) {
     reg("neon_pcpc",     ST_MERGE_VEC_VEC, 0, 0, simd_merge_vec_vec_pcpc_pure);
     reg("neon_pcpc_full",ST_MERGE_VEC_VEC, 0, 0, simd_merge_vec_vec_pcpc_full);
     reg("neon_unroll8",  ST_MERGE_VEC_VEC, 0, 0, simd_merge_vec_vec_unroll8);
+    reg("neon_prefix",   ST_MERGE_VEC_VEC, 0, 0, simd_merge_vec_vec_prefix);
+    reg("neon_prefix",   ST_MERGE_CST_VEC, 0, 0, simd_merge_cst_vec_prefix);
+    reg("neon_prefix",   ST_MERGE_VEC_CST, 0, 0, simd_merge_vec_cst_prefix);
     ensure_mask_to_bits();
     ensure_blend_tab();
     reg("neon_tbl",      ST_MERGE_CST_CST, 0, 0, simd_merge_cst_cst_tbl);
