@@ -449,11 +449,21 @@ static inline void merge_flat_x86_impl(uint8_t *symbols, int n,
      * coverage instead of scalar), c4/c5 (Haswell/Cascade Lake, -21%),
      * c5a (Zen 2, -43% to -54%), c6a (Zen 3, -25%). */
     if (D == 2) {
-        /* 16 codes/iter: 2x ryg D=2 unpack + 4-entry pshufb scatter.  Each
-         * unpack reads a 16-byte window (slop), so stop the fast loop a few
-         * groups early. */
+        /* 16 codes/iter: D=2 unpack + 4-entry pshufb scatter. */
         __m128i c2s_vec = _mm_loadl_epi64((const __m128i *)c2s);  /* 4 entries */
         int i = 0;
+#if defined(PIVCO_HAS_AVX2)
+        /* AVX2: one vpsrlvd transpose unpack per 16 codes (terrelln PR #1),
+         * ~1.3-1.9x faster than two ryg calls.  Reads exactly 4 bytes/iter, so
+         * no over-read slop is needed beyond the last group. */
+        for (; i + 16 <= n; i += 16) {
+            __m128i codes = flat_d2_unpack_avx2(bm + ((i * 2) >> 3));
+            __m128i syms  = _mm_shuffle_epi8(c2s_vec, codes);
+            _mm_storeu_si128((__m128i *)(symbols + i), syms);
+        }
+#else
+        /* SSE4.1 fallback: 2x ryg D=2 unpack.  Each reads a 16-byte window
+         * (slop), so stop the fast loop a few groups early. */
         int fast_end = n >= 16 ? n - 16 : 0;
         for (; i + 16 <= fast_end; i += 16) {
             __m128i lo_codes = flat_d2_unpack_x86(bm + ((i      * 2) >> 3));
@@ -462,6 +472,7 @@ static inline void merge_flat_x86_impl(uint8_t *symbols, int n,
             __m128i syms     = _mm_shuffle_epi8(c2s_vec, codes);
             _mm_storeu_si128((__m128i *)(symbols + i), syms);
         }
+#endif
         for (; i < n; i++) {
             uint32_t code = extract_D_bits_x86(bm, i * 2, 2);
             symbols[i] = c2s[code];

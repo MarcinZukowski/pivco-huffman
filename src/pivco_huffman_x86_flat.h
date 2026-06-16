@@ -118,4 +118,28 @@ static inline __m128i flat_d6_unpack_x86(const uint8_t *bm_ptr)
     return _mm_packus_epi16(lsb, _mm_setzero_si128());
 }
 
+#if defined(PIVCO_HAS_AVX2)
+#include <immintrin.h>
+/* D=2 AVX2 unpack: 16 codes from 4 bytes.  Broadcast the 4-byte window to four
+ * 32-bit lanes and vpsrlvd lane j by 2*j ({0,2,4,6}), so lane j byte b holds
+ * code (4*b + j) in its low bits (D=2 packs exactly 4 codes per byte, which is
+ * what makes this clean — no other D aligns this way).  A single pshufb
+ * transposes that 4x4 byte matrix and the 0x3 mask clears the upper 6 bits,
+ * leaving code i in byte i.  ~1.3-1.9x faster than two ryg flat_d2_unpack_x86
+ * calls; from terrelln's PR #1.  Reads exactly 4 bytes (memcpy, no over-read). */
+static inline __m128i flat_d2_unpack_avx2(const uint8_t *bm_ptr)
+{
+    const __m128i s = _mm_setr_epi32(0, 2, 4, 6);
+    const __m128i m = _mm_set1_epi8(0x3);
+    const __m128i shuf = _mm_setr_epi8(
+         0,  4,  8, 12,
+         1,  5,  9, 13,
+         2,  6, 10, 14,
+         3,  7, 11, 15);
+    uint32_t packed; memcpy(&packed, bm_ptr, 4);
+    __m128i v = _mm_srlv_epi32(_mm_set1_epi32((int)packed), s);
+    return _mm_and_si128(_mm_shuffle_epi8(v, shuf), m);
+}
+#endif /* PIVCO_HAS_AVX2 */
+
 #endif /* PIVCO_HUFFMAN_X86_FLAT_H */
