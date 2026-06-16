@@ -10,7 +10,9 @@ work it is a **runtime** knob, not a compile-time limit:
   `[1, PIVCO_WIRE_MAX_N]` (`= 65535`, the uint16 wire-N cap) works with no
   recompile.
 - `PIVCO_BLOCK_SIZE` is now only the *default* chosen by the file codec,
-  CLI, and benchmarks. It defaults to **32768** on every architecture.
+  CLI, and benchmarks. It defaults to **32768** on every architecture
+  except **Apple Silicon (macOS/arm64), which defaults to 16384** — see the
+  M4 exception below. An explicit `-DPIVCO_BLOCK_SIZE` overrides either.
 - Streams are self-describing: the block size is written into the
   `.ph` header, and `pivcohuf_decompress` reads it back. A file made at one
   block size decodes on any build.
@@ -95,11 +97,30 @@ The lone regression is Sapphire Rapids (−3% at 32K; it peaks at 16K). 4K is
 worse for encode too (−5…−21%). So 32K is the right call on both axes: a win
 or wash everywhere for encode, with one −3% outlier.
 
-### The Apple M4 exception
+### The Apple Silicon exception (default 16K)
 
 M4 is the one part that prefers **16K**: 32K regresses its text/medium-entropy
 distributions (and occasionally drops below 8K) because its very wide L1/L2
 already absorbs the per-block cost at 16K, after which the larger working set
-only hurts. The fleet default stays 32K (optimal for the cloud targets,
-including Graviton); a runtime gate that drops Apple silicon to 16K is a
-planned follow-up.
+only hurts. So the default is gated: **macOS/arm64 → 16K, everything else →
+32K** (the cloud targets, including Graviton, want 32K).
+
+The gate is compile-time (`#if defined(__APPLE__) && defined(__aarch64__)` in
+`include/pivco_huffman.h`). That is exact, not a heuristic: a macOS arm64
+binary only ever runs on Apple Silicon, and a macOS binary's ISA is fixed at
+build time — so there is nothing a runtime probe could learn that the build
+doesn't already know. (CPU-ID asm doesn't help either: `MIDR_EL1` is EL1-only
+and faults at userspace on macOS; `sysctl hw.optional.arm64` is the only
+supported probe, and it still has to be `#ifdef __APPLE__`-guarded, collapsing
+back to the compile-time check.)
+
+Caveats / future work:
+
+- Only **M4** was measured; M1–M3 are assumed to share the wide-L1 behaviour
+  and inherit the 16K default.
+- The *real* cause is cache size, not vendor. A principled **runtime gate
+  keyed on L1/L2 size** (`sysctl hw.l1dcachesize` on macOS,
+  `sysconf(_SC_LEVEL1_DCACHE_SIZE)` / sysfs on Linux) would generalise — e.g.
+  a future wide-L1 Graviton could also opt into 16K — and could supersede the
+  `__APPLE__` gate.
+- An explicit `-DPIVCO_BLOCK_SIZE=N` overrides the gate entirely.

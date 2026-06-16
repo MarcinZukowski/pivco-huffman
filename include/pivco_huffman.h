@@ -20,10 +20,22 @@ extern "C" {
 #ifndef PIVCO_BLOCK_SIZE
 /* 32K is the cross-arch sweet spot measured across the full fleet (12 EC2
  * parts + M4): every uarch peaks at or near 32K, and the fast modern AVX-512
- * parts regress past it (cache cliff).  See docs/BLOCK_SIZE.md.  Apple
- * M-series specifically prefers 16K (32K regresses its text dists) — a
- * runtime gate for that is a planned follow-up; the default stays 32K. */
+ * parts regress past it (cache cliff).  See docs/BLOCK_SIZE.md.
+ *
+ * Apple M-series is the exception: 32K regresses its text dists (its wide
+ * L1/L2 already absorbs the per-block cost at 16K, after which the larger
+ * working set only hurts), so it defaults to 16K.  Gated compile-time on
+ * macOS/arm64 — a macOS arm64 binary is always Apple Silicon, and a macOS
+ * binary's ISA is fixed at build time, so the gate is exact.  An explicit
+ * -DPIVCO_BLOCK_SIZE still wins (this whole block is #ifndef-guarded).
+ * Only M4 was measured; M1–M3 are assumed to share the wide-L1 behaviour.
+ * A principled runtime gate keyed on cache size (which is the real cause)
+ * could supersede this later. */
+#if defined(__APPLE__) && defined(__aarch64__)
+#define PIVCO_BLOCK_SIZE 16384
+#else
 #define PIVCO_BLOCK_SIZE 32768
+#endif
 #endif
 
 /* Hard upper bound on a block's symbol count: the per-block wire header
