@@ -101,6 +101,10 @@ if(TARGET_ARCH STREQUAL "arm64" OR TARGET_ARCH STREQUAL "aarch64")
     # NEON merge_vec_vec variant microbench (prefix-sum cursor decoupling;
     # old / com64 / com128 / Jeff's PR#4 variants).  Self-contained.
     add_executable(pivco_bench_merge_neon bench_merge_neon.c)
+
+    # NEON encode-partition variant microbench (the same prefix-sum idea on
+    # the encode side; old / com / com_v2(transpose) / com_v3(vpaddq mask)).
+    add_executable(pivco_bench_partition_neon bench_partition_neon.c)
 endif()
 
 # Partition u8 vs u16 microbench: works on any tier (each ISA is

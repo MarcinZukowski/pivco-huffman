@@ -743,6 +743,35 @@ static inline uint8_t enc_mask8_codes_la_neon(uint16x8_t code_vec,
     return (uint8_t)vaddvq_u16(weighted);
 }
 
+/* enc_masks8x8_codes_la_neon — build the partition masks for EIGHT 8-code
+ * chunks at once, packed LE into a u64 (byte k = mask of chunk k).
+ *
+ * Per chunk: vtstq_u16(code, 1<<shift_d) -> 0x0000/0xFFFF per lane, AND with
+ * the {1,2,4,..,128} bit-weights.  Then a vpaddq_u16 tree (4+2+1 = 7 ops)
+ * reduces the 8 weighted vectors to one uint16x8 whose lane k is mask_k --
+ * replacing 8 lane-crossing vaddvq reductions + 8 SIMD->GPR moves with 7
+ * vpaddq + 1 vmovn + 1 fmov.  Big win on Graviton's narrow pipes (the
+ * 8 addv were the bottleneck), neutral on Apple.  See the ARM "porting
+ * x86 movemask to NEON" pairwise-reduction technique.  shift_d = 15-depth. */
+static inline uint64_t enc_masks8x8_codes_la_neon(
+        uint16x8_t c0, uint16x8_t c1, uint16x8_t c2, uint16x8_t c3,
+        uint16x8_t c4, uint16x8_t c5, uint16x8_t c6, uint16x8_t c7,
+        int shift_d)
+{
+    uint16x8_t bit = vdupq_n_u16((uint16_t)(1u << shift_d));
+    static const uint16_t powers_arr[8] = {1,2,4,8,16,32,64,128};
+    uint16x8_t pw = vld1q_u16(powers_arr);
+    uint16x8_t w0=vandq_u16(vtstq_u16(c0,bit),pw), w1=vandq_u16(vtstq_u16(c1,bit),pw),
+               w2=vandq_u16(vtstq_u16(c2,bit),pw), w3=vandq_u16(vtstq_u16(c3,bit),pw),
+               w4=vandq_u16(vtstq_u16(c4,bit),pw), w5=vandq_u16(vtstq_u16(c5,bit),pw),
+               w6=vandq_u16(vtstq_u16(c6,bit),pw), w7=vandq_u16(vtstq_u16(c7,bit),pw);
+    uint16x8_t p01=vpaddq_u16(w0,w1), p23=vpaddq_u16(w2,w3),
+               p45=vpaddq_u16(w4,w5), p67=vpaddq_u16(w6,w7);
+    uint16x8_t q0=vpaddq_u16(p01,p23), q1=vpaddq_u16(p45,p67);
+    uint16x8_t r=vpaddq_u16(q0,q1);   /* lane k = mask_k */
+    return vget_lane_u64(vreinterpret_u64_u8(vmovn_u16(r)), 0);
+}
+
 /* part_core_neon — the single shared partition loop.  Parameterized by
  * compile-time-constant flags so each always-inline wrapper folds to a
  * specialized branch-free loop with no dead stores:
@@ -766,6 +795,48 @@ static inline int build_bitmap_partition_full_neon(uint16_t *codes_la, int n,
 {
     int n_left = 0, n_right = 0, j = 0;
     int neg_shift_d = -(15 - depth);
+
+    /* V5 wide path: 64 codes/iter, 8 independent chunks.  Mirrors the
+     * COM64 merge idea on the encode side (Jeff Plaisance).  Load all 8
+     * code_vecs first so the in-place left compaction has no read-after-
+     * write hazard, build all 8 bitmap bytes (one 8-byte store instead of
+     * eight 1-byte stores), then a vcnt + 0x0101.. prefix sum precomputes
+     * every chunk's left/right scatter cursor -- so the 8 compact+scatter
+     * chunks are independent (no serial n_left/n_right add chain) and the
+     * 8 compress_popcnt[mask] loads are replaced by one vcnt.
+     * The 8-code loop below handles the n mod 64 residual. */
+    for (; j + 64 <= n; j += 64) {
+        uint16x8_t cv0=vld1q_u16(codes_la+j),    cv1=vld1q_u16(codes_la+j+8),
+                   cv2=vld1q_u16(codes_la+j+16), cv3=vld1q_u16(codes_la+j+24),
+                   cv4=vld1q_u16(codes_la+j+32), cv5=vld1q_u16(codes_la+j+40),
+                   cv6=vld1q_u16(codes_la+j+48), cv7=vld1q_u16(codes_la+j+56);
+        uint64_t mask_word = enc_masks8x8_codes_la_neon(
+            cv0,cv1,cv2,cv3,cv4,cv5,cv6,cv7, 15 - depth);
+        uint8_t m0=(uint8_t)mask_word,        m1=(uint8_t)(mask_word>>8),
+                m2=(uint8_t)(mask_word>>16),  m3=(uint8_t)(mask_word>>24),
+                m4=(uint8_t)(mask_word>>32),  m5=(uint8_t)(mask_word>>40),
+                m6=(uint8_t)(mask_word>>48),  m7=(uint8_t)(mask_word>>56);
+        memcpy(bm + (j >> 3), &mask_word, 8);
+        uint8x8_t pc_v = vcnt_u8(vcreate_u8(mask_word));
+        uint64_t pc_word = vget_lane_u64(vreinterpret_u64_u8(pc_v), 0);
+        uint64_t pfx = pc_word * 0x0101010101010101ULL;
+#define _V5_PART(K_, CV, M) do {                                              \
+        uint32_t cr = (K_)==0 ? 0u : (uint32_t)((pfx >> (8*((K_)-1))) & 0xFF); \
+        uint32_t cl = 8u*(K_) - cr;                                           \
+        const uint8_t *tab = compress_tab[(M)];                               \
+        uint8x16_t data  = vreinterpretq_u8_u16(CV);                          \
+        uint8x16_t right = vqtbl1q_u8(data, vld1q_u8(tab));                    \
+        uint8x16_t left  = vqtbl1q_u8(data, vld1q_u8(tab + 16));               \
+        vst1q_u8((uint8_t *)(right_out + n_right + cr), right);               \
+        vst1q_u8((uint8_t *)(codes_la  + n_left  + cl), left);                \
+    } while (0)
+        _V5_PART(0,cv0,m0); _V5_PART(1,cv1,m1); _V5_PART(2,cv2,m2); _V5_PART(3,cv3,m3);
+        _V5_PART(4,cv4,m4); _V5_PART(5,cv5,m5); _V5_PART(6,cv6,m6); _V5_PART(7,cv7,m7);
+#undef _V5_PART
+        uint32_t total_r = (uint32_t)(pfx >> 56);
+        n_right += total_r; n_left += 64 - total_r;
+    }
+
     for (; j + 8 <= n; j += 8) {
         uint16x8_t code_vec = vld1q_u16(codes_la + j);
         uint8_t mask = enc_mask8_codes_la_neon(code_vec, neg_shift_d);
