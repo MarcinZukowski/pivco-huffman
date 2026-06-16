@@ -18,8 +18,7 @@
 - [LSB-first canonical codes](#lsb-first-canonical-codes-2026-05-12)
 
 **NEON**
-- [NEON flat_dN_unpack (D=3/5/6) single vld + overread guarantee](#neon-flat_dn_unpack-d356-single-vld--overread-guarantee)
-- [Graviton4 (Neoverse V2) flat-unpack weakness](#graviton4-neoverse-v2-flat-unpack-weakness-2026-05-26)
+(no open entries)
 
 **SSE/AVX2**
 - [SSE/AVX2 enc_node_full gap vs huf0 on text](#sseavx2-enc_node_full-gap-vs-huf0-on-text-2026-05-12-partial)
@@ -27,8 +26,6 @@
 
 **AVX-512**
 - [AVX-512 BW tier for Cascade Lake (c5)](#avx-512-bw-tier-for-cascade-lake-c5-2026-05-12)
-- [AVX-512 byte-scatter (vpscatterdd / vpermb)](#avx-512-byte-scatter-vpscatterdd--vpermb-2026-05-09)
-- [PDEP / vpexpandw per-position code reconstruction](#pdep--vpexpandw-per-position-code-reconstruction-2026-05-10)
 
 **Other ISA**
 - [RISC-V RVV 1.0 backend](#risc-v-rvv-10-backend-speculative)
@@ -54,6 +51,8 @@
 - [NEON bu_tree_merge 16B loads + precomputed (nr0,m1) shuf](#neon-bu_tree_merge-16b-loads--precomputed-nr0m1-shuf-2026-05-11)
 - [Graviton4 NEON D=5/6 unpack store-forward stall fix](#graviton4-neon-d56-unpack-store-forward-stall-fix-2026-04-27)
 - [Graviton4 NEON D=5/6 vqtbl{2,4} regression gate](#graviton4-neon-d56-vqtbl24-regression-gate-2026-04-25)
+- [NEON flat_dN_unpack single vld + overread guarantee](#neon-flat_dn_unpack-single-vld--overread-guarantee-2026-06-16)
+- [Graviton4 (Neoverse V2) flat-unpack weakness, resolved](#graviton4-neoverse-v2-flat-unpack-weakness-2026-05-26-resolved-2026-06-16)
 
 **SSE/AVX2**
 - [SSE root both-leaves vectorisation](#sse-root-both-leaves-vectorisation-2026-04-27)
@@ -105,6 +104,8 @@
 
 **AVX-512**
 - [AVX-512 root iota](#avx-512-root-iota-2026-04-27)
+- [AVX-512 byte-scatter (vpscatterdd / vpermb) (TD-only)](#avx-512-byte-scatter-vpscatterdd--vpermb-td-only-2026-05-09)
+- [PDEP / vpexpandw per-position code reconstruction (TD-only)](#pdep--vpexpandw-per-position-code-reconstruction-td-only-2026-05-10)
 
 **Other ISA**
 - [SVE 128-bit and SVE 256-bit](#sve-128-bit-and-sve-256-bit-2026-05-28)
@@ -139,14 +140,6 @@ Microbench (`bench_unpack_fl_layout.c`) shows FL-layout 2–22× faster than cur
 ### LSB-first canonical codes, 2026-05-12
 Bit-reversing canonical codes (root at bit 0) would let `code` replace `code_la` (-512 B table) but does NOT improve any hot operation: u8 subtree repack and partition kernels are symmetric.  Multi-day rewrite of every SIMD partition kernel for a marginal cleanup — not justified.  Logged so the question doesn't get re-derived.
 
-**NEON**
-
-### NEON flat_dN_unpack (D=3/5/6) single vld + overread guarantee
-Current code does 3–6 separate `vsetq_lane_u8` per iter to avoid over-reading the bitmap stream — ~5 cycles vector-pipe pressure per iter.  Fix is codec-side: guarantee 16-byte tail padding on every flat region, then single `vld1q_u8`.  Per-call drops from ~5 to ~1 vector-pipe cycle.  Needs `_fast` / `_safe` variants (last iter uses safe) and Graviton 4 validation (V2 store-forward stall was the original workaround motivator).
-
-### Graviton4 (Neoverse V2) flat-unpack weakness, 2026-05-26
-On c8g the flat-decode unpack is 3–5.5× slower than M4 for odd/high D (D3 0.143 vs 0.042 ns/elem, D7 0.236 vs 0.043).  Scatter half is fine.  Cause: NEON variable shifts + `vqtbl` cross-byte field repositioning is V2-narrow-pipe-bound; even D's (2,4 byte/nibble-aligned) lag less.  V2-tuned unpack (more immediate `ushr`/`sli`, fewer table lookups) might shave 20–40% but unlikely to reach M4 parity, and only c8g benefits.  Lower ROI than other open items.  Numbers: `results/bench_prim-allhosts-20260526-abf79af.md`.
-
 **SSE/AVX2**
 
 ### SSE/AVX2 enc_node_full gap vs huf0 on text, 2026-05-12, partial
@@ -159,12 +152,6 @@ NEON and AVX-512 D=7 BU `merge_flat_d7_*` shipped (`7e4bc44`, `dcfaecc`); SSE/AV
 
 ### AVX-512 BW tier for Cascade Lake (c5), 2026-05-12
 c5 (Xeon 8275CL) has F/BW/CD/DQ/VL but no VBMI2; today drops to AVX2 tier.  Could shim a new tier that uses vpermi2w for enc_init (BW) while keeping AVX2 partition + SSE pack.  Estimated ~10–12% wall on c5, prose_pride 691 → ~775 M/s, crosses huf0_x2 parity.  Defer unless c5 specifically becomes important.
-
-### AVX-512 byte-scatter (vpscatterdd / vpermb), 2026-05-09
-AVX-512 has no byte scatter (vpscatterdd is dword-only); current code uses per-lane `_mm_extract_epi16` + byte stores.  No obvious dword-packing trick fits scattered destinations.  Low-priority microbench probe.
-
-### PDEP / vpexpandw per-position code reconstruction, 2026-05-10
-Alternative decoder: walk Huffman tree bottom-up, build per-output-position code as contiguous uint16[N] via vpexpandw, then sequential c2s lookup with scalar stores.  Eliminates scattered byte stores.  Projection on Xeon prose_pride: **1.4× at D≤11 (huf0-compatible)** or **5× at D≤8** (small ratio cost).  AVX-512 VBMI2 only — Zen 3 / NEON have no efficient analogue (BMI2 PDEP is 12-15× faster than NEON's table emulation, per primitives microbench).  Significant format change.  Parked — existing decoder already beats huf0 by 1.0–5×, no urgent bottleneck.
 
 **Other ISA**
 
@@ -226,6 +213,16 @@ The old `memcpy(&packed, bm_ptr, 5/6) + vsetq_lane_u64` compiled to a stack roun
 
 ### Graviton4 NEON D=5/6 vqtbl{2,4} regression gate, 2026-04-25
 Build-time gate `PIVCO_NEON_FAST_MULTI_TBL` (default 1 on `__APPLE__`, 0 elsewhere) falls D=5/6 through to scalar in `flat_decode_{scatter,direct}_neon`.  Bell_s80 537 → 1105 M/s (+106%), flat_M5 1282 → 3187 (+148%), flat_M6 1194 → 2458 (+106%).  Win count on c8g: 10/19 → 13/19.  Rejected variant (`2× vqtbl1` + sub + blend): even slower than the original regressed path.  Methodology note: re-baselined on c8g.large (dedicated) before diagnosing — c8g.medium burstable had real CPU-steal variance.  Commit `cee2366`; sweep `results/20260425-0126-cee2366-graviton-d56-fix.md`.
+
+### NEON flat_dN_unpack single vld + overread guarantee, 2026-06-16
+Replaced the byte-wise `vsetq_lane_u8 × N` chain in `flat_d{3,5,6,7}_unpack` with a single 16-byte `vld1q_u8` register load.  Three-tier merge loop in callers bounds the fast region (`fast_end = n - K`) and falls through to a `_safe` byte-wise variant for the ≤8-code tail.  Same fast/safe pattern already used by the AVX-512 flat unpacks.  The original byte-wise load (`cee2366`) was the workaround for a V2 store-forward stall on the prior `memcpy + vsetq_lane_u64` form; a direct vld register load doesn't go through the stack at all.  Per-primitive isolation (perf_event_open CPU_CYCLES on G4, CLOCK_MONOTONIC ns on M4, 3-round median):
+- G4 cyc/elem: D=3 0.428→0.246 (−43%), D=5 0.367→0.246 (−33%), D=6 0.422→0.247 (−42%), D=7 0.477→0.245 (−49%).
+- M4 ns/elem: D=3 0.048→0.039 (−19%), D=5 0.048→0.039 (−19%), D=6 0.047→0.039 (−17%), D=7 0.054→0.038 (−30%).
+
+ryg multiply-as-shift (`vmulq_u16 + vshrq_n_u16`) was tested on top of the single-load form and measured neutral on both hosts (G4 cycles within ±1%, M4 ns within ±5%), so the variable-shift + mask form was kept.  Commit `d856bcc`.
+
+### Graviton4 (Neoverse V2) flat-unpack weakness, 2026-05-26, resolved 2026-06-16
+Original observation: G4 flat-decode unpack 3–5.5× slower than M4 for odd/high D (D=3 0.143 vs 0.042 ns/elem; D=7 0.236 vs 0.043).  Diagnosis ascribed it to NEON variable shifts + `vqtbl` cross-byte field repositioning being V2-narrow-pipe-bound, suggesting a V2-tuned unpack with more immediate `ushr`/`sli`.  That fix was never tried; the actual dominant cost turned out to be the byte-wise `vsetq_lane_u8 × N` load chain (originally added in `cee2366` to dodge a different V2 pathology — store-forward stall on the prior `memcpy + vsetq_lane_u64`).  Replacing that with a single `vld1q_u8` register load (`d856bcc`) brought G4 unpack to ~0.087 ns/elem uniformly across D=3/5/6/7 — D=3 −39%, D=7 −63%.  Residual gap to M4 (~0.039 ns/elem) is now ~2.2×, uniform across D, attributable to V2's narrower vector pipe width; no further uarch-specific tuning planned.
 
 **SSE/AVX2**
 
@@ -349,6 +346,12 @@ Was about adding `#pragma GCC unroll` to the scalar `for (; i < n; i++) symbols[
 
 ### AVX-512 root iota, 2026-04-27
 Replace scalar `id[k] = j+k` loop with precomputed iota-table read.  3 wins vs 3 losses at p<0.05 across 29 distributions — at the noise floor.  Patch preserved at `extras/avx512_root_iota.diff`.
+
+### AVX-512 byte-scatter (vpscatterdd / vpermb) (TD-only), 2026-05-09
+Originally a microbench probe for the top-down scatter path (`_mm_extract_epi16` + byte stores in `extras/bench/bench_fusion_v4_sse_cnt.cpp` / `extras/fusion.diff`).  AVX-512 has no byte scatter (vpscatterdd is dword-only) and no obvious dword-packing trick fits scattered destinations.  Moot: production BU writes contiguously (`code_to_sym[code]` lookups stored sequentially), so the byte-scatter primitive is not on any production path.  Not pursuing.
+
+### PDEP / vpexpandw per-position code reconstruction (TD-only), 2026-05-10
+Proposed an alternative decoder: build per-output-position code as contiguous uint16[N] via vpexpandw, then sequential c2s lookup with scalar stores.  Stated motivation: "eliminates scattered byte stores", projected 1.4× at D≤11 / 5× at D≤8 on Xeon prose_pride.  The projection was against the old top-down decoder's `_mm_extract_epi16` scattered stores, which were retired when TD went away.  Production BU already writes contiguously, so the original motivation is moot, and re-justifying vs current BU (which already beats huf0 1.0–5×) would require a fresh projection that nobody has done.  AVX-512 VBMI2-only, significant format change.  Not pursuing without new evidence.
 
 **Other ISA**
 
