@@ -30,6 +30,18 @@
 #include <time.h>
 #include <math.h>
 
+/* Optional cycle-counter timer (Linux only; falls back to wall-clock
+ * on hosts without perf_event_open).  Enable with `--timer=cyc`.  The
+ * BEST_MBPS macro then computes "MB/Gcyc" instead of MB/s — useful for
+ * frequency-stable A/B regardless of turbo / DVFS. */
+#if defined(__linux__)
+#  include <errno.h>
+#  include <unistd.h>
+#  include <linux/perf_event.h>
+#  include <sys/syscall.h>
+#  include <sys/ioctl.h>
+#endif
+
 #include "pivco_huffman.h"
 #define HUF_STATIC_LINKING_ONLY
 #include "huf.h"
@@ -77,10 +89,47 @@ static size_t g_total = TOTAL;
 
 static size_t g_table_G = 128 * 1024;   /* ph table-refresh granularity */
 
-static double now_ns(void) {
+static double now_ns_wall(void) {
     struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t);
     return (double)t.tv_sec * 1e9 + (double)t.tv_nsec;
 }
+
+#if defined(__linux__)
+static int    g_perf_fd  = -1;
+static int    g_use_cyc  = 0;   /* set by --timer=cyc */
+
+static void perf_init_cyc(void) {
+    struct perf_event_attr pe; memset(&pe, 0, sizeof pe);
+    pe.type = PERF_TYPE_HARDWARE; pe.size = sizeof pe;
+    pe.config = PERF_COUNT_HW_CPU_CYCLES;
+    pe.disabled = 0;  /* count continuously; we read deltas */
+    pe.exclude_kernel = 1; pe.exclude_hv = 1;
+    g_perf_fd = (int)syscall(SYS_perf_event_open, &pe, 0, -1, -1, 0);
+    if (g_perf_fd < 0) {
+        fprintf(stderr, "perf_event_open failed (%s); falling back to wall-clock\n",
+                strerror(errno));
+        g_use_cyc = 0;
+    }
+}
+static inline double now_ticks(void) {
+    if (g_use_cyc && g_perf_fd >= 0) {
+        uint64_t v = 0;
+        if (read(g_perf_fd, &v, sizeof v) == sizeof v) return (double)v;
+    }
+    return now_ns_wall();
+}
+#else
+static inline void perf_init_cyc(void) {
+    fprintf(stderr, "--timer=cyc not supported on this OS; using wall-clock\n");
+}
+static int g_use_cyc = 0;
+static inline double now_ticks(void) { return now_ns_wall(); }
+#endif
+
+/* now_ns(): returns "ticks" — either real ns (wall-clock) or CPU
+ * cycles (when --timer=cyc).  The BEST_MBPS formula is identical
+ * in both modes; reported units are MB/s vs MB/Gcyc. */
+static inline double now_ns(void) { return now_ticks(); }
 
 /* Adaptive best-MB/s measurement: each sample times REPEATS consecutive
  * passes over the buffer; collect samples; keep going until the top two
@@ -736,10 +785,17 @@ int main(int argc, char **argv) {
         else if (!strncmp(argv[i], "--G=", 4)) g_table_G = (size_t)atoi(argv[i]+4) * 1024;
         else if (!strncmp(argv[i], "--engines=", 10)) eng_filter = argv[i] + 10;
         else if (!strncmp(argv[i], "--dist=", 7)) { dist_filter = argv[i] + 7; }
+        else if (!strcmp(argv[i], "--timer=cyc")) {
+#if defined(__linux__)
+            g_use_cyc = 1;
+#else
+            fprintf(stderr, "--timer=cyc requires Linux perf_event_open; ignoring\n");
+#endif
+        }
         else if (!strcmp(argv[i], "--list") || !strcmp(argv[i], "--help")
                  || !strcmp(argv[i], "-h")) {
             bench_init();
-            printf("usage: pivco_fair_bench [--all] [--G=KB] [--engines=a,b] [--dist=x,y]\n\n");
+            printf("usage: pivco_fair_bench [--all] [--G=KB] [--engines=a,b] [--dist=x,y] [--timer=cyc]\n\n");
             printf("engines:");
             for (int e = 0; e < N_ENGINES; e++) printf(" %s", ENGINES[e].name);
             printf("\n\ndistributions (* = in default 'main' set):\n");
@@ -753,15 +809,20 @@ int main(int argc, char **argv) {
         }
     }
     bench_init();
+#if defined(__linux__)
+    if (g_use_cyc) perf_init_cyc();
+#endif
     phtd_set_fse_enabled(0);   /* TD grid: raw bitmaps, isolate tree x prims */
     printf("fair-bench: buffer >= %d KB (real-file dists may be larger), "
            "adaptive %d-%d runs x %d reps (top-2 within %d%% stops), "
-           "ph table-G=%zu KB, BLK=%d\n",
+           "ph table-G=%zu KB, BLK=%d  timer=%s\n",
            TOTAL/1024, _BMA_MIN, _BMA_MAX, REPEATS,
-           (int)(_BMA_TOL*100), g_table_G/1024, BLK);
+           (int)(_BMA_TOL*100), g_table_G/1024, BLK,
+           g_use_cyc ? "CPU_CYCLES (units: MB/Gcyc)" : "wall ns (units: MB/s)");
     if (eng_filter)  printf("  engines: %s\n", eng_filter);
     if (dist_filter) printf("  dists:   %s\n", dist_filter);
-    printf("columns: enc(opaque prebuilt)  dec(opaque prebuilt)  MB/s | ratio(op pb) | builds/1MB\n\n");
+    printf("columns: enc(opaque prebuilt)  dec(opaque prebuilt)  %s | ratio(op pb) | builds/1MB\n\n",
+           g_use_cyc ? "MB/Gcyc" : "MB/s");
 
     uint8_t *sym = malloc(TOTAL_MAX);
     int nd = bench_num_distributions();
