@@ -23,6 +23,7 @@
 **SSE/AVX2**
 - [SSE/AVX2 enc_node_full gap vs huf0 on text](#sseavx2-enc_node_full-gap-vs-huf0-on-text-2026-05-12-partial)
 - [SSE/AVX2 D=7 flat-subtree path](#sseavx2-d7-flat-subtree-path)
+- [x86 COM merge (prefix-sum cursor decoupling)](#x86-com-merge-prefix-sum-cursor-decoupling-2026-06-16)
 
 **AVX-512**
 - [AVX-512 BW tier for Cascade Lake (c5)](#avx-512-bw-tier-for-cascade-lake-c5-2026-05-12)
@@ -147,6 +148,26 @@ Older Intel (c3/c4/c5) and Zen 3 (c6a) trailed huf0_x2 by ~25–30% on text enco
 
 ### SSE/AVX2 D=7 flat-subtree path
 NEON and AVX-512 D=7 BU `merge_flat_d7_*` shipped (`7e4bc44`, `dcfaecc`); SSE/AVX2 still has no D=7 SIMD because pshufb is only 16-wide and the 128-entry c2s doesn't fit (see comment in `pivco_huffman_primitives_x86.h:536`).  Coverage: bell_s80 0%, zipfian 11.2%, flat_M7 already 1.43× vs huf0 on the SSE host.  Expected end-to-end win <2% on zipfian.  Low marginal EV — parked.
+
+### x86 COM merge (prefix-sum cursor decoupling), 2026-06-16
+The NEON COM64 merge (`5cccccc`) decouples per-chunk cursors via a popcount
+prefix sum, breaking the `expand_tab_pre[nr0][m1]` cursor-dependent table
+load.  Tried porting the same to the x86 SSE/AVX2 merge (8 independent
+8-code pshufb chunks per 64 codes; SWAR or pshufb bytewise popcount; also
+a 128-wide and an AVX2 two-lane variant).  Bench harness lives in
+`extras/bench/bench_merge_x86.c`.  Microbench looked like a -9..-18% win,
+but **production fair_bench (SSE/AVX2 tier, clang-20) regresses on every
+Intel host (c3/c4/c5, -2..-11% dec_pb), wins only on Zen 2 (c5a), wash on
+Zen 3 (c6a)**; the microbench is also compiler-fragile (gcc vs clang flip
+the Intel sign).  Root cause: unlike NEON, the x86 baseline merge has no
+cursor-dependent table load — it's flat pshufb + 1-cycle cursor adds — so
+COM only adds code + a prefix-sum dependency the older Intel frontends
+don't absorb.  vpexpandb (VBMI2 hosts) is ~3× faster than any COM form, so
+those hosts are unaffected regardless.  The production merge logic is the
+standalone `sse_com*` functions in the bench (drop-in for the three
+`merge_*_x86` main loops).  Open: a vendor-gated `sse_com128` for the AMD
+non-VBMI2 tier (Zen 2/3) is the only angle that might pay off; needs a
+production A/B on c5a/c6a before it's worth a dispatch split.
 
 **AVX-512**
 

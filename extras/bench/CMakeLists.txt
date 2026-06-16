@@ -248,6 +248,16 @@ endif()
 
 # -------- Counter-instrumented x86 microbenches --------
 if(TARGET_ARCH STREQUAL "x86_64" OR TARGET_ARCH STREQUAL "amd64")
+    # x86 merge_vec_vec COM exploration (prefix-sum cursor decoupling;
+    # NEON-specific win that doesn't transfer -- see IDEAS.md).  Self-
+    # contained; needs AVX2, plus VBMI2 for the vpexpandb reference variant.
+    add_executable(pivco_bench_merge_x86 bench_merge_x86.c)
+    target_compile_options(pivco_bench_merge_x86 PRIVATE -mavx2)
+    if(COMPILER_HAS_AVX512_VBMI2)
+        target_compile_options(pivco_bench_merge_x86 PRIVATE
+            -mavx512vbmi2 -mavx512bw)
+    endif()
+
     add_executable(pivco_micro_sse_cnt bench_micro_sse_cnt.cpp)
     target_link_libraries(pivco_micro_sse_cnt pivco_huffman counters::counters m)
     target_include_directories(pivco_micro_sse_cnt PRIVATE ${CMAKE_SOURCE_DIR}/src)
