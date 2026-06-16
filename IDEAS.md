@@ -23,7 +23,7 @@
 **SSE/AVX2**
 - [SSE/AVX2 enc_node_full gap vs huf0 on text](#sseavx2-enc_node_full-gap-vs-huf0-on-text-2026-05-12-partial)
 - [SSE/AVX2 D=7 flat-subtree path](#sseavx2-d7-flat-subtree-path)
-- [x86 COM merge (prefix-sum cursor decoupling)](#x86-com-merge-prefix-sum-cursor-decoupling-2026-06-16)
+- [x86 COM merge + partition (prefix-sum cursor decoupling)](#x86-com-merge--partition-prefix-sum-cursor-decoupling-2026-06-16)
 
 **AVX-512**
 - [AVX-512 BW tier for Cascade Lake (c5)](#avx-512-bw-tier-for-cascade-lake-c5-2026-05-12)
@@ -149,7 +149,7 @@ Older Intel (c3/c4/c5) and Zen 3 (c6a) trailed huf0_x2 by ~25–30% on text enco
 ### SSE/AVX2 D=7 flat-subtree path
 NEON and AVX-512 D=7 BU `merge_flat_d7_*` shipped (`7e4bc44`, `dcfaecc`); SSE/AVX2 still has no D=7 SIMD because pshufb is only 16-wide and the 128-entry c2s doesn't fit (see comment in `pivco_huffman_primitives_x86.h:536`).  Coverage: bell_s80 0%, zipfian 11.2%, flat_M7 already 1.43× vs huf0 on the SSE host.  Expected end-to-end win <2% on zipfian.  Low marginal EV — parked.
 
-### x86 COM merge (prefix-sum cursor decoupling), 2026-06-16
+### x86 COM merge + partition (prefix-sum cursor decoupling), 2026-06-16
 The NEON COM64 merge (`5cccccc`) decouples per-chunk cursors via a popcount
 prefix sum, breaking the `expand_tab_pre[nr0][m1]` cursor-dependent table
 load.  Tried porting the same to the x86 SSE/AVX2 merge (8 independent
@@ -168,6 +168,18 @@ standalone `sse_com*` functions in the bench (drop-in for the three
 `merge_*_x86` main loops).  Open: a vendor-gated `sse_com128` for the AMD
 non-VBMI2 tier (Zen 2/3) is the only angle that might pay off; needs a
 production A/B on c5a/c6a before it's worth a dispatch split.
+
+The same COM transform was also tried on the x86 **encode partition**
+(the encode-side mirror; it DID win on NEON, `6ddd75d`/`f151ce7`).  Same
+result as the merge: AMD wins, Intel regresses — and here the Intel
+regression shows already in the microbench (`extras/bench/bench_partition_
+x86.c`, clang-20, ns/elem partition cost): c6a (Zen3) 0.207->0.197 (-5%),
+c5a (Zen2) 0.244->0.212 (-13%), but c4 (Haswell) +17%, c5 (Cascade) +18%,
+c3 (Ivy) +11%.  Root cause is the same: on x86 the partition movemask is
+already a single cheap pmovmskb (no addv to remove — NEON's biggest
+lever), so COM only offers bm-store-batching + popcnt-load-elimination +
+cursor-decouple, which Intel's frontend can't absorb on the wider 8-chunk
+body.  Not shipped; same AMD-gated-retry caveat as merge.
 
 **AVX-512**
 

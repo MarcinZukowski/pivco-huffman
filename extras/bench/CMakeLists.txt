@@ -262,6 +262,11 @@ if(TARGET_ARCH STREQUAL "x86_64" OR TARGET_ARCH STREQUAL "amd64")
             -mavx512vbmi2 -mavx512bw)
     endif()
 
+    # x86 encode-partition COM exploration (same prefix-sum idea; AMD wins,
+    # Intel regresses -- NEON-specific, see IDEAS.md).  Self-contained.
+    add_executable(pivco_bench_partition_x86 bench_partition_x86.c)
+    target_compile_options(pivco_bench_partition_x86 PRIVATE -mavx2)
+
     add_executable(pivco_micro_sse_cnt bench_micro_sse_cnt.cpp)
     target_link_libraries(pivco_micro_sse_cnt pivco_huffman counters::counters m)
     target_include_directories(pivco_micro_sse_cnt PRIVATE ${CMAKE_SOURCE_DIR}/src)
