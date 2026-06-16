@@ -22,6 +22,7 @@
 #include "pivco_huffman_common.h"
 #include "pivco_huffman_neon_tables.h"   /* expand_tab*, compress_tab* */
 #include "pivco_huffman_neon_flat.h"     /* flat_d{2,3,4,5,6}_unpack */
+#include "pivco_huffman_neon_pack.h"     /* pack_d{5,6,7}_neon (ryg pack) */
 #include "pivco_prof.h"
 
 #include <arm_neon.h>
@@ -801,64 +802,8 @@ static inline int pack_d4_neon(uint8_t *out, const uint16_t *codes_la,
     return i;
 }
 
-/* D=5: 8 codes -> 5 bytes.  uint64 (max shift 7*5=35). */
-static inline int pack_d5_neon(uint8_t *out, const uint16_t *codes_la,
-                                 int n, int right_shift)
-{
-    static const int32_t sh4[4] = {0, 5, 10, 15};
-    int i = 0;
-    for (; i + 8 <= n; i += 8) {
-        uint16x8_t v = vandq_u16(vshlq_u16(vld1q_u16(codes_la + i),
-                                            vdupq_n_s16((int16_t)-right_shift)),
-                                  vdupq_n_u16(0x1F));
-        uint32x4_t lo = vshlq_u32(vmovl_u16(vget_low_u16 (v)), vld1q_s32(sh4));
-        uint32x4_t hi = vshlq_u32(vmovl_u16(vget_high_u16(v)), vld1q_s32(sh4));
-        uint64_t packed = (uint64_t)vaddvq_u32(lo)
-                        | ((uint64_t)vaddvq_u32(hi) << 20);
-        memcpy(out + i * 5 / 8, &packed, 5);   /* exact 5 bytes */
-    }
-    return i;
-}
-
-/* D=6: 8 codes -> 6 bytes.  uint64 (max shift 7*6=42). */
-static inline int pack_d6_neon(uint8_t *out, const uint16_t *codes_la,
-                                 int n, int right_shift)
-{
-    static const int32_t sh4[4] = {0, 6, 12, 18};
-    int i = 0;
-    for (; i + 8 <= n; i += 8) {
-        uint16x8_t v = vandq_u16(vshlq_u16(vld1q_u16(codes_la + i),
-                                            vdupq_n_s16((int16_t)-right_shift)),
-                                  vdupq_n_u16(0x3F));
-        uint32x4_t lo = vshlq_u32(vmovl_u16(vget_low_u16 (v)), vld1q_s32(sh4));
-        uint32x4_t hi = vshlq_u32(vmovl_u16(vget_high_u16(v)), vld1q_s32(sh4));
-        uint64_t packed = (uint64_t)vaddvq_u32(lo)
-                        | ((uint64_t)vaddvq_u32(hi) << 24);
-        memcpy(out + i * 6 / 8, &packed, 6);   /* exact 6 bytes */
-    }
-    return i;
-}
-
-/* D=7: 8 codes -> 7 bytes.  Pack each half of 4 codes in uint32 lanes
- * (4*7=28 bits < 32), horizontal-add to a scalar, then combine the two
- * 28-bit halves in a uint64.  Avoids the uint16->uint64 widen chain. */
-static inline int pack_d7_neon(uint8_t *out, const uint16_t *codes_la,
-                                 int n, int right_shift)
-{
-    static const int32_t sh4[4] = {0, 7, 14, 21};
-    int i = 0;
-    for (; i + 8 <= n; i += 8) {
-        uint16x8_t v = vandq_u16(vshlq_u16(vld1q_u16(codes_la + i),
-                                            vdupq_n_s16((int16_t)-right_shift)),
-                                  vdupq_n_u16(0x7F));
-        uint32x4_t lo = vshlq_u32(vmovl_u16(vget_low_u16 (v)), vld1q_s32(sh4));
-        uint32x4_t hi = vshlq_u32(vmovl_u16(vget_high_u16(v)), vld1q_s32(sh4));
-        uint64_t packed = (uint64_t)vaddvq_u32(lo)
-                        | ((uint64_t)vaddvq_u32(hi) << 28);
-        memcpy(out + i * 7 / 8, &packed, 7);   /* exact 7 bytes */
-    }
-    return i;
-}
+/* D=5/6/7 pack moved to pivco_huffman_neon_pack.h (ryg multiply-as-shift,
+ * 16 codes/iter via byte-laid intermediate). */
 
 /* D=8: 16 codes -> 16 bytes.  Byte-aligned; one shift+AND pass. */
 static inline int pack_d8_neon(uint8_t *out, const uint16_t *codes_la,
