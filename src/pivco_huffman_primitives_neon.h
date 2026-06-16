@@ -340,15 +340,21 @@ static inline void merge_flat_d3_neon(uint8_t *symbols, int n,
 {
     uint8x16_t c2s_vec = vld1q_u8(c2s);
     int i = 0;
-    for (; i + 16 <= n; i += 16) {
-        uint8x8_t codes_lo = flat_d3_unpack(bm + ((i      * 3) >> 3));
-        uint8x8_t codes_hi = flat_d3_unpack(bm + (((i + 8) * 3) >> 3));
+    int fast_end = n >= 16 ? n - 16 : 0;
+    for (; i + 16 <= fast_end; i += 16) {
+        uint8x8_t codes_lo = flat_d3_unpack_fast(bm + ((i      * 3) >> 3));
+        uint8x8_t codes_hi = flat_d3_unpack_fast(bm + (((i + 8) * 3) >> 3));
         uint8x16_t codes = vcombine_u8(codes_lo, codes_hi);
         uint8x16_t syms  = vqtbl1q_u8(c2s_vec, codes);
         vst1q_u8(symbols + i, syms);
     }
+    for (; i + 8 <= fast_end; i += 8) {
+        uint8x8_t codes = flat_d3_unpack_fast(bm + ((i * 3) >> 3));
+        uint8x8_t syms  = vqtbl1_u8(c2s_vec, codes);
+        vst1_u8(symbols + i, syms);
+    }
     for (; i + 8 <= n; i += 8) {
-        uint8x8_t codes = flat_d3_unpack(bm + ((i * 3) >> 3));
+        uint8x8_t codes = flat_d3_unpack_safe(bm + ((i * 3) >> 3));
         uint8x8_t syms  = vqtbl1_u8(c2s_vec, codes);
         vst1_u8(symbols + i, syms);
     }
@@ -394,15 +400,21 @@ static inline void merge_flat_d5_neon(uint8_t *symbols, int n,
     c2s_vec.val[0] = vld1q_u8(c2s);
     c2s_vec.val[1] = vld1q_u8(c2s + 16);
     int i = 0;
-    for (; i + 16 <= n; i += 16) {
-        uint8x8_t codes_lo = flat_d5_unpack(bm + ((i      * 5) >> 3));
-        uint8x8_t codes_hi = flat_d5_unpack(bm + (((i + 8) * 5) >> 3));
+    int fast_end = n >= 24 ? n - 24 : 0;
+    for (; i + 16 <= fast_end; i += 16) {
+        uint8x8_t codes_lo = flat_d5_unpack_fast(bm + ((i      * 5) >> 3));
+        uint8x8_t codes_hi = flat_d5_unpack_fast(bm + (((i + 8) * 5) >> 3));
         uint8x16_t codes = vcombine_u8(codes_lo, codes_hi);
         uint8x16_t syms  = vqtbl2q_u8(c2s_vec, codes);
         vst1q_u8(symbols + i, syms);
     }
+    for (; i + 8 <= fast_end; i += 8) {
+        uint8x8_t codes = flat_d5_unpack_fast(bm + ((i * 5) >> 3));
+        uint8x8_t syms  = vqtbl2_u8(c2s_vec, codes);
+        vst1_u8(symbols + i, syms);
+    }
     for (; i + 8 <= n; i += 8) {
-        uint8x8_t codes = flat_d5_unpack(bm + ((i * 5) >> 3));
+        uint8x8_t codes = flat_d5_unpack_safe(bm + ((i * 5) >> 3));
         uint8x8_t syms  = vqtbl2_u8(c2s_vec, codes);
         vst1_u8(symbols + i, syms);
     }
@@ -423,15 +435,21 @@ static inline void merge_flat_d6_neon(uint8_t *symbols, int n,
     c2s_vec.val[2] = vld1q_u8(c2s + 32);
     c2s_vec.val[3] = vld1q_u8(c2s + 48);
     int i = 0;
-    for (; i + 16 <= n; i += 16) {
-        uint8x8_t codes_lo = flat_d6_unpack(bm + ((i      * 6) >> 3));
-        uint8x8_t codes_hi = flat_d6_unpack(bm + (((i + 8) * 6) >> 3));
+    int fast_end = n >= 24 ? n - 24 : 0;
+    for (; i + 16 <= fast_end; i += 16) {
+        uint8x8_t codes_lo = flat_d6_unpack_fast(bm + ((i      * 6) >> 3));
+        uint8x8_t codes_hi = flat_d6_unpack_fast(bm + (((i + 8) * 6) >> 3));
         uint8x16_t codes = vcombine_u8(codes_lo, codes_hi);
         uint8x16_t syms  = vqtbl4q_u8(c2s_vec, codes);
         vst1q_u8(symbols + i, syms);
     }
+    for (; i + 8 <= fast_end; i += 8) {
+        uint8x8_t codes = flat_d6_unpack_fast(bm + ((i * 6) >> 3));
+        uint8x8_t syms  = vqtbl4_u8(c2s_vec, codes);
+        vst1_u8(symbols + i, syms);
+    }
     for (; i + 8 <= n; i += 8) {
-        uint8x8_t codes = flat_d6_unpack(bm + ((i * 6) >> 3));
+        uint8x8_t codes = flat_d6_unpack_safe(bm + ((i * 6) >> 3));
         uint8x8_t syms  = vqtbl4_u8(c2s_vec, codes);
         vst1_u8(symbols + i, syms);
     }
@@ -456,16 +474,23 @@ static inline void merge_flat_d7_neon(uint8_t *symbols, int n,
     uint8x16_t sub64q = vdupq_n_u8(64);
     uint8x8_t  sub64  = vdup_n_u8(64);
     int i = 0;
-    for (; i + 16 <= n; i += 16) {
-        uint8x8_t cl = flat_d7_unpack(bm + ((i      * 7) >> 3));
-        uint8x8_t ch = flat_d7_unpack(bm + (((i + 8) * 7) >> 3));
+    int fast_end = n >= 24 ? n - 24 : 0;
+    for (; i + 16 <= fast_end; i += 16) {
+        uint8x8_t cl = flat_d7_unpack_fast(bm + ((i      * 7) >> 3));
+        uint8x8_t ch = flat_d7_unpack_fast(bm + (((i + 8) * 7) >> 3));
         uint8x16_t codes = vcombine_u8(cl, ch);
         uint8x16_t s = vqtbl4q_u8(lo, codes);
         s = vqtbx4q_u8(s, hi, vsubq_u8(codes, sub64q));
         vst1q_u8(symbols + i, s);
     }
+    for (; i + 8 <= fast_end; i += 8) {
+        uint8x8_t codes = flat_d7_unpack_fast(bm + ((i * 7) >> 3));
+        uint8x8_t s = vqtbl4_u8(lo, codes);
+        s = vqtbx4_u8(s, hi, vsub_u8(codes, sub64));
+        vst1_u8(symbols + i, s);
+    }
     for (; i + 8 <= n; i += 8) {
-        uint8x8_t codes = flat_d7_unpack(bm + ((i * 7) >> 3));
+        uint8x8_t codes = flat_d7_unpack_safe(bm + ((i * 7) >> 3));
         uint8x8_t s = vqtbl4_u8(lo, codes);
         s = vqtbx4_u8(s, hi, vsub_u8(codes, sub64));
         vst1_u8(symbols + i, s);

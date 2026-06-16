@@ -60,16 +60,35 @@ static const int16_t flat_d3_shift_tab[8] = {
     0, -3, -6, -9, -12, -7, -10, -13
 };
 
-/* Unpack 8 consecutive D=3 codes from 3 bytes starting at bm_ptr into
- * the low 8 lanes of a uint8x8 vector (values 0..7). */
-static inline uint8x8_t flat_d3_unpack(const uint8_t *bm_ptr)
+/* D=3 _safe: byte-wise vsetq_lane_u8 loads, exact 3-byte read.  Use for
+ * the final iteration where the bm region may end within the next
+ * 16 bytes after bm_ptr.  Same shuf+shift as _fast. */
+static inline uint8x8_t flat_d3_unpack_safe(const uint8_t *bm_ptr)
 {
-    /* Load 3 bytes byte-by-byte into a vector with top bytes zero.
-     * Avoid a 4-byte read so we don't run past the end of the stream. */
     uint8x16_t bm_lo = vdupq_n_u8(0);
     bm_lo = vsetq_lane_u8(bm_ptr[0], bm_lo, 0);
     bm_lo = vsetq_lane_u8(bm_ptr[1], bm_lo, 1);
     bm_lo = vsetq_lane_u8(bm_ptr[2], bm_lo, 2);
+    uint8x16_t shuffled = vqtbl1q_u8(bm_lo, vld1q_u8(flat_d3_shuf_tab));
+    uint16x8_t w = vreinterpretq_u16_u8(shuffled);
+    uint16x8_t shifted = vshlq_u16(w, vld1q_s16(flat_d3_shift_tab));
+    uint16x8_t masked = vandq_u16(shifted, vdupq_n_u16(0x07));
+    return vmovn_u16(masked);
+}
+
+/* D=3 _fast: single 16-byte vector load.  Reads 13 bytes past the valid
+ * 3-byte region — caller (merge_flat_dN_neon) bounds the loop so this
+ * overread stays within the bm scratch region.  Same pattern as the
+ * AVX-512 flat_d3_unpack_avx512_fast and x86 flat_d3_unpack_x86.
+ *
+ * The original byte-wise vsetq_lane_u8 chain was the v0.2 workaround
+ * for a Neoverse-V2 store-forward stall on the previous
+ * `memcpy(&packed, 5/6) + vsetq_lane_u64` form (which routed via the
+ * stack).  A direct vld1q_u8 doesn't go through the stack at all and
+ * doesn't reintroduce that pathology. */
+static inline uint8x8_t flat_d3_unpack_fast(const uint8_t *bm_ptr)
+{
+    uint8x16_t bm_lo = vld1q_u8(bm_ptr);
     uint8x16_t shuffled = vqtbl1q_u8(bm_lo, vld1q_u8(flat_d3_shuf_tab));
     uint16x8_t w = vreinterpretq_u16_u8(shuffled);
     uint16x8_t shifted = vshlq_u16(w, vld1q_s16(flat_d3_shift_tab));
@@ -122,7 +141,7 @@ static const int16_t flat_d5_shift_tab[8] = {
  * (Graviton 4) the int-store -> vector-load forward stalls hard,
  * costing ~20x throughput vs the byte-wise pattern.  M4 absorbs the
  * stall, so the old form looked fine there. */
-static inline uint8x8_t flat_d5_unpack(const uint8_t *bm_ptr)
+static inline uint8x8_t flat_d5_unpack_safe(const uint8_t *bm_ptr)
 {
     uint8x16_t bm_lo = vdupq_n_u8(0);
     bm_lo = vsetq_lane_u8(bm_ptr[0], bm_lo, 0);
@@ -130,6 +149,17 @@ static inline uint8x8_t flat_d5_unpack(const uint8_t *bm_ptr)
     bm_lo = vsetq_lane_u8(bm_ptr[2], bm_lo, 2);
     bm_lo = vsetq_lane_u8(bm_ptr[3], bm_lo, 3);
     bm_lo = vsetq_lane_u8(bm_ptr[4], bm_lo, 4);
+    uint8x16_t shuffled = vqtbl1q_u8(bm_lo, vld1q_u8(flat_d5_shuf_tab));
+    uint16x8_t w = vreinterpretq_u16_u8(shuffled);
+    uint16x8_t shifted = vshlq_u16(w, vld1q_s16(flat_d5_shift_tab));
+    uint16x8_t masked = vandq_u16(shifted, vdupq_n_u16(0x1F));
+    return vmovn_u16(masked);
+}
+
+/* D=5 _fast: single 16-byte vector load (overreads 11 bytes). */
+static inline uint8x8_t flat_d5_unpack_fast(const uint8_t *bm_ptr)
+{
+    uint8x16_t bm_lo = vld1q_u8(bm_ptr);
     uint8x16_t shuffled = vqtbl1q_u8(bm_lo, vld1q_u8(flat_d5_shuf_tab));
     uint16x8_t w = vreinterpretq_u16_u8(shuffled);
     uint16x8_t shifted = vshlq_u16(w, vld1q_s16(flat_d5_shift_tab));
@@ -154,7 +184,7 @@ static const int16_t flat_d6_shift_tab[8] = {
 /* Unpack 8 consecutive D=6 codes from 6 bytes starting at bm_ptr.
  * Same byte-wise vector-lane load as flat_d5_unpack — see that
  * function's comment for the Neoverse-V2 store-forward rationale. */
-static inline uint8x8_t flat_d6_unpack(const uint8_t *bm_ptr)
+static inline uint8x8_t flat_d6_unpack_safe(const uint8_t *bm_ptr)
 {
     uint8x16_t bm_lo = vdupq_n_u8(0);
     bm_lo = vsetq_lane_u8(bm_ptr[0], bm_lo, 0);
@@ -163,6 +193,17 @@ static inline uint8x8_t flat_d6_unpack(const uint8_t *bm_ptr)
     bm_lo = vsetq_lane_u8(bm_ptr[3], bm_lo, 3);
     bm_lo = vsetq_lane_u8(bm_ptr[4], bm_lo, 4);
     bm_lo = vsetq_lane_u8(bm_ptr[5], bm_lo, 5);
+    uint8x16_t shuffled = vqtbl1q_u8(bm_lo, vld1q_u8(flat_d6_shuf_tab));
+    uint16x8_t w = vreinterpretq_u16_u8(shuffled);
+    uint16x8_t shifted = vshlq_u16(w, vld1q_s16(flat_d6_shift_tab));
+    uint16x8_t masked = vandq_u16(shifted, vdupq_n_u16(0x3F));
+    return vmovn_u16(masked);
+}
+
+/* D=6 _fast: single 16-byte vector load (overreads 10 bytes). */
+static inline uint8x8_t flat_d6_unpack_fast(const uint8_t *bm_ptr)
+{
+    uint8x16_t bm_lo = vld1q_u8(bm_ptr);
     uint8x16_t shuffled = vqtbl1q_u8(bm_lo, vld1q_u8(flat_d6_shuf_tab));
     uint16x8_t w = vreinterpretq_u16_u8(shuffled);
     uint16x8_t shifted = vshlq_u16(w, vld1q_s16(flat_d6_shift_tab));
@@ -187,7 +228,7 @@ static const int16_t flat_d7_shift_tab[8] = {
 
 /* Unpack 8 consecutive D=7 codes from 7 bytes starting at bm_ptr.  Byte-wise
  * vector-lane load (see flat_d5_unpack's Neoverse-V2 store-forward note). */
-static inline uint8x8_t flat_d7_unpack(const uint8_t *bm_ptr)
+static inline uint8x8_t flat_d7_unpack_safe(const uint8_t *bm_ptr)
 {
     uint8x16_t bm_lo = vdupq_n_u8(0);
     bm_lo = vsetq_lane_u8(bm_ptr[0], bm_lo, 0);
@@ -197,6 +238,17 @@ static inline uint8x8_t flat_d7_unpack(const uint8_t *bm_ptr)
     bm_lo = vsetq_lane_u8(bm_ptr[4], bm_lo, 4);
     bm_lo = vsetq_lane_u8(bm_ptr[5], bm_lo, 5);
     bm_lo = vsetq_lane_u8(bm_ptr[6], bm_lo, 6);
+    uint8x16_t shuffled = vqtbl1q_u8(bm_lo, vld1q_u8(flat_d7_shuf_tab));
+    uint16x8_t w = vreinterpretq_u16_u8(shuffled);
+    uint16x8_t shifted = vshlq_u16(w, vld1q_s16(flat_d7_shift_tab));
+    uint16x8_t masked = vandq_u16(shifted, vdupq_n_u16(0x7F));
+    return vmovn_u16(masked);
+}
+
+/* D=7 _fast: single 16-byte vector load (overreads 9 bytes). */
+static inline uint8x8_t flat_d7_unpack_fast(const uint8_t *bm_ptr)
+{
+    uint8x16_t bm_lo = vld1q_u8(bm_ptr);
     uint8x16_t shuffled = vqtbl1q_u8(bm_lo, vld1q_u8(flat_d7_shuf_tab));
     uint16x8_t w = vreinterpretq_u16_u8(shuffled);
     uint16x8_t shifted = vshlq_u16(w, vld1q_s16(flat_d7_shift_tab));

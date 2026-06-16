@@ -827,8 +827,8 @@ static void bench_flat_direct_d3(uint8_t *out, const uint8_t *bm,
     uint8x16_t c2s_vec = vld1q_u8(c2s);
     for (int r = 0; r < reps; r++) {
         for (int i = 0; i + 16 <= n; i += 16) {
-            uint8x8_t lo = flat_d3_unpack(bm + (((i)      * 3) >> 3));
-            uint8x8_t hi = flat_d3_unpack(bm + (((i + 8)  * 3) >> 3));
+            uint8x8_t lo = flat_d3_unpack_safe(bm + (((i)      * 3) >> 3));
+            uint8x8_t hi = flat_d3_unpack_safe(bm + (((i + 8)  * 3) >> 3));
             uint8x16_t codes = vcombine_u8(lo, hi);
             vst1q_u8(out + i, vqtbl1q_u8(c2s_vec, codes));
         }
@@ -842,7 +842,7 @@ static void bench_flat_scatter_d3(uint8_t *out, const uint16_t *idx,
     uint8x16_t c2s_vec = vld1q_u8(c2s);
     for (int r = 0; r < reps; r++) {
         for (int i = 0; i + 8 <= n; i += 8) {
-            uint8x8_t codes = flat_d3_unpack(bm + ((i * 3) >> 3));
+            uint8x8_t codes = flat_d3_unpack_safe(bm + ((i * 3) >> 3));
             uint8x8_t syms  = vqtbl1_u8(c2s_vec, codes);
             out[idx[i+0]] = vget_lane_u8(syms, 0);
             out[idx[i+1]] = vget_lane_u8(syms, 1);
@@ -910,8 +910,8 @@ static void bench_flat_direct_d5(uint8_t *out, const uint8_t *bm,
     uint8x16x2_t c2s_vec = {{vld1q_u8(c2s), vld1q_u8(c2s + 16)}};
     for (int r = 0; r < reps; r++) {
         for (int i = 0; i + 16 <= n; i += 16) {
-            uint8x8_t lo = flat_d5_unpack(bm + (((i)     * 5) >> 3));
-            uint8x8_t hi = flat_d5_unpack(bm + (((i + 8) * 5) >> 3));
+            uint8x8_t lo = flat_d5_unpack_safe(bm + (((i)     * 5) >> 3));
+            uint8x8_t hi = flat_d5_unpack_safe(bm + (((i + 8) * 5) >> 3));
             uint8x16_t codes = vcombine_u8(lo, hi);
             vst1q_u8(out + i, vqtbl2q_u8(c2s_vec, codes));
         }
@@ -925,7 +925,7 @@ static void bench_flat_scatter_d5(uint8_t *out, const uint16_t *idx,
     uint8x16x2_t c2s_vec = {{vld1q_u8(c2s), vld1q_u8(c2s + 16)}};
     for (int r = 0; r < reps; r++) {
         for (int i = 0; i + 8 <= n; i += 8) {
-            uint8x8_t codes = flat_d5_unpack(bm + ((i * 5) >> 3));
+            uint8x8_t codes = flat_d5_unpack_safe(bm + ((i * 5) >> 3));
             uint8x8_t syms  = vqtbl2_u8(c2s_vec, codes);
             out[idx[i+0]] = vget_lane_u8(syms, 0);
             out[idx[i+1]] = vget_lane_u8(syms, 1);
@@ -947,8 +947,8 @@ static void bench_flat_direct_d6(uint8_t *out, const uint8_t *bm,
                               vld1q_u8(c2s+32),  vld1q_u8(c2s+48)}};
     for (int r = 0; r < reps; r++) {
         for (int i = 0; i + 16 <= n; i += 16) {
-            uint8x8_t lo = flat_d6_unpack(bm + (((i)     * 6) >> 3));
-            uint8x8_t hi = flat_d6_unpack(bm + (((i + 8) * 6) >> 3));
+            uint8x8_t lo = flat_d6_unpack_safe(bm + (((i)     * 6) >> 3));
+            uint8x8_t hi = flat_d6_unpack_safe(bm + (((i + 8) * 6) >> 3));
             uint8x16_t codes = vcombine_u8(lo, hi);
             vst1q_u8(out + i, vqtbl4q_u8(c2s_vec, codes));
         }
@@ -963,7 +963,7 @@ static void bench_flat_scatter_d6(uint8_t *out, const uint16_t *idx,
                               vld1q_u8(c2s+32),  vld1q_u8(c2s+48)}};
     for (int r = 0; r < reps; r++) {
         for (int i = 0; i + 8 <= n; i += 8) {
-            uint8x8_t codes = flat_d6_unpack(bm + ((i * 6) >> 3));
+            uint8x8_t codes = flat_d6_unpack_safe(bm + ((i * 6) >> 3));
             uint8x8_t syms  = vqtbl4_u8(c2s_vec, codes);
             out[idx[i+0]] = vget_lane_u8(syms, 0);
             out[idx[i+1]] = vget_lane_u8(syms, 1);

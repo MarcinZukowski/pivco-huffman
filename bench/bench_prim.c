@@ -195,11 +195,11 @@ static void neon_unpack(const ctx_t *c) {
     int n = c->n; uint8_t *cd = c->codes; const uint8_t *bm = c->bm;
     switch (c->D) {
     case 2: for (int i=0;i<n;i+=16) vst1q_u8(cd+i, flat_d2_unpack(bm + (i>>4)*4)); break;
-    case 3: for (int i=0;i<n;i+= 8) vst1_u8 (cd+i, flat_d3_unpack(bm + (i>>3)*3)); break;
+    case 3: for (int i=0;i<n;i+= 8) vst1_u8 (cd+i, flat_d3_unpack_safe(bm + (i>>3)*3)); break;
     case 4: for (int i=0;i<n;i+=16) vst1q_u8(cd+i, flat_d4_unpack(bm + (i>>4)*8)); break;
-    case 5: for (int i=0;i<n;i+= 8) vst1_u8 (cd+i, flat_d5_unpack(bm + (i>>3)*5)); break;
-    case 6: for (int i=0;i<n;i+= 8) vst1_u8 (cd+i, flat_d6_unpack(bm + (i>>3)*6)); break;
-    case 7: for (int i=0;i<n;i+= 8) vst1_u8 (cd+i, flat_d7_unpack(bm + (i>>3)*7)); break;
+    case 5: for (int i=0;i<n;i+= 8) vst1_u8 (cd+i, flat_d5_unpack_safe(bm + (i>>3)*5)); break;
+    case 6: for (int i=0;i<n;i+= 8) vst1_u8 (cd+i, flat_d6_unpack_safe(bm + (i>>3)*6)); break;
+    case 7: for (int i=0;i<n;i+= 8) vst1_u8 (cd+i, flat_d7_unpack_safe(bm + (i>>3)*7)); break;
     }
 }
 static void neon_scatter(const ctx_t *c) {
