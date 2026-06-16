@@ -83,19 +83,41 @@ static inline int popcount_K_right_neon(const uint8_t *bm, int nbytes, int K)
     return K_right;
 }
 
-/* merge_vec_vec_neon — V4 stride-16 main path.
+/* merge_vec_vec_neon — V5 stride-64 main path with prefix-sum cursors.
  *
- * Each iter loads 16-byte L_full / R_full once, produces two 8-byte
- * output halves.  Iter 0 uses vqtbl1 over vcombine(low(L_full),
- * low(R_full)) with the baseline expand_tab[m0].  Iter 1 uses vqtbl2
- * over the full 32-byte (L_full, R_full) with a PRECOMPUTED shuf
- * indexed by (nr0, m1) — collapses what would be ~4 runtime ALU ops
- * (the iter-0-induced shift adjustment) into one indexed load.  See
- * pivco_huffman_neon_tables.c for the (nr0, m1) table algebra.
+ * Each outer iter handles 64 codes via 4 INDEPENDENT chunks of 16 codes.
+ * Cursors for each chunk are precomputed from a byte-wise prefix sum
+ * over an 8-byte bm window: vcnt_u8 gives per-byte popcounts, then the
+ * classic `popcnt * 0x0101010101010101` mul broadcasts a u64 prefix sum
+ * per byte position.
  *
- * +13-15% bench gain on M4, +7-10% on Graviton 4 vs the older stride-
- * 16 path with 4 × vld_8 per iter.  See IDEAS.md "NEON bu_merge:
- * 16-byte loads + precomputed (nr0, m1) shuf — SHIPPED (2026-05-11)". */
+ * Within each chunk: iter 0 is vqtbl1 over vcombine(low(L_full),
+ * low(R_full)) with expand_tab[m_even]; iter 1 is vqtbl2 over the full
+ * 32-byte (L_full, R_full) with expand_tab_pre[popcnt(m_even)][m_odd].
+ * Because all 4 chunks' lc/rc starts are precomputed, the chunks have
+ * no data dependency on each other -- 4-way ILP for the OoO machine.
+ *
+ * Width capped at 64 (not 128): a wider 128-code, 8-chunk version
+ * (COM128) extracts more parallelism but stresses NEON register
+ * allocation -- gcc 11/14 spill heavily on the 8-chunk variant (gcc14
+ * COM128: +5..+22% cyc/elem regression on c7g/c8g/m9g vs prior V4),
+ * while COM64 stays within reach of both compilers' regalloc.  Clang's
+ * COM128 win over COM64 is M4-only (-11%) and noise on Graviton (+/-
+ * 3%), so COM64 dominates the cross-uarch cross-compiler matrix.
+ *
+ * Bench (cyc/elem perf_event_open / ns/elem CLOCK_MONOTONIC, 3-round
+ * median) vs the prior V4 stride-16 path:
+ *   M4 (Apple, clang):        0.050 -> 0.034 ns   (-32%)
+ *   c7g (Neoverse V1, clang): 0.278 -> 0.243 cyc  (-13%)
+ *   c7g (gcc14):              0.293 -> 0.272 cyc  (-7%)
+ *   c8g (Neoverse V2, clang): 0.290 -> 0.230 cyc  (-21%)
+ *   c8g (gcc14):              0.295 -> 0.245 cyc  (-17%)
+ *   m9g (Neoverse V3, clang): 0.232 -> 0.186 cyc  (-20%)
+ *   m9g (gcc14):              0.245 -> 0.200 cyc  (-18%)
+ *
+ * Fallback ladder: stride-16 -> stride-8 -> scalar handles K not divisible
+ * by 64 (and K < 64).  expand_tab_pre cache footprint unchanged (18 KB,
+ * shared with the V4 stride-16 fallback). */
 static inline void merge_vec_vec_neon(const uint8_t *bm, int K,
                                      const uint8_t *left,
                                      const uint8_t *right,
@@ -104,11 +126,61 @@ static inline void merge_vec_vec_neon(const uint8_t *bm, int K,
     PROF_TIC();
     int lc = 0, rc = 0;
     int j = 0;
+
+    /* V5 main: 64 codes per iter, 4 independent chunks. */
+    for (; j + 64 <= K; j += 64) {
+        uint64_t mask_u64;
+        memcpy(&mask_u64, bm + (j >> 3), 8);
+        uint8x8_t bm_v = vcreate_u8(mask_u64);
+        uint8x8_t pc_v = vcnt_u8(bm_v);
+        uint64_t pc_u64 = vget_lane_u64(vreinterpret_u64_u8(pc_v), 0);
+        uint64_t pfx = pc_u64 * 0x0101010101010101ULL;
+
+        uint8_t cr0 = 0;
+        uint8_t cr1 = (uint8_t)(pfx >>  8);
+        uint8_t cr2 = (uint8_t)(pfx >> 24);
+        uint8_t cr3 = (uint8_t)(pfx >> 40);
+        uint8_t in0 = (uint8_t)pc_u64;
+        uint8_t in1 = (uint8_t)(pc_u64 >> 16);
+        uint8_t in2 = (uint8_t)(pc_u64 >> 32);
+        uint8_t in3 = (uint8_t)(pc_u64 >> 48);
+
+        uint8_t m0 = (uint8_t) mask_u64;
+        uint8_t m1 = (uint8_t)(mask_u64 >>  8);
+        uint8_t m2 = (uint8_t)(mask_u64 >> 16);
+        uint8_t m3 = (uint8_t)(mask_u64 >> 24);
+        uint8_t m4 = (uint8_t)(mask_u64 >> 32);
+        uint8_t m5 = (uint8_t)(mask_u64 >> 40);
+        uint8_t m6 = (uint8_t)(mask_u64 >> 48);
+        uint8_t m7 = (uint8_t)(mask_u64 >> 56);
+
+#define _V5_CHUNK(idx, cr, in, ma, mb) do {                                  \
+            uint8_t cl = (uint8_t)((idx)*16 - (cr));                         \
+            uint8x16_t L = vld1q_u8(left  + lc + cl);                        \
+            uint8x16_t R = vld1q_u8(right + rc + (cr));                      \
+            uint8x16_t both = vcombine_u8(vget_low_u8(L), vget_low_u8(R));   \
+            uint8x8_t  s0   = vld1_u8(expand_tab[ma]);                       \
+            vst1_u8(out + j + (idx)*16,     vqtbl1_u8(both, s0));            \
+            uint8x16x2_t src = {{ L, R }};                                   \
+            uint8x8_t s1 = vld1_u8(expand_tab_pre[in][mb]);                  \
+            vst1_u8(out + j + (idx)*16 + 8, vqtbl2_u8(src, s1));             \
+        } while (0)
+        _V5_CHUNK(0, cr0, in0, m0, m1);
+        _V5_CHUNK(1, cr1, in1, m2, m3);
+        _V5_CHUNK(2, cr2, in2, m4, m5);
+        _V5_CHUNK(3, cr3, in3, m6, m7);
+#undef _V5_CHUNK
+
+        uint8_t total_r = (uint8_t)(pfx >> 56);
+        rc += total_r;
+        lc += 64 - total_r;
+    }
+
+    /* V4 stride-16 fallback for the residual (handles K mod 128). */
     for (; j + 16 <= K; j += 16) {
         uint8x16_t L_full = vld1q_u8(left  + lc);
         uint8x16_t R_full = vld1q_u8(right + rc);
 
-        /* Iter 0: vqtbl1 on the low halves with baseline shuf. */
         uint8_t m0 = bm[j >> 3];
         uint8x16_t both0 = vcombine_u8(vget_low_u8(L_full),
                                         vget_low_u8(R_full));
@@ -117,7 +189,6 @@ static inline void merge_vec_vec_neon(const uint8_t *bm, int K,
         vst1_u8(out + j, o0);
         int nr0 = expand_popcnt[m0];
 
-        /* Iter 1: vqtbl2 over (L_full, R_full) with pre-shifted shuf. */
         uint8_t m1 = bm[(j >> 3) + 1];
         uint8x16x2_t src = {{ L_full, R_full }};
         uint8x8_t shuf1  = vld1_u8(expand_tab_pre[nr0][m1]);
@@ -149,8 +220,9 @@ static inline void merge_vec_vec_neon(const uint8_t *bm, int K,
 }
 
 /* merge_cst_vec_neon — left input is a broadcast constant.
- * Same V4 strategy as merge_vec_vec_neon; the L lane of every vqtbl2
- * iteration reads from a duplicated 16-byte register holding left_sym. */
+ * Same V5 strategy as merge_vec_vec_neon; the L lane of every chunk's
+ * vqtbl2 reads from a duplicated 16-byte register holding left_sym, so
+ * no L loads are issued in the V5 main loop. */
 static inline void merge_cst_vec_neon(const uint8_t *bm, int K,
                                                 uint8_t left_sym,
                                                 const uint8_t *right,
@@ -161,6 +233,44 @@ static inline void merge_cst_vec_neon(const uint8_t *bm, int K,
     int j = 0;
     uint8x8_t  Lbcast   = vdup_n_u8(left_sym);
     uint8x16_t Lbcast_q = vdupq_n_u8(left_sym);
+
+    /* V5 main: 64 codes per iter, 4 independent chunks. */
+    for (; j + 64 <= K; j += 64) {
+        uint64_t mask_u64;
+        memcpy(&mask_u64, bm + (j >> 3), 8);
+        uint8x8_t bm_v = vcreate_u8(mask_u64);
+        uint8x8_t pc_v = vcnt_u8(bm_v);
+        uint64_t pc_u64 = vget_lane_u64(vreinterpret_u64_u8(pc_v), 0);
+        uint64_t pfx = pc_u64 * 0x0101010101010101ULL;
+
+        uint8_t cr0=0,             cr1=(uint8_t)(pfx>> 8);
+        uint8_t cr2=(uint8_t)(pfx>>24), cr3=(uint8_t)(pfx>>40);
+        uint8_t in0=(uint8_t)pc_u64,     in1=(uint8_t)(pc_u64>>16);
+        uint8_t in2=(uint8_t)(pc_u64>>32), in3=(uint8_t)(pc_u64>>48);
+
+        uint8_t m0=(uint8_t) mask_u64,        m1=(uint8_t)(mask_u64>> 8);
+        uint8_t m2=(uint8_t)(mask_u64>>16),   m3=(uint8_t)(mask_u64>>24);
+        uint8_t m4=(uint8_t)(mask_u64>>32),   m5=(uint8_t)(mask_u64>>40);
+        uint8_t m6=(uint8_t)(mask_u64>>48),   m7=(uint8_t)(mask_u64>>56);
+
+#define _V5_CHUNK_CV(idx, cr, in, ma, mb) do {                               \
+            uint8x16_t R = vld1q_u8(right + rc + (cr));                      \
+            uint8x16_t both = vcombine_u8(Lbcast, vget_low_u8(R));           \
+            uint8x8_t  s0   = vld1_u8(expand_tab[ma]);                       \
+            vst1_u8(out + j + (idx)*16,     vqtbl1_u8(both, s0));            \
+            uint8x16x2_t src = {{ Lbcast_q, R }};                            \
+            uint8x8_t s1 = vld1_u8(expand_tab_pre[in][mb]);                  \
+            vst1_u8(out + j + (idx)*16 + 8, vqtbl2_u8(src, s1));             \
+        } while (0)
+        _V5_CHUNK_CV(0, cr0, in0, m0, m1);
+        _V5_CHUNK_CV(1, cr1, in1, m2, m3);
+        _V5_CHUNK_CV(2, cr2, in2, m4, m5);
+        _V5_CHUNK_CV(3, cr3, in3, m6, m7);
+#undef _V5_CHUNK_CV
+
+        rc += (uint8_t)(pfx >> 56);
+    }
+
     for (; j + 16 <= K; j += 16) {
         uint8x16_t R_full = vld1q_u8(right + rc);
         uint8_t m0 = bm[j >> 3];
@@ -194,7 +304,7 @@ static inline void merge_cst_vec_neon(const uint8_t *bm, int K,
     PROF_TOC(PROF_BU_MERGE_CST_VEC, K);
 }
 
-/* merge_vec_cst_neon — mirror of merge_cst_vec_neon. */
+/* merge_vec_cst_neon — mirror of merge_cst_vec_neon (R is broadcast). */
 static inline void merge_vec_cst_neon(const uint8_t *bm, int K,
                                                  const uint8_t *left,
                                                  uint8_t right_sym,
@@ -205,6 +315,46 @@ static inline void merge_vec_cst_neon(const uint8_t *bm, int K,
     int j = 0;
     uint8x8_t  Rbcast   = vdup_n_u8(right_sym);
     uint8x16_t Rbcast_q = vdupq_n_u8(right_sym);
+
+    /* V5 main: 64 codes per iter, 4 independent chunks. */
+    for (; j + 64 <= K; j += 64) {
+        uint64_t mask_u64;
+        memcpy(&mask_u64, bm + (j >> 3), 8);
+        uint8x8_t bm_v = vcreate_u8(mask_u64);
+        uint8x8_t pc_v = vcnt_u8(bm_v);
+        uint64_t pc_u64 = vget_lane_u64(vreinterpret_u64_u8(pc_v), 0);
+        uint64_t pfx = pc_u64 * 0x0101010101010101ULL;
+
+        uint8_t cr0=0,             cr1=(uint8_t)(pfx>> 8);
+        uint8_t cr2=(uint8_t)(pfx>>24), cr3=(uint8_t)(pfx>>40);
+        uint8_t in0=(uint8_t)pc_u64,     in1=(uint8_t)(pc_u64>>16);
+        uint8_t in2=(uint8_t)(pc_u64>>32), in3=(uint8_t)(pc_u64>>48);
+
+        uint8_t m0=(uint8_t) mask_u64,        m1=(uint8_t)(mask_u64>> 8);
+        uint8_t m2=(uint8_t)(mask_u64>>16),   m3=(uint8_t)(mask_u64>>24);
+        uint8_t m4=(uint8_t)(mask_u64>>32),   m5=(uint8_t)(mask_u64>>40);
+        uint8_t m6=(uint8_t)(mask_u64>>48),   m7=(uint8_t)(mask_u64>>56);
+
+#define _V5_CHUNK_VC(idx, cr, in, ma, mb) do {                               \
+            uint8_t cl = (uint8_t)((idx)*16 - (cr));                         \
+            uint8x16_t L = vld1q_u8(left + lc + cl);                         \
+            uint8x16_t both = vcombine_u8(vget_low_u8(L), Rbcast);           \
+            uint8x8_t  s0   = vld1_u8(expand_tab[ma]);                       \
+            vst1_u8(out + j + (idx)*16,     vqtbl1_u8(both, s0));            \
+            uint8x16x2_t src = {{ L, Rbcast_q }};                            \
+            uint8x8_t s1 = vld1_u8(expand_tab_pre[in][mb]);                  \
+            vst1_u8(out + j + (idx)*16 + 8, vqtbl2_u8(src, s1));             \
+        } while (0)
+        _V5_CHUNK_VC(0, cr0, in0, m0, m1);
+        _V5_CHUNK_VC(1, cr1, in1, m2, m3);
+        _V5_CHUNK_VC(2, cr2, in2, m4, m5);
+        _V5_CHUNK_VC(3, cr3, in3, m6, m7);
+#undef _V5_CHUNK_VC
+
+        uint8_t total_r = (uint8_t)(pfx >> 56);
+        lc += 64 - total_r;
+    }
+
     for (; j + 16 <= K; j += 16) {
         uint8x16_t L_full = vld1q_u8(left + lc);
         uint8_t m0 = bm[j >> 3];

@@ -97,6 +97,10 @@ if(TARGET_ARCH STREQUAL "arm64" OR TARGET_ARCH STREQUAL "aarch64")
 
     add_executable(pivco_enc_init_micro bench_enc_init.c)
     target_link_libraries(pivco_enc_init_micro pivco_huffman m)
+
+    # NEON merge_vec_vec variant microbench (prefix-sum cursor decoupling;
+    # old / com64 / com128 / Jeff's PR#4 variants).  Self-contained.
+    add_executable(pivco_bench_merge_neon bench_merge_neon.c)
 endif()
 
 # Partition u8 vs u16 microbench: works on any tier (each ISA is
