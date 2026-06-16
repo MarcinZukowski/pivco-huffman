@@ -877,6 +877,47 @@ int part_core_neon(uint16_t *codes_la, int n, int depth,
 {
     int n_left = 0, n_right = 0, j = 0;
     int neg_shift_d = -(15 - depth);
+
+    /* V5 wide path: 64 codes/iter, 8 independent chunks -- same prefix-sum
+     * cursor decoupling + vpaddq 8-mask build as build_bitmap_partition_full_
+     * neon, specialized here for the one-sided (right/left/none) emit cases.
+     * BUILD=1 only (all live callers build the bitmap; the BUILD=0 from-bitmap
+     * share is unused, falls through to the 8-code loop).  EMIT_RIGHT/
+     * EMIT_LEFT are compile-time, so the unused scatter + cursor drop out. */
+    if (BUILD) {
+        int shift_d = 15 - depth;
+        for (; j + 64 <= n; j += 64) {
+            uint16x8_t cv0=vld1q_u16(codes_la+j),    cv1=vld1q_u16(codes_la+j+8),
+                       cv2=vld1q_u16(codes_la+j+16), cv3=vld1q_u16(codes_la+j+24),
+                       cv4=vld1q_u16(codes_la+j+32), cv5=vld1q_u16(codes_la+j+40),
+                       cv6=vld1q_u16(codes_la+j+48), cv7=vld1q_u16(codes_la+j+56);
+            uint64_t mask_word = enc_masks8x8_codes_la_neon(
+                cv0,cv1,cv2,cv3,cv4,cv5,cv6,cv7, shift_d);
+            memcpy(bm + (j >> 3), &mask_word, 8);
+            uint8x8_t pc_v = vcnt_u8(vcreate_u8(mask_word));
+            uint64_t pc_word = vget_lane_u64(vreinterpret_u64_u8(pc_v), 0);
+            uint64_t pfx = pc_word * 0x0101010101010101ULL;
+#define _V5_PART1(K_, CV) do {                                                \
+            uint32_t cr = (K_)==0 ? 0u : (uint32_t)((pfx >> (8*((K_)-1))) & 0xFF);\
+            if (EMIT_RIGHT || EMIT_LEFT) {                                     \
+                uint8_t M = (uint8_t)(mask_word >> (8*(K_)));                  \
+                const uint8_t *tab = compress_tab[M];                         \
+                uint8x16_t data = vreinterpretq_u8_u16(CV);                   \
+                if (EMIT_RIGHT) vst1q_u8((uint8_t *)(right_out + n_right + cr),\
+                                          vqtbl1q_u8(data, vld1q_u8(tab)));     \
+                if (EMIT_LEFT)  vst1q_u8((uint8_t *)(codes_la + n_left         \
+                                          + (8u*(K_) - cr)),                   \
+                                          vqtbl1q_u8(data, vld1q_u8(tab + 16)));\
+            }                                                                 \
+        } while (0)
+            _V5_PART1(0,cv0); _V5_PART1(1,cv1); _V5_PART1(2,cv2); _V5_PART1(3,cv3);
+            _V5_PART1(4,cv4); _V5_PART1(5,cv5); _V5_PART1(6,cv6); _V5_PART1(7,cv7);
+#undef _V5_PART1
+            uint32_t total_r = (uint32_t)(pfx >> 56);
+            n_right += total_r; n_left += 64 - total_r;
+        }
+    }
+
     for (; j + 8 <= n; j += 8) {
         uint16x8_t code_vec = vld1q_u16(codes_la + j);
         uint8_t mask;
