@@ -10,8 +10,10 @@ OUT="$ROOT/results/sweep_uarch/$DATE"
 mkdir -p "$OUT"
 echo "[sweep] writing results to $OUT" >&2
 
-# bench knob: passed to pivco_fair_bench as the repeats arg (default 20).
-REPS=${REPS:-20}
+# NB: current pivco_fair_bench takes no positional repeats arg (it self-paces
+# via adaptive runs and rejects unknown args since f3e3ef3).  No-args run =
+# default dist set, all engines (ph + huf0 both present), at the build's
+# default block size.
 
 run_one() {
     local alias=$1
@@ -48,7 +50,7 @@ run_one() {
         ssh "$alias" "cd pivco-huffman && rm -rf build && \
                       cmake -B build -DCMAKE_BUILD_TYPE=Release >/tmp/cmake.log 2>&1 && \
                       cmake --build build --target pivco_fair_bench -j2 >/tmp/build.log 2>&1 && \
-                      taskset -c 0 ./build/pivco_fair_bench $REPS" \
+                      taskset -c 0 ./build/pivco_fair_bench" \
             2>>"$err"
 
         echo "=== done: $alias  date: $(date -u +%FT%TZ) ==="
