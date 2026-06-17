@@ -651,14 +651,41 @@ int main(int argc, char **argv) {
         return 0;
     }
 
-    if (variants) { pv_register_partition(); pv_register_merge(); }
+    if (variants) {
+        pv_register_partition(); pv_register_merge();
+        /* Regroup so each logical family (stage) runs as one contiguous block
+           — scalar, then production backend, then its variants — instead of
+           all variants trailing at the very end.  Stable within a stage:
+           original registration order is preserved, so scalar/backend stay
+           ahead of the later-registered variants. */
+        prim_t grouped[256]; int ng = 0;
+        for (int k=0;k<NPRIMS;k++) {
+            stage_t s = PRIMS[k].stage;
+            int seen=0; for (int j=0;j<k;j++) if (PRIMS[j].stage==s){seen=1;break;}
+            if (seen) continue;
+            for (int m=0;m<NPRIMS;m++) if (PRIMS[m].stage==s) grouped[ng++]=PRIMS[m];
+        }
+        memcpy(PRIMS, grouped, (size_t)ng*sizeof(prim_t)); NPRIMS = ng;
+    }
 
     printf("bench_prim: n=%d elems, best-of-9 x %d reps, partition depth=%d%s\n",
-           n, reps, PART_DEPTH, variants ? "  [+variants]" : "");
+           n, reps, PART_DEPTH, variants ? "  [* production, + variant]" : "");
     printf("%-22s %-3s %-15s %10s  %5s %5s %5s   %6s %6s %6s  %s\n",
            "stage","D","variant","ns/elem",
            "in_b","out_b","lut_b", "in_MB/s","out_MB/s","lut_MB/s","check");
     volatile uint8_t sink = 0; int prevD=-99; stage_t prevS=-1;
+
+    /* Warm the core to max DVFS clock before any timing.  At the default
+       best-of-9 x reps each variant's timed window is only ~5 ms — shorter
+       than the turbo ramp — so the FIRST variant measured otherwise reads
+       sub-turbo, and best-of-9 can't rescue it when all 9 samples are cold
+       (measured: neon 0.0367 cold vs 0.035 warm on M4).  Busy-spin ~200 ms. */
+    {
+        double tw = now_ns(); volatile uint64_t w = 0; uint64_t a = 1;
+        while (now_ns() - tw < 200e6)
+            for (int i=0;i<200000;i++){ a = a*6364136223846793005ULL + 1442695040888963407ULL; w += a; }
+        sink ^= (uint8_t)w;
+    }
 
     for (int k=0;k<NPRIMS;k++) {
         prim_t *p = &PRIMS[k];
@@ -773,8 +800,12 @@ int main(int argc, char **argv) {
         double in_bw  = best > 0 ? in_b  * 125.0 / best : 0;
         double out_bw = best > 0 ? out_b * 125.0 / best : 0;
         double lut_bw = best > 0 ? lut_b * 125.0 / best : 0;
+        /* mark like --list: '*' production backend, '+' variant, ' ' scalar */
+        char vmark = !strcmp(p->variant, BK) ? '*'
+                   : !strcmp(p->variant, "scalar") ? ' ' : '+';
+        char vbuf[24]; snprintf(vbuf, sizeof vbuf, "%c %s", vmark, p->variant);
         printf("%-22s %-3s %-15s %10.3g  %5.2f %5.2f %5.2f   %6.0f %6.0f %6.0f  %s",
-               stage_name(p->stage), dbuf, p->variant, best,
+               stage_name(p->stage), dbuf, vbuf, best,
                in_b, out_b, lut_b, in_bw, out_bw, lut_bw, chk);
         if (p->origin)     /* prim_variants provenance: [isa] origin · note */
             printf("  [%s] %s%s%s", pv_isa_name(p->isa), p->origin,
