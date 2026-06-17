@@ -32,7 +32,7 @@
 #if defined(__aarch64__)
 #  define PIVCO_BACKEND_NEON 1
 #  define HAVE_SIMD 1
-#  define HAVE_NEON_KERNELS 1
+#  define USE_NEON_KERNELS 1
 #  define BK "neon"
 #elif defined(__x86_64__)
 #  if defined(__SSE4_1__)
@@ -190,7 +190,7 @@ static void p_xor_scalar       (const ctx_t *c){ scalar_xor(c->out, c->merge_lef
 static void p_xor_accum_scalar (const ctx_t *c){ scalar_xor_accum(c->out, c->merge_left, c->n); }
 static void p_plus_one_scalar  (const ctx_t *c){ scalar_plus_one(c->out, c->n); }
 
-#if defined(HAVE_NEON_KERNELS)   /* standalone unpack/scatter: NEON intrinsics */
+#if defined(USE_NEON_KERNELS)   /* standalone unpack/scatter: NEON intrinsics */
 static void neon_unpack(const ctx_t *c) {
     int n = c->n; uint8_t *cd = c->codes; const uint8_t *bm = c->bm;
     switch (c->D) {
@@ -226,7 +226,7 @@ static void neon_scatter(const ctx_t *c) {
         }
     }
 }
-#endif /* HAVE_NEON_KERNELS */
+#endif /* USE_NEON_KERNELS */
 
 #if defined(HAVE_SIMD)   /* pack/merge/partition: production prim_*, all backends */
 static void simd_pack (const ctx_t *c){ prim_enc_pack_dN(c->la_work, c->n, c->D, c->depth, c->pack_out); }
@@ -292,137 +292,6 @@ static void simd_xor_accum (const ctx_t *c){
     o[0] = r;
 }
 
-#if defined(HAVE_NEON_KERNELS)
-/* Alternate merge_two: replace vtst+vand+veor with a 256×8 lookup that
- * pre-expands each bm byte to (0xFF/0x00) × 8.  One vld1_u8 per 8
- * outputs vs three SIMD ops in the production path. */
-static uint8_t g_mask_to_bits[256][8];
-static int g_mask_to_bits_built = 0;
-static void ensure_mask_to_bits(void) {
-    if (g_mask_to_bits_built) return;
-    for (int m = 0; m < 256; m++)
-        for (int i = 0; i < 8; i++)
-            g_mask_to_bits[m][i] = ((m >> i) & 1) ? 0xFF : 0x00;
-    g_mask_to_bits_built = 1;
-}
-/* blend_tab: per (left_sym, right_sym) pair, precompute 256×8 of fully
- * blended output bytes.  Built once outside the hot loop for the bench. */
-static uint8_t g_blend_tab[256][8] __attribute__((aligned(64)));
-static int g_blend_tab_built = 0;
-static void ensure_blend_tab(void) {
-    if (g_blend_tab_built) return;
-    for (int m = 0; m < 256; m++)
-        for (int i = 0; i < 8; i++)
-            g_blend_tab[m][i] = ((m >> i) & 1) ? MERGE_RIGHT_SYM : MERGE_LEFT_SYM;
-    g_blend_tab_built = 1;
-}
-static void simd_merge_cst_cst_tbl (const ctx_t *c) {
-    const uint8_t *bm = c->bm; uint8_t *out = c->out; int K = c->n;
-    uint8_t L = MERGE_LEFT_SYM, R = MERGE_RIGHT_SYM;
-    uint8x16_t vleft  = vdupq_n_u8(L);
-    uint8x16_t vdelta = vdupq_n_u8(L ^ R);
-    int j = 0;
-    for (; j + 16 <= K; j += 16) {
-        uint8x16_t bits = vcombine_u8(
-            vld1_u8(g_mask_to_bits[bm[j >> 3]]),
-            vld1_u8(g_mask_to_bits[bm[(j >> 3) + 1]]));
-        vst1q_u8(out + j, veorq_u8(vleft, vandq_u8(vdelta, bits)));
-    }
-    for (; j < K; j++) {
-        int mb = (bm[j >> 3] >> (j & 7)) & 1;
-        out[j] = mb ? R : L;
-    }
-}
-/* blend_tab variant: 2 loads + 1 vcombine + 1 store per 16 outputs.  No
- * SIMD compute in the hot loop — the blend was precomputed into the
- * lookup table at startup. */
-static void simd_merge_cst_cst_blendtab (const ctx_t *c) {
-    const uint8_t *bm = c->bm; uint8_t *out = c->out; int K = c->n;
-    int j = 0;
-    for (; j + 16 <= K; j += 16) {
-        uint8x8_t lo = vld1_u8(g_blend_tab[bm[j >> 3]]);
-        uint8x8_t hi = vld1_u8(g_blend_tab[bm[(j >> 3) + 1]]);
-        vst1q_u8(out + j, vcombine_u8(lo, hi));
-    }
-    for (; j < K; j++) {
-        int mb = (bm[j >> 3] >> (j & 7)) & 1;
-        out[j] = mb ? MERGE_RIGHT_SYM : MERGE_LEFT_SYM;
-    }
-}
-/* 16-byte version of "your" idea: combine two bm-byte broadcasts into
- * one 16-lane register, vtstq → vandq → vqtbl1q.  One wide store per
- * 16 outputs. */
-static void simd_merge_cst_cst_vtblq (const ctx_t *c) {
-    const uint8_t *bm = c->bm; uint8_t *out = c->out; int K = c->n;
-    static const uint8_t bit_pos_tab16[16] = {1,2,4,8,16,32,64,128,
-                                              1,2,4,8,16,32,64,128};
-    uint8x16_t vbits = vld1q_u8(bit_pos_tab16);
-    uint16_t lr = (uint16_t)MERGE_LEFT_SYM | ((uint16_t)MERGE_RIGHT_SYM << 8);
-    uint8x16_t c2s_vec = vreinterpretq_u8_u16(vdupq_n_u16(lr));
-    uint8x16_t one = vdupq_n_u8(1);
-    int j = 0;
-    for (; j + 16 <= K; j += 16) {
-        uint8x16_t bm_dup = vcombine_u8(vdup_n_u8(bm[j >> 3]),
-                                         vdup_n_u8(bm[(j >> 3) + 1]));
-        uint8x16_t m   = vtstq_u8(bm_dup, vbits);
-        uint8x16_t idx = vandq_u8(m, one);
-        vst1q_u8(out + j, vqtbl1q_u8(c2s_vec, idx));
-    }
-    for (; j < K; j++) {
-        int mb = (bm[j >> 3] >> (j & 7)) & 1;
-        out[j] = mb ? MERGE_RIGHT_SYM : MERGE_LEFT_SYM;
-    }
-}
-/* Marcin's simple variant: vtst → mask (0xFF/0x00) → mask & 1 → TBL.
- * 8-byte half-width, two independent halves per 16-output iter. */
-static void simd_merge_cst_cst_vtbl (const ctx_t *c) {
-    const uint8_t *bm = c->bm; uint8_t *out = c->out; int K = c->n;
-    static const uint8_t bit_pos_tab[8] = {1,2,4,8,16,32,64,128};
-    uint8x8_t vbits = vld1_u8(bit_pos_tab);
-    uint16_t lr = (uint16_t)MERGE_LEFT_SYM | ((uint16_t)MERGE_RIGHT_SYM << 8);
-    uint8x8_t c2s8 = vreinterpret_u8_u16(vdup_n_u16(lr));    /* [L,R,L,R,L,R,L,R] */
-    uint8x8_t one  = vdup_n_u8(1);
-    int j = 0;
-    for (; j + 16 <= K; j += 16) {
-        uint8x8_t m0 = vtst_u8(vdup_n_u8(bm[j >> 3]),     vbits);
-        uint8x8_t m1 = vtst_u8(vdup_n_u8(bm[(j >> 3)+1]), vbits);
-        vst1_u8(out + j,     vtbl1_u8(c2s8, vand_u8(m0, one)));
-        vst1_u8(out + j + 8, vtbl1_u8(c2s8, vand_u8(m1, one)));
-    }
-    for (; j < K; j++) {
-        int mb = (bm[j >> 3] >> (j & 7)) & 1;
-        out[j] = mb ? MERGE_RIGHT_SYM : MERGE_LEFT_SYM;
-    }
-}
-/* D=1 flat-decode variant: same shape as merge_flat_d2 but with a 2-byte
- * (L,R) lookup.  bm bit i = index 0 or 1, used as a TBL index into a
- * register holding [L,R,L,R,...]. */
-static void simd_merge_cst_cst_d1flat (const ctx_t *c) {
-    const uint8_t *bm = c->bm; uint8_t *out = c->out; int K = c->n;
-    uint16_t lr_word = (uint16_t)MERGE_LEFT_SYM | ((uint16_t)MERGE_RIGHT_SYM << 8);
-    uint8x16_t c2s_vec = vreinterpretq_u8_u16(vdupq_n_u16(lr_word));
-    static const uint8_t dup_tab_d1  [16] = {0,0,0,0,0,0,0,0, 1,1,1,1,1,1,1,1};
-    static const int8_t  shift_tab_d1[16] = {0,-1,-2,-3,-4,-5,-6,-7,
-                                             0,-1,-2,-3,-4,-5,-6,-7};
-    uint8x16_t dup_v   = vld1q_u8(dup_tab_d1);
-    int8x16_t  shift_v = vld1q_s8(shift_tab_d1);
-    uint8x16_t one_v   = vdupq_n_u8(1);
-    int j = 0;
-    for (; j + 16 <= K; j += 16) {
-        uint16_t bm_word; memcpy(&bm_word, bm + (j >> 3), 2);
-        uint8x16_t bm_lo = vreinterpretq_u8_u16(
-            vsetq_lane_u16(bm_word, vdupq_n_u16(0), 0));
-        uint8x16_t dup     = vqtbl1q_u8(bm_lo, dup_v);
-        uint8x16_t shifted = vshlq_u8(dup, shift_v);
-        uint8x16_t idx     = vandq_u8(shifted, one_v);
-        vst1q_u8(out + j, vqtbl1q_u8(c2s_vec, idx));
-    }
-    for (; j < K; j++) {
-        int mb = (bm[j >> 3] >> (j & 7)) & 1;
-        out[j] = mb ? MERGE_RIGHT_SYM : MERGE_LEFT_SYM;
-    }
-}
-#endif
 
 /* max-out-bw probe: write only, value out[i] = (uint8_t)i. */
 static void simd_plus_one (const ctx_t *c){
@@ -454,128 +323,8 @@ static void simd_plus_one (const ctx_t *c){
 }
 #endif
 
-#if defined(HAVE_NEON_KERNELS)
-/* ---------- experimental: precomputed-popcount merge ----------
- *
- * Replace the per-iter `expand_popcnt[bm[j>>3]]` table lookup with a
- * sequential read from a precomputed bm_popcnt[] array.  The hypothesis
- * is that the production lookup is on the critical path (mask compute ->
- * popcnt-table load -> cursor advance), and a statically-known sequential
- * address frees the load to start at iter top.
- *
- * Two variants:
- *   neon_pcpc_pure   — bm_popcnt[] is pre-filled (treat the populating
- *                       pass as amortized cost; bench the merge alone).
- *   neon_pcpc_full   — populate bm_popcnt[] inside the timed function
- *                       (the realistic cost a caller would pay).
- *
- * The shuffle vectors (expand_tab[m] / expand_tab_pre[nr0][m]) STILL
- * depend on the mask byte itself — only the popcount load is replaced.
- */
-static uint8_t g_bm_popcnt[16384] __attribute__((aligned(64)));
 
-static inline void fill_bm_popcnt(const uint8_t *bm, int K) {
-    int bm_bytes = (K + 7) >> 3;
-    int i = 0;
-    for (; i + 16 <= bm_bytes; i += 16) {
-        vst1q_u8(g_bm_popcnt + i, vcntq_u8(vld1q_u8(bm + i)));
-    }
-    for (; i < bm_bytes; i++) g_bm_popcnt[i] = (uint8_t)__builtin_popcount(bm[i]);
-}
-
-static inline void merge_neon_pcpc(const uint8_t *bm, int K,
-                                     const uint8_t *left, const uint8_t *right,
-                                     uint8_t *out) {
-    int lc = 0, rc = 0, j = 0;
-    for (; j + 16 <= K; j += 16) {
-        uint8x16_t L_full = vld1q_u8(left + lc);
-        uint8x16_t R_full = vld1q_u8(right + rc);
-
-        uint8_t m0  = bm[j >> 3];
-        int     nr0 = g_bm_popcnt[j >> 3];        /* sequential, address known early */
-        uint8x16_t both0 = vcombine_u8(vget_low_u8(L_full), vget_low_u8(R_full));
-        uint8x8_t  shuf0 = vld1_u8(expand_tab[m0]);
-        uint8x8_t  o0    = vqtbl1_u8(both0, shuf0);
-        vst1_u8(out + j, o0);
-
-        uint8_t m1  = bm[(j >> 3) + 1];
-        int     nr1 = g_bm_popcnt[(j >> 3) + 1];
-        uint8x16x2_t src = {{ L_full, R_full }};
-        uint8x8_t shuf1  = vld1_u8(expand_tab_pre[nr0][m1]);
-        uint8x8_t o1     = vqtbl2_u8(src, shuf1);
-        vst1_u8(out + j + 8, o1);
-
-        rc += nr0 + nr1;
-        lc += (16 - nr0 - nr1);
-    }
-    for (; j < K; j++) {
-        int mb = (bm[j >> 3] >> (j & 7)) & 1;
-        out[j] = mb ? right[rc++] : left[lc++];
-    }
-}
-
-static void simd_merge_vec_vec_pcpc_pure (const ctx_t *c){
-    /* Caller responsibility: bm_popcnt must already be filled.  Each
-       outer rep keeps the same bm, so we let the bench's inner timer
-       see only the merge work; fill_bm_popcnt is called once outside
-       the timing loop via the correctness path. */
-    merge_neon_pcpc(c->bm, c->n, c->merge_left, c->merge_right, c->out);
-}
-static void simd_merge_vec_vec_pcpc_full (const ctx_t *c){
-    fill_bm_popcnt(c->bm, c->n);
-    merge_neon_pcpc(c->bm, c->n, c->merge_left, c->merge_right, c->out);
-}
-
-/* ---- 8-way unrolled, in-register popcount ----
- *
- * Per outer iter:
- *   - vld1_u8 8 bitmap bytes into bm_vec  (1 load, 8 masks)
- *   - vcnt_u8 produces 8 popcounts in pc_vec (1 op)
- *   - 8 unrolled sub-iters: lane K extracts mask[K] + popcount[K] via
- *     vget_lane_u8 (compile-time index, ~1c), then runs the standard
- *     merge body with 1-mask-per-sub-iter shape.
- *
- * Trade vs neon_pcpc: no temp store, no second-pass load — popcount
- * values stay in vector lanes and get pulled via vget_lane.  Cost: each
- * sub-iter is the simpler 1-mask version, so we load L + R every 8
- * outputs instead of every 16 (DOUBLES L/R load count).  If those loads
- * are not on the critical path the freed popcount dependency may still
- * net out positive. */
-static inline void merge_neon_unroll8(const uint8_t *bm, int K,
-                                        const uint8_t *left, const uint8_t *right,
-                                        uint8_t *out) {
-    int lc = 0, rc = 0, j = 0;
-    for (; j + 64 <= K; j += 64) {
-        uint8x8_t bm_vec = vld1_u8(bm + (j >> 3));
-        uint8x8_t pc_vec = vcnt_u8(bm_vec);
-#define UNROLL_STEP(K_) do {                                          \
-            uint8_t  m  = vget_lane_u8(bm_vec, K_);                   \
-            int      nr = vget_lane_u8(pc_vec, K_);                   \
-            uint8x8_t  L = vld1_u8(left  + lc);                       \
-            uint8x8_t  R = vld1_u8(right + rc);                       \
-            uint8x16_t both = vcombine_u8(L, R);                      \
-            uint8x8_t  shuf = vld1_u8(expand_tab[m]);                 \
-            uint8x8_t  o    = vqtbl1_u8(both, shuf);                  \
-            vst1_u8(out + j + 8 * K_, o);                             \
-            rc += nr;                                                  \
-            lc += (8 - nr);                                            \
-        } while (0)
-        UNROLL_STEP(0); UNROLL_STEP(1); UNROLL_STEP(2); UNROLL_STEP(3);
-        UNROLL_STEP(4); UNROLL_STEP(5); UNROLL_STEP(6); UNROLL_STEP(7);
-#undef UNROLL_STEP
-    }
-    /* scalar tail for elements past the last 64-aligned boundary */
-    for (; j < K; j++) {
-        int mb = (bm[j >> 3] >> (j & 7)) & 1;
-        out[j] = mb ? right[rc++] : left[lc++];
-    }
-}
-static void simd_merge_vec_vec_unroll8 (const ctx_t *c){
-    merge_neon_unroll8(c->bm, c->n, c->merge_left, c->merge_right, c->out);
-}
-#endif
-
-#if defined(HAVE_NEON_KERNELS)   /* partition family + unfused comparison (NEON only) */
+#if defined(USE_NEON_KERNELS)   /* partition family + unfused comparison (NEON only) */
 /* production fused variants */
 static void simd_bmbuild (const ctx_t *c){ prim_enc_partition_none(c->la_work, c->n, c->depth, c->bm); }
 static void simd_fusedhalf(const ctx_t *c){ prim_enc_partition_right(c->la_work, c->n, c->depth, c->bm, c->tmp16); }
@@ -589,13 +338,26 @@ typedef enum { ST_UNPACK, ST_SCATTER, ST_PACK, ST_MERGE_FLAT, ST_PART,
                ST_BMBUILD, ST_PARTBM, ST_PARTHALF, ST_FUSEDHALF,
                ST_MERGE_VEC_VEC, ST_MERGE_CST_CST, ST_MERGE_CST_VEC, ST_MERGE_VEC_CST,
                ST_XOR, ST_XOR_ACCUM, ST_PLUS_ONE } stage_t;
+#include "prim_variants/prims.h"   /* pv_isa_t + PV_VARIANT (needs stage_t) */
 typedef struct {
-    const char *variant; stage_t stage; int D; int inplace; void (*run)(const ctx_t *);
+    const char       *variant;
+    stage_t           stage;
+    int               D;
+    int               inplace;
+    void            (*run)(const ctx_t *);
+    /* prim_variants metadata (NULL/0 for production + scalar-reference rows) */
+    pv_isa_t          isa;
+    const char       *origin;
+    const char       *note;
 } prim_t;
 static prim_t PRIMS[256]; static int NPRIMS = 0;
 static void reg(const char *v, stage_t s, int D, int ip, void (*fn)(const ctx_t *)) {
-    PRIMS[NPRIMS++] = (prim_t){ v, s, D, ip, fn };
+    PRIMS[NPRIMS++] = (prim_t){ .variant=v, .stage=s, .D=D, .inplace=ip, .run=fn };
 }
+/* Graveyard variant families (bench-only; ctx_t / compress_tab /
+   enc_mask8_codes_la_neon etc. are all in scope by here). */
+#include "prim_variants/prims-partition.h"
+#include "prim_variants/prims-merge.h"
 /* Stage label = the .h primitive name (without the prim_ prefix), or the
    internal name for the few stages that have no production analogue
    (part_bm / part_half exist only as instrumentation for the unfused
@@ -712,14 +474,46 @@ static void stage_bits(stage_t s, int D, double *in, double *out, double *lut) {
     }
 }
 
+static void usage(FILE *f) {
+    fprintf(f,
+        "usage: pivco_bench_prim [--n=N] [--reps=N] [--D=d,d,...] [--variants[=<logical>]]\n"
+        "\n"
+        "  --n=N            elements per run (default 8192; rounded down to mult of 16)\n"
+        "  --reps=N         inner reps per timed run (default 2000)\n"
+        "  --D=d,d,...      restrict to these flat depths D (2..%d; default all)\n"
+        "  --variants       also run the prim_variants/ graveyard (frozen non-shipping\n"
+        "                   kernels) next to production + scalar reference\n"
+        "  --variants=NAME  ...limited to one logical primitive, e.g.\n"
+        "                   enc_partition_full, merge_vec_vec, flat_dN_unpack\n"
+        "  --list           list logical primitives + their variants (* = production),\n"
+        "                   then exit (combine with --variants for the graveyard)\n"
+        "  --listv          verbose --list: one line per variant with what it is\n"
+        "  -h, --help       show this help and exit\n",
+        MAXD);
+}
+
 int main(int argc, char **argv) {
     int n = 8192, reps = 2000, want[MAXD+1] = {0}, any = 0;
+    int variants = 0, do_list = 0; const char *vfilter = NULL;
     for (int i=1;i<argc;i++) {
         if      (!strncmp(argv[i],"--n=",4))    n = atoi(argv[i]+4);
         else if (!strncmp(argv[i],"--reps=",7)) reps = atoi(argv[i]+7);
+        else if (!strcmp(argv[i],"--variants") || !strncmp(argv[i],"--variants=",11)) {
+            variants = 1;
+            if (argv[i][10] == '=') vfilter = argv[i] + 11;  /* e.g. enc_partition_full */
+        }
+        else if (!strcmp(argv[i],"--list"))  do_list = 1;
+        else if (!strcmp(argv[i],"--listv")) do_list = 2;
         else if (!strncmp(argv[i],"--D=",4))
             for (char *t=strtok(argv[i]+4,","); t; t=strtok(NULL,",")) {
                 int d=atoi(t); if (d>=2&&d<=MAXD){want[d]=1;any=1;} }
+        else if (!strcmp(argv[i],"-h") || !strcmp(argv[i],"--help")) {
+            usage(stdout); return 0;
+        }
+        else {
+            fprintf(stderr, "bench_prim: unknown arg '%s'\n\n", argv[i]);
+            usage(stderr); return 2;
+        }
     }
     n &= ~15;
     if (!any) for (int d=2;d<=MAXD;d++) want[d]=1;
@@ -747,11 +541,11 @@ int main(int argc, char **argv) {
            production prim_* on every backend (SIMD where the backend handles
            D, scalar fallback otherwise) -- so registered for all D. */
         reg("scalar",ST_UNPACK, d,0,p_unpack_scalar);
-#if defined(HAVE_NEON_KERNELS)
+#if defined(USE_NEON_KERNELS)
         if (d <= 7) reg(BK,ST_UNPACK, d,0,neon_unpack);
 #endif
         reg("scalar",ST_SCATTER,d,0,p_scatter_scalar);
-#if defined(HAVE_NEON_KERNELS)
+#if defined(USE_NEON_KERNELS)
         if (d <= 7) reg(BK,ST_SCATTER,d,0,neon_scatter);
 #endif
         reg("scalar",ST_PACK,   d,0,p_pack_scalar);
@@ -767,7 +561,7 @@ int main(int argc, char **argv) {
 #if defined(HAVE_SIMD)
     reg(BK,      ST_PART,0,1,simd_part);
 #endif
-#if defined(HAVE_NEON_KERNELS)
+#if defined(USE_NEON_KERNELS)
     /* Unfused decomposition: fused part == bm_build + part_bm (re-read cost).
        part_half == HALF-node saving (one-sided scatter). */
     reg(BK, ST_BMBUILD, 0,0, simd_bmbuild);
@@ -790,18 +584,9 @@ int main(int argc, char **argv) {
     reg(BK,       ST_MERGE_CST_VEC,  0, 0, simd_merge_cst_vec);
     reg(BK,       ST_MERGE_VEC_CST,  0, 0, simd_merge_vec_cst);
 #endif
-#if defined(HAVE_NEON_KERNELS)
-    reg("neon_pcpc",     ST_MERGE_VEC_VEC, 0, 0, simd_merge_vec_vec_pcpc_pure);
-    reg("neon_pcpc_full",ST_MERGE_VEC_VEC, 0, 0, simd_merge_vec_vec_pcpc_full);
-    reg("neon_unroll8",  ST_MERGE_VEC_VEC, 0, 0, simd_merge_vec_vec_unroll8);
-    ensure_mask_to_bits();
-    ensure_blend_tab();
-    reg("neon_tbl",      ST_MERGE_CST_CST, 0, 0, simd_merge_cst_cst_tbl);
-    reg("neon_blendtab", ST_MERGE_CST_CST, 0, 0, simd_merge_cst_cst_blendtab);
-    reg("neon_vtbl",     ST_MERGE_CST_CST, 0, 0, simd_merge_cst_cst_vtbl);
-    reg("neon_vtblq",    ST_MERGE_CST_CST, 0, 0, simd_merge_cst_cst_vtblq);
-    reg("neon_d1flat",   ST_MERGE_CST_CST, 0, 0, simd_merge_cst_cst_d1flat);
-#endif
+    /* merge_vec_vec / merge_cst_cst experimental variants (neon_pcpc,
+       unroll8, tbl/blendtab/vtbl/vtblq/d1flat) now live in
+       prim_variants/prims-merge.h — run with --variants. */
     /* Synthetic byte-XOR — memory-bandwidth comparison point. */
     reg("scalar", ST_XOR, 0, 0, p_xor_scalar);
 #if defined(HAVE_SIMD)
@@ -818,15 +603,66 @@ int main(int argc, char **argv) {
     reg(BK,       ST_PLUS_ONE, 0, 0, simd_plus_one);
 #endif
 
-    printf("bench_prim: n=%d elems, best-of-9 x %d reps, partition depth=%d\n",
-           n, reps, PART_DEPTH);
-    printf("%-22s %-3s %-9s %10s  %5s %5s %5s   %6s %6s %6s  %s\n",
+    if (do_list) {
+        /* --list always shows the full set (production + variants); running
+           the variants still requires --variants. */
+        pv_register_partition(); pv_register_merge();
+        int verbose = (do_list == 2);
+        printf("logical primitives  (* = production, + = variant):\n");
+        int shown[64] = {0};
+        for (int k=0;k<NPRIMS;k++) {
+            stage_t s = PRIMS[k].stage;
+            if ((int)s < 64 && shown[s]) continue;
+            if ((int)s < 64) shown[s] = 1;
+            char seen[64][24]; int ns = 0;
+            if (verbose) {
+                printf("\n%s:\n", stage_name(s));
+                for (int m=0;m<NPRIMS;m++) if (PRIMS[m].stage==s) {
+                    prim_t *p = &PRIMS[m];
+                    int dup=0; for (int t=0;t<ns;t++) if(!strcmp(seen[t],p->variant)) {dup=1;break;}
+                    if (dup) continue;
+                    if (ns<64) snprintf(seen[ns++],24,"%s",p->variant);
+                    int isprod = !strcmp(p->variant, BK), issca = !strcmp(p->variant,"scalar");
+                    printf("  %-15s %c  ", p->variant, isprod ? '*' : (issca ? ' ' : '+'));
+                    if (issca)       printf("scalar reference");
+                    else if (isprod) printf("production (real prim_*)");
+                    else if (p->origin)
+                        printf("[%s] %s%s%s", pv_isa_name(p->isa), p->origin,
+                               p->note ? " · " : "", p->note ? p->note : "");
+                    else printf("experimental (bench_prim, unannotated)");
+                    printf("\n");
+                }
+            } else {
+                printf("  %-22s", stage_name(s));
+                char vbuf[400]; int vo = 0; vbuf[0] = 0;
+                for (int m=0;m<NPRIMS;m++) if (PRIMS[m].stage==s) {
+                    prim_t *p = &PRIMS[m];
+                    int dup=0; for (int t=0;t<ns;t++) if(!strcmp(seen[t],p->variant)) {dup=1;break;}
+                    if (dup) continue;
+                    if (ns<64) snprintf(seen[ns++],24,"%s",p->variant);
+                    if (!strcmp(p->variant, BK))           printf(" %s*", p->variant);
+                    else if (!strcmp(p->variant,"scalar")) printf(" scalar");
+                    else vo += snprintf(vbuf+vo, sizeof vbuf - vo, " %s", p->variant);
+                }
+                if (vo) printf(" [+%s]", vbuf);
+                printf("\n");
+            }
+        }
+        return 0;
+    }
+
+    if (variants) { pv_register_partition(); pv_register_merge(); }
+
+    printf("bench_prim: n=%d elems, best-of-9 x %d reps, partition depth=%d%s\n",
+           n, reps, PART_DEPTH, variants ? "  [+variants]" : "");
+    printf("%-22s %-3s %-15s %10s  %5s %5s %5s   %6s %6s %6s  %s\n",
            "stage","D","variant","ns/elem",
            "in_b","out_b","lut_b", "in_MB/s","out_MB/s","lut_MB/s","check");
     volatile uint8_t sink = 0; int prevD=-99; stage_t prevS=-1;
 
     for (int k=0;k<NPRIMS;k++) {
         prim_t *p = &PRIMS[k];
+        if (vfilter && strcmp(stage_name(p->stage), vfilter)) continue;
         ctx_t cx = { bm, codes, c2s, out, pack_out, merge_left, merge_right,
                      la_work, tmp16, n, p->D, PART_DEPTH };
         const char *chk = "ok";
@@ -848,10 +684,11 @@ int main(int argc, char **argv) {
             memset(out,0,n); p->run(&cx);
             if (memcmp(out,ref,n)) chk="FAIL";
         } else if (p->stage == ST_MERGE_VEC_VEC) {
-#if defined(HAVE_NEON_KERNELS)
-            /* Populate g_bm_popcnt once per row so the _pcpc_pure variant
-               sees an up-to-date table; harmless for other variants. */
-            fill_bm_popcnt(bm, n);
+#if defined(USE_NEON_KERNELS)
+            /* Populate the graveyard pcpc popcount table once per row so its
+               pre-filled "pcpc" variant sees an up-to-date table; harmless
+               otherwise.  (Defined in prim_variants/prims-merge.h.) */
+            pv_fill_bm_popcnt(bm, n);
 #endif
             scalar_merge_vec_vec(ref, bm, n, merge_left, merge_right);
             memset(out,0,n); p->run(&cx);
@@ -936,9 +773,13 @@ int main(int argc, char **argv) {
         double in_bw  = best > 0 ? in_b  * 125.0 / best : 0;
         double out_bw = best > 0 ? out_b * 125.0 / best : 0;
         double lut_bw = best > 0 ? lut_b * 125.0 / best : 0;
-        printf("%-22s %-3s %-9s %10.3g  %5.2f %5.2f %5.2f   %6.0f %6.0f %6.0f  %s\n",
+        printf("%-22s %-3s %-15s %10.3g  %5.2f %5.2f %5.2f   %6.0f %6.0f %6.0f  %s",
                stage_name(p->stage), dbuf, p->variant, best,
                in_b, out_b, lut_b, in_bw, out_bw, lut_bw, chk);
+        if (p->origin)     /* prim_variants provenance: [isa] origin · note */
+            printf("  [%s] %s%s%s", pv_isa_name(p->isa), p->origin,
+                   p->note ? " · " : "", p->note ? p->note : "");
+        printf("\n");
     }
     (void)sink;
     free(merge_left); free(merge_right);
