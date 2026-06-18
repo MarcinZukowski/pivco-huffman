@@ -269,6 +269,25 @@ static void prim_merge_cc_d1flat(const ctx_t *c) {
     }
     for (; j < K; j++) out[j] = ((bm[j >> 3] >> (j & 7)) & 1) ? MERGE_RIGHT_SYM : MERGE_LEFT_SYM;
 }
+/* vbsl — LUT-free, TBL-free bit-test + vbslq select.
+ *   Broadcast the 2 bm bytes across the 16 lanes, vtstq against per-lane bit
+ *   positions {1,2,..,128} (LSB-first, ph's bit order) -> 0xFF where the bit
+ *   is set, then  out = vbslq(mask, RIGHT, LEFT).  Two ops after broadcast
+ *   (vtstq + vbslq) — one fewer than the xor form's vand+veor. */
+static void prim_merge_cc_vbsl(const ctx_t *c) {
+    const uint8_t *bm = c->bm; uint8_t *out = c->out; int K = c->n;
+    static const uint8_t bitpos[16] = {1,2,4,8,16,32,64,128, 1,2,4,8,16,32,64,128};
+    uint8x16_t vbits  = vld1q_u8(bitpos);
+    uint8x16_t vleft  = vdupq_n_u8(MERGE_LEFT_SYM);
+    uint8x16_t vright = vdupq_n_u8(MERGE_RIGHT_SYM);
+    int j = 0;
+    for (; j + 16 <= K; j += 16) {
+        uint8x16_t bmdup = vcombine_u8(vdup_n_u8(bm[j >> 3]), vdup_n_u8(bm[(j >> 3) + 1]));
+        uint8x16_t mask  = vtstq_u8(bmdup, vbits);            /* 0xFF where bit set */
+        vst1q_u8(out + j, vbslq_u8(mask, vright, vleft));
+    }
+    for (; j < K; j++) out[j] = ((bm[j >> 3] >> (j & 7)) & 1) ? MERGE_RIGHT_SYM : MERGE_LEFT_SYM;
+}
 
 #endif /* USE_NEON_KERNELS */
 
@@ -301,7 +320,9 @@ static void pv_register_merge(void) {
     PV_VARIANT(ST_MERGE_CST_CST, "vtbl",      PV_ISA_NEON, "bench_prim experiment",
                "8-lane vtst + vtbl1 x2", 0, prim_merge_cc_vtbl);
     PV_VARIANT(ST_MERGE_CST_CST, "d1flat",    PV_ISA_NEON, "bench_prim experiment",
-               "D=1 flat-decode shape (vshl + vqtbl1q)", 0, prim_merge_cc_d1flat);
+               "D=1 flat-decode shape (vshl + vqtbl1q) — matches production", 0, prim_merge_cc_d1flat);
+    PV_VARIANT(ST_MERGE_CST_CST, "vbsl",      PV_ISA_NEON, "bench_prim experiment",
+               "LUT/TBL-free vtstq + vbslq select; leaner than xor blend. Neoverse V3 (m9g) 1.05x vs prod; slower on M4/V1/V2 (store-bound, scalar->vector broadcast dominates)", 0, prim_merge_cc_vbsl);
 #endif
 }
 
