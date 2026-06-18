@@ -14,7 +14,7 @@
  *
  * unpack/scatter/merge/pack are per-depth-D; partition is a 1-bit split (one
  * representative depth).  Every SIMD variant is checked against a scalar
- * reference before timing.  Metric: ns/elem (3 sig figs).
+ * reference before timing.  Metric: ns/elem (4 decimal places).
  *
  * Build: CMake target pivco_bench_prim (links pivco_huffman for the NEON
  * tables + lazy init).   Run: ./pivco_bench_prim [--n=] [--reps=] [--D=2,3,..]
@@ -358,6 +358,8 @@ static void reg(const char *v, stage_t s, int D, int ip, void (*fn)(const ctx_t 
    enc_mask8_codes_la_neon etc. are all in scope by here). */
 #include "prim_variants/prims-partition.h"
 #include "prim_variants/prims-merge.h"
+#include "prim_variants/prims-flat.h"
+#include "prim_variants/prims-pack.h"
 /* Stage label = the .h primitive name (without the prim_ prefix), or the
    internal name for the few stages that have no production analogue
    (part_bm / part_half exist only as instrumentation for the unfused
@@ -606,7 +608,7 @@ int main(int argc, char **argv) {
     if (do_list) {
         /* --list always shows the full set (production + variants); running
            the variants still requires --variants. */
-        pv_register_partition(); pv_register_merge();
+        pv_register_partition(); pv_register_merge(); pv_register_flat(); pv_register_pack();
         int verbose = (do_list == 2);
         printf("logical primitives  (* = production, + = variant):\n");
         int shown[64] = {0};
@@ -652,7 +654,7 @@ int main(int argc, char **argv) {
     }
 
     if (variants) {
-        pv_register_partition(); pv_register_merge();
+        pv_register_partition(); pv_register_merge(); pv_register_flat(); pv_register_pack();
         /* Regroup so each logical family (stage) runs as one contiguous block
            — scalar, then production backend, then its variants — instead of
            all variants trailing at the very end.  Stable within a stage:
@@ -804,7 +806,7 @@ int main(int argc, char **argv) {
         char vmark = !strcmp(p->variant, BK) ? '*'
                    : !strcmp(p->variant, "scalar") ? ' ' : '+';
         char vbuf[24]; snprintf(vbuf, sizeof vbuf, "%c %s", vmark, p->variant);
-        printf("%-22s %-3s %-15s %10.3g  %5.2f %5.2f %5.2f   %6.0f %6.0f %6.0f  %s",
+        printf("%-22s %-3s %-15s %10.4f  %5.2f %5.2f %5.2f   %6.0f %6.0f %6.0f  %s",
                stage_name(p->stage), dbuf, vbuf, best,
                in_b, out_b, lut_b, in_bw, out_bw, lut_bw, chk);
         if (p->origin)     /* prim_variants provenance: [isa] origin · note */

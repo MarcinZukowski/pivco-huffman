@@ -54,4 +54,11 @@ static inline const char *pv_isa_name(pv_isa_t i) {
         .inplace = (IP), .run = (FN), .isa = (ISA),                            \
         .origin = (ORIGIN), .note = (NOTE) })
 
+/* Per-D variant: same as PV_VARIANT but sets .D = DVAL.  For the per-depth
+ * flat stages (ST_UNPACK / ST_MERGE_FLAT), whose verify keys on prim->D. */
+#define PV_VARIANT_D(STAGE, NAME, DVAL, ISA, ORIGIN, NOTE, IP, FN)               \
+    (PRIMS[NPRIMS++] = (prim_t){ .variant = (NAME), .stage = (STAGE), .D = (DVAL),\
+        .inplace = (IP), .run = (FN), .isa = (ISA),                            \
+        .origin = (ORIGIN), .note = (NOTE) })
+
 #endif /* PIVCO_PRIM_VARIANTS_H */

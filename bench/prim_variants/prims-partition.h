@@ -19,6 +19,35 @@
 
 static const uint16_t PV_WLO[8] = {1,2,4,8,16,32,64,128};
 
+/* coalesce-vext switch macros (from bench_coalesce.c); used by
+ * prim_part_coal_vext below.  zero_v must be in scope. */
+#define COALESCE_CASE_0(V_v, cnt_var, accum_var, so_far_var, out_p, n_var) \
+    case 0: {                                                              \
+        uint8x16_t _merged = vorrq_u8((accum_var), (V_v));                 \
+        if ((cnt_var) < 8) { (accum_var) = _merged; (so_far_var) = (cnt_var); } \
+        else { vst1q_u8((out_p) + (n_var), _merged); (n_var) += 16;        \
+            (accum_var) = zero_v; (so_far_var) = (cnt_var) - 8; }          \
+    } break;
+#define COALESCE_CASE_K(K, V_v, cnt_var, accum_var, so_far_var, out_p, n_var) \
+    case K: {                                                                 \
+        uint8x16_t _shifted = vextq_u8(zero_v, (V_v), 16 - (K) * 2);          \
+        uint8x16_t _merged  = vorrq_u8((accum_var), _shifted);                \
+        if ((K) + (cnt_var) < 8) { (accum_var) = _merged; (so_far_var) = (K) + (cnt_var); } \
+        else { vst1q_u8((out_p) + (n_var), _merged); (n_var) += 16;           \
+            (accum_var) = vextq_u8((V_v), zero_v, (8 - (K)) * 2); (so_far_var) = (K) + (cnt_var) - 8; } \
+    } break;
+#define COALESCE_SWITCH(V_v, cnt_var, accum_var, so_far_var, out_p, n_var)    \
+    switch (so_far_var) {                                                     \
+        COALESCE_CASE_0(   V_v, cnt_var, accum_var, so_far_var, out_p, n_var) \
+        COALESCE_CASE_K(1, V_v, cnt_var, accum_var, so_far_var, out_p, n_var) \
+        COALESCE_CASE_K(2, V_v, cnt_var, accum_var, so_far_var, out_p, n_var) \
+        COALESCE_CASE_K(3, V_v, cnt_var, accum_var, so_far_var, out_p, n_var) \
+        COALESCE_CASE_K(4, V_v, cnt_var, accum_var, so_far_var, out_p, n_var) \
+        COALESCE_CASE_K(5, V_v, cnt_var, accum_var, so_far_var, out_p, n_var) \
+        COALESCE_CASE_K(6, V_v, cnt_var, accum_var, so_far_var, out_p, n_var) \
+        COALESCE_CASE_K(7, V_v, cnt_var, accum_var, so_far_var, out_p, n_var) \
+    }
+
 /* 64 codes -> 8 group mask bytes (wire order): vtst the partition bit, AND by
    {1..128} for one bit/lane, then a 3-level vpaddq tree -> uint16x8 -> vmovn. */
 static inline uint8x8_t prim_enc_mask64_neon(const uint16_t *cw,
@@ -170,18 +199,684 @@ static inline int prim_part_right_prefix64_neon(uint16_t *codes_la, int n, int d
     return n_right;
 }
 
+/* ============================================================================
+ * asof-5f3222e — pre-COM stride-8 serial-cursor FULL partition (2026-05-26)
+ *   Production encode partition before COM (6ddd75d/f151ce7): one movmask + one
+ *   compress_tab[mask] load -> two vqtbl1q + two stores per 8 codes, serial
+ *   cursor, 1-byte bm store.
+ * ========================================================================== */
+static inline int prim_part_full_asof_5f3222e_neon(uint16_t *codes_la, int n, int depth,
+                                                   uint8_t *bm, uint16_t *right_out) {
+    int n_left = 0, n_right = 0, j = 0;
+    int neg_shift_d = -(15 - depth);
+    for (; j + 8 <= n; j += 8) {
+        uint16x8_t code_vec = vld1q_u16(codes_la + j);
+        uint8_t mask = enc_mask8_codes_la_neon(code_vec, neg_shift_d);
+        bm[j >> 3] = mask;
+        const uint8_t *tab = compress_tab[mask];
+        uint8x16_t data = vreinterpretq_u8_u16(code_vec);
+        int nr = compress_popcnt[mask];
+        vst1q_u8((uint8_t *)(right_out + n_right), vqtbl1q_u8(data, vld1q_u8(tab)));
+        vst1q_u8((uint8_t *)(codes_la  + n_left ), vqtbl1q_u8(data, vld1q_u8(tab + 16)));
+        n_right += nr; n_left += (8 - nr);
+    }
+    if (j < n) {
+        int tail = n - j, shift_d = 15 - depth;
+        uint16_t tb[8]; for (int k = 0; k < tail; k++) tb[k] = codes_la[j + k];
+        uint8_t mask = 0;
+        for (int k = 0; k < tail; k++) mask |= (uint8_t)(((tb[k] >> shift_d) & 1) << k);
+        bm[j >> 3] = mask;
+        for (int k = 0; k < tail; k++)
+            if (mask & (1 << k)) right_out[n_right++] = tb[k];
+            else                 codes_la[n_left++]   = tb[k];
+    }
+    return n_right;
+}
+static void prim_part_full_asof_5f3222e(const ctx_t *c){ prim_part_full_asof_5f3222e_neon(c->la_work, c->n, c->depth, c->bm, c->tmp16); }
+
 /* ctx_t adapters (registered below). */
 static void prim_part_full_prefix64 (const ctx_t *c){ prim_part_full_prefix64_neon (c->la_work, c->n, c->depth, c->bm, c->tmp16); }
 static void prim_part_none_prefix64 (const ctx_t *c){ prim_part_none_prefix64_neon (c->la_work, c->n, c->depth, c->bm); }
 static void prim_part_right_prefix64(const ctx_t *c){ prim_part_right_prefix64_neon(c->la_work, c->n, c->depth, c->bm, c->tmp16); }
 
+/* ============================================================================
+ * com / com_v2_transpose — 64 codes/iter, 8 chunks, *0x0101.. prefix-sum
+ *   cursors (no per-chunk serial n_left/n_right add, no compress_popcnt[]
+ *   load).  The two differ only in how the 8 partition-mask bytes are built:
+ *     com           : 8 independent enc_mask8 (per-chunk vaddvq movemask)
+ *     com_v2_transpose : an 8x8 vsli transpose of the per-lane depth bits.
+ *   com_v2 is a documented LOSER (the transpose costs more than the 8 vaddvq
+ *   it removes); the shipped production partition (com_v3, vtst+vpaddq tree)
+ *   replaced both.  From bench_partition_neon.c.
+ * ========================================================================== */
+static inline uint8_t pv_enc_mask8_neon(uint16x8_t code_vec, int neg_shift_d) {
+    int16x8_t shr_vec = vdupq_n_s16((int16_t)neg_shift_d);
+    uint16x8_t bit_lsb = vandq_u16(vshlq_u16(code_vec, shr_vec), vdupq_n_u16(1));
+    static const int16_t weights[8] = {0,1,2,3,4,5,6,7};
+    uint16x8_t weighted = vshlq_u16(bit_lsb, vld1q_s16(weights));
+    return (uint8_t)vaddvq_u16(weighted);
+}
+
+/* shared compact+scatter of one 64-code window given the 8 mask bytes already
+ * packed into mask_word and the cv0..cv7 code vectors. */
+#define PV_PART_COM_BODY(MASK_WORD)                                          \
+    memcpy(bm + (j >> 3), &MASK_WORD, 8);                                    \
+    uint8x8_t pc_v = vcnt_u8(vcreate_u8(MASK_WORD));                         \
+    uint64_t pc_word = vget_lane_u64(vreinterpret_u64_u8(pc_v), 0);          \
+    uint64_t pfx = pc_word * 0x0101010101010101ULL;                         \
+    PV_PCHUNK(0,cv0); PV_PCHUNK(1,cv1); PV_PCHUNK(2,cv2); PV_PCHUNK(3,cv3);  \
+    PV_PCHUNK(4,cv4); PV_PCHUNK(5,cv5); PV_PCHUNK(6,cv6); PV_PCHUNK(7,cv7);  \
+    uint32_t total_r = (uint32_t)(pfx >> 56);                               \
+    n_right += total_r; n_left += 64 - total_r;
+
+#define PV_PCHUNK(K_, CV) do {                                              \
+        uint8_t M = (uint8_t)(mask_word >> (8*(K_)));                        \
+        uint32_t cr = (K_)==0 ? 0u : (uint32_t)((pfx >> (8*((K_)-1))) & 0xFF);\
+        uint32_t cl = 8u*(K_) - cr;                                         \
+        const uint8_t *tab = compress_tab[M];                              \
+        uint8x16_t data  = vreinterpretq_u8_u16(CV);                       \
+        vst1q_u8((uint8_t *)(right_out + n_right + cr), vqtbl1q_u8(data, vld1q_u8(tab)));      \
+        vst1q_u8((uint8_t *)(codes_la  + n_left  + cl), vqtbl1q_u8(data, vld1q_u8(tab + 16))); \
+    } while (0)
+
+static inline int prim_part_com_neon(uint16_t *codes_la, int n, int depth,
+                                     uint8_t *bm, uint16_t *right_out) {
+    int n_left = 0, n_right = 0, j = 0;
+    int neg_shift_d = -(15 - depth);
+    for (; j + 64 <= n; j += 64) {
+        uint16x8_t cv0=vld1q_u16(codes_la+j),    cv1=vld1q_u16(codes_la+j+8),
+                   cv2=vld1q_u16(codes_la+j+16), cv3=vld1q_u16(codes_la+j+24),
+                   cv4=vld1q_u16(codes_la+j+32), cv5=vld1q_u16(codes_la+j+40),
+                   cv6=vld1q_u16(codes_la+j+48), cv7=vld1q_u16(codes_la+j+56);
+        uint8_t m0=pv_enc_mask8_neon(cv0,neg_shift_d), m1=pv_enc_mask8_neon(cv1,neg_shift_d),
+                m2=pv_enc_mask8_neon(cv2,neg_shift_d), m3=pv_enc_mask8_neon(cv3,neg_shift_d),
+                m4=pv_enc_mask8_neon(cv4,neg_shift_d), m5=pv_enc_mask8_neon(cv5,neg_shift_d),
+                m6=pv_enc_mask8_neon(cv6,neg_shift_d), m7=pv_enc_mask8_neon(cv7,neg_shift_d);
+        uint64_t mask_word = (uint64_t)m0 | ((uint64_t)m1<<8) | ((uint64_t)m2<<16)
+                           | ((uint64_t)m3<<24) | ((uint64_t)m4<<32) | ((uint64_t)m5<<40)
+                           | ((uint64_t)m6<<48) | ((uint64_t)m7<<56);
+        PV_PART_COM_BODY(mask_word);
+    }
+    int shift_d = 15 - depth;
+    for (; j < n; j++) {
+        uint16_t c = codes_la[j];
+        if ((c >> shift_d) & 1) right_out[n_right++] = c;
+        else                    codes_la[n_left++]   = c;
+    }
+    return n_right;
+}
+
+/* build all 8 partition-mask bytes at once via an 8x8 vsli transpose. */
+static inline uint64_t pv_build_8_masks_transpose(
+        uint16x8_t cv0, uint16x8_t cv1, uint16x8_t cv2, uint16x8_t cv3,
+        uint16x8_t cv4, uint16x8_t cv5, uint16x8_t cv6, uint16x8_t cv7,
+        int neg_shift_d) {
+    int16x8_t s = vdupq_n_s16((int16_t)neg_shift_d);
+    uint16x8_t one = vdupq_n_u16(1);
+    uint16x8_t b0=vandq_u16(vshlq_u16(cv0,s),one), b1=vandq_u16(vshlq_u16(cv1,s),one),
+               b2=vandq_u16(vshlq_u16(cv2,s),one), b3=vandq_u16(vshlq_u16(cv3,s),one),
+               b4=vandq_u16(vshlq_u16(cv4,s),one), b5=vandq_u16(vshlq_u16(cv5,s),one),
+               b6=vandq_u16(vshlq_u16(cv6,s),one), b7=vandq_u16(vshlq_u16(cv7,s),one);
+    uint16x8_t a0=vtrn1q_u16(b0,b1), a1=vtrn2q_u16(b0,b1),
+               a2=vtrn1q_u16(b2,b3), a3=vtrn2q_u16(b2,b3),
+               a4=vtrn1q_u16(b4,b5), a5=vtrn2q_u16(b4,b5),
+               a6=vtrn1q_u16(b6,b7), a7=vtrn2q_u16(b6,b7);
+    uint32x4_t c0=vtrn1q_u32(vreinterpretq_u32_u16(a0),vreinterpretq_u32_u16(a2)),
+               c2=vtrn2q_u32(vreinterpretq_u32_u16(a0),vreinterpretq_u32_u16(a2)),
+               c1=vtrn1q_u32(vreinterpretq_u32_u16(a1),vreinterpretq_u32_u16(a3)),
+               c3=vtrn2q_u32(vreinterpretq_u32_u16(a1),vreinterpretq_u32_u16(a3)),
+               c4=vtrn1q_u32(vreinterpretq_u32_u16(a4),vreinterpretq_u32_u16(a6)),
+               c6=vtrn2q_u32(vreinterpretq_u32_u16(a4),vreinterpretq_u32_u16(a6)),
+               c5=vtrn1q_u32(vreinterpretq_u32_u16(a5),vreinterpretq_u32_u16(a7)),
+               c7=vtrn2q_u32(vreinterpretq_u32_u16(a5),vreinterpretq_u32_u16(a7));
+    uint64x2_t t0=vtrn1q_u64(vreinterpretq_u64_u32(c0),vreinterpretq_u64_u32(c4)),
+               t4=vtrn2q_u64(vreinterpretq_u64_u32(c0),vreinterpretq_u64_u32(c4)),
+               t1=vtrn1q_u64(vreinterpretq_u64_u32(c1),vreinterpretq_u64_u32(c5)),
+               t5=vtrn2q_u64(vreinterpretq_u64_u32(c1),vreinterpretq_u64_u32(c5)),
+               t2=vtrn1q_u64(vreinterpretq_u64_u32(c2),vreinterpretq_u64_u32(c6)),
+               t6=vtrn2q_u64(vreinterpretq_u64_u32(c2),vreinterpretq_u64_u32(c6)),
+               t3=vtrn1q_u64(vreinterpretq_u64_u32(c3),vreinterpretq_u64_u32(c7)),
+               t7=vtrn2q_u64(vreinterpretq_u64_u32(c3),vreinterpretq_u64_u32(c7));
+    uint8x8_t acc = vmovn_u16(vreinterpretq_u16_u64(t0));
+    acc = vsli_n_u8(acc, vmovn_u16(vreinterpretq_u16_u64(t1)), 1);
+    acc = vsli_n_u8(acc, vmovn_u16(vreinterpretq_u16_u64(t2)), 2);
+    acc = vsli_n_u8(acc, vmovn_u16(vreinterpretq_u16_u64(t3)), 3);
+    acc = vsli_n_u8(acc, vmovn_u16(vreinterpretq_u16_u64(t4)), 4);
+    acc = vsli_n_u8(acc, vmovn_u16(vreinterpretq_u16_u64(t5)), 5);
+    acc = vsli_n_u8(acc, vmovn_u16(vreinterpretq_u16_u64(t6)), 6);
+    acc = vsli_n_u8(acc, vmovn_u16(vreinterpretq_u16_u64(t7)), 7);
+    return vget_lane_u64(vreinterpret_u64_u8(acc), 0);
+}
+
+static inline int prim_part_com_v2_neon(uint16_t *codes_la, int n, int depth,
+                                        uint8_t *bm, uint16_t *right_out) {
+    int n_left = 0, n_right = 0, j = 0;
+    int neg_shift_d = -(15 - depth);
+    for (; j + 64 <= n; j += 64) {
+        uint16x8_t cv0=vld1q_u16(codes_la+j),    cv1=vld1q_u16(codes_la+j+8),
+                   cv2=vld1q_u16(codes_la+j+16), cv3=vld1q_u16(codes_la+j+24),
+                   cv4=vld1q_u16(codes_la+j+32), cv5=vld1q_u16(codes_la+j+40),
+                   cv6=vld1q_u16(codes_la+j+48), cv7=vld1q_u16(codes_la+j+56);
+        uint64_t mask_word = pv_build_8_masks_transpose(cv0,cv1,cv2,cv3,cv4,cv5,cv6,cv7,neg_shift_d);
+        PV_PART_COM_BODY(mask_word);
+    }
+    int shift_d = 15 - depth;
+    for (; j < n; j++) {
+        uint16_t c = codes_la[j];
+        if ((c >> shift_d) & 1) right_out[n_right++] = c;
+        else                    codes_la[n_left++]   = c;
+    }
+    return n_right;
+}
+#undef PV_PCHUNK
+#undef PV_PART_COM_BODY
+
+static void prim_part_com         (const ctx_t *c){ prim_part_com_neon   (c->la_work, c->n, c->depth, c->bm, c->tmp16); }
+static void prim_part_com_v2_trans(const ctx_t *c){ prim_part_com_v2_neon(c->la_work, c->n, c->depth, c->bm, c->tmp16); }
+
+/* ============================================================================
+ * split16 / split16_unroll — dense-codes SIMD-mask partition (stride 8 / 16).
+ *   The encode-side tree-walk split on left-aligned uint16 codes: SIMD
+ *   movemask build (vshlq + vaddvq) then production-shape partition_8 via
+ *   compress_tab.  split16 is stride-8; split16_unroll is stride-16 (two
+ *   partition_8 per iter for ILP).  From bench_encode_split.c (CODES16 /
+ *   CODES16U).  These ARE the modern production partition shape minus the
+ *   *0x0101 prefix-sum cursor-decouple; left compacts in place.
+ * ========================================================================== */
+static inline uint8_t pv_simd_mask8_neon(uint16x8_t code_vec, int neg_shift_d) {
+    int16x8_t shr_vec = vdupq_n_s16((int16_t)neg_shift_d);
+    uint16x8_t bit_lsb = vandq_u16(vshlq_u16(code_vec, shr_vec), vdupq_n_u16(1));
+    static const int16_t weights_shift[8] = {0, 1, 2, 3, 4, 5, 6, 7};
+    uint16x8_t weighted = vshlq_u16(bit_lsb, vld1q_s16(weights_shift));
+    return (uint8_t)vaddvq_u16(weighted);
+}
+static inline int pv_partition_8_reg(uint8x16_t data, uint8_t mask,
+                                     uint16_t *left_out, uint16_t *right_out) {
+    const uint8_t *tab = compress_tab[mask];
+    vst1q_u8((uint8_t *)right_out, vqtbl1q_u8(data, vld1q_u8(tab)));
+    vst1q_u8((uint8_t *)left_out,  vqtbl1q_u8(data, vld1q_u8(tab + 16)));
+    return compress_popcnt[mask];
+}
+static inline int prim_part_split16_neon(uint16_t *codes_la, int n, int depth,
+                                         uint8_t *bm, uint16_t *left_out, uint16_t *right_out) {
+    int neg_shift_d = -(15 - depth);
+    int n_left = 0, n_right = 0, j = 0;
+    for (; j + 8 <= n; j += 8) {
+        uint16x8_t code_vec = vld1q_u16(codes_la + j);
+        uint8_t mask = pv_simd_mask8_neon(code_vec, neg_shift_d);
+        bm[j >> 3] = mask;
+        uint8x16_t data = vreinterpretq_u8_u16(code_vec);
+        int nr = pv_partition_8_reg(data, mask, left_out + n_left, right_out + n_right);
+        n_right += nr; n_left += (8 - nr);
+    }
+    int shift_d = 15 - depth;
+    if (j < n) {
+        int tail = n - j; uint16_t tb[8]; for (int k=0;k<tail;k++) tb[k]=codes_la[j+k];
+        uint8_t mask = 0; for (int k=0;k<tail;k++) mask |= (uint8_t)(((tb[k]>>shift_d)&1)<<k);
+        bm[j>>3] = mask;
+        for (int k=0;k<tail;k++) if (mask&(1<<k)) right_out[n_right++]=tb[k]; else left_out[n_left++]=tb[k];
+    }
+    return n_right;
+}
+static inline int prim_part_split16_unroll_neon(uint16_t *codes_la, int n, int depth,
+                                                uint8_t *bm, uint16_t *left_out, uint16_t *right_out) {
+    int neg_shift_d = -(15 - depth);
+    int n_left = 0, n_right = 0, j = 0;
+    for (; j + 16 <= n; j += 16) {
+        uint16x8_t cv0 = vld1q_u16(codes_la + j), cv1 = vld1q_u16(codes_la + j + 8);
+        uint8_t m0 = pv_simd_mask8_neon(cv0, neg_shift_d), m1 = pv_simd_mask8_neon(cv1, neg_shift_d);
+        bm[j >> 3] = m0; bm[(j >> 3) + 1] = m1;
+        int nr0 = pv_partition_8_reg(vreinterpretq_u8_u16(cv0), m0, left_out + n_left, right_out + n_right);
+        n_right += nr0; n_left += (8 - nr0);
+        int nr1 = pv_partition_8_reg(vreinterpretq_u8_u16(cv1), m1, left_out + n_left, right_out + n_right);
+        n_right += nr1; n_left += (8 - nr1);
+    }
+    int shift_d = 15 - depth;
+    for (; j + 8 <= n; j += 8) {
+        uint16x8_t cv = vld1q_u16(codes_la + j);
+        uint8_t m = pv_simd_mask8_neon(cv, neg_shift_d); bm[j >> 3] = m;
+        int nr = pv_partition_8_reg(vreinterpretq_u8_u16(cv), m, left_out + n_left, right_out + n_right);
+        n_right += nr; n_left += (8 - nr);
+    }
+    if (j < n) {
+        int tail = n - j; uint16_t tb[8]; for (int k=0;k<tail;k++) tb[k]=codes_la[j+k];
+        uint8_t mask = 0; for (int k=0;k<tail;k++) mask |= (uint8_t)(((tb[k]>>shift_d)&1)<<k);
+        bm[j>>3] = mask;
+        for (int k=0;k<tail;k++) if (mask&(1<<k)) right_out[n_right++]=tb[k]; else left_out[n_left++]=tb[k];
+    }
+    return n_right;
+}
+/* left_out aliases la_work for the in-place ST_PART contract. */
+static void prim_part_split16       (const ctx_t *c){ prim_part_split16_neon       (c->la_work, c->n, c->depth, c->bm, c->la_work, c->tmp16); }
+static void prim_part_split16_unroll(const ctx_t *c){ prim_part_split16_unroll_neon(c->la_work, c->n, c->depth, c->bm, c->la_work, c->tmp16); }
+
+/* ============================================================================
+ * coal_* — partition store-coalescing experiments (ALL documented LOSERS;
+ *   see docs/COALESCE.md).  They compact a uint16 source into densely-packed
+ *   bytes from a PREBUILT bitmap (no bm write, no mask compute), so they map
+ *   to the unfused ST_PARTBM (full: left+right) / ST_PARTHALF (right only)
+ *   stages — exactly the prebuilt-bitmap re-read shape the unfusing-cost
+ *   decomposition uses.  From bench_coalesce.c.  vext = switch-on-so_far;
+ *   tbl = runtime vqtbl1q shuffle; macro = 4-iter lookahead; macro1s = macro
+ *   but only the left side coalesced; half_tree = single-side OR-tree macro.
+ * ========================================================================== */
+static const uint8_t PV_COAL_IOTA[16] = {0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15};
+
+static void prim_part_coal_vext(const ctx_t *c) {
+    const uint16_t *src = c->la_work; const uint8_t *bitmap = c->bm;
+    uint8_t *left_bytes = (uint8_t *)c->la_work, *right_bytes = (uint8_t *)c->tmp16;
+    int n = c->n;
+    const uint8x16_t zero_v = vdupq_n_u8(0);
+    uint8x16_t accum_l = zero_v, accum_r = zero_v;
+    int so_far_l = 0, so_far_r = 0, n_left_bytes = 0, n_right_bytes = 0;
+    for (int j = 0; j + 8 <= n; j += 8) {
+        uint8_t mask = bitmap[j >> 3];
+        uint8x16_t data = vld1q_u8((const uint8_t *)(src + j));
+        const uint8_t *tab = compress_tab[mask];
+        uint8x16_t r_v = vqtbl1q_u8(data, vld1q_u8(tab));
+        uint8x16_t l_v = vqtbl1q_u8(data, vld1q_u8(tab + 16));
+        int cnt_r = compress_popcnt[mask]; int cnt_l = 8 - cnt_r;
+        COALESCE_SWITCH(r_v, cnt_r, accum_r, so_far_r, right_bytes, n_right_bytes)
+        COALESCE_SWITCH(l_v, cnt_l, accum_l, so_far_l, left_bytes,  n_left_bytes)
+    }
+    if (so_far_l > 0) vst1q_u8(left_bytes  + n_left_bytes,  accum_l);
+    if (so_far_r > 0) vst1q_u8(right_bytes + n_right_bytes, accum_r);
+}
+
+static void prim_part_coal_tbl(const ctx_t *c) {
+    const uint16_t *src = c->la_work; const uint8_t *bitmap = c->bm;
+    uint8_t *left_bytes = (uint8_t *)c->la_work, *right_bytes = (uint8_t *)c->tmp16;
+    int n = c->n;
+    const uint8x16_t zero_v = vdupq_n_u8(0);
+    const uint8x16_t iota = vld1q_u8(PV_COAL_IOTA);
+    uint8x16_t accum_l = zero_v, accum_r = zero_v;
+    int so_far_l = 0, so_far_r = 0, n_left_bytes = 0, n_right_bytes = 0;
+    for (int j = 0; j + 8 <= n; j += 8) {
+        uint8_t mask = bitmap[j >> 3];
+        uint8x16_t data = vld1q_u8((const uint8_t *)(src + j));
+        const uint8_t *tab = compress_tab[mask];
+        uint8x16_t r_v = vqtbl1q_u8(data, vld1q_u8(tab));
+        uint8x16_t l_v = vqtbl1q_u8(data, vld1q_u8(tab + 16));
+        int cnt_r = compress_popcnt[mask]; int cnt_l = 8 - cnt_r;
+        { uint8x16_t shuf_left = vsubq_u8(iota, vdupq_n_u8((uint8_t)(so_far_r * 2)));
+          uint8x16_t merged = vorrq_u8(accum_r, vqtbl1q_u8(r_v, shuf_left));
+          int new_sf = so_far_r + cnt_r;
+          if (new_sf >= 8) { vst1q_u8(right_bytes + n_right_bytes, merged); n_right_bytes += 16;
+            accum_r = vqtbl1q_u8(r_v, vaddq_u8(iota, vdupq_n_u8((uint8_t)((8 - so_far_r) * 2)))); so_far_r = new_sf - 8;
+          } else { accum_r = merged; so_far_r = new_sf; } }
+        { uint8x16_t shuf_left = vsubq_u8(iota, vdupq_n_u8((uint8_t)(so_far_l * 2)));
+          uint8x16_t merged = vorrq_u8(accum_l, vqtbl1q_u8(l_v, shuf_left));
+          int new_sf = so_far_l + cnt_l;
+          if (new_sf >= 8) { vst1q_u8(left_bytes + n_left_bytes, merged); n_left_bytes += 16;
+            accum_l = vqtbl1q_u8(l_v, vaddq_u8(iota, vdupq_n_u8((uint8_t)((8 - so_far_l) * 2)))); so_far_l = new_sf - 8;
+          } else { accum_l = merged; so_far_l = new_sf; } }
+    }
+    if (so_far_l > 0) vst1q_u8(left_bytes  + n_left_bytes,  accum_l);
+    if (so_far_r > 0) vst1q_u8(right_bytes + n_right_bytes, accum_r);
+}
+
+/* NOTE: bench_coalesce's 4-iter macro variants (coalesce_macro,
+ * coalesce_macro_one_sided, half_coalesce_macro_tree) are NOT registered.
+ * Their (lo,hi) 32-byte accumulator only holds 16 codes, but a 4-mask
+ * (32-code) block can produce up to 32 codes on one side, so they cannot
+ * partition a general bitmap byte-exactly — in the source they were pure
+ * throughput probes on identity data with NO correctness check.  Verified
+ * here to mismatch the scalar reference, so they're omitted (they would
+ * report FAIL).  The kernels are preserved in bench_coalesce.c. */
+
 #endif /* USE_NEON_KERNELS */
+
+/* ============================================================================
+ * x86 (SSE4.1 / AVX2) partition variants — extracted verbatim from
+ * extras/bench/bench_partition_{x86,unroll,avx2}.c.  They reuse the production
+ * compress_tab / compress_popcnt / pv_enc_mask8_x86 (in scope here, built
+ * by prim_codec_init).  Same (codes_la,n,depth,bm,right_out) -> n_right contract
+ * as the production partition; the ctx_t adapter maps that onto la_work/tmp16.
+ * ========================================================================== */
+#if defined(__SSE4_1__) && !defined(__AVX512VBMI2__)
+
+/* Shared SWAR per-byte popcount helper (each output byte = popcount of the
+ * corresponding input byte).  Defined once here; the merge x86 section reuses
+ * it via the same #ifndef guard. */
+#ifndef PV_X86_POPCNT_BYTES_U64
+#define PV_X86_POPCNT_BYTES_U64 1
+static inline uint64_t pv_popcnt_bytes_u64(uint64_t x) {
+    x = x - ((x >> 1) & 0x5555555555555555ULL);
+    x = (x & 0x3333333333333333ULL) + ((x >> 2) & 0x3333333333333333ULL);
+    x = (x + (x >> 4)) & 0x0f0f0f0f0f0f0f0fULL;
+    return x;
+}
+#endif
+
+/* Self-contained 8-code partition-mask: left-shift each u16 by `depth` so the
+ * partition bit (15-depth) lands in the MSB, signed-saturate-pack to bytes,
+ * movemask -> 8-bit mask.  Local copy so the graveyard doesn't depend on the
+ * production x86-backend pv_enc_mask8_x86 (absent on the AVX-512 build). */
+static inline uint8_t pv_enc_mask8_x86(__m128i code_vec, __m128i shift_count) {
+    __m128i shifted = _mm_sll_epi16(code_vec, shift_count);
+    __m128i bytes   = _mm_packs_epi16(shifted, _mm_setzero_si128());
+    return (uint8_t)_mm_movemask_epi8(bytes);
+}
+
+/* sse_com: 64 codes/iter, 8 chunks, prefix-sum cursors (no compress_popcnt
+ * load, no serial cursor).  bench_partition_x86.c::com_partition. */
+static inline int prim_part_full_com_x86(uint16_t *codes_la, int n, int depth,
+                                         uint8_t *bm, uint16_t *right_out) {
+    int n_left = 0, n_right = 0, j = 0;
+    __m128i shift_count = _mm_cvtsi32_si128(depth);
+    for (; j + 64 <= n; j += 64) {
+        __m128i c0=_mm_loadu_si128((const __m128i*)(codes_la+j)),    c1=_mm_loadu_si128((const __m128i*)(codes_la+j+8)),
+                c2=_mm_loadu_si128((const __m128i*)(codes_la+j+16)), c3=_mm_loadu_si128((const __m128i*)(codes_la+j+24)),
+                c4=_mm_loadu_si128((const __m128i*)(codes_la+j+32)), c5=_mm_loadu_si128((const __m128i*)(codes_la+j+40)),
+                c6=_mm_loadu_si128((const __m128i*)(codes_la+j+48)), c7=_mm_loadu_si128((const __m128i*)(codes_la+j+56));
+        uint64_t mask_word = (uint64_t)pv_enc_mask8_x86(c0,shift_count)
+            | ((uint64_t)pv_enc_mask8_x86(c1,shift_count)<<8)  | ((uint64_t)pv_enc_mask8_x86(c2,shift_count)<<16)
+            | ((uint64_t)pv_enc_mask8_x86(c3,shift_count)<<24) | ((uint64_t)pv_enc_mask8_x86(c4,shift_count)<<32)
+            | ((uint64_t)pv_enc_mask8_x86(c5,shift_count)<<40) | ((uint64_t)pv_enc_mask8_x86(c6,shift_count)<<48)
+            | ((uint64_t)pv_enc_mask8_x86(c7,shift_count)<<56);
+        memcpy(bm + (j>>3), &mask_word, 8);
+        uint64_t pfx = pv_popcnt_bytes_u64(mask_word) * 0x0101010101010101ULL;
+        #define PV_PC(K_, CV) do {                                              \
+            uint8_t M = (uint8_t)(mask_word >> (8*(K_)));                        \
+            uint32_t cr = (K_)==0 ? 0u : (uint32_t)((pfx >> (8*((K_)-1))) & 0xFF);\
+            uint32_t cl = 8u*(K_) - cr;                                         \
+            const uint8_t *t = compress_tab[M];                                \
+            _mm_storeu_si128((__m128i*)(right_out + n_right + cr),             \
+                             _mm_shuffle_epi8(CV,_mm_load_si128((const __m128i*)t)));\
+            _mm_storeu_si128((__m128i*)(codes_la + n_left + cl),               \
+                             _mm_shuffle_epi8(CV,_mm_load_si128((const __m128i*)(t+16))));\
+        } while (0)
+        PV_PC(0,c0); PV_PC(1,c1); PV_PC(2,c2); PV_PC(3,c3); PV_PC(4,c4); PV_PC(5,c5); PV_PC(6,c6); PV_PC(7,c7);
+        #undef PV_PC
+        uint32_t total_r = (uint32_t)(pfx >> 56);
+        n_right += total_r; n_left += 64 - total_r;
+    }
+    int shift_d = 15 - depth;
+    for (; j < n; j++){ uint16_t c=codes_la[j]; if((c>>shift_d)&1) right_out[n_right++]=c; else codes_la[n_left++]=c; }
+    return n_right;
+}
+static void prim_part_full_com(const ctx_t *c){
+    prim_part_full_com_x86(c->la_work, c->n, c->depth, c->bm, c->tmp16);
+}
+
+#if defined(__AVX2__)
+/* unroll2y: 2x-unrolled compress_tab partition with the mask gen + load fused
+ * into one ymm chain.  bench_partition_unroll.c::partition_2y. */
+static inline int prim_part_full_unroll2y_x86(uint16_t *codes_la, int n, int depth,
+                                              uint8_t *bm, uint16_t *right_out) {
+    int n_left = 0, n_right = 0, j = 0;
+    __m128i shift_count = _mm_cvtsi32_si128(depth);
+    for (; j + 16 <= n; j += 16) {
+        __m256i code01 = _mm256_loadu_si256((const __m256i *)(codes_la + j));
+        __m256i shifted = _mm256_sll_epi16(code01, shift_count);
+        __m256i packed  = _mm256_packs_epi16(shifted, _mm256_setzero_si256());
+        uint32_t mfull = (uint32_t)_mm256_movemask_epi8(packed);
+        uint8_t m0 = (uint8_t)(mfull        & 0xFF);
+        uint8_t m1 = (uint8_t)((mfull >> 16) & 0xFF);
+        bm[j >> 3]       = m0;
+        bm[(j >> 3) + 1] = m1;
+
+        __m128i code0 = _mm256_castsi256_si128(code01);
+        __m128i code1 = _mm256_extracti128_si256(code01, 1);
+
+        const uint8_t *tab0 = compress_tab[m0];
+        const uint8_t *tab1 = compress_tab[m1];
+        __m128i sr0 = _mm_load_si128((const __m128i *)tab0);
+        __m128i sl0 = _mm_load_si128((const __m128i *)(tab0 + 16));
+        __m128i sr1 = _mm_load_si128((const __m128i *)tab1);
+        __m128i sl1 = _mm_load_si128((const __m128i *)(tab1 + 16));
+
+        __m128i r0 = _mm_shuffle_epi8(code0, sr0);
+        __m128i l0 = _mm_shuffle_epi8(code0, sl0);
+        __m128i r1 = _mm_shuffle_epi8(code1, sr1);
+        __m128i l1 = _mm_shuffle_epi8(code1, sl1);
+
+        int nr0 = compress_popcnt[m0];
+        int nr1 = compress_popcnt[m1];
+
+        _mm_storeu_si128((__m128i *)(right_out + n_right),       r0);
+        _mm_storeu_si128((__m128i *)(right_out + n_right + nr0), r1);
+        _mm_storeu_si128((__m128i *)(codes_la  + n_left),        l0);
+        _mm_storeu_si128((__m128i *)(codes_la  + n_left + (8 - nr0)), l1);
+
+        n_right += nr0 + nr1;
+        n_left  += (8 - nr0) + (8 - nr1);
+    }
+    if (j + 8 <= n) {
+        __m128i code = _mm_loadu_si128((const __m128i *)(codes_la + j));
+        __m128i shifted = _mm_sll_epi16(code, shift_count);
+        __m128i packed  = _mm_packs_epi16(shifted, _mm_setzero_si128());
+        uint8_t mask    = (uint8_t)_mm_movemask_epi8(packed);
+        bm[j >> 3] = mask;
+        const uint8_t *tab = compress_tab[mask];
+        __m128i sr = _mm_load_si128((const __m128i *)tab);
+        __m128i sl = _mm_load_si128((const __m128i *)(tab + 16));
+        __m128i r  = _mm_shuffle_epi8(code, sr);
+        __m128i l  = _mm_shuffle_epi8(code, sl);
+        int nr = compress_popcnt[mask];
+        _mm_storeu_si128((__m128i *)(right_out + n_right), r);
+        _mm_storeu_si128((__m128i *)(codes_la  + n_left ), l);
+        n_right += nr;
+        n_left  += (8 - nr);
+        j += 8;
+    }
+    int shift_d = 15 - depth;
+    for (; j < n; j++){ uint16_t c=codes_la[j]; if((c>>shift_d)&1) right_out[n_right++]=c; else codes_la[n_left++]=c; }
+    return n_right;
+}
+static void prim_part_full_unroll2y(const ctx_t *c){
+    prim_part_full_unroll2y_x86(c->la_work, c->n, c->depth, c->bm, c->tmp16);
+}
+
+#if defined(__BMI2__)
+/* pext: no compress_tab; derive the pshufb control on the fly via BMI2
+ * pdep/pext on a packed-indices vector.  bench_partition_avx2.c::partition_pext.
+ * (BMI2 pext is Intel/Zen4-fast, AMD-pre-Zen4-slow -- gated on __BMI2__.) */
+static inline int prim_part_full_pext_x86(uint16_t *codes_la, int n, int depth,
+                                          uint8_t *bm, uint16_t *right_out) {
+    int n_left = 0, n_right = 0, j = 0;
+    __m128i shift_count = _mm_cvtsi32_si128(depth);
+    const __m128i dup_shuf = _mm_setr_epi8(0,0,1,1,2,2,3,3,4,4,5,5,6,6,7,7);
+    const __m128i odd_offset = _mm_setr_epi8(0,1,0,1,0,1,0,1,0,1,0,1,0,1,0,1);
+    for (; j + 8 <= n; j += 8) {
+        __m128i code_vec = _mm_loadu_si128((const __m128i *)(codes_la + j));
+        __m128i shifted = _mm_sll_epi16(code_vec, shift_count);
+        __m128i packed  = _mm_packs_epi16(shifted, _mm_setzero_si128());
+        uint8_t mask    = (uint8_t)_mm_movemask_epi8(packed);
+        bm[j >> 3] = mask;
+
+        uint32_t indices = 0x76543210u;
+        uint32_t mask_ex_r = _pdep_u32((uint32_t)mask,           0x11111111u) * 0x0Fu;
+        uint32_t mask_ex_l = _pdep_u32((uint32_t)(uint8_t)~mask, 0x11111111u) * 0x0Fu;
+        uint32_t comp_r    = _pext_u32(indices, mask_ex_r);
+        uint32_t comp_l    = _pext_u32(indices, mask_ex_l);
+
+        uint64_t spread_r = _pdep_u64((uint64_t)comp_r, 0x0F0F0F0F0F0F0F0Full);
+        uint64_t spread_l = _pdep_u64((uint64_t)comp_l, 0x0F0F0F0F0F0F0F0Full);
+        __m128i r_bytes  = _mm_cvtsi64_si128((int64_t)spread_r);
+        __m128i l_bytes  = _mm_cvtsi64_si128((int64_t)spread_l);
+        __m128i r_dup    = _mm_shuffle_epi8(r_bytes, dup_shuf);
+        __m128i l_dup    = _mm_shuffle_epi8(l_bytes, dup_shuf);
+        __m128i shuf_r   = _mm_add_epi8(_mm_add_epi8(r_dup, r_dup), odd_offset);
+        __m128i shuf_l   = _mm_add_epi8(_mm_add_epi8(l_dup, l_dup), odd_offset);
+
+        __m128i right = _mm_shuffle_epi8(code_vec, shuf_r);
+        __m128i left  = _mm_shuffle_epi8(code_vec, shuf_l);
+        int nr = __builtin_popcount(mask);
+        _mm_storeu_si128((__m128i *)(right_out + n_right), right);
+        _mm_storeu_si128((__m128i *)(codes_la  + n_left ), left);
+        n_right += nr;
+        n_left  += (8 - nr);
+    }
+    int shift_d = 15 - depth;
+    for (; j < n; j++){ uint16_t c=codes_la[j]; if((c>>shift_d)&1) right_out[n_right++]=c; else codes_la[n_left++]=c; }
+    return n_right;
+}
+static void prim_part_full_pext(const ctx_t *c){
+    prim_part_full_pext_x86(c->la_work, c->n, c->depth, c->bm, c->tmp16);
+}
+#endif /* __BMI2__ */
+#endif /* __AVX2__ */
+#endif /* __SSE4_1__ */
+
+/* ============================================================================
+ * coalesce LOSERS — AVX-512 store-coalescing partition experiments
+ *   From extras/bench/bench_coalesce_avx512.c (bench_compressstoreu,
+ *   bench_macro), reshaped to the ST_PART contract: in-place u16 partition,
+ *   mask from bit (15-depth) of each code, full bm written, left compacted
+ *   back into codes_la (= la_work), right into right_out (= tmp16) — matching
+ *   p_part_scalar / the production AVX-512 partition.  Both are documented
+ *   LOSERS vs the production vpcompressw + full-store partition.
+ * ========================================================================== */
+#if defined(__AVX512VBMI2__) && defined(__AVX512VBMI__)
+#include <immintrin.h>
+
+/* Per-32-code mask: shift the partition bit (15-depth) to bit 15, read the
+ * sign bits.  Identical to enc_mask32_codes_la_avx512 in the production
+ * backend (the bench reference scalar_partition uses bit 15-depth). */
+static inline uint32_t pv_part_mask32(__m512i code_vec, int depth) {
+    return (uint32_t)_mm512_movepi16_mask(_mm512_slli_epi16(code_vec, depth));
+}
+
+/* coal_compressstoreu: single-instruction _mm512_mask_compressstoreu_epi16
+ * per side (writes only popcount*2 bytes, advancing by the same). */
+static int pv_part_coal_compressstoreu_avx512(uint16_t *codes_la, int n, int depth,
+                                              uint8_t *bm, uint16_t *right_out) {
+    int n_left = 0, n_right = 0, j = 0;
+    for (; j + 32 <= n; j += 32) {
+        __m512i data = _mm512_loadu_si512((const __m512i *)(codes_la + j));
+        uint32_t mask = pv_part_mask32(data, depth);
+        memcpy(bm + (j >> 3), &mask, 4);
+        _mm512_mask_compressstoreu_epi16(right_out + n_right, (__mmask32)mask,  data);
+        _mm512_mask_compressstoreu_epi16(codes_la  + n_left,  (__mmask32)~mask, data);
+        int nr = __builtin_popcount(mask);
+        n_right += nr; n_left += 32 - nr;
+    }
+    for (; j + 8 <= n; j += 8) {
+        __m128i data = _mm_loadu_si128((const __m128i *)(codes_la + j));
+        __m128i sh   = _mm_slli_epi16(data, depth);
+        uint32_t mask = (uint32_t)_mm_movepi16_mask(sh) & 0xFF;
+        bm[j >> 3] = (uint8_t)mask;
+        _mm_mask_compressstoreu_epi16(right_out + n_right, (__mmask8)mask,  data);
+        _mm_mask_compressstoreu_epi16(codes_la  + n_left,  (__mmask8)~mask, data);
+        int nr = __builtin_popcount(mask);
+        n_right += nr; n_left += 8 - nr;
+    }
+    if (j < n) {
+        int tail = n - j, shd = 15 - depth; uint8_t mask = 0;
+        uint16_t tb[8]; for (int k = 0; k < tail; k++) tb[k] = codes_la[j + k];
+        for (int k = 0; k < tail; k++) mask |= (uint8_t)(((tb[k] >> shd) & 1) << k);
+        bm[j >> 3] = mask;
+        for (int k = 0; k < tail; k++)
+            if (mask & (1 << k)) right_out[n_right++] = tb[k];
+            else                 codes_la[n_left++]   = tb[k];
+    }
+    return n_right;
+}
+static void prim_part_coal_compressstoreu(const ctx_t *c) {
+    pv_part_coal_compressstoreu_avx512(c->la_work, c->n, c->depth, c->bm, c->tmp16);
+}
+
+/* coal_vpermb_macro: 2-iter macro-block coalesce.  Accumulate two consecutive
+ * iters' compressed data into one 64-byte zmm via runtime byte-shift (vpermb),
+ * one store per side per macro = 0.5 stores/iter. */
+static const uint8_t pv_coal_iota64[64] __attribute__((aligned(64))) = {
+     0, 1, 2, 3, 4, 5, 6, 7, 8, 9,10,11,12,13,14,15,
+    16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,
+    32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,
+    48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63};
+static int pv_part_coal_macro_avx512(uint16_t *codes_la, int n, int depth,
+                                     uint8_t *bm, uint16_t *right_out) {
+    const __m512i iota = _mm512_load_si512((const __m512i *)pv_coal_iota64);
+    int n_left = 0, n_right = 0, j = 0;
+    for (; j + 64 <= n; j += 64) {
+        __m512i d0 = _mm512_loadu_si512((const __m512i *)(codes_la + j));
+        __m512i d1 = _mm512_loadu_si512((const __m512i *)(codes_la + j + 32));
+        uint32_t m0 = pv_part_mask32(d0, depth);
+        uint32_t m1 = pv_part_mask32(d1, depth);
+        memcpy(bm + (j >> 3),     &m0, 4);
+        memcpy(bm + (j >> 3) + 4, &m1, 4);
+        int pr0 = __builtin_popcount(m0), pr1 = __builtin_popcount(m1);
+        int pl0 = 32 - pr0, pl1 = 32 - pr1;
+        __m512i r0 = _mm512_maskz_compress_epi16((__mmask32)m0, d0);
+        __m512i r1 = _mm512_maskz_compress_epi16((__mmask32)m1, d1);
+        __m512i l0 = _mm512_maskz_compress_epi16((__mmask32)~m0, d0);
+        __m512i l1 = _mm512_maskz_compress_epi16((__mmask32)~m1, d1);
+        /* Right side.  Place r1 at byte offset pr0*2 via vpermb on (iota -
+         * pr0*2); vpermb uses only the low 6 bits, so positions below the
+         * offset wrap to garbage — zero them with a maskz keyed on
+         * iota >= pr0*2 so the OR with r0 keeps r0's low bytes intact.  When
+         * pr0+pr1 > 32 the combined data exceeds one 64-byte zmm, so fall
+         * back to two stores (the coalesce can't represent it).  (The
+         * original throughput-only bench skipped both the mask and this
+         * spill check — it never verified.) */
+        if (pr0 + pr1 <= 32) {
+            __m512i offr = _mm512_set1_epi8((char)(pr0 * 2));
+            __mmask64 keepr = _mm512_cmpge_epu8_mask(iota, offr);
+            __m512i r1p = _mm512_maskz_permutexvar_epi8(keepr, _mm512_sub_epi8(iota, offr), r1);
+            _mm512_storeu_si512((__m512i *)(right_out + n_right), _mm512_or_si512(r0, r1p));
+        } else {
+            _mm512_storeu_si512((__m512i *)(right_out + n_right), r0);
+            _mm512_storeu_si512((__m512i *)(right_out + n_right + pr0), r1);
+        }
+        n_right += pr0 + pr1;
+        /* Left side (in-place into codes_la). */
+        if (pl0 + pl1 <= 32) {
+            __m512i offl = _mm512_set1_epi8((char)(pl0 * 2));
+            __mmask64 keepl = _mm512_cmpge_epu8_mask(iota, offl);
+            __m512i l1p = _mm512_maskz_permutexvar_epi8(keepl, _mm512_sub_epi8(iota, offl), l1);
+            _mm512_storeu_si512((__m512i *)(codes_la + n_left), _mm512_or_si512(l0, l1p));
+        } else {
+            _mm512_storeu_si512((__m512i *)(codes_la + n_left), l0);
+            _mm512_storeu_si512((__m512i *)(codes_la + n_left + pl0), l1);
+        }
+        n_left += pl0 + pl1;
+    }
+    /* stride-8 tail */
+    for (; j + 8 <= n; j += 8) {
+        __m128i data = _mm_loadu_si128((const __m128i *)(codes_la + j));
+        uint32_t mask = (uint32_t)_mm_movepi16_mask(_mm_slli_epi16(data, depth)) & 0xFF;
+        bm[j >> 3] = (uint8_t)mask;
+        _mm_mask_compressstoreu_epi16(right_out + n_right, (__mmask8)mask,  data);
+        _mm_mask_compressstoreu_epi16(codes_la  + n_left,  (__mmask8)~mask, data);
+        int nr = __builtin_popcount(mask);
+        n_right += nr; n_left += 8 - nr;
+    }
+    if (j < n) {
+        int tail = n - j, shd = 15 - depth; uint8_t mask = 0;
+        uint16_t tb[8]; for (int k = 0; k < tail; k++) tb[k] = codes_la[j + k];
+        for (int k = 0; k < tail; k++) mask |= (uint8_t)(((tb[k] >> shd) & 1) << k);
+        bm[j >> 3] = mask;
+        for (int k = 0; k < tail; k++)
+            if (mask & (1 << k)) right_out[n_right++] = tb[k];
+            else                 codes_la[n_left++]   = tb[k];
+    }
+    return n_right;
+}
+static void prim_part_coal_macro(const ctx_t *c) {
+    pv_part_coal_macro_avx512(c->la_work, c->n, c->depth, c->bm, c->tmp16);
+}
+#endif /* __AVX512VBMI2__ && __AVX512VBMI__ */
 
 /* ============================================================================
  * Registry — partition family (no-op where the ISA is unavailable)
  * ========================================================================== */
 static void pv_register_partition(void) {
+#if defined(__AVX512VBMI2__) && defined(__AVX512VBMI__)
+    PV_VARIANT(ST_PART, "coal_compressstoreu", PV_ISA_AVX512,
+               "bench_coalesce_avx512.c bench_compressstoreu",
+               "1-instr compress+store; LOSER vs full-store production", 1,
+               prim_part_coal_compressstoreu);
+    PV_VARIANT(ST_PART, "coal_vpermb_macro", PV_ISA_AVX512,
+               "bench_coalesce_avx512.c bench_macro",
+               "2-iter vpermb coalesce, 0.5 stores/iter; LOSER", 1,
+               prim_part_coal_macro);
+#endif
 #if defined(USE_NEON_KERNELS)
+    PV_VARIANT(ST_PART,      "asof-5f3222e", PV_ISA_NEON,
+               "5f3222e (2026-05-26)",
+               "pre-COM stride-8 serial-cursor FULL partition", 1,
+               prim_part_full_asof_5f3222e);
     PV_VARIANT(ST_PART,      "prefix64", PV_ISA_NEON,
                "Jeff Plaisance / 6d61760",
                "M4 FULL +15-18% vs shipped COM; needs Graviton check", 1,
@@ -194,6 +889,41 @@ static void pv_register_partition(void) {
                "Jeff Plaisance / 6d61760",
                "M4 RIGHT ~2-3% slower than shipped COM", 0,
                prim_part_right_prefix64);
+    /* enc_partition_full (ST_PART) */
+    PV_VARIANT(ST_PART, "com",              PV_ISA_NEON, "bench_partition_neon.c",
+               "64/iter 8-chunk prefix-sum cursors, masks via 8x vaddvq; pre-com_v3 step", 1, prim_part_com);
+    PV_VARIANT(ST_PART, "com_v2_transpose", PV_ISA_NEON, "bench_partition_neon.c",
+               "com but masks via 8x8 vsli transpose; LOSER (transpose > the 8 vaddvq it removes)", 1, prim_part_com_v2_trans);
+    PV_VARIANT(ST_PART, "split16",          PV_ISA_NEON, "bench_encode_split.c (CODES16)",
+               "dense-codes SIMD-movemask partition_8, stride-8; no prefix-sum cursor decouple", 1, prim_part_split16);
+    PV_VARIANT(ST_PART, "split16_unroll",   PV_ISA_NEON, "bench_encode_split.c (CODES16U)",
+               "split16 at stride-16 (2 partition_8/iter for ILP)", 1, prim_part_split16_unroll);
+    /* coalesce experiments: prebuilt-bitmap re-read -> ST_PARTBM / ST_PARTHALF
+       (all documented losers; see docs/COALESCE.md). */
+    PV_VARIANT(ST_PARTBM,   "coal_vext",     PV_ISA_NEON, "bench_coalesce.c",
+               "per-iter store-coalesce, switch on so_far -> vextq; LOSER", 1, prim_part_coal_vext);
+    PV_VARIANT(ST_PARTBM,   "coal_tbl",      PV_ISA_NEON, "bench_coalesce.c",
+               "per-iter coalesce, runtime vqtbl1q shuffle; LOSER", 1, prim_part_coal_tbl);
+    /* coal_macro / coal_macro1s / coal_half_tree omitted: 32B accumulator can't
+       hold a 4-mask block's >16 codes, so they don't verify byte-exact. */
+#endif
+#if defined(__SSE4_1__) && !defined(__AVX512VBMI2__)
+    PV_VARIANT(ST_PART, "sse_com", PV_ISA_SSE4,
+               "bench_partition_x86.c / IDEAS x86 COM partition",
+               "64 codes/iter prefix-sum cursors; AMD win, Intel regress", 1,
+               prim_part_full_com);
+#if defined(__AVX2__)
+    PV_VARIANT(ST_PART, "unroll2y", PV_ISA_AVX2,
+               "bench_partition_unroll.c",
+               "2x-unroll, ymm-fused mask gen + load", 1,
+               prim_part_full_unroll2y);
+#if defined(__BMI2__)
+    PV_VARIANT(ST_PART, "pext", PV_ISA_AVX2,
+               "bench_partition_avx2.c",
+               "BMI2 pdep/pext shuffle-control gen, no compress_tab", 1,
+               prim_part_full_pext);
+#endif
+#endif
 #endif
 }
 

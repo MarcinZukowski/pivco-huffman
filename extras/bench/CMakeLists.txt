@@ -97,15 +97,9 @@ if(TARGET_ARCH STREQUAL "arm64" OR TARGET_ARCH STREQUAL "aarch64")
 
     add_executable(pivco_enc_init_micro bench_enc_init.c)
     target_link_libraries(pivco_enc_init_micro pivco_huffman m)
-
-    # NEON merge_vec_vec variant microbench (prefix-sum cursor decoupling;
-    # old / com64 / com128 / Jeff's PR#4 variants).  Self-contained.
-    add_executable(pivco_bench_merge_neon bench_merge_neon.c)
-
-    # NEON encode-partition variant microbench (the same prefix-sum idea on
-    # the encode side; old / com / com_v2(transpose) / com_v3(vpaddq mask)).
-    add_executable(pivco_bench_partition_neon bench_partition_neon.c)
 endif()
+# NEON merge_vec_vec + encode-partition variant microbenches retired —
+# kernels mined into bench/prim_variants/ (graveyard).
 
 # Partition u8 vs u16 microbench: works on any tier (each ISA is
 # #ifdef-gated inside the source).
@@ -252,20 +246,8 @@ endif()
 
 # -------- Counter-instrumented x86 microbenches --------
 if(TARGET_ARCH STREQUAL "x86_64" OR TARGET_ARCH STREQUAL "amd64")
-    # x86 merge_vec_vec COM exploration (prefix-sum cursor decoupling;
-    # NEON-specific win that doesn't transfer -- see IDEAS.md).  Self-
-    # contained; needs AVX2, plus VBMI2 for the vpexpandb reference variant.
-    add_executable(pivco_bench_merge_x86 bench_merge_x86.c)
-    target_compile_options(pivco_bench_merge_x86 PRIVATE -mavx2)
-    if(COMPILER_HAS_AVX512_VBMI2)
-        target_compile_options(pivco_bench_merge_x86 PRIVATE
-            -mavx512vbmi2 -mavx512bw)
-    endif()
-
-    # x86 encode-partition COM exploration (same prefix-sum idea; AMD wins,
-    # Intel regresses -- NEON-specific, see IDEAS.md).  Self-contained.
-    add_executable(pivco_bench_partition_x86 bench_partition_x86.c)
-    target_compile_options(pivco_bench_partition_x86 PRIVATE -mavx2)
+    # x86 merge_vec_vec + encode-partition COM microbenches retired —
+    # kernels mined into bench/prim_variants/ (graveyard).
 
     add_executable(pivco_micro_sse_cnt bench_micro_sse_cnt.cpp)
     target_link_libraries(pivco_micro_sse_cnt pivco_huffman counters::counters m)
