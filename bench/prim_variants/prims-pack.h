@@ -306,21 +306,15 @@ static void prim_pack_sllv(const ctx_t *c) {
  * ========================================================================== */
 static void pv_register_pack(void) {
     for (int d = 2; d <= 7; d++) {
-#if defined(__AVX512VBMI2__) && defined(__AVX512VBMI__)
         PV_VARIANT_D(ST_PACK, "multishift", d, PV_ISA_AVX512,
                      "bench_pack_v2.c pack_v2_dN",
-                     "vpmultishiftqb, 64 codes/iter", 0, prim_pack_multishift);
-#endif
-#if defined(__BMI2__)
+                     "vpmultishiftqb, 64 codes/iter", 0, PV_FN_VBMI2(prim_pack_multishift));
         PV_VARIANT_D(ST_PACK, "asof-cd119a6", d, PV_ISA_AVX512,
                      "cd119a6 pack_dN_bmi2",
-                     "BMI2 pext pack, 8 codes/iter", 0, prim_pack_bmi2);
-#endif
-#if defined(__AVX512F__)
+                     "BMI2 pext pack, 8 codes/iter", 0, PV_FN_BMI2(prim_pack_bmi2));
         PV_VARIANT_D(ST_PACK, "asof-2f80076", d, PV_ISA_AVX512,
                      "cd119a6~1 PACK_DN_AVX512_UNIFIED",
-                     "sllv + reduce_add pack, 8 codes/iter", 0, prim_pack_sllv);
-#endif
+                     "sllv + reduce_add pack, 8 codes/iter", 0, PV_FN_AVX512F(prim_pack_sllv));
     }
 }
 

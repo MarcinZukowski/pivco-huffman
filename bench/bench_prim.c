@@ -350,7 +350,7 @@ typedef struct {
     const char       *origin;
     const char       *note;
 } prim_t;
-static prim_t PRIMS[256]; static int NPRIMS = 0;
+static prim_t PRIMS[512]; static int NPRIMS = 0;
 static void reg(const char *v, stage_t s, int D, int ip, void (*fn)(const ctx_t *)) {
     PRIMS[NPRIMS++] = (prim_t){ .variant=v, .stage=s, .D=D, .inplace=ip, .run=fn };
 }
@@ -610,7 +610,7 @@ int main(int argc, char **argv) {
            the variants still requires --variants. */
         pv_register_partition(); pv_register_merge(); pv_register_flat(); pv_register_pack();
         int verbose = (do_list == 2);
-        printf("logical primitives  (* = production, + = variant):\n");
+        printf("logical primitives  (* = production, + = variant, - = other-arch, not built here):\n");
         int shown[64] = {0};
         for (int k=0;k<NPRIMS;k++) {
             stage_t s = PRIMS[k].stage;
@@ -625,18 +625,22 @@ int main(int argc, char **argv) {
                     if (dup) continue;
                     if (ns<64) snprintf(seen[ns++],24,"%s",p->variant);
                     int isprod = !strcmp(p->variant, BK), issca = !strcmp(p->variant,"scalar");
-                    printf("  %-15s %c  ", p->variant, isprod ? '*' : (issca ? ' ' : '+'));
+                    int isstub = (p->run == NULL);   /* compiled out on this host */
+                    char mk = isstub ? '-' : (isprod ? '*' : (issca ? ' ' : '+'));
+                    printf("  %-15s %c  ", p->variant, mk);
                     if (issca)       printf("scalar reference");
                     else if (isprod) printf("production (real prim_*)");
                     else if (p->origin)
-                        printf("[%s] %s%s%s", pv_isa_name(p->isa), p->origin,
-                               p->note ? " · " : "", p->note ? p->note : "");
+                        printf("[%s] %s%s%s%s", pv_isa_name(p->isa), p->origin,
+                               p->note ? " · " : "", p->note ? p->note : "",
+                               isstub ? "  (not built here)" : "");
                     else printf("experimental (bench_prim, unannotated)");
                     printf("\n");
                 }
             } else {
                 printf("  %-22s", stage_name(s));
-                char vbuf[400]; int vo = 0; vbuf[0] = 0;
+                char vbuf[400]; int vo = 0; vbuf[0] = 0;   /* runnable variants */
+                char sbuf[400]; int so = 0; sbuf[0] = 0;   /* other-arch stubs  */
                 for (int m=0;m<NPRIMS;m++) if (PRIMS[m].stage==s) {
                     prim_t *p = &PRIMS[m];
                     int dup=0; for (int t=0;t<ns;t++) if(!strcmp(seen[t],p->variant)) {dup=1;break;}
@@ -644,9 +648,11 @@ int main(int argc, char **argv) {
                     if (ns<64) snprintf(seen[ns++],24,"%s",p->variant);
                     if (!strcmp(p->variant, BK))           printf(" %s*", p->variant);
                     else if (!strcmp(p->variant,"scalar")) printf(" scalar");
-                    else vo += snprintf(vbuf+vo, sizeof vbuf - vo, " %s", p->variant);
+                    else if (p->run == NULL) so += snprintf(sbuf+so, sizeof sbuf - so, " %s", p->variant);
+                    else                     vo += snprintf(vbuf+vo, sizeof vbuf - vo, " %s", p->variant);
                 }
                 if (vo) printf(" [+%s]", vbuf);
+                if (so) printf(" [-%s]", sbuf);
                 printf("\n");
             }
         }
@@ -655,17 +661,26 @@ int main(int argc, char **argv) {
 
     if (variants) {
         pv_register_partition(); pv_register_merge(); pv_register_flat(); pv_register_pack();
-        /* Regroup so each logical family (stage) runs as one contiguous block
-           — scalar, then production backend, then its variants — instead of
-           all variants trailing at the very end.  Stable within a stage:
-           original registration order is preserved, so scalar/backend stay
-           ahead of the later-registered variants. */
-        prim_t grouped[256]; int ng = 0;
+        /* Regroup so each logical family (stage) runs as one contiguous block,
+           sub-grouped by D — scalar, then production backend, then its variants
+           — instead of all variants trailing at the very end.  Stable within
+           each (stage, D): original registration order is preserved, so
+           scalar/backend stay ahead of the later-registered variants, and
+           per-D variants (e.g. flat fl_natural) slot under their own D rather
+           than after the last D. */
+        prim_t grouped[512]; int ng = 0;
         for (int k=0;k<NPRIMS;k++) {
             stage_t s = PRIMS[k].stage;
-            int seen=0; for (int j=0;j<k;j++) if (PRIMS[j].stage==s){seen=1;break;}
-            if (seen) continue;
-            for (int m=0;m<NPRIMS;m++) if (PRIMS[m].stage==s) grouped[ng++]=PRIMS[m];
+            int sseen=0; for (int j=0;j<k;j++) if (PRIMS[j].stage==s){sseen=1;break;}
+            if (sseen) continue;
+            /* flush this stage, sub-grouped by D in first-occurrence order */
+            for (int m=0;m<NPRIMS;m++) {
+                if (PRIMS[m].stage!=s) continue;
+                int d = PRIMS[m].D;
+                int dseen=0; for (int q=0;q<m;q++) if (PRIMS[q].stage==s && PRIMS[q].D==d){dseen=1;break;}
+                if (dseen) continue;
+                for (int t=0;t<NPRIMS;t++) if (PRIMS[t].stage==s && PRIMS[t].D==d) grouped[ng++]=PRIMS[t];
+            }
         }
         memcpy(PRIMS, grouped, (size_t)ng*sizeof(prim_t)); NPRIMS = ng;
     }
@@ -691,6 +706,7 @@ int main(int argc, char **argv) {
 
     for (int k=0;k<NPRIMS;k++) {
         prim_t *p = &PRIMS[k];
+        if (!p->run) continue;   /* other-arch stub (not built here); see --list */
         if (vfilter && strcmp(stage_name(p->stage), vfilter)) continue;
         ctx_t cx = { bm, codes, c2s, out, pack_out, merge_left, merge_right,
                      la_work, tmp16, n, p->D, PART_DEPTH };

@@ -40,6 +40,53 @@ static inline const char *pv_isa_name(pv_isa_t i) {
     }
 }
 
+/* Per-ISA function selector for cross-arch visibility: yields the kernel when
+ * THIS build compiled it, else NULL — a "listed but not runnable here" stub so
+ * --list/--listv can show every variant (marked '-') regardless of the host's
+ * ISA, while the run/verify path skips the NULL ones.  Each macro's condition
+ * MUST match the kernel's own #if gate.  Off-ISA the fn token never appears,
+ * so the (uncompiled) kernel symbol is not referenced. */
+#if defined(USE_NEON_KERNELS)
+#  define PV_FN_NEON(f) (f)
+#else
+#  define PV_FN_NEON(f) NULL
+#endif
+#if defined(__SSE4_1__) && !defined(__AVX512VBMI2__)
+#  define PV_FN_SSE(f) (f)
+#else
+#  define PV_FN_SSE(f) NULL
+#endif
+#if defined(__SSE4_1__) && !defined(__AVX512VBMI2__) && defined(__AVX2__)
+#  define PV_FN_SSE_AVX2(f) (f)
+#else
+#  define PV_FN_SSE_AVX2(f) NULL
+#endif
+#if defined(__SSE4_1__) && !defined(__AVX512VBMI2__) && defined(__AVX2__) && defined(__BMI2__)
+#  define PV_FN_SSE_AVX2_BMI2(f) (f)
+#else
+#  define PV_FN_SSE_AVX2_BMI2(f) NULL
+#endif
+#if defined(__AVX2__)
+#  define PV_FN_AVX2(f) (f)
+#else
+#  define PV_FN_AVX2(f) NULL
+#endif
+#if defined(__AVX512VBMI2__) && defined(__AVX512VBMI__)
+#  define PV_FN_VBMI2(f) (f)
+#else
+#  define PV_FN_VBMI2(f) NULL
+#endif
+#if defined(__BMI2__)
+#  define PV_FN_BMI2(f) (f)
+#else
+#  define PV_FN_BMI2(f) NULL
+#endif
+#if defined(__AVX512F__)
+#  define PV_FN_AVX512F(f) (f)
+#else
+#  define PV_FN_AVX512F(f) NULL
+#endif
+
 /* Append a variant to bench_prim's PRIMS[] table (same translation unit;
  * prim_t / PRIMS / NPRIMS / stage_t / ctx_t are provided by bench_prim.c).
  *   STAGE   logical primitive, e.g. ST_PART / ST_MERGE_VEC_VEC

@@ -222,24 +222,20 @@ static void prim_merge_flat_asof_d6(const ctx_t *c){
  * Registry — flat family (no-op where the ISA is unavailable)
  * ========================================================================== */
 static void pv_register_flat(void) {
-#if defined(USE_NEON_KERNELS)
     PV_VARIANT_D(ST_UNPACK,     "fl_natural", 2, PV_ISA_NEON, "bench_unpack_fl_layout.c",
-                 "row-major shift+mask + vst4q deinterleave (D|8 only)", 0, prim_flat_unpack_fl_natural_d2);
+                 "row-major shift+mask + vst4q deinterleave (D|8 only)", 0, PV_FN_NEON(prim_flat_unpack_fl_natural_d2));
     PV_VARIANT_D(ST_UNPACK,     "fl_natural", 4, PV_ISA_NEON, "bench_unpack_fl_layout.c",
-                 "row-major shift+mask + vst2q deinterleave (D|8 only)", 0, prim_flat_unpack_fl_natural_d4);
+                 "row-major shift+mask + vst2q deinterleave (D|8 only)", 0, PV_FN_NEON(prim_flat_unpack_fl_natural_d4));
     PV_VARIANT_D(ST_MERGE_FLAT, "asof-6dc5632", 5, PV_ISA_NEON, "6dc5632",
-                 "first-shipped D=5 flat decode: memcpy(5)+vsetq_lane_u64 unpack + vqtbl2 c2s", 0, prim_merge_flat_asof_6dc5632_d5);
-#endif
-#if defined(__AVX2__)
+                 "first-shipped D=5 flat decode: memcpy(5)+vsetq_lane_u64 unpack + vqtbl2 c2s", 0, PV_FN_NEON(prim_merge_flat_asof_6dc5632_d5));
     PV_VARIANT_D(ST_MERGE_FLAT, "asof-d580b16", 2, PV_ISA_AVX2, "d580b16~1:pivco_huffman_x86_flat.h",
-                 "pre-ryg vpsrlvd AVX2 flat unpack + scalar c2s gather", 0, prim_merge_flat_asof_d2);
+                 "pre-ryg vpsrlvd AVX2 flat unpack + scalar c2s gather", 0, PV_FN_AVX2(prim_merge_flat_asof_d2));
     PV_VARIANT_D(ST_MERGE_FLAT, "asof-d580b16", 3, PV_ISA_AVX2, "d580b16~1:pivco_huffman_x86_flat.h",
-                 "pre-ryg vpsrlvd AVX2 flat unpack + scalar c2s gather", 0, prim_merge_flat_asof_d3);
+                 "pre-ryg vpsrlvd AVX2 flat unpack + scalar c2s gather", 0, PV_FN_AVX2(prim_merge_flat_asof_d3));
     PV_VARIANT_D(ST_MERGE_FLAT, "asof-d580b16", 5, PV_ISA_AVX2, "d580b16~1:pivco_huffman_x86_flat.h",
-                 "pre-ryg vpsrlvd AVX2 flat unpack + scalar c2s gather", 0, prim_merge_flat_asof_d5);
+                 "pre-ryg vpsrlvd AVX2 flat unpack + scalar c2s gather", 0, PV_FN_AVX2(prim_merge_flat_asof_d5));
     PV_VARIANT_D(ST_MERGE_FLAT, "asof-d580b16", 6, PV_ISA_AVX2, "d580b16~1:pivco_huffman_x86_flat.h",
-                 "pre-ryg vpsrlvd AVX2 flat unpack + scalar c2s gather", 0, prim_merge_flat_asof_d6);
-#endif
+                 "pre-ryg vpsrlvd AVX2 flat unpack + scalar c2s gather", 0, PV_FN_AVX2(prim_merge_flat_asof_d6));
 }
 
 #endif /* PIVCO_PRIM_VARIANTS_FLAT_H */

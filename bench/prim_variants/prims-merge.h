@@ -748,65 +748,60 @@ static void prim_merge_flat_e5a199a(const ctx_t *c) {
  * Registry — merge family (no-op where the ISA is unavailable)
  * ========================================================================== */
 static void pv_register_merge(void) {
-#if defined(__AVX512VBMI2__) && defined(__AVX512VBMI__)
+#if defined(USE_NEON_KERNELS)
+    pv_build_cc_tables();
+#endif
+    /* merge_flat — AVX-512 (asof-e5a199a, per-D) */
     for (int d = 2; d <= 7; d++)
         PV_VARIANT_D(ST_MERGE_FLAT, "asof-e5a199a", d, PV_ISA_AVX512,
                      "e5a199a~1 merge_flat_dN_avx512",
-                     "pre-widening 16 codes/iter", 0, prim_merge_flat_e5a199a);
-#endif
-#if defined(USE_NEON_KERNELS)
-    pv_build_cc_tables();
-    /* merge_vec_vec */
+                     "pre-widening 16 codes/iter", 0, PV_FN_VBMI2(prim_merge_flat_e5a199a));
+    /* merge_vec_vec — NEON */
     PV_VARIANT(ST_MERGE_VEC_VEC, "asof-4dd08e3", PV_ISA_NEON, "4dd08e3 (2026-05-10)",
-               "genesis bottom-up tree_merge: stride-8, 1 vqtbl1/8, serial cursor", 0, prim_merge_vv_asof_4dd08e3);
+               "genesis bottom-up tree_merge: stride-8, 1 vqtbl1/8, serial cursor", 0, PV_FN_NEON(prim_merge_vv_asof_4dd08e3));
     PV_VARIANT(ST_MERGE_VEC_VEC, "cursor16",  PV_ISA_NEON, "historical 2c8606e (pre-5cccccc)",
-               "stride-16 shipped merge before COM64; loop-carried cursor", 0, prim_merge_vv_cursor16);
+               "stride-16 shipped merge before COM64; loop-carried cursor", 0, PV_FN_NEON(prim_merge_vv_cursor16));
     PV_VARIANT(ST_MERGE_VEC_VEC, "prefix128", PV_ISA_NEON, "Jeff Plaisance / PR #4",
-               "vpaddlq fold + u16 SWAR prefix, 128/iter; M1 Max win, ARM-untested", 0, prim_merge_vv_prefix128);
+               "vpaddlq fold + u16 SWAR prefix, 128/iter; M1 Max win, ARM-untested", 0, PV_FN_NEON(prim_merge_vv_prefix128));
     PV_VARIANT(ST_MERGE_VEC_VEC, "prefix64",  PV_ISA_NEON, "Jeff Plaisance / PR #4",
-               "prefix128 block style at 64-code stride", 0, prim_merge_vv_prefix64);
+               "prefix128 block style at 64-code stride", 0, PV_FN_NEON(prim_merge_vv_prefix64));
     PV_VARIANT(ST_MERGE_VEC_VEC, "pcpc",      PV_ISA_NEON, "bench_prim experiment",
-               "precomputed-popcount (pre-filled table); M4 wash, store-bound", 0, prim_merge_vv_pcpc);
+               "precomputed-popcount (pre-filled table); M4 wash, store-bound", 0, PV_FN_NEON(prim_merge_vv_pcpc));
     PV_VARIANT(ST_MERGE_VEC_VEC, "pcpc_full", PV_ISA_NEON, "bench_prim experiment",
-               "pcpc + table fill inside the timed region", 0, prim_merge_vv_pcpc_full);
+               "pcpc + table fill inside the timed region", 0, PV_FN_NEON(prim_merge_vv_pcpc_full));
     PV_VARIANT(ST_MERGE_VEC_VEC, "unroll8",   PV_ISA_NEON, "bench_prim experiment",
-               "8-way unroll, in-register vcnt popcount; doubles L/R load count", 0, prim_merge_vv_unroll8);
+               "8-way unroll, in-register vcnt popcount; doubles L/R load count", 0, PV_FN_NEON(prim_merge_vv_unroll8));
     PV_VARIANT(ST_MERGE_VEC_VEC, "com32",     PV_ISA_NEON, "bench_merge_neon.c",
-               "COM prefix-sum cursor-decouple, 32/iter (2 chunks); narrower than shipped com64", 0, prim_merge_vv_com32);
+               "COM prefix-sum cursor-decouple, 32/iter (2 chunks); narrower than shipped com64", 0, PV_FN_NEON(prim_merge_vv_com32));
     PV_VARIANT(ST_MERGE_VEC_VEC, "com128",    PV_ISA_NEON, "bench_merge_neon.c",
-               "COM 128/iter (8 chunks, lo/hi u64 split + cross-half bias); regalloc-heavy, loses on Graviton", 0, prim_merge_vv_com128);
-    /* merge_cst_cst */
+               "COM 128/iter (8 chunks, lo/hi u64 split + cross-half bias); regalloc-heavy, loses on Graviton", 0, PV_FN_NEON(prim_merge_vv_com128));
+    /* merge_cst_cst — NEON */
     PV_VARIANT(ST_MERGE_CST_CST, "tbl",       PV_ISA_NEON, "bench_prim experiment",
-               "256x8 mask->0xFF/0x00 LUT + vand/veor blend", 0, prim_merge_cc_tbl);
+               "256x8 mask->0xFF/0x00 LUT + vand/veor blend", 0, PV_FN_NEON(prim_merge_cc_tbl));
     PV_VARIANT(ST_MERGE_CST_CST, "blendtab",  PV_ISA_NEON, "bench_prim experiment",
-               "precomputed 256x8 blended-output LUT (no hot-loop compute)", 0, prim_merge_cc_blendtab);
+               "precomputed 256x8 blended-output LUT (no hot-loop compute)", 0, PV_FN_NEON(prim_merge_cc_blendtab));
     PV_VARIANT(ST_MERGE_CST_CST, "vtblq",     PV_ISA_NEON, "bench_prim experiment",
-               "16-lane vtstq + vqtbl1q", 0, prim_merge_cc_vtblq);
+               "16-lane vtstq + vqtbl1q", 0, PV_FN_NEON(prim_merge_cc_vtblq));
     PV_VARIANT(ST_MERGE_CST_CST, "vtbl",      PV_ISA_NEON, "bench_prim experiment",
-               "8-lane vtst + vtbl1 x2", 0, prim_merge_cc_vtbl);
+               "8-lane vtst + vtbl1 x2", 0, PV_FN_NEON(prim_merge_cc_vtbl));
     PV_VARIANT(ST_MERGE_CST_CST, "d1flat",    PV_ISA_NEON, "bench_prim experiment",
-               "D=1 flat-decode shape (vshl + vqtbl1q)", 0, prim_merge_cc_d1flat);
-#endif
-#if defined(__SSE4_1__) && !defined(__AVX512VBMI2__)
+               "D=1 flat-decode shape (vshl + vqtbl1q)", 0, PV_FN_NEON(prim_merge_cc_d1flat));
     /* merge_vec_vec — x86 COM / prefix-sum forms (IDEAS: x86 COM merge). */
     PV_VARIANT(ST_MERGE_VEC_VEC, "sse_com",        PV_ISA_SSE4, "bench_merge_x86.c",
                "64 codes/iter, 8 pshufb merges, SWAR-popcnt prefix cursors", 0,
-               prim_merge_vv_sse_com);
+               PV_FN_SSE(prim_merge_vv_sse_com));
     PV_VARIANT(ST_MERGE_VEC_VEC, "sse_com_pshufb", PV_ISA_SSE4, "bench_merge_x86.c",
                "sse_com but Mula pshufb bytewise popcount", 0,
-               prim_merge_vv_sse_com_pshufb);
+               PV_FN_SSE(prim_merge_vv_sse_com_pshufb));
     PV_VARIANT(ST_MERGE_VEC_VEC, "sse_com128",     PV_ISA_SSE4, "bench_merge_x86.c",
                "128 codes/iter, full-width pshufb popcount", 0,
-               prim_merge_vv_sse_com128);
-#if defined(__AVX2__)
+               PV_FN_SSE(prim_merge_vv_sse_com128));
     PV_VARIANT(ST_MERGE_VEC_VEC, "avx2_com",       PV_ISA_AVX2, "bench_merge_x86.c",
                "16 codes/_mm256_shuffle_epi8 (2 lanes), COM cursors", 0,
-               prim_merge_vv_avx2_com);
+               PV_FN_SSE_AVX2(prim_merge_vv_avx2_com));
     PV_VARIANT(ST_MERGE_VEC_VEC, "prepop",         PV_ISA_AVX2, "bench_merge_avx2.c",
                "16 B/iter, on-the-fly prefix-popcount pshufb controls (no tab)", 0,
-               prim_merge_vv_prepop);
-#endif
-#endif
+               PV_FN_SSE_AVX2(prim_merge_vv_prepop));
 }
 
 #endif /* PIVCO_PRIM_VARIANTS_MERGE_H */

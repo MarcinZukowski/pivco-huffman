@@ -862,69 +862,57 @@ static void prim_part_coal_macro(const ctx_t *c) {
  * Registry — partition family (no-op where the ISA is unavailable)
  * ========================================================================== */
 static void pv_register_partition(void) {
-#if defined(__AVX512VBMI2__) && defined(__AVX512VBMI__)
+    /* enc_partition_full — AVX-512 coalesce losers */
     PV_VARIANT(ST_PART, "coal_compressstoreu", PV_ISA_AVX512,
                "bench_coalesce_avx512.c bench_compressstoreu",
                "1-instr compress+store; LOSER vs full-store production", 1,
-               prim_part_coal_compressstoreu);
+               PV_FN_VBMI2(prim_part_coal_compressstoreu));
     PV_VARIANT(ST_PART, "coal_vpermb_macro", PV_ISA_AVX512,
                "bench_coalesce_avx512.c bench_macro",
                "2-iter vpermb coalesce, 0.5 stores/iter; LOSER", 1,
-               prim_part_coal_macro);
-#endif
-#if defined(USE_NEON_KERNELS)
+               PV_FN_VBMI2(prim_part_coal_macro));
+    /* NEON */
     PV_VARIANT(ST_PART,      "asof-5f3222e", PV_ISA_NEON,
                "5f3222e (2026-05-26)",
                "pre-COM stride-8 serial-cursor FULL partition", 1,
-               prim_part_full_asof_5f3222e);
+               PV_FN_NEON(prim_part_full_asof_5f3222e));
     PV_VARIANT(ST_PART,      "prefix64", PV_ISA_NEON,
                "Jeff Plaisance / 6d61760",
                "M4 FULL +15-18% vs shipped COM; needs Graviton check", 1,
-               prim_part_full_prefix64);
+               PV_FN_NEON(prim_part_full_prefix64));
     PV_VARIANT(ST_BMBUILD,   "prefix64", PV_ISA_NEON,
                "Jeff Plaisance / 6d61760",
                "M4 NONE ~3-4% faster than shipped COM", 0,
-               prim_part_none_prefix64);
+               PV_FN_NEON(prim_part_none_prefix64));
     PV_VARIANT(ST_FUSEDHALF, "prefix64", PV_ISA_NEON,
                "Jeff Plaisance / 6d61760",
                "M4 RIGHT ~2-3% slower than shipped COM", 0,
-               prim_part_right_prefix64);
-    /* enc_partition_full (ST_PART) */
+               PV_FN_NEON(prim_part_right_prefix64));
     PV_VARIANT(ST_PART, "com",              PV_ISA_NEON, "bench_partition_neon.c",
-               "64/iter 8-chunk prefix-sum cursors, masks via 8x vaddvq; pre-com_v3 step", 1, prim_part_com);
+               "64/iter 8-chunk prefix-sum cursors, masks via 8x vaddvq; pre-com_v3 step", 1, PV_FN_NEON(prim_part_com));
     PV_VARIANT(ST_PART, "com_v2_transpose", PV_ISA_NEON, "bench_partition_neon.c",
-               "com but masks via 8x8 vsli transpose; LOSER (transpose > the 8 vaddvq it removes)", 1, prim_part_com_v2_trans);
+               "com but masks via 8x8 vsli transpose; LOSER (transpose > the 8 vaddvq it removes)", 1, PV_FN_NEON(prim_part_com_v2_trans));
     PV_VARIANT(ST_PART, "split16",          PV_ISA_NEON, "bench_encode_split.c (CODES16)",
-               "dense-codes SIMD-movemask partition_8, stride-8; no prefix-sum cursor decouple", 1, prim_part_split16);
+               "dense-codes SIMD-movemask partition_8, stride-8; no prefix-sum cursor decouple", 1, PV_FN_NEON(prim_part_split16));
     PV_VARIANT(ST_PART, "split16_unroll",   PV_ISA_NEON, "bench_encode_split.c (CODES16U)",
-               "split16 at stride-16 (2 partition_8/iter for ILP)", 1, prim_part_split16_unroll);
-    /* coalesce experiments: prebuilt-bitmap re-read -> ST_PARTBM / ST_PARTHALF
-       (all documented losers; see docs/COALESCE.md). */
+               "split16 at stride-16 (2 partition_8/iter for ILP)", 1, PV_FN_NEON(prim_part_split16_unroll));
     PV_VARIANT(ST_PARTBM,   "coal_vext",     PV_ISA_NEON, "bench_coalesce.c",
-               "per-iter store-coalesce, switch on so_far -> vextq; LOSER", 1, prim_part_coal_vext);
+               "per-iter store-coalesce, switch on so_far -> vextq; LOSER", 1, PV_FN_NEON(prim_part_coal_vext));
     PV_VARIANT(ST_PARTBM,   "coal_tbl",      PV_ISA_NEON, "bench_coalesce.c",
-               "per-iter coalesce, runtime vqtbl1q shuffle; LOSER", 1, prim_part_coal_tbl);
-    /* coal_macro / coal_macro1s / coal_half_tree omitted: 32B accumulator can't
-       hold a 4-mask block's >16 codes, so they don't verify byte-exact. */
-#endif
-#if defined(__SSE4_1__) && !defined(__AVX512VBMI2__)
+               "per-iter coalesce, runtime vqtbl1q shuffle; LOSER", 1, PV_FN_NEON(prim_part_coal_tbl));
+    /* x86 enc_partition_full */
     PV_VARIANT(ST_PART, "sse_com", PV_ISA_SSE4,
                "bench_partition_x86.c / IDEAS x86 COM partition",
                "64 codes/iter prefix-sum cursors; AMD win, Intel regress", 1,
-               prim_part_full_com);
-#if defined(__AVX2__)
+               PV_FN_SSE(prim_part_full_com));
     PV_VARIANT(ST_PART, "unroll2y", PV_ISA_AVX2,
                "bench_partition_unroll.c",
                "2x-unroll, ymm-fused mask gen + load", 1,
-               prim_part_full_unroll2y);
-#if defined(__BMI2__)
+               PV_FN_SSE_AVX2(prim_part_full_unroll2y));
     PV_VARIANT(ST_PART, "pext", PV_ISA_AVX2,
                "bench_partition_avx2.c",
                "BMI2 pdep/pext shuffle-control gen, no compress_tab", 1,
-               prim_part_full_pext);
-#endif
-#endif
-#endif
+               PV_FN_SSE_AVX2_BMI2(prim_part_full_pext));
 }
 
 #endif /* PIVCO_PRIM_VARIANTS_PARTITION_H */
