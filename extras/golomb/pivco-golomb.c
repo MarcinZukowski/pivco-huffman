@@ -523,36 +523,56 @@ static void merge_vec_cst_plus1_neon(const uint8_t *bm, int K,
                                      const uint8_t *vec, uint8_t *out) {
     int lc = 0;
     int j  = 0;
-    const uint8x16_t Rbq  = vdupq_n_u8(0xFF);
-    const uint8x8_t  one8 = vdup_n_u8(1);
+    const uint8x8_t  Rbcast   = vdup_n_u8(0xFF);
+    const uint8x16_t Rbcast_q = vdupq_n_u8(0xFF);
+    const uint8x8_t  one8     = vdup_n_u8(1);
 
-    /* Since Rbq is constant, both half-iters of the 16-element loop can
-     * share one vqtbl2 source {L_full, Rbq}.  For iter-0 we use
-     * expand_tab_pre[8] (the nr0=8 entry encodes "L window starts at byte 0,
-     * R window starts at byte 16" — exactly what we want against a full
-     * L_full + constant Rbq). */
-    for (; j + 16 <= K; j += 16) {
-        uint8x16_t L_full = vld1q_u8(vec + lc);
-        uint8x16x2_t src = {{ L_full, Rbq }};
+    /* V5 COM64 main path (ported from production merge_vec_cst_neon, 5cccccc):
+     * 64 codes / iter as 4 independent 16-code chunks.  The left (vec) cursor
+     * for each chunk is precomputed from a byte-wise popcount prefix sum
+     * (pc * 0x0101..), so there's no loop-carried cursor between chunks — the
+     * dependency the old per-16 form (lc += 16-nr0-nr1) carried.  Constant
+     * right = 0xFF; the post-merge +1 wraps 0xFF->0 for the bit==1 lanes. */
+    for (; j + 64 <= K; j += 64) {
+        uint64_t mask_u64;
+        memcpy(&mask_u64, bm + (j >> 3), 8);
+        uint8x8_t bm_v = vcreate_u8(mask_u64);
+        uint8x8_t pc_v = vcnt_u8(bm_v);
+        uint64_t pc_u64 = vget_lane_u64(vreinterpret_u64_u8(pc_v), 0);
+        uint64_t pfx = pc_u64 * 0x0101010101010101ULL;
 
-        uint8_t m0 = bm[j >> 3];
-        uint8x8_t shuf0 = vld1_u8(g_expand_tab_pre[8][m0]);
-        uint8x8_t o0    = vqtbl2_u8(src, shuf0);
-        vst1_u8(out + j, vadd_u8(o0, one8));
-        int nr0 = g_expand_popcnt[m0];
+        uint8_t cr0=0,                  cr1=(uint8_t)(pfx>> 8);
+        uint8_t cr2=(uint8_t)(pfx>>24), cr3=(uint8_t)(pfx>>40);
+        uint8_t in0=(uint8_t)pc_u64,        in1=(uint8_t)(pc_u64>>16);
+        uint8_t in2=(uint8_t)(pc_u64>>32),  in3=(uint8_t)(pc_u64>>48);
 
-        uint8_t m1 = bm[(j >> 3) + 1];
-        uint8x8_t shuf1 = vld1_u8(g_expand_tab_pre[nr0][m1]);
-        uint8x8_t o1    = vqtbl2_u8(src, shuf1);
-        vst1_u8(out + j + 8, vadd_u8(o1, one8));
+        uint8_t m0=(uint8_t) mask_u64,        m1=(uint8_t)(mask_u64>> 8);
+        uint8_t m2=(uint8_t)(mask_u64>>16),   m3=(uint8_t)(mask_u64>>24);
+        uint8_t m4=(uint8_t)(mask_u64>>32),   m5=(uint8_t)(mask_u64>>40);
+        uint8_t m6=(uint8_t)(mask_u64>>48),   m7=(uint8_t)(mask_u64>>56);
 
-        lc += (16 - nr0 - g_expand_popcnt[m1]);
+#define _VC_CHUNK_P1(idx, cr, in, ma, mb) do {                               \
+            uint8_t cl = (uint8_t)((idx)*16 - (cr));                          \
+            uint8x16_t L = vld1q_u8(vec + lc + cl);                           \
+            uint8x16_t both = vcombine_u8(vget_low_u8(L), Rbcast);           \
+            uint8x8_t  s0   = vld1_u8(g_expand_tab[ma]);                      \
+            vst1_u8(out + j + (idx)*16,     vadd_u8(vqtbl1_u8(both, s0), one8)); \
+            uint8x16x2_t src = {{ L, Rbcast_q }};                            \
+            uint8x8_t s1 = vld1_u8(g_expand_tab_pre[in][mb]);                 \
+            vst1_u8(out + j + (idx)*16 + 8, vadd_u8(vqtbl2_u8(src, s1), one8)); \
+        } while (0)
+        _VC_CHUNK_P1(0, cr0, in0, m0, m1);
+        _VC_CHUNK_P1(1, cr1, in1, m2, m3);
+        _VC_CHUNK_P1(2, cr2, in2, m4, m5);
+        _VC_CHUNK_P1(3, cr3, in3, m6, m7);
+#undef _VC_CHUNK_P1
+        lc += 64 - (uint8_t)(pfx >> 56);
     }
-    /* 8-element tail: same single-source vqtbl2 against {L, Rbq}. */
+    /* 8-element tail: single-source vqtbl2 against {L, Rbcast_q}. */
     for (; j + 8 <= K; j += 8) {
         uint8_t m = bm[j >> 3];
         uint8x16_t L_full = vcombine_u8(vld1_u8(vec + lc), vdup_n_u8(0));
-        uint8x16x2_t src = {{ L_full, Rbq }};
+        uint8x16x2_t src = {{ L_full, Rbcast_q }};
         uint8x8_t shuf = vld1_u8(g_expand_tab_pre[8][m]);
         uint8x8_t o    = vqtbl2_u8(src, shuf);
         vst1_u8(out + j, vadd_u8(o, one8));
