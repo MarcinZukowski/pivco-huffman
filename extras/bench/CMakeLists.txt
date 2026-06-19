@@ -186,6 +186,12 @@ add_executable(pivco_dist_stats
 )
 target_link_libraries(pivco_dist_stats pivco_huffman m)
 
+# Self-contained cross-arch 4-way root-merge microbench (AVX-512 VBMI2 runs all
+# variants; NEON runs vvvv only; selects via #if).  Needs -march=native.
+add_executable(pivco_merge4way bench_merge4way.c)
+target_compile_options(pivco_merge4way PRIVATE -march=native)
+target_link_libraries(pivco_merge4way m)
+
 add_executable(pivco_partition_skew
     bench_partition_skew.c
     ${BENCH_DIST}

@@ -8,6 +8,7 @@
 ### CONSIDERED — open / parked / research direction
 
 **General**
+- [4-way root merge (top 2 levels in one pass)](#4-way-root-merge-top-2-levels-in-one-pass-2026-06-19)
 - [Cross-port post-June-5 x86 optimizations to NEON](#cross-port-post-june-5-x86-optimizations-to-neon-2026-06-13)
 - [SIMD-ify scalar tails (overwrite or masked stores)](#simd-ify-scalar-tails-overwrite-or-masked-stores-2026-06-15)
 - [Golomb/Rice tier for very-high-skew nodes (p > 0.95)](#golombrice-tier-for-very-high-skew-nodes-p--095-2026-05-16-research)
@@ -116,6 +117,9 @@
 ## CONSIDERED
 
 **General**
+
+### 4-way root merge (top 2 levels in one pass), 2026-06-19
+Merge the root's 4 grandchild streams in one pass instead of 3 binary merges (write N once, not ~2N).  Microbench `extras/bench/bench_merge4way.c`: **VBMI2-only** — Zen5 1.35–2.0×, Granite Rapids 1.9–2.9× (more leaf grandchildren = faster, via const-buffer `vpexpandb` over `set1`); NEON loses ~0.36× (no byte-expand → the 4-way rank costs more than the saved pass).  7/9 main dists qualify.  Blocker: wire-format change (top-2-levels as 2 routing bitplanes + 4 substreams).  Next: c8a/c8i decode PROF for the end-to-end %.
 
 ### Cross-port post-June-5 x86 optimizations to NEON, 2026-06-13
 Recent x86 wins targeted SSE/AVX2 + AVX-512 only: AVX-512 pack_d{2..7} multishift 64 codes/iter (`0c80e3a`), AVX-512 merge_flat_d{2..7} widened to 64 codes/iter (`e5a199a`), x86 AVX2 pack_d{2,3,5,6,7} via ryg multiply-as-shift (`a1aa6b9`), x86 partition 2x-unrolled stride-16 (`83e23a0`).  Open question on NEON (M4 + Graviton 4): is the analogous primitive already at width ceiling, or is there headroom?  Multishift has no NEON analogue (x86-only), and the multiply-as-shift trick is irrelevant on NEON (`vshlq_u32` is native).  But the merge_flat widening pattern and the 2x partition unroll may transfer.  Action: per-primitive bench (`bench_prim`) before/after a NEON 64-codes/iter sketch + fair_bench A/B on c8g.
