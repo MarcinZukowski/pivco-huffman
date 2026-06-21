@@ -410,7 +410,7 @@ if(BUILD_BENCH)
     # in src/.  aarch64 baseline includes NEON; x86 SIMD variants will need
     # per-arch flags when added.
     add_executable(pivco_bench_prim bench/bench_prim.c)
-    target_include_directories(pivco_bench_prim PRIVATE include src)
+    target_include_directories(pivco_bench_prim PRIVATE include src extras/ph-td/include)
     target_link_libraries(pivco_bench_prim pivco_huffman m)
 
     # Dump distribution histograms as a JS-loadable data file for the

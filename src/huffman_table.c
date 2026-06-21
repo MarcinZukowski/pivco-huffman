@@ -343,6 +343,37 @@ int pivco_huffman_build_table(const uint64_t freq[PIVCO_MAX_SYMBOLS],
     return build_table_finish(lengths, table);
 }
 
+/* partbyrank: assign each leaf its in-order rank (left-to-right leaf
+ * position) in a single in-order pass, returning the next free rank.  A
+ * subtree's leaves are a contiguous rank range, so routing by code-bit is
+ * equivalent to routing by `rank > split_rank`.  Per node, everything is known
+ * once its left subtree has been visited:
+ *   flat_base_rank[node] = rank on enter  (min rank of the subtree)
+ *   split_rank[node]     = rank after left - 1  (max rank of the left subtree)
+ * A flat subtree's leaves are enumerated in code order (== in-order) via
+ * flat_code_to_sym, not the tree structure, so it does not recurse. */
+static uint16_t assign_inorder_ranks(pivco_huffman_table_t *table,
+                                     int16_t id, uint16_t rank)
+{
+    const pivco_tree_node_t *n = &table->tree[id];
+    if (n->symbol >= 0) {                       /* leaf */
+        table->sym_to_rank[n->symbol] = (uint8_t)rank;
+        return (uint16_t)(rank + 1);
+    }
+    if (table->flat_depth[id] >= 2) {           /* flat subtree */
+        table->flat_base_rank[id] = (uint8_t)rank;
+        int cnt = 1 << table->flat_depth[id];
+        for (int i = 0; i < cnt; i++) {
+            uint8_t sym = table->flat_code_to_sym[table->flat_offset[id] + i];
+            table->sym_to_rank[sym] = (uint8_t)(rank + i);
+        }
+        return (uint16_t)(rank + cnt);
+    }
+    rank = assign_inorder_ranks(table, n->left, rank);
+    table->split_rank[id] = (uint8_t)(rank - 1); /* max rank of the left subtree */
+    return assign_inorder_ranks(table, n->right, rank);
+}
+
 static int build_table_finish(const uint8_t lengths[PIVCO_MAX_SYMBOLS],
                               pivco_huffman_table_t *table)
 {
@@ -766,18 +797,6 @@ static int build_table_finish(const uint8_t lengths[PIVCO_MAX_SYMBOLS],
 
     PROF_MARK("classify");
 
-    /* Populate code_la (left-aligned code) for the dense tree-walk
-     * encoder.  Bit-d of the canonical code lives at position 15-d of
-     * code_la (for d < code_len[sym]). */
-    for (int s = 0; s < PIVCO_MAX_SYMBOLS; s++) {
-        uint8_t len = table->code_len[s];
-        table->code_la[s] = len > 0
-            ? (uint16_t)(table->code[s] << (16 - len))
-            : 0;
-    }
-
-    PROF_MARK("code_la");
-
     /* Populate max_leaf_depth[node] for every internal node.  Used by
      * the encoder to detect when a subtree's remaining bits fit in a
      * byte and can be processed with uint8-wide partitions.  Iterative
@@ -825,6 +844,11 @@ static int build_table_finish(const uint8_t lengths[PIVCO_MAX_SYMBOLS],
         }
     }
     PROF_MARK("max_leaf_depth");
+
+    /* partbyrank: one in-order pass assigns every leaf its rank and every
+     * internal node its split_rank / flat_base_rank (see assign_inorder_ranks). */
+    assign_inorder_ranks(table, table->tree_root, 0);
+    PROF_MARK("partbyrank");
 
     return PIVCO_OK;
 }

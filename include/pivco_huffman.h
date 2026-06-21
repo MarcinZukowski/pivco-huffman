@@ -112,11 +112,14 @@ typedef struct {
     /* Per-symbol encode info */
     uint16_t code[PIVCO_MAX_SYMBOLS];       /* canonical Huffman code */
     uint8_t  code_len[PIVCO_MAX_SYMBOLS];   /* code length (0 = unused) */
-    /* Left-aligned code: code << (16 - code_len).  Used by the dense
-     * tree-walk encoder so that the bit at tree-depth d is at fixed
-     * position 15-d across all symbols, eliminating the per-element
-     * shift-amount variance.  Populated by pivco_huffman_build_table. */
-    uint16_t code_la[PIVCO_MAX_SYMBOLS];
+
+    /* "partbyrank" encode: a subtree's leaves are a contiguous rank range, so
+     * per-node routing is `rank > split_rank` (8-bit, vs a 16-bit code bit-test)
+     * and a flat subtree's local code is `rank - flat_base_rank`.  Filled by
+     * pivco_huffman_build_table; byte-identical wire output. */
+    uint8_t  sym_to_rank[PIVCO_MAX_SYMBOLS];        /* in-order leaf rank per symbol */
+    uint8_t  split_rank[PIVCO_MAX_TREE_NODES];      /* max rank in node's left subtree */
+    uint8_t  flat_base_rank[PIVCO_MAX_TREE_NODES];  /* min rank in a flat subtree */
 
     /* Tree for PIVCO tree-walk encode/decode */
     pivco_tree_node_t tree[PIVCO_MAX_TREE_NODES];

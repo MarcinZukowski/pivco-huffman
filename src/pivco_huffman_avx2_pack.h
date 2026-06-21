@@ -28,24 +28,14 @@
 #include <string.h>
 #include <immintrin.h>
 
-/* Load 32 left-aligned u16 codes, right-shift, narrow to one ymm of 32
- * bytes (1 code/byte), mask to D bits.
- *
- * NB: vpackuswb SATURATES (u16 > 255 -> 255).  We mask the high byte of
- * each u16 to zero before the pack so it behaves like truncation. */
-static inline __m256i pivco_pack_load_codes_byte_avx2(const uint16_t *codes_la,
-                                                       int right_shift,
-                                                       uint8_t code_mask)
+/* Load 32 ranks, subtract base, mask to D bits (1 rank/byte) — the byte-laid
+ * intermediate the multiply-as-shift pack expects, with no u16 narrow. */
+static inline __m256i pivco_pack_load_byte_avx2(const uint8_t *ranks,
+                                                uint8_t base, uint8_t code_mask)
 {
-    const __m256i lo_byte_mask = _mm256_set1_epi16(0x00FF);
-    __m256i a = _mm256_loadu_si256((const __m256i *)(codes_la));
-    __m256i b = _mm256_loadu_si256((const __m256i *)(codes_la + 16));
-    a = _mm256_and_si256(_mm256_srli_epi16(a, right_shift), lo_byte_mask);
-    b = _mm256_and_si256(_mm256_srli_epi16(b, right_shift), lo_byte_mask);
-    /* vpackuswb on ymm operates per-128-bit-lane; permute to fix order. */
-    __m256i packed = _mm256_packus_epi16(a, b);
-    __m256i bytes  = _mm256_permute4x64_epi64(packed, 0xD8);
-    return _mm256_and_si256(bytes, _mm256_set1_epi8((char)code_mask));
+    __m256i b = _mm256_sub_epi8(_mm256_loadu_si256((const __m256i *)ranks),
+                                 _mm256_set1_epi8((char)base));
+    return _mm256_and_si256(b, _mm256_set1_epi8((char)code_mask));
 }
 
 /* Per-D compact-shuf tables: pattern is bytes [0..D-1] from positions
@@ -68,8 +58,8 @@ static inline __m256i pivco_pack_load_codes_byte_avx2(const uint16_t *codes_la,
     0, 1, 2, 3, 4, 5, 6, 8,  9,10,11,12,13,14, -1,-1)
 
 #define PIVCO_PACK_AVX2_DN(NAME, D_VAL, COMPACT_SHUF)                           \
-static inline int NAME(uint8_t *out, const uint16_t *codes_la,                  \
-                       int n, int right_shift)                                   \
+static inline int NAME(uint8_t *out, const uint8_t *ranks,                      \
+                       int n, uint8_t base)                                      \
 {                                                                                \
     const __m256i c0 = _mm256_set1_epi16(                                        \
         (int16_t)(((1 << (D_VAL)) << 8) | 1));                                   \
@@ -80,18 +70,18 @@ static inline int NAME(uint8_t *out, const uint16_t *codes_la,                  
     const __m256i compact = COMPACT_SHUF;                                        \
     int i = 0;                                                                   \
     for (; i + 32 <= n; i += 32) {                                               \
-        __m256i cb = pivco_pack_load_codes_byte_avx2(                            \
-            codes_la + i, right_shift, (uint8_t)((1 << (D_VAL)) - 1));           \
+        __m256i cb = pivco_pack_load_byte_avx2(                                  \
+            ranks + i, base, (uint8_t)((1 << (D_VAL)) - 1));                     \
         __m256i x  = _mm256_maddubs_epi16(c0, cb);                               \
         x = _mm256_madd_epi16(x, c1);                                            \
         __m256i xs = _mm256_srli_epi64(x, 32 - 4*(D_VAL));                       \
         x = _mm256_or_si256(_mm256_and_si256(x, c3),                             \
                              _mm256_andnot_si256(c3, xs));                       \
         __m256i out_y = _mm256_shuffle_epi8(x, compact);                         \
-        int base = (i * (D_VAL)) >> 3;                                           \
-        _mm_storeu_si128((__m128i *)(out + base),                                \
+        int outpos = (i * (D_VAL)) >> 3;                                         \
+        _mm_storeu_si128((__m128i *)(out + outpos),                              \
                           _mm256_castsi256_si128(out_y));                        \
-        _mm_storeu_si128((__m128i *)(out + base + 2*(D_VAL)),                    \
+        _mm_storeu_si128((__m128i *)(out + outpos + 2*(D_VAL)),                  \
                           _mm256_extracti128_si256(out_y, 1));                   \
     }                                                                            \
     return i;                                                                    \

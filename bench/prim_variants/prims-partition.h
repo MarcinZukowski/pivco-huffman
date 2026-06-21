@@ -599,6 +599,133 @@ static void prim_part_full_com(const ctx_t *c){
     prim_part_full_com_x86(c->la_work, c->n, c->depth, c->bm, c->tmp16);
 }
 
+/* u16-like: the per-8-chunk u8 rank partition (mirrors the u16 partition
+ * shape) — one movemask + one storel per 8-rank chunk, 2x-unrolled — to A/B
+ * against the shipped 16-wide + single-movemask part_full_x86.  Uses the
+ * production x86 rank tables (x86_ctab_r/l, x86_pc8, x86_mask8); 8-byte storel
+ * keeps the in-place left write off the next iter. */
+static void prim_part_u16like(const ctx_t *c) {
+    uint8_t *ranks = c->ranks_work, *bm = c->bm, *tmp = c->tmp8;
+    int n = c->n; uint8_t thr = c->rank_thr;
+    x86_build_tabs();
+    int n_left = 0, n_right = 0, j = 0;
+    __m128i thr1 = _mm_set1_epi8((char)(thr + 1));
+    for (; j + 16 <= n; j += 16) {
+        __m128i v  = _mm_loadu_si128((const __m128i *)(ranks + j));
+        __m128i v1 = _mm_unpackhi_epi64(v, v);
+        uint8_t m0 = x86_mask8(v,  thr1);
+        uint8_t m1 = x86_mask8(v1, thr1);
+        bm[j >> 3] = m0; bm[(j >> 3) + 1] = m1;
+        int nr0 = x86_pc8[m0], nr1 = x86_pc8[m1];
+        _mm_storel_epi64((__m128i *)(tmp + n_right),
+            _mm_shuffle_epi8(v,  _mm_load_si128((const __m128i *)x86_ctab_r[m0])));
+        _mm_storel_epi64((__m128i *)(tmp + n_right + nr0),
+            _mm_shuffle_epi8(v1, _mm_load_si128((const __m128i *)x86_ctab_r[m1])));
+        _mm_storel_epi64((__m128i *)(ranks + n_left),
+            _mm_shuffle_epi8(v,  _mm_load_si128((const __m128i *)x86_ctab_l[m0])));
+        _mm_storel_epi64((__m128i *)(ranks + n_left + (8 - nr0)),
+            _mm_shuffle_epi8(v1, _mm_load_si128((const __m128i *)x86_ctab_l[m1])));
+        n_right += nr0 + nr1; n_left += (8 - nr0) + (8 - nr1);
+    }
+    for (; j < n; j++) {
+        if ((j & 7) == 0) bm[j >> 3] = 0;
+        uint8_t r = ranks[j];
+        if (r > thr) { bm[j >> 3] |= (uint8_t)(1u << (j & 7)); tmp[n_right++] = r; }
+        else         { ranks[n_left++] = r; }
+    }
+}
+
+/* sse32: 32 ranks/iter — two SSE movemasks OR'd into a 32-bit mask, one 4-byte
+ * bitmap write, two X86_COMPACT16 (16-wide) per iter, POPCNT for the cursor
+ * advance (no x86_pc8 sum).  The pshufb+store compaction traffic per byte is
+ * identical to the shipped 16/iter part_full_x86; this only folds loop + mask +
+ * bitmap overhead in half.  Both 16-byte halves are loaded before any in-place
+ * left store, so the dense left write can't clobber an un-loaded rank. */
+static void prim_part_sse32_u8(const ctx_t *c) {
+    uint8_t *ranks = c->ranks_work, *bm = c->bm, *tmp = c->tmp8;
+    int n = c->n; uint8_t thr = c->rank_thr;
+    x86_build_tabs();
+    int n_left = 0, n_right = 0, j = 0;
+    __m128i thr1 = _mm_set1_epi8((char)(thr + 1));
+    for (; j + 32 <= n; j += 32) {
+        __m128i v0 = _mm_loadu_si128((const __m128i *)(ranks + j));
+        __m128i v1 = _mm_loadu_si128((const __m128i *)(ranks + j + 16));
+        uint32_t mlo = (uint16_t)_mm_movemask_epi8(
+            _mm_cmpeq_epi8(_mm_min_epu8(v0, thr1), thr1));
+        uint32_t mhi = (uint16_t)_mm_movemask_epi8(
+            _mm_cmpeq_epi8(_mm_min_epu8(v1, thr1), thr1));
+        uint32_t mm = mlo | (mhi << 16);
+        memcpy(bm + (j >> 3), &mm, 4);
+        int r0 = x86_pc8[(uint8_t)mlo];
+        X86_COMPACT16(v0, (uint8_t)mlo, (uint8_t)(mlo >> 8), r0, n_left, n_right);
+        int nr01 = __builtin_popcount(mlo);
+        n_right += nr01; n_left += 16 - nr01;
+        int r2 = x86_pc8[(uint8_t)mhi];
+        X86_COMPACT16(v1, (uint8_t)mhi, (uint8_t)(mhi >> 8), r2, n_left, n_right);
+        int nr23 = __builtin_popcount(mhi);
+        n_right += nr23; n_left += 16 - nr23;
+    }
+    for (; j + 16 <= n; j += 16) {
+        __m128i v = _mm_loadu_si128((const __m128i *)(ranks + j));
+        uint16_t mm = (uint16_t)_mm_movemask_epi8(
+            _mm_cmpeq_epi8(_mm_min_epu8(v, thr1), thr1));
+        memcpy(bm + (j >> 3), &mm, 2);
+        int rlo = x86_pc8[(uint8_t)mm], rhi = x86_pc8[(uint8_t)(mm >> 8)];
+        X86_COMPACT16(v, (uint8_t)mm, (uint8_t)(mm >> 8), rlo, n_left, n_right);
+        n_right += rlo + rhi; n_left += 16 - rlo - rhi;
+    }
+    for (; j < n; j++) {
+        if ((j & 7) == 0) bm[j >> 3] = 0;
+        uint8_t r = ranks[j];
+        if (r > thr) { bm[j >> 3] |= (uint8_t)(1u << (j & 7)); tmp[n_right++] = r; }
+        else         { ranks[n_left++] = r; }
+    }
+}
+
+#if defined(__AVX2__)
+/* avx32: like sse32 but the 32-byte routing mask comes from a single ymm
+ * vpcmpeqb(vpminub) + vpmovmskb instead of two SSE movemasks. */
+static void prim_part_avx32_u8(const ctx_t *c) {
+    uint8_t *ranks = c->ranks_work, *bm = c->bm, *tmp = c->tmp8;
+    int n = c->n; uint8_t thr = c->rank_thr;
+    x86_build_tabs();
+    int n_left = 0, n_right = 0, j = 0;
+    __m256i thr1y = _mm256_set1_epi8((char)(thr + 1));
+    __m128i thr1  = _mm256_castsi256_si128(thr1y);
+    for (; j + 32 <= n; j += 32) {
+        __m256i v = _mm256_loadu_si256((const __m256i *)(ranks + j));
+        uint32_t mm = (uint32_t)_mm256_movemask_epi8(
+            _mm256_cmpeq_epi8(_mm256_min_epu8(v, thr1y), thr1y));
+        memcpy(bm + (j >> 3), &mm, 4);
+        __m128i v0 = _mm256_castsi256_si128(v);
+        __m128i v1 = _mm256_extracti128_si256(v, 1);
+        int r0 = x86_pc8[(uint8_t)mm];
+        X86_COMPACT16(v0, (uint8_t)mm, (uint8_t)(mm >> 8), r0, n_left, n_right);
+        int nr01 = __builtin_popcount(mm & 0xFFFF);
+        n_right += nr01; n_left += 16 - nr01;
+        int r2 = x86_pc8[(uint8_t)(mm >> 16)];
+        X86_COMPACT16(v1, (uint8_t)(mm >> 16), (uint8_t)(mm >> 24), r2, n_left, n_right);
+        int nr23 = __builtin_popcount(mm >> 16);
+        n_right += nr23; n_left += 16 - nr23;
+    }
+    for (; j + 16 <= n; j += 16) {
+        __m128i v = _mm_loadu_si128((const __m128i *)(ranks + j));
+        uint16_t mm = (uint16_t)_mm_movemask_epi8(
+            _mm_cmpeq_epi8(_mm_min_epu8(v, thr1), thr1));
+        memcpy(bm + (j >> 3), &mm, 2);
+        int rlo = x86_pc8[(uint8_t)mm], rhi = x86_pc8[(uint8_t)(mm >> 8)];
+        X86_COMPACT16(v, (uint8_t)mm, (uint8_t)(mm >> 8), rlo, n_left, n_right);
+        n_right += rlo + rhi; n_left += 16 - rlo - rhi;
+    }
+    for (; j < n; j++) {
+        if ((j & 7) == 0) bm[j >> 3] = 0;
+        uint8_t r = ranks[j];
+        if (r > thr) { bm[j >> 3] |= (uint8_t)(1u << (j & 7)); tmp[n_right++] = r; }
+        else         { ranks[n_left++] = r; }
+    }
+}
+#endif  /* __AVX2__ */
+
 #if defined(__AVX2__)
 /* unroll2y: 2x-unrolled compress_tab partition with the mask gen + load fused
  * into one ymm chain.  bench_partition_unroll.c::partition_2y. */
@@ -863,20 +990,20 @@ static void prim_part_coal_macro(const ctx_t *c) {
  * ========================================================================== */
 static void pv_register_partition(void) {
     /* enc_partition_full — AVX-512 coalesce losers */
-    PV_VARIANT(ST_PART, "coal_compressstoreu", PV_ISA_AVX512,
+    PV_VARIANT(ST_U16_PART, "coal_compressstoreu", PV_ISA_AVX512,
                "bench_coalesce_avx512.c bench_compressstoreu",
                "1-instr compress+store; LOSER vs full-store production", 1,
                PV_FN_VBMI2(prim_part_coal_compressstoreu));
-    PV_VARIANT(ST_PART, "coal_vpermb_macro", PV_ISA_AVX512,
+    PV_VARIANT(ST_U16_PART, "coal_vpermb_macro", PV_ISA_AVX512,
                "bench_coalesce_avx512.c bench_macro",
                "2-iter vpermb coalesce, 0.5 stores/iter; LOSER", 1,
                PV_FN_VBMI2(prim_part_coal_macro));
     /* NEON */
-    PV_VARIANT(ST_PART,      "asof-5f3222e", PV_ISA_NEON,
+    PV_VARIANT(ST_U16_PART,      "asof-5f3222e", PV_ISA_NEON,
                "5f3222e (2026-05-26)",
                "pre-COM stride-8 serial-cursor FULL partition", 1,
                PV_FN_NEON(prim_part_full_asof_5f3222e));
-    PV_VARIANT(ST_PART,      "prefix64", PV_ISA_NEON,
+    PV_VARIANT(ST_U16_PART,      "prefix64", PV_ISA_NEON,
                "Jeff Plaisance / 6d61760",
                "M4 FULL +15-18% vs shipped COM; needs Graviton check", 1,
                PV_FN_NEON(prim_part_full_prefix64));
@@ -888,28 +1015,42 @@ static void pv_register_partition(void) {
                "Jeff Plaisance / 6d61760",
                "M4 RIGHT ~2-3% slower than shipped COM", 0,
                PV_FN_NEON(prim_part_right_prefix64));
-    PV_VARIANT(ST_PART, "com",              PV_ISA_NEON, "bench_partition_neon.c",
+    PV_VARIANT(ST_U16_PART, "com",              PV_ISA_NEON, "bench_partition_neon.c",
                "64/iter 8-chunk prefix-sum cursors, masks via 8x vaddvq; pre-com_v3 step", 1, PV_FN_NEON(prim_part_com));
-    PV_VARIANT(ST_PART, "com_v2_transpose", PV_ISA_NEON, "bench_partition_neon.c",
+    PV_VARIANT(ST_U16_PART, "com_v2_transpose", PV_ISA_NEON, "bench_partition_neon.c",
                "com but masks via 8x8 vsli transpose; LOSER (transpose > the 8 vaddvq it removes)", 1, PV_FN_NEON(prim_part_com_v2_trans));
-    PV_VARIANT(ST_PART, "split16",          PV_ISA_NEON, "bench_encode_split.c (CODES16)",
+    PV_VARIANT(ST_U16_PART, "split16",          PV_ISA_NEON, "bench_encode_split.c (CODES16)",
                "dense-codes SIMD-movemask partition_8, stride-8; no prefix-sum cursor decouple", 1, PV_FN_NEON(prim_part_split16));
-    PV_VARIANT(ST_PART, "split16_unroll",   PV_ISA_NEON, "bench_encode_split.c (CODES16U)",
+    PV_VARIANT(ST_U16_PART, "split16_unroll",   PV_ISA_NEON, "bench_encode_split.c (CODES16U)",
                "split16 at stride-16 (2 partition_8/iter for ILP)", 1, PV_FN_NEON(prim_part_split16_unroll));
     PV_VARIANT(ST_PARTBM,   "coal_vext",     PV_ISA_NEON, "bench_coalesce.c",
                "per-iter store-coalesce, switch on so_far -> vextq; LOSER", 1, PV_FN_NEON(prim_part_coal_vext));
     PV_VARIANT(ST_PARTBM,   "coal_tbl",      PV_ISA_NEON, "bench_coalesce.c",
                "per-iter coalesce, runtime vqtbl1q shuffle; LOSER", 1, PV_FN_NEON(prim_part_coal_tbl));
-    /* x86 enc_partition_full */
-    PV_VARIANT(ST_PART, "sse_com", PV_ISA_SSE4,
+    /* x86 enc_partition_full (u8 rank): the per-8-chunk u16-like port vs the
+       shipped 16-wide + single-movemask part_full_x86. */
+    PV_VARIANT(ST_PART, "u16-like", PV_ISA_SSE4,
+               "30f42a5 per-8-chunk port",
+               "per-8-chunk u8 port (mirrors u16 shape); vs shipped 16-wide", 1,
+               PV_FN_SSE(prim_part_u16like));
+    PV_VARIANT(ST_PART, "sse32", PV_ISA_SSE4,
+               "32 ranks/iter, 2x SSE movemask + 2x X86_COMPACT16",
+               "32/iter; halves loop+mask+bitmap, same compaction traffic", 1,
+               PV_FN_SSE(prim_part_sse32_u8));
+    PV_VARIANT(ST_PART, "avx32", PV_ISA_AVX2,
+               "32 ranks/iter, 1x ymm movemask + 2x X86_COMPACT16",
+               "32/iter; single 32-bit mask build vs 2x SSE", 1,
+               PV_FN_SSE_AVX2(prim_part_avx32_u8));
+    /* x86 enc_partition_full (u16 code_la graveyard) */
+    PV_VARIANT(ST_U16_PART, "sse_com", PV_ISA_SSE4,
                "bench_partition_x86.c / IDEAS x86 COM partition",
                "64 codes/iter prefix-sum cursors; AMD win, Intel regress", 1,
                PV_FN_SSE(prim_part_full_com));
-    PV_VARIANT(ST_PART, "unroll2y", PV_ISA_AVX2,
+    PV_VARIANT(ST_U16_PART, "unroll2y", PV_ISA_AVX2,
                "bench_partition_unroll.c",
                "2x-unroll, ymm-fused mask gen + load", 1,
                PV_FN_SSE_AVX2(prim_part_full_unroll2y));
-    PV_VARIANT(ST_PART, "pext", PV_ISA_AVX2,
+    PV_VARIANT(ST_U16_PART, "pext", PV_ISA_AVX2,
                "bench_partition_avx2.c",
                "BMI2 pdep/pext shuffle-control gen, no compress_tab", 1,
                PV_FN_SSE_AVX2_BMI2(prim_part_full_pext));

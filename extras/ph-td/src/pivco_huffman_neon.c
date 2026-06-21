@@ -546,16 +546,17 @@ static inline void flat_decode_direct_neon(uint8_t *symbols, int n,
 #undef DST_DIRECT
 }
 
-/* Encode-side SIMD primitives -- enc_mask8_codes_la_neon, the SIMD
- * bitmap+partition kernel (prim_enc_partition_full), the per-D
- * flat-pack helpers (pack_d2_neon..pack_d8_neon + pack_dN_neon
- * dispatcher) -- all live in pivco_huffman_primitives_neon.h (now the
- * SHARED main-repo header, not a forked copy) so TD uses the current
- * primitives. */
+/* Decode/merge primitives come from the SHARED main-repo header (TD tracks the
+ * current decode primitives).  The u16 (code_la) ENCODE kernels — u16init_neon,
+ * enc_mask8_codes_la_neon, the bitmap+partition kernel, pack_d2..8_neon +
+ * u16pack_dN_neon — were retired from the production codec (it encodes on u8 ranks
+ * now), so TD owns them in pivco_huffman_u16enc.h, included after the shared
+ * header (which still provides compress_tab / the *_pack.h helpers / the macros). */
 #include "pivco_huffman_primitives_neon.h"
+#include "pivco_huffman_u16enc.h"
 static inline void pack_D_bits_dense(uint8_t *out, int n, int D, int depth,
                                       const uint16_t *codes_la)
-{ pack_dN_neon(out, codes_la, n, D, depth); }
+{ u16pack_dN_neon(out, codes_la, n, D, depth); }
 
 static void encode_node_neon(const pivco_huffman_table_t *table,
                               int16_t node_id,
@@ -719,7 +720,7 @@ int pivco_huffman_encode_neon(const uint8_t *symbols,
     uint16_t codes_la[PIVCO_BLOCK_SIZE + 16];
 
     PROF_TIC();
-    enc_init_neon(codes_la, N, symbols, table->code_la);
+    u16init_neon(codes_la, N, symbols, table->code_la);
     PROF_TOC(PROF_ENC_INIT, N);
 
     /* `tmp` scratch sizing: each RIGHT-going recursion advances the tmp

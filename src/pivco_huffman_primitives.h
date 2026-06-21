@@ -5,21 +5,21 @@
  * PIVCO_BACKEND_* macro that CMake passes to that translation unit.
  *
  * Every backend primitive header MUST provide static-inline
- * implementations under specialized names (e.g. `enc_init_scalar`,
- * `enc_init_neon`, etc.) and declare the aliases the codec uses
+ * implementations under specialized names (e.g. `part_core_scalar`,
+ * `part_core_neon`, etc.) and declare the aliases the codec uses
  * (`prim_enc_init`, ...).  The aliases forward to the specialized
  * name via always-inline static-inline wrappers, so that:
  *
  *   - codec.c reads cleanly (calls `prim_X` consistently)
  *   - stepping into the alias drops you on the specialized name
- *   - grep for `enc_init_scalar` finds exactly the scalar impl
+ *   - grep for `part_core_scalar` finds exactly the scalar impl
  *
  * ===========================================================================
  *  Primitive contract — every backend must implement these
  * ===========================================================================
  *
  *  Boundary convention.  Primitives own only the SIMD-bound work:
- *  building the raw partition bitmap, partitioning codes_la, packing
+ *  building the raw partition bitmap, partitioning the rank array, packing
  *  N·D-bit flat regions, the BU merge kernels.  Everything else --
  *  the K_right header, the FSE marker byte, the optional FSE-attempt
  *  on the raw bitmap, the per-stats bookkeeping -- is arch-agnostic
@@ -44,68 +44,67 @@
  *  ENCODE PRIMITIVES
  * ---------------------------------------------------------------------------
  *
- *  void prim_enc_init(uint16_t codes_la[n], int n,
+ *  void prim_enc_init(uint8_t ranks[n], int n,
  *                      const uint8_t *symbols,
- *                      const uint16_t code_la_lut[256]);
+ *                      const uint8_t sym_to_rank[256]);
  *
- *    Build the per-block left-aligned-codes array, gathering from
- *    `code_la_lut` (= table->code_la) indexed by each input symbol:
+ *    Build the per-block in-order rank array, gathering from `sym_to_rank`
+ *    (= table->sym_to_rank) indexed by each input symbol:
  *
- *        codes_la[i] = code_la_lut[symbols[i]]
+ *        ranks[i] = sym_to_rank[symbols[i]]
  *
- *    `code_la_lut[s]` holds the per-symbol Huffman code shifted up so
- *    bit 15 is the root partition bit.  codes_la is built once per block
- *    and DOES NOT mutate across the recursion -- the current-depth
- *    partition bit is at position `15 - depth`, which the primitives
- *    derive from the `depth` argument they receive.
+ *    Each leaf's rank is its left-to-right position among the tree's leaves
+ *    (partbyrank).  A subtree's leaves form a contiguous rank range, so
+ *    the per-node routing test reduces to an 8-bit compare against the node's
+ *    split_rank (below).  ranks is built once per block; the partition mutates
+ *    it in place across the recursion (the left half stays, the right half is
+ *    compacted into a scratch buffer for the right child to recurse on).
  *
  *  ENCODE PARTITION FAMILY  (prim_enc_partition_{full,left,right,none})
  *
- *    Every non-flat internal node builds the same n-bit partition bitmap
- *    from codes_la[0..n); the four members differ only in how many code
- *    halves they additionally scatter.  Building the bitmap is mandatory
- *    (it goes on the wire); the scatter outputs feed further recursion,
- *    so a side is scattered ONLY when that child is itself a subtree.
- *    The codec picks the member by node_type, mirroring the decode-side
- *    prim_merge_* family 1:1:
+ *    Every non-flat internal node builds the same n-bit partition bitmap from
+ *    ranks[0..n): bit j = (ranks[j] > split_rank), where split_rank is the max
+ *    rank in the node's left subtree.  Because in-order rank order == the old
+ *    left-aligned-code order, this is byte-identical to the former code_la
+ *    bit-test — wire format and decoder are unchanged.  The four members
+ *    differ only in how many halves they additionally scatter; the codec picks
+ *    by node_type, mirroring the decode-side prim_merge_* family 1:1:
  *
  *      node_type        primitive                     scatters   outputs
- *      INTERNAL_FULL    prim_enc_partition_full        both       left->codes_la,
+ *      INTERNAL_FULL    prim_enc_partition_full        both       left in place,
  *                                                                 right->right_out
  *      HALF_RIGHT       prim_enc_partition_right       right only right->right_out
- *      HALF_LEFT        prim_enc_partition_left        left only  left->left_out
+ *      HALF_LEFT        prim_enc_partition_left        left only  left in place
  *      BOTH_LEAVES      prim_enc_partition_none        neither    (bitmap only)
  *
  *    SUFFIX CONVENTION: the suffix names the NON-TRIVIAL child subtree —
- *    the side whose codes are emitted for further recursion — identical
+ *    the side whose ranks are emitted for further recursion — identical
  *    to the HALF_* node_type meaning (HALF_RIGHT's right child is the
  *    subtree, left is a leaf, so prim_enc_partition_right emits the right
- *    codes).  `_none` = zero CODE outputs (both children leaves); it still
+ *    ranks).  `_none` = zero outputs (both children leaves); it still
  *    writes the bitmap, so it is exactly the bitmap-build step.
  *
  *    Common contract (all four):
- *      Writes ceil(n/8) bytes into bm.  Bit j (j in [0..n)) is bit
- *      (15 - depth) of codes_la[j]; lands at bit (j & 7) of bm[j >> 3].
- *      codes_la values are unchanged across levels (depth-threaded, no
- *      shift) — a scattered side carries the full uint16 codes onward.
+ *      Writes ceil(n/8) bytes into bm.  Bit j (j in [0..n)) is
+ *      (ranks[j] > thr); lands at bit (j & 7) of bm[j >> 3].
  *
- *    Signatures:
- *      int  prim_enc_partition_full (uint16_t *codes_la, int n, int depth,
- *                                    uint8_t *bm, uint16_t *right_out);
- *           // left stays in codes_la[0..n_left); right->right_out[0..n_right)
- *      int  prim_enc_partition_right(uint16_t *codes_la, int n, int depth,
- *                                    uint8_t *bm, uint16_t *right_out);
+ *    Signatures (thr = table->split_rank[node]):
+ *      int  prim_enc_partition_full (uint8_t *ranks, int n, uint8_t thr,
+ *                                    uint8_t *bm, uint8_t *right_out);
+ *           // left stays in ranks[0..n_left); right->right_out[0..n_right)
+ *      int  prim_enc_partition_right(uint8_t *ranks, int n, uint8_t thr,
+ *                                    uint8_t *bm, uint8_t *right_out);
  *           // emits right_out[0..n_right); left side not produced
- *      int  prim_enc_partition_left (uint16_t *codes_la, int n, int depth,
+ *      int  prim_enc_partition_left (uint8_t *ranks, int n, uint8_t thr,
  *                                    uint8_t *bm);
- *           // left compacted IN PLACE into codes_la[0..n_left); right not produced
- *      int  prim_enc_partition_none (uint16_t *codes_la, int n,
- *                                    int depth, uint8_t *bm);
+ *           // left compacted IN PLACE into ranks[0..n_left); right not produced
+ *      int  prim_enc_partition_none (uint8_t *ranks, int n, uint8_t thr,
+ *                                    uint8_t *bm);
  *           // bitmap only (no scatter)
  *    All four return n_right (caller derives n_left = n - n_right).  _left
- *    keeps its codes in place in codes_la, matching _full, so the codec's
- *    left child recurses on codes_la either way; _right emits to right_out
- *    (codes_la untouched); _none emits no codes.
+ *    keeps its ranks in place in ranks[0..n_left), matching _full, so the
+ *    codec's left child recurses on ranks either way; _right emits to
+ *    right_out (ranks untouched); _none emits no ranks.
  *
  *    SHARED SCATTER CORE: the compress-table scatter used here is the
  *    same operation the top-down decoder needs (read bitmap + scatter vs.
@@ -118,18 +117,17 @@
  *
  *        marker_slot = *out_ptr;  *marker_slot = 0;  *out_ptr += 1;
  *        bm = *out_ptr;  *out_ptr += bitmap_bytes(n);
- *        n_right = prim_enc_partition_<m>(codes_la, n, depth, bm, ...);
+ *        n_right = prim_enc_partition_<m>(ranks, n, split_rank, bm, ...);
  *        codec_maybe_fse_attempt(...);  // may rewrite marker + bm,
  *                                       // adjust *out_ptr on commit
  *        wire_commit_kr_header(kr_slot, n_right);
  *
  *    IMPLEMENTATION (2026-05-26): all four members live in every backend.
  *    _right/_left/_none share one parameterized core (part_core_<backend>,
- *    BUILD + EMIT_RIGHT/EMIT_LEFT compile-time flags) that also covers the
- *    from-bitmap (BUILD=0) form for the future TD-decode share.  _full stays
- *    HAND-WRITTEN (build_bitmap_partition_<backend>) because the generic
- *    core's 1,1,1 specialization scheduled ~8% slower on the hot common path
- *    (measured on M4).  bench_prim numbers that motivated the split (M4/NEON):
+ *    EMIT_RIGHT/EMIT_LEFT compile-time flags).  _full stays HAND-WRITTEN
+ *    (part_full_<backend>) because the generic core's 1,1 specialization
+ *    scheduled ~8% slower on the hot common path (measured on M4 for the former
+ *    code_la partition).  bench_prim numbers that motivated the split (M4/NEON):
  *    _none (bitmap only) ~-54% vs _full, fused build+half (_right/_left) ~-26%
  *    vs _full — the *unfused* "build then partition-half" route is a wash
  *    (the re-read eats the one-sided-scatter saving), so _right/_left are
@@ -137,19 +135,17 @@
  *    (AVX-512 calgary/proba80 +16-18%, dna +8%; smaller on NEON/SSE); balanced
  *    inputs (english) are flat.
  *
- *  void prim_enc_pack_dN(const uint16_t *codes_la, int n, int D, int depth,
+ *  void prim_enc_pack_dN(const uint8_t *ranks, int n, int D, uint8_t base,
  *                     uint8_t *out_packed);
  *
- *    Flat-subtree path.  Pack the D bits at positions [15-depth ..
- *    15-depth-D+1] of each codes_la[i] LSB-first into out_packed[ceil(n*D/8)]
- *    bytes.  Equivalent to a right-shift by `(16 - depth - D)` and a
- *    `(1 << D) - 1` mask before packing.
+ *    Flat-subtree path.  In a flat subtree (all 2^D leaves at the same depth),
+ *    the in-subtree local code is `ranks[i] - base`, already a D-bit value
+ *    (base = table->flat_base_rank[node] = the min rank in the subtree).  Pack
+ *    those local codes LSB-first into out_packed[ceil(n*D/8)] bytes.
  *
- *    The depth-threaded representation (rather than shifting codes_la
- *    per recursion level) matches the NEON encoder's SIMD-tuned
- *    ergonomic: vshlq_u16 with a runtime vector amount is one op,
- *    paid once per pack_dN call rather than n times per partition
- *    pass across the recursion.
+ *    Because (rank - base) is already an 8-bit value in the low bits, the
+ *    packers read straight from the u8 rank array — no u16 load + shift +
+ *    narrow round-trip that the former code_la pack needed.
  *
  * ---------------------------------------------------------------------------
  *  DECODE PRIMITIVES (bottom-up)

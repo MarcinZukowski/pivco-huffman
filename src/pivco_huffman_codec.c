@@ -93,12 +93,12 @@ extern uint64_t g_pivco_fse_bytes_out[PIVCO_FSE_STATS_SLOTS];
 
 /* ---------- Encode tree walk ---------- *
  *
- * DFS, in-order: emit the partition bitmap at this node, then recurse
- * left, then right.  At each non-flat internal node, `codes_la[0..n)`
- * holds the surviving codes (left-aligned: top bit = current depth's
- * partition).  After partition, left stays in codes_la[0..n_left) and
- * right goes to tmp[0..n_right); the shift-by-1 in the primitive lets
- * the next recursion read bit 15 again. */
+ * DFS, pre-order: emit the partition bitmap at this node, then recurse left,
+ * then right.  At each non-flat internal node, `ranks[0..n)` holds the
+ * surviving leaves' in-order ranks; partition routes each by `rank >
+ * split_rank[node]`, leaving the left half in place in `ranks[0..n_left)` and
+ * compacting the right half into `tmp[0..n_right)`.  The recursion descends
+ * left on `ranks`, right on `tmp`. */
 
 /* Arch-agnostic FSE attempt on a freshly-built raw bitmap.
  *
@@ -185,10 +185,10 @@ static inline void codec_maybe_fse_attempt(uint8_t *marker_slot,
 
 static void codec_encode_node(const pivco_huffman_table_t *table,
                                int16_t node_id,
-                               uint16_t *codes_la, int n,
+                               uint8_t *ranks, int n,
                                int depth,
                                uint8_t **out_ptr,
-                               uint16_t *tmp)
+                               uint8_t *tmp)
 {
     if (n == 0) return;
 
@@ -199,7 +199,7 @@ static void codec_encode_node(const pivco_huffman_table_t *table,
     if (table->flat_depth[node_id] >= 2) {
         int D = table->flat_depth[node_id];
         int total_bytes = (n * D + 7) >> 3;
-        prim_enc_pack_dN(codes_la, n, D, depth, *out_ptr);
+        prim_enc_pack_dN(ranks, n, D, table->flat_base_rank[node_id], *out_ptr);
         *out_ptr += total_bytes;
         return;
     }
@@ -224,16 +224,17 @@ static void codec_encode_node(const pivco_huffman_table_t *table,
      * dispatch.  The bitmap (and thus the wire bytes) is identical across
      * variants; only the encode-internal scatter work differs — a leaf child
      * never reads its scattered side, so HALF/BOTH_LEAVES skip that scatter. */
+    uint8_t thr = table->split_rank[node_id];
     int n_right;
     switch ((pivco_node_type_t)table->node_type[node_id]) {
     case PIVCO_NODE_BOTH_LEAVES:
-        n_right = prim_enc_partition_none(codes_la, n, depth, bm);        break;
+        n_right = prim_enc_partition_none(ranks, n, thr, bm);        break;
     case PIVCO_NODE_HALF_RIGHT:
-        n_right = prim_enc_partition_right(codes_la, n, depth, bm, tmp);  break;
+        n_right = prim_enc_partition_right(ranks, n, thr, bm, tmp);  break;
     case PIVCO_NODE_HALF_LEFT:
-        n_right = prim_enc_partition_left(codes_la, n, depth, bm);        break;
+        n_right = prim_enc_partition_left(ranks, n, thr, bm);        break;
     default:
-        n_right = prim_enc_partition_full(codes_la, n, depth, bm, tmp);   break;
+        n_right = prim_enc_partition_full(ranks, n, thr, bm, tmp);   break;
     }
     int n_left  = n - n_right;
 
@@ -246,9 +247,9 @@ static void codec_encode_node(const pivco_huffman_table_t *table,
 
     wire_commit_kr_header(kr_slot, n_right);
 
-    codec_encode_node(table, node->left,  codes_la, n_left,  depth + 1,
+    codec_encode_node(table, node->left,  ranks, n_left,  depth + 1,
                        out_ptr, tmp + n_right);
-    codec_encode_node(table, node->right, tmp,      n_right, depth + 1,
+    codec_encode_node(table, node->right, tmp,   n_right, depth + 1,
                        out_ptr, tmp + n_right);
 }
 
@@ -268,29 +269,22 @@ int CODEC_ENCODE_ENTRY(const uint8_t *symbols, size_t n,
     wire_write_block_n(ptr, N);
     ptr += PIVCO_BLOCK_N_BYTES;
 
-    /* Per-block left-aligned codes.  Built once per block via
-     * prim_enc_init (a gather from table->code_la[symbols[i]]). */
-    /* +16 slack: NEON's build_bitmap_partition primitive does a stride-8
-     * SIMD partition whose 16-byte vst1q_u8 store can land up to 8 uint16
-     * elements past the cursor at end-of-buffer.  The scalar primitive
-     * doesn't need the padding but it costs us 16 bytes of stack per
-     * call.  Same trick + same rationale as the legacy NEON encoder
-     * carried since dense-codes_la landed (b31d269 2026-05-11). */
-    /* codes_la (N+16) and the recursion scratch arena ((MAX_CODE_LEN+2)*N)
-     * are both sized off the runtime N and allocated together in one heap
-     * block (no compile-time block-size cap; N up to PIVCO_WIRE_MAX_N). */
-    const size_t codes_capacity = (size_t)N + 16;
+    /* One heap block: the per-block ranks buffer + the recursion's right-half
+     * scratch (see the tree-walk note above).  +64 slack on ranks absorbs the
+     * SIMD partition's over-wide (16/64-byte) tail store at end-of-buffer; the
+     * scratch holds one right-half per recursion level, hence (MAX_CODE_LEN+2)*N. */
+    const size_t ranks_capacity = (size_t)N + 64;
     const size_t tmp_capacity   = (size_t)N * (PIVCO_MAX_CODE_LEN + 2);
-    uint16_t *codes_la = (uint16_t *)malloc(
-        (codes_capacity + tmp_capacity) * sizeof(uint16_t));
-    if (!codes_la) return PIVCO_ERR_NULL;
-    uint16_t *tmp = codes_la + codes_capacity;
+    uint8_t *ranks = (uint8_t *)malloc(ranks_capacity + tmp_capacity);
+    if (!ranks) return PIVCO_ERR_NULL;
+    uint8_t *tmp = ranks + ranks_capacity;
 
-    prim_enc_init(codes_la, N, symbols, table->code_la);
+    /* ranks[i] = in-order rank of symbols[i] (gather table->sym_to_rank). */
+    prim_enc_init(ranks, N, symbols, table->sym_to_rank);
 
-    codec_encode_node(table, table->tree_root, codes_la, N, 0, &ptr, tmp);
+    codec_encode_node(table, table->tree_root, ranks, N, 0, &ptr, tmp);
 
-    free(codes_la);
+    free(ranks);
     *out_len = (size_t)(ptr - out);
     return PIVCO_OK;
 }

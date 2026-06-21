@@ -572,215 +572,188 @@ static inline void merge_flat_x86(uint8_t *out, int n,
     PROF_TOC(PROF_BU_MERGE_FLAT, n);
 }
 
-/* ---------- Encode primitives (bitmap + partition) ----------
- *
- * Dense-codes mask build via the classic SSE movemask trick.
- * code_vec holds 8 left-aligned 16-bit Huffman codes.  At tree depth d,
- * bit d of the original code is at position (15 - d) of code_la; we
- * shift LEFT by d to move that bit to position 15 (= sign bit of each
- * int16 lane).  _mm_packs_epi16 with signed saturation then collapses
- * each int16 lane to an int8 byte where bit 7 is the sign bit, and
- * _mm_movemask_epi8 reads bit 7 of each byte into an 8-bit bitmask --
- * the per-element bit slice we want.
- *
- * Cost: vpsllw (1) + vpacksw (1) + vpmovmskb (1) = 3 SSE ops + 1 mask. */
-static inline uint8_t enc_mask8_codes_la_x86(__m128i code_vec,
-                                               __m128i shift_count)
+/* ---------- Encode primitives: rank-based encoding (8-bit in-order ranks) ----------
+ * Partition 8-bit ranks against split_rank, a u8 port of the code_la partition
+ * (part_core_x86): per-8-rank chunk, movemask routing mask, compress_tab pshufb,
+ * 8-byte storel compaction.  No unsigned byte-compare on SSE, so the routing
+ * mask uses the MIN trick: rank > thr  <=>  min(rank, thr+1) == thr+1. */
+static uint8_t x86_pc8[256];
+static uint8_t x86_ctab_r[256][16], x86_ctab_l[256][16];
+static uint8_t x86_pre_r[9][256][16], x86_pre_l[9][256][16];
+static int     x86_tabs_ready = 0;
+static void x86_build_tabs(void)
 {
-    __m128i shifted = _mm_sll_epi16(code_vec, shift_count);
-    __m128i bytes   = _mm_packs_epi16(shifted, _mm_setzero_si128());
-    return (uint8_t)_mm_movemask_epi8(bytes);
+    if (x86_tabs_ready) return;
+    for (int m = 0; m < 256; m++) {
+        x86_pc8[m] = (uint8_t)__builtin_popcount(m);
+        memset(x86_ctab_r[m], 0x80, 16);
+        memset(x86_ctab_l[m], 0x80, 16);
+        int pr = 0, pl = 0;
+        for (int k = 0; k < 8; k++) {
+            if (m & (1 << k)) x86_ctab_r[m][pr++] = (uint8_t)k;  /* right -> [0:n_right) */
+            else              x86_ctab_l[m][pl++] = (uint8_t)k;  /* left  -> [0:n_left) */
+        }
+    }
+    /* High-half (lanes 8..15) source positions pre-shifted to output offset
+     * nlo, for the dense 16-wide compaction (min-merge with the low-half ctab). */
+    for (int nlo = 0; nlo <= 8; nlo++) {
+        for (int m = 0; m < 256; m++) {
+            memset(x86_pre_r[nlo][m], 0x80, 16);
+            memset(x86_pre_l[nlo][m], 0x80, 16);
+            int pr = nlo, pl = nlo;
+            for (int k = 0; k < 8; k++) {
+                if (m & (1 << k)) x86_pre_r[nlo][m][pr++] = (uint8_t)(8 + k);
+                else              x86_pre_l[nlo][m][pl++] = (uint8_t)(8 + k);
+            }
+        }
+    }
+    x86_tabs_ready = 1;
 }
 
-/* Stride-16 SIMD main path: 2x-unrolled load + partition.  Two 8-code
- * chunks per outer iter with all per-chunk deps independent until the
- * cursor math.  The second store of each (right, left) pair overlaps
- * the first and overwrites its trailing pshufb junk with chunk 1's
- * valid prefix — safe because the junk lives past the popcount of
- * chunk 0.  Stride-8 residual handles n mod 16 ∈ [8, 16); scalar tail
- * handles the final 1..7.
- *
- * +9% on Zen 3 (c6a), +14% on Cascade Lake (c5) vs the previous
- * stride-8-only inner loop.  Wire format byte-for-byte identical. */
-static inline int build_bitmap_partition_x86(uint16_t *codes_la, int n,
-                                               int depth,
-                                               uint8_t *bm,
-                                               uint16_t *right_out)
+/* 8-bit mask of (rank > thr) for the 8 ranks in the low 8 lanes of `ids8`. */
+static inline uint8_t x86_mask8(__m128i ids8, __m128i thr1)
 {
-    uint16_t *lp = codes_la, *rp = right_out;
+    __m128i ge = _mm_cmpeq_epi8(_mm_min_epu8(ids8, thr1), thr1);
+    return (uint8_t)_mm_movemask_epi8(ge);
+}
+
+/* Compact the 8 ranks in the low 8 lanes of `v` (chunk mask `m`): right ranks
+ * to tmp[ro), left ranks in place to ranks[lo).  pshufb gathers each side
+ * contiguously; storel writes exactly 8 bytes (the chunk), the (8 - popcount)
+ * trailing zeros get overwritten by the next chunk's compaction.  The 8-byte
+ * width (vs the code_la 16-byte store) keeps the in-place left write from
+ * clobbering the next iter's not-yet-loaded ranks. */
+/* Dense 16-wide compaction: one pshufb + one 16-byte store per side over all 16
+ * ranks in `v`.  The low-half ctab (lanes 0..7 of chunk mlo) is min-merged with
+ * the high-half pre table (lanes 8..15 of chunk mhi, pre-shifted to output
+ * offset rlo): both use 0x80 fill, so min picks the real index at each output
+ * lane.  Half the pshufb + store traffic of the per-8 form — the binding
+ * resource on a port-bound SSE loop (SSE has no native byte-compress).  The
+ * in-place left 16-byte store is safe: n_left <= j so n_left+16 <= j+16 = the next
+ * iter's load, no clobber. */
+#define X86_COMPACT16(v, mlo, mhi, rlo, ldst, rdst)                         \
+    do {                                                                        \
+        __m128i ridx_ = _mm_min_epu8(                                           \
+            _mm_load_si128((const __m128i *)x86_ctab_r[mlo]),               \
+            _mm_load_si128((const __m128i *)x86_pre_r[rlo][mhi]));          \
+        _mm_storeu_si128((__m128i *)(tmp + (rdst)), _mm_shuffle_epi8((v), ridx_)); \
+        int llo_ = 8 - (rlo);                                                   \
+        __m128i lidx_ = _mm_min_epu8(                                           \
+            _mm_load_si128((const __m128i *)x86_ctab_l[mlo]),               \
+            _mm_load_si128((const __m128i *)x86_pre_l[llo_][mhi]));         \
+        _mm_storeu_si128((__m128i *)(ranks + (ldst)), _mm_shuffle_epi8((v), lidx_)); \
+    } while (0)
+
+/* full: 16-wide dense compaction (one pshufb + one 16-byte store per side),
+ * 32 ranks per main-loop iter.  Dense-16 beats the per-8 port (the u16 code_la
+ * partition shape) by halving the pshufb + store count — the binding resource
+ * on a port-bound SSE loop with no byte-compress.  Doing 32/iter then folds the
+ * loop, mask-build and bitmap-write overhead in half again (~10-12% over the
+ * 16/iter form on Zen 3 / Skylake-X / Haswell).  The pshufb + store traffic per
+ * byte is unchanged — two X86_COMPACT16 per 32 ranks. */
+static inline int part_full_x86(uint8_t *ranks, int n, uint8_t thr,
+                                   uint8_t *bm, uint8_t *tmp)
+{
+    x86_build_tabs();
+    int n_left = 0, n_right = 0;
     int j = 0;
-    __m128i shift_count = _mm_cvtsi32_si128(depth);
-
+    __m128i thr1 = _mm_set1_epi8((char)(thr + 1));
+    /* 32 ranks/iter: two SSE movemasks OR'd into a 32-bit routing mask (one
+     * 4-byte bitmap write), two 16-wide compactions, POPCNT for the cursor
+     * advance.  Both 16-byte halves are loaded before any in-place left store,
+     * so the dense left write can't clobber an un-loaded rank. */
+    for (; j + 32 <= n; j += 32) {
+        __m128i v0 = _mm_loadu_si128((const __m128i *)(ranks + j));
+        __m128i v1 = _mm_loadu_si128((const __m128i *)(ranks + j + 16));
+        uint32_t mlo = (uint16_t)_mm_movemask_epi8(
+            _mm_cmpeq_epi8(_mm_min_epu8(v0, thr1), thr1));
+        uint32_t mhi = (uint16_t)_mm_movemask_epi8(
+            _mm_cmpeq_epi8(_mm_min_epu8(v1, thr1), thr1));
+        uint32_t mm = mlo | (mhi << 16);
+        memcpy(bm + (j >> 3), &mm, 4);
+        int r0 = x86_pc8[(uint8_t)mlo];
+        X86_COMPACT16(v0, (uint8_t)mlo, (uint8_t)(mlo >> 8), r0, n_left, n_right);
+        int nr01 = __builtin_popcount(mlo);
+        n_right += nr01; n_left += 16 - nr01;
+        int r2 = x86_pc8[(uint8_t)mhi];
+        X86_COMPACT16(v1, (uint8_t)mhi, (uint8_t)(mhi >> 8), r2, n_left, n_right);
+        int nr23 = __builtin_popcount(mhi);
+        n_right += nr23; n_left += 16 - nr23;
+    }
+    /* 16-rank tail of the [32k, 32k+31] remainder: one movemask, one compaction. */
     for (; j + 16 <= n; j += 16) {
-        __m128i code0 = _mm_loadu_si128((const __m128i *)(codes_la + j    ));
-        __m128i code1 = _mm_loadu_si128((const __m128i *)(codes_la + j + 8));
-
-        uint8_t m0 = enc_mask8_codes_la_x86(code0, shift_count);
-        uint8_t m1 = enc_mask8_codes_la_x86(code1, shift_count);
-        bm[j >> 3]       = m0;
-        bm[(j >> 3) + 1] = m1;
-
-        const uint8_t *tab0 = compress_tab[m0];
-        const uint8_t *tab1 = compress_tab[m1];
-        __m128i sr0 = _mm_load_si128((const __m128i *)tab0);
-        __m128i sl0 = _mm_load_si128((const __m128i *)(tab0 + 16));
-        __m128i sr1 = _mm_load_si128((const __m128i *)tab1);
-        __m128i sl1 = _mm_load_si128((const __m128i *)(tab1 + 16));
-
-        __m128i r0 = _mm_shuffle_epi8(code0, sr0);
-        __m128i l0 = _mm_shuffle_epi8(code0, sl0);
-        __m128i r1 = _mm_shuffle_epi8(code1, sr1);
-        __m128i l1 = _mm_shuffle_epi8(code1, sl1);
-
-        int nr0 = compress_popcnt[m0];
-        int nr1 = compress_popcnt[m1];
-
-        _mm_storeu_si128((__m128i *)rp,                r0);
-        _mm_storeu_si128((__m128i *)(rp + nr0),        r1);
-        _mm_storeu_si128((__m128i *)lp,                l0);
-        _mm_storeu_si128((__m128i *)(lp + (8 - nr0)),  l1);
-
-        rp += nr0 + nr1;
-        lp += (8 - nr0) + (8 - nr1);
+        __m128i v = _mm_loadu_si128((const __m128i *)(ranks + j));
+        uint16_t mm = (uint16_t)_mm_movemask_epi8(
+            _mm_cmpeq_epi8(_mm_min_epu8(v, thr1), thr1));
+        uint8_t mlo = (uint8_t)mm;
+        uint8_t mhi = (uint8_t)(mm >> 8);
+        memcpy(bm + (j >> 3), &mm, 2);
+        int rlo = x86_pc8[mlo], rhi = x86_pc8[mhi];
+        X86_COMPACT16(v, mlo, mhi, rlo, n_left, n_right);
+        n_right += rlo + rhi;
+        n_left += (16 - rlo - rhi);
     }
-
-    /* Stride-8 residual (n mod 16 ∈ [8, 16)). */
-    if (j + 8 <= n) {
-        __m128i code_vec = _mm_loadu_si128((const __m128i *)(codes_la + j));
-        uint8_t mask = enc_mask8_codes_la_x86(code_vec, shift_count);
-        bm[j >> 3] = mask;
-
-        const uint8_t *tab = compress_tab[mask];
-        __m128i shuf_r = _mm_load_si128((const __m128i *)tab);
-        __m128i shuf_l = _mm_load_si128((const __m128i *)(tab + 16));
-        __m128i right  = _mm_shuffle_epi8(code_vec, shuf_r);
-        __m128i left   = _mm_shuffle_epi8(code_vec, shuf_l);
-        int nr = compress_popcnt[mask];
-        _mm_storeu_si128((__m128i *)rp, right);
-        _mm_storeu_si128((__m128i *)lp, left);
-        rp += nr;
-        lp += (8 - nr);
-        j += 8;
-    }
-
-    /* Scalar tail.  Read all tail codes into a temporary before writing
-     * back, since the in-place left write can overlap the read when
-     * the left cursor + 8 > j. */
-    if (j < n) {
-        int tail = n - j;
-        uint16_t tail_buf[8];
-        for (int k = 0; k < tail; k++) tail_buf[k] = codes_la[j + k];
-        uint8_t mask = 0;
-        int shift_d = 15 - depth;
-        for (int k = 0; k < tail; k++) {
-            int bit = (tail_buf[k] >> shift_d) & 1;
-            mask |= (uint8_t)(bit << k);
-        }
-        bm[j >> 3] = mask;
-        for (int k = 0; k < tail; k++) {
-            if (mask & (1 << k))
-                *rp++ = tail_buf[k];
-            else
-                *lp++ = tail_buf[k];
-        }
-    }
-    return (int)(rp - right_out);
-}
-
-/* part_core_x86 — shared partition loop for the right/left/none variants (and
- * the from-bitmap BUILD=0 form, kept for a future TD-decode share).  FULL stays
- * hand-written in build_bitmap_partition_x86 (matching the NEON rationale:
- * the generic 1,1,1 form can schedule worse on the hot common path).
- * always_inline + compile-time-constant flags => each wrapper specializes. */
-__attribute__((always_inline)) static inline
-int part_core_x86(uint16_t *codes_la, int n, int depth,
-                  uint8_t *bm, const uint8_t *bm_in, uint16_t *right_out,
-                  int BUILD, int EMIT_RIGHT, int EMIT_LEFT)
-{
-    int n_left = 0, n_right = 0, j = 0;
-    __m128i shift_count = _mm_cvtsi32_si128(depth);
-    for (; j + 8 <= n; j += 8) {
-        __m128i code_vec = _mm_loadu_si128((const __m128i *)(codes_la + j));
-        uint8_t mask;
-        if (BUILD) { mask = enc_mask8_codes_la_x86(code_vec, shift_count); bm[j >> 3] = mask; }
-        else         mask = bm_in[j >> 3];
-        const uint8_t *tab = compress_tab[mask];
-        if (EMIT_RIGHT)
-            _mm_storeu_si128((__m128i *)(right_out + n_right),
-                             _mm_shuffle_epi8(code_vec, _mm_load_si128((const __m128i *)tab)));
-        if (EMIT_LEFT)
-            _mm_storeu_si128((__m128i *)(codes_la + n_left),
-                             _mm_shuffle_epi8(code_vec, _mm_load_si128((const __m128i *)(tab + 16))));
-        int nr = compress_popcnt[mask];
-        n_right += nr;
-        n_left  += 8 - nr;
-    }
-    if (j < n) {
-        int tail = n - j, shift_d = 15 - depth;
-        uint16_t tail_buf[8];
-        for (int k = 0; k < tail; k++) tail_buf[k] = codes_la[j + k];
-        uint8_t mask;
-        if (BUILD) {
-            mask = 0;
-            for (int k = 0; k < tail; k++)
-                mask |= (uint8_t)(((tail_buf[k] >> shift_d) & 1) << k);
-            bm[j >> 3] = mask;
-        } else mask = bm_in[j >> 3];
-        for (int k = 0; k < tail; k++) {
-            if (mask & (1 << k)) { if (EMIT_RIGHT) right_out[n_right] = tail_buf[k]; n_right++; }
-            else                 { if (EMIT_LEFT)  codes_la[n_left]   = tail_buf[k]; n_left++;  }
-        }
+    for (; j < n; j++) {
+        if ((j & 7) == 0) bm[j >> 3] = 0;
+        uint8_t r = ranks[j];
+        if (r > thr) { bm[j >> 3] |= (uint8_t)(1u << (j & 7)); tmp[n_right++] = r; }
+        else         { ranks[n_left++] = r; }
     }
     return n_right;
 }
 
-/* ---------- Encode primitives (init) ---------- */
-
-/* enc_init_x86 — gather per-symbol left-aligned codes into codes_la.
- * Today this is a straight scalar loop; the compiler auto-vectorises
- * it well enough on AVX2 hosts that a hand-rolled vpermi2w / vpgatherq
- * version doesn't materially help (the LSU is the bottleneck either
- * way).  AVX-512 has an actual SIMD win via vpermi2w -- see
- * primitives_avx512.h. */
-static inline void enc_init_x86(uint16_t *codes_la, int n,
-                                  const uint8_t *symbols,
-                                  const uint16_t *code_la_lut)
+/* right/left/none: u8 port of part_core_x86 — stride-8, movemask mask,
+ * compress_tab pshufb.  EMIT_RIGHT/EMIT_LEFT compile-time -> the unused side's
+ * pshufb + store fold away. */
+__attribute__((always_inline)) static inline
+int part_core_x86(uint8_t *ranks, int n, uint8_t thr,
+                     uint8_t *bm, uint8_t *tmp, int EMIT_RIGHT, int EMIT_LEFT)
 {
-    for (int i = 0; i < n; i++) codes_la[i] = code_la_lut[symbols[i]];
+    x86_build_tabs();
+    int n_left = 0, n_right = 0;
+    int j = 0;
+    __m128i thr1 = _mm_set1_epi8((char)(thr + 1));
+    for (; j + 8 <= n; j += 8) {
+        __m128i v = _mm_loadl_epi64((const __m128i *)(ranks + j));
+        uint8_t m = x86_mask8(v, thr1);
+        bm[j >> 3] = m;
+        if (EMIT_RIGHT)
+            _mm_storel_epi64((__m128i *)(tmp + n_right),
+                _mm_shuffle_epi8(v, _mm_load_si128((const __m128i *)x86_ctab_r[m])));
+        if (EMIT_LEFT)
+            _mm_storel_epi64((__m128i *)(ranks + n_left),
+                _mm_shuffle_epi8(v, _mm_load_si128((const __m128i *)x86_ctab_l[m])));
+        int rc = x86_pc8[m];
+        n_right += rc;
+        n_left += 8 - rc;
+    }
+    for (; j < n; j++) {
+        if ((j & 7) == 0) bm[j >> 3] = 0;
+        uint8_t r = ranks[j];
+        if (r > thr) { bm[j >> 3] |= (uint8_t)(1u << (j & 7));
+                       if (EMIT_RIGHT) tmp[n_right] = r; n_right++; }
+        else         { if (EMIT_LEFT) ranks[n_left] = r; n_left++; }
+    }
+    return n_right;
 }
 
-/* ---------- Encode primitives (flat-subtree pack) ----------
- *
- * Per-D SIMD bit-pack helpers.  Each reads D-bit codes from codes_la
- * (each lane holds the left-aligned Huffman code -- bit-d of the
- * original code is at position 15-d) and packs them LSB-first into
- * the output byte stream.  Each helper OVERPACKS (processes
- * ceil(n / stride) * stride elements).  The dispatcher pack_dN_x86
- * below handles the residual scalar tail. */
+/* Native u8 rank packers (SSE4.1).  The flat local code is (rank - base),
+ * already a D-bit byte, so the byte-laid intermediate comes from a u8 load +
+ * sub + mask — no u16 srli + saturating narrow.  The bit-stitch backend mirrors
+ * the code_la pack_d{2,3,4,8}_sse_x86 helpers above. */
 
-/* AVX2 D=2,3,5,6,7: 32 codes per ymm iter via ryg's multiply-as-shift
- * pack (pmaddubsw + pmaddwd + psrlq + and/andn/or + vpshufb compact
- * + 2x movdqu).  Helpers live in pivco_huffman_avx2_pack.h.  Beats the
- * prior sllv+reduce_add path by 3-3.5x on Zen 3 (c6a).  D=4 stays on
- * the SSE _mm_maddubs_epi16 "2 codes per byte" path which is intrinsically
- * cheap and beats v3 by ~20%. */
-
-/* SSE4.1 D=2: 16 codes -> 4 bytes.  _mm_maddubs_epi16 weighted pair-add
+/* SSE4.1 D=2: 16 ranks -> 4 bytes.  _mm_maddubs_epi16 weighted pair-add
  * with weights {1, 4, 16, 64} (int8 max 127, so 64 fits). */
-static inline int pack_d2_sse_x86(uint8_t *out, const uint16_t *codes_la,
-                                    int n, int right_shift)
+static inline int pack_d2_sse_x86(uint8_t *out, const uint8_t *ranks, int n, uint8_t base)
 {
     const __m128i weights = _mm_setr_epi8(1, 4, 16, 64, 1, 4, 16, 64,
                                            1, 4, 16, 64, 1, 4, 16, 64);
+    const __m128i vb = _mm_set1_epi8((char)base);
     int i = 0;
     for (; i + 16 <= n; i += 16) {
-        __m128i v0 = _mm_loadu_si128((const __m128i *)(codes_la + i    ));
-        __m128i v1 = _mm_loadu_si128((const __m128i *)(codes_la + i + 8));
-        v0 = _mm_srli_epi16(v0, right_shift);
-        v1 = _mm_srli_epi16(v1, right_shift);
-        v0 = _mm_and_si128(v0, _mm_set1_epi16(0x3));
-        v1 = _mm_and_si128(v1, _mm_set1_epi16(0x3));
-        __m128i bytes = _mm_packus_epi16(v0, v1);
+        __m128i bytes = _mm_and_si128(
+            _mm_sub_epi8(_mm_loadu_si128((const __m128i *)(ranks + i)), vb),
+            _mm_set1_epi8(0x3));
         __m128i step1 = _mm_maddubs_epi16(bytes, weights);
         __m128i step2 = _mm_hadd_epi16(step1, _mm_setzero_si128());
         __m128i out_bytes = _mm_packus_epi16(step2, _mm_setzero_si128());
@@ -790,21 +763,17 @@ static inline int pack_d2_sse_x86(uint8_t *out, const uint16_t *codes_la,
     return i;
 }
 
-/* SSE4.1 D=4: 16 codes -> 8 bytes.  _mm_maddubs_epi16 with weights {1, 16}. */
-static inline int pack_d4_sse_x86(uint8_t *out, const uint16_t *codes_la,
-                                    int n, int right_shift)
+/* SSE4.1 D=4: 16 ranks -> 8 bytes.  _mm_maddubs_epi16 with weights {1, 16}. */
+static inline int pack_d4_sse_x86(uint8_t *out, const uint8_t *ranks, int n, uint8_t base)
 {
     const __m128i weights = _mm_setr_epi8(1, 16, 1, 16, 1, 16, 1, 16,
                                            1, 16, 1, 16, 1, 16, 1, 16);
+    const __m128i vb = _mm_set1_epi8((char)base);
     int i = 0;
     for (; i + 16 <= n; i += 16) {
-        __m128i v0 = _mm_loadu_si128((const __m128i *)(codes_la + i    ));
-        __m128i v1 = _mm_loadu_si128((const __m128i *)(codes_la + i + 8));
-        v0 = _mm_srli_epi16(v0, right_shift);
-        v1 = _mm_srli_epi16(v1, right_shift);
-        v0 = _mm_and_si128(v0, _mm_set1_epi16(0xF));
-        v1 = _mm_and_si128(v1, _mm_set1_epi16(0xF));
-        __m128i bytes = _mm_packus_epi16(v0, v1);
+        __m128i bytes = _mm_and_si128(
+            _mm_sub_epi8(_mm_loadu_si128((const __m128i *)(ranks + i)), vb),
+            _mm_set1_epi8(0xF));
         __m128i step1 = _mm_maddubs_epi16(bytes, weights);
         __m128i out_bytes = _mm_packus_epi16(step1, _mm_setzero_si128());
         _mm_storel_epi64((__m128i *)(out + (i * 4 / 8)), out_bytes);
@@ -812,39 +781,32 @@ static inline int pack_d4_sse_x86(uint8_t *out, const uint16_t *codes_la,
     return i;
 }
 
-/* SSE4.1 D=8: 16 codes -> 16 bytes, byte-aligned. */
-static inline int pack_d8_sse_x86(uint8_t *out, const uint16_t *codes_la,
-                                    int n, int right_shift)
+/* SSE4.1 D=8: 16 ranks -> 16 bytes, byte-aligned. */
+static inline int pack_d8_sse_x86(uint8_t *out, const uint8_t *ranks, int n, uint8_t base)
 {
+    const __m128i vb = _mm_set1_epi8((char)base);
     int i = 0;
     for (; i + 16 <= n; i += 16) {
-        __m128i v0 = _mm_loadu_si128((const __m128i *)(codes_la + i    ));
-        __m128i v1 = _mm_loadu_si128((const __m128i *)(codes_la + i + 8));
-        /* Mask to 8 bits before the *saturating* packus: codes_la may carry
-         * the flat-root prefix in the bits above the D=8 code (depth>0), and
-         * packus would clamp those to 255 instead of dropping them (NEON's
-         * vmovn truncates).  The mask matches the truncate semantics. */
-        v0 = _mm_and_si128(_mm_srli_epi16(v0, right_shift), _mm_set1_epi16(0x00FF));
-        v1 = _mm_and_si128(_mm_srli_epi16(v1, right_shift), _mm_set1_epi16(0x00FF));
-        __m128i bytes = _mm_packus_epi16(v0, v1);
-        _mm_storeu_si128((__m128i *)(out + i), bytes);
+        _mm_storeu_si128((__m128i *)(out + i),
+            _mm_sub_epi8(_mm_loadu_si128((const __m128i *)(ranks + i)), vb));
     }
     return i;
 }
 
-/* SSE4.1 D=3: 8 codes -> 24 bits via _mm_mullo_epi32 multiply-as-shift.
+/* SSE4.1 D=3: 8 ranks -> 24 bits via _mm_mullo_epi32 multiply-as-shift.
  * SSE4.1 lacks _mm_sllv_epi32; multiplying uint32 by 2^k achieves the
  * same per-lane left shift. */
-static inline int pack_d3_sse_x86(uint8_t *out, const uint16_t *codes_la,
-                                    int n, int right_shift)
+static inline int pack_d3_sse_x86(uint8_t *out, const uint8_t *ranks, int n, uint8_t base)
 {
     const __m128i mlo = _mm_setr_epi32(1, 8, 64, 512);
     const __m128i mhi = _mm_setr_epi32(4096, 32768, 262144, 2097152);
+    const __m128i vb = _mm_set1_epi8((char)base);
     int i = 0;
     for (; i + 8 <= n; i += 8) {
-        __m128i v = _mm_loadu_si128((const __m128i *)(codes_la + i));
-        v = _mm_srli_epi16(v, right_shift);
-        v = _mm_and_si128(v, _mm_set1_epi16(0x7));
+        __m128i v8 = _mm_and_si128(
+            _mm_sub_epi8(_mm_loadl_epi64((const __m128i *)(ranks + i)), vb),
+            _mm_set1_epi8(0x7));
+        __m128i v = _mm_cvtepu8_epi16(v8);                 /* 8 ranks -> u16 */
         __m128i vlo = _mm_unpacklo_epi16(v, _mm_setzero_si128());
         __m128i vhi = _mm_unpackhi_epi16(v, _mm_setzero_si128());
         vlo = _mm_mullo_epi32(vlo, mlo);
@@ -854,53 +816,37 @@ static inline int pack_d3_sse_x86(uint8_t *out, const uint16_t *codes_la,
         s = _mm_hadd_epi32(s, s);
         uint32_t packed = (uint32_t)_mm_cvtsi128_si32(s);
         int bi = i * 3 / 8;
-        out[bi    ] = (uint8_t)(packed       );
+        out[bi    ] = (uint8_t)(packed      );
         out[bi + 1] = (uint8_t)(packed >>  8);
         out[bi + 2] = (uint8_t)(packed >> 16);
     }
     return i;
 }
 
-/* Dispatcher: pack n D-bit codes from codes_la into out[].  Selects the
- * SIMD per-D pack helper, then handles any residual scalar tail.
- *
- * D=2/4/8 use SSE4.1 directly; D=3/5/6/7 use AVX2 sllv where available,
- * falling back to scalar on SSE4.1-only hosts (D=3 has an SSE multiply-
- * as-shift version, D=5/6/7 stay scalar since SSE has no uint64 per-
- * lane shift). */
-static inline void pack_dN_x86(uint8_t *out, const uint16_t *codes_la,
-                                 int n, int D, int depth)
+/* Dispatcher: native SIMD per-D path (mirrors pack_dN_x86) + scalar tail. */
+static inline void pack_dN_x86(uint8_t *out, const uint8_t *ranks,
+                                  int n, int D, uint8_t base)
 {
     int total_bytes = (n * D + 7) >> 3;
     if (total_bytes > 0) out[total_bytes - 1] = 0;
-    int right_shift = 16 - depth - D;
 
-    /* NB: BMI2 pext pack is NOT used here.  pext is microcoded-slow on AMD
-     * pre-Zen4 (measured 2x worse than the AVX2 spread on c6a/Zen3), and the
-     * x86 backend runs on those parts.  pext pack is gated to the AVX-512
-     * backend instead (Intel Xeon + AMD Zen4, both fast-pext). */
     int i = 0;
     switch (D) {
-    case 4: i = pack_d4_sse_x86(out, codes_la, n, right_shift); break;
-    case 8: i = pack_d8_sse_x86(out, codes_la, n, right_shift); break;
+    case 4: i = pack_d4_sse_x86(out, ranks, n, base); break;
+    case 8: i = pack_d8_sse_x86(out, ranks, n, base); break;
 #ifdef PIVCO_HAS_AVX2
-    case 2: i = pack_d2_avx2_x86(out, codes_la, n, right_shift); break;
-    case 3: i = pack_d3_avx2_x86(out, codes_la, n, right_shift); break;
-    case 5: i = pack_d5_avx2_x86(out, codes_la, n, right_shift); break;
-    case 6: i = pack_d6_avx2_x86(out, codes_la, n, right_shift); break;
-    case 7: i = pack_d7_avx2_x86(out, codes_la, n, right_shift); break;
+    case 2: i = pack_d2_avx2_x86(out, ranks, n, base); break;
+    case 3: i = pack_d3_avx2_x86(out, ranks, n, base); break;
+    case 5: i = pack_d5_avx2_x86(out, ranks, n, base); break;
+    case 6: i = pack_d6_avx2_x86(out, ranks, n, base); break;
+    case 7: i = pack_d7_avx2_x86(out, ranks, n, base); break;
 #else
-    case 2: i = pack_d2_sse_x86(out, codes_la, n, right_shift); break;
-    case 3: i = pack_d3_sse_x86(out, codes_la, n, right_shift); break;
-    /* D=5,6,7 fall through to scalar tail on SSE4.1-only hosts. */
+    case 2: i = pack_d2_sse_x86(out, ranks, n, base); break;
+    case 3: i = pack_d3_sse_x86(out, ranks, n, base); break;
+    /* D=5,6,7 fall through to the scalar tail on SSE4.1-only hosts. */
 #endif
     default: break;
     }
-
-    int simd_n = i > n ? n : i;
-    PROF_COUNT_ONLY(PROF_ENC_FLAT_SIMD_ELEMS, simd_n);
-    PROF_COUNT_ONLY(PROF_ENC_FLAT_TAIL_ELEMS, n - simd_n);
-    (void)simd_n;  /* unused when PIVCO_PROF=0 (PROF_COUNT_ONLY expands away) */
 
     if (i >= n) return;
 
@@ -913,8 +859,8 @@ static inline void pack_dN_x86(uint8_t *out, const uint16_t *codes_la,
         ? (uint64_t)out[byte_idx] & ((1u << bits_in_buf) - 1)
         : 0;
     for (; i < n; i++) {
-        uint32_t local = ((uint32_t)codes_la[i] >> right_shift) & mask;
-        buf |= ((uint64_t)local) << bits_in_buf;
+        uint32_t local = (uint32_t)(uint8_t)(ranks[i] - base) & mask;
+        buf |= (uint64_t)local << bits_in_buf;
         bits_in_buf += D;
         while (bits_in_buf >= 8) {
             out[byte_idx++] = (uint8_t)(buf & 0xff);
@@ -922,9 +868,7 @@ static inline void pack_dN_x86(uint8_t *out, const uint16_t *codes_la,
             bits_in_buf -= 8;
         }
     }
-    if (bits_in_buf > 0) {
-        out[byte_idx] = (uint8_t)(buf & ((1u << bits_in_buf) - 1));
-    }
+    if (bits_in_buf > 0) out[byte_idx] = (uint8_t)(buf & ((1u << bits_in_buf) - 1));
 }
 
 /* ---------- Aliases consumed by codec.c ---------- */
@@ -934,37 +878,37 @@ static inline void pack_dN_x86(uint8_t *out, const uint16_t *codes_la,
 PIVCO_PRIM_ALWAYS_INLINE void prim_codec_init(void)
 { codec_init_x86(); }
 
-PIVCO_PRIM_ALWAYS_INLINE void prim_enc_init(uint16_t *codes_la, int n,
+PIVCO_PRIM_ALWAYS_INLINE void prim_enc_init(uint8_t *ranks, int n,
                                               const uint8_t *symbols,
-                                              const uint16_t *code_la_lut)
-{ enc_init_x86(codes_la, n, symbols, code_la_lut); }
+                                              const uint8_t *sym_to_rank)
+{ for (int i = 0; i < n; i++) ranks[i] = sym_to_rank[symbols[i]]; }
 
-PIVCO_PRIM_ALWAYS_INLINE int prim_enc_partition_full(uint16_t *codes_la,
-                                                      int n, int depth,
+PIVCO_PRIM_ALWAYS_INLINE int prim_enc_partition_full(uint8_t *ranks,
+                                                      int n, uint8_t thr,
                                                       uint8_t *bm,
-                                                      uint16_t *right_out)
-{ return build_bitmap_partition_x86(codes_la, n, depth, bm, right_out); }
+                                                      uint8_t *right_out)
+{ return part_full_x86(ranks, n, thr, bm, right_out); }
 
-PIVCO_PRIM_ALWAYS_INLINE int prim_enc_partition_right(uint16_t *codes_la,
-                                                      int n, int depth,
+PIVCO_PRIM_ALWAYS_INLINE int prim_enc_partition_right(uint8_t *ranks,
+                                                      int n, uint8_t thr,
                                                       uint8_t *bm,
-                                                      uint16_t *right_out)
-{ return part_core_x86(codes_la, n, depth, bm, NULL, right_out, 1, 1, 0); }
+                                                      uint8_t *right_out)
+{ return part_core_x86(ranks, n, thr, bm, right_out, 1, 0); }
 
-PIVCO_PRIM_ALWAYS_INLINE int prim_enc_partition_left(uint16_t *codes_la,
-                                                     int n, int depth,
+PIVCO_PRIM_ALWAYS_INLINE int prim_enc_partition_left(uint8_t *ranks,
+                                                     int n, uint8_t thr,
                                                      uint8_t *bm)
-{ return part_core_x86(codes_la, n, depth, bm, NULL, NULL, 1, 0, 1); }
+{ return part_core_x86(ranks, n, thr, bm, NULL, 0, 1); }
 
-PIVCO_PRIM_ALWAYS_INLINE int prim_enc_partition_none(uint16_t *codes_la,
-                                                     int n, int depth,
+PIVCO_PRIM_ALWAYS_INLINE int prim_enc_partition_none(uint8_t *ranks,
+                                                     int n, uint8_t thr,
                                                      uint8_t *bm)
-{ return part_core_x86(codes_la, n, depth, bm, NULL, NULL, 1, 0, 0); }
+{ return part_core_x86(ranks, n, thr, bm, NULL, 0, 0); }
 
-PIVCO_PRIM_ALWAYS_INLINE void prim_enc_pack_dN(const uint16_t *codes_la,
-                                             int n, int D, int depth,
+PIVCO_PRIM_ALWAYS_INLINE void prim_enc_pack_dN(const uint8_t *ranks,
+                                             int n, int D, uint8_t base,
                                              uint8_t *out_packed)
-{ pack_dN_x86(out_packed, codes_la, n, D, depth); }
+{ pack_dN_x86(out_packed, ranks, n, D, base); }
 
 PIVCO_PRIM_ALWAYS_INLINE void prim_merge_flat(uint8_t *out, int n,
                                                           const uint8_t *bm, int D,

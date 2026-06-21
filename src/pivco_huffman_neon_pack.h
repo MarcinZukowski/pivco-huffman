@@ -31,20 +31,13 @@
 #include <stdint.h>
 #include <string.h>
 
-/* Load 16 left-aligned u16 codes, right-shift, narrow to one u8x16
- * (1 code/byte), mask to D bits.  Lane k holds codes_la[base + k]. */
+/* Load 16 ranks, subtract base, mask to D bits (1 rank/byte) — the byte-laid
+ * intermediate the multiply-as-shift pack expects, with no u16 narrow. */
 static inline uint8x16_t
-pivco_pack_load_codes_byte_neon(const uint16_t *codes_la, int right_shift,
-                                 uint8_t code_mask)
+pivco_pack_load_byte_neon(const uint8_t *ranks, uint8_t base, uint8_t code_mask)
 {
-    int16x8_t rsh = vdupq_n_s16((int16_t)-right_shift);
-    uint16x8_t a = vshlq_u16(vld1q_u16(codes_la    ), rsh);
-    uint16x8_t b = vshlq_u16(vld1q_u16(codes_la + 8), rsh);
-    /* vmovn_u16 = truncate (low 8 bits, no saturation).  D <= 7, so the
-     * shifted code already fits in 8 bits — the mask below cleans any
-     * stray high bits from the original codes_la lane. */
-    uint8x16_t bytes = vcombine_u8(vmovn_u16(a), vmovn_u16(b));
-    return vandq_u8(bytes, vdupq_n_u8(code_mask));
+    uint8x16_t b = vsubq_u8(vld1q_u8(ranks), vdupq_n_u8(base));
+    return vandq_u8(b, vdupq_n_u8(code_mask));
 }
 
 /* Per-D compact shuffles: bytes [0..D-1] from u64[0]'s low part go to
@@ -70,8 +63,8 @@ static const uint8_t pivco_pack_compact_d7_neon[16] = {
 
 /* D as compile-time constant so vshrq_n_u64 / mask constants fold. */
 #define PIVCO_PACK_NEON_DN(NAME, D_VAL, COMPACT_TAB)                            \
-static inline int NAME(uint8_t *out, const uint16_t *codes_la,                 \
-                       int n, int right_shift)                                  \
+static inline int NAME(uint8_t *out, const uint8_t *ranks,                     \
+                       int n, uint8_t base)                                     \
 {                                                                                \
     const uint8x16_t c0 = vreinterpretq_u8_u16(                                  \
         vdupq_n_u16((uint16_t)(((1u << (D_VAL)) << 8) | 1u)));                   \
@@ -81,8 +74,8 @@ static inline int NAME(uint8_t *out, const uint16_t *codes_la,                 \
     const uint8x16_t compact = vld1q_u8(COMPACT_TAB);                            \
     int i = 0;                                                                   \
     for (; i + 16 <= n; i += 16) {                                               \
-        uint8x16_t cb = pivco_pack_load_codes_byte_neon(                         \
-            codes_la + i, right_shift, (uint8_t)((1u << (D_VAL)) - 1u));         \
+        uint8x16_t cb = pivco_pack_load_byte_neon(                               \
+            ranks + i, base, (uint8_t)((1u << (D_VAL)) - 1u));                   \
         /* Step 1: word[i] = cb[2i] + cb[2i+1] * 2^D  (8 u16 lanes)   */         \
         uint16x8_t prod_lo = vmull_u8(vget_low_u8(cb),  vget_low_u8(c0));        \
         uint16x8_t prod_hi = vmull_high_u8(cb, c0);                              \

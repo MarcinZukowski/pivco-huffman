@@ -72,33 +72,21 @@ static const uint8_t pivco_pack_compact_d7[64] __attribute__((aligned(64))) = {
      0,0,0,0,0,0,0,0
 };
 
-/* Load 64 left-aligned u16 codes, right-shift to align code into low D
- * bits, narrow u16 -> u8, assemble into one zmm (1 code per byte).
- *
- * NB: the returned bytes carry whatever sat in the low byte of each
- * codes_la lane after right-shift — high bits above D may be GARBAGE.
- * Callers must mask to D bits if their subsequent pipeline would leak
- * those bits.  The multishift-based D=3/5/6/7 helpers don't mask here
- * because their per-group `_mm512_and_si512(cb, mX)` already clips both
- * the unwanted bytes (zero outside the group) AND the high bits within
- * each group byte (0x07 / 0x1F / 0x3F / 0x7F).  The vpermb-stride D=2
- * and D=4 helpers DO mask because their shift-then-OR step would
- * otherwise leak high bits across byte boundaries within each u32. */
-static inline __m512i pivco_pack_load_codes_byte(const uint16_t *codes_la,
-                                                  int right_shift)
+
+/* ---- rank-based (partbyrank) variants -------------------------------------
+ * The flat local code is (rank - base), already a D-bit value in each byte —
+ * so the byte-laid `cb` comes straight from a u8 load + subtract (no u16 load
+ * + cvtepi16_epi8 narrow).  The pack BACKEND is byte-for-byte the same. */
+static inline __m512i pivco_pack_load_byte(const uint8_t *ranks, uint8_t base)
 {
-    __m512i lo16 = _mm512_loadu_si512((const __m512i *)(codes_la));
-    __m512i hi16 = _mm512_loadu_si512((const __m512i *)(codes_la + 32));
-    __m256i lo_b = _mm512_cvtepi16_epi8(_mm512_srli_epi16(lo16, right_shift));
-    __m256i hi_b = _mm512_cvtepi16_epi8(_mm512_srli_epi16(hi16, right_shift));
-    return _mm512_inserti64x4(_mm512_castsi256_si512(lo_b), hi_b, 1);
+    return _mm512_sub_epi8(_mm512_loadu_si512((const __m512i *)ranks),
+                           _mm512_set1_epi8((char)base));
 }
 
-/* D=2 (4 codes per byte): 4 groups by code mod 4, gather + shift + OR. */
-static inline int pack_d2_avx512(uint8_t *out, const uint16_t *codes_la,
-                                   int n, int right_shift)
+static inline int pack_d2_avx512(uint8_t *out, const uint8_t *ranks,
+                                   int n, uint8_t base)
 {
-    /* Group g (g in 0..3) gathers codes (g, g+4, g+8, ..., g+60) into the
+    /* Group g (g in 0..3) gathers ranks (g, g+4, g+8, ..., g+60) into the
      * low 16 output bytes; group g's bits land at position 2g within each
      * output byte. */
     const __m512i shuf0 = _mm512_set_epi8(
@@ -122,7 +110,7 @@ static inline int pack_d2_avx512(uint8_t *out, const uint16_t *codes_la,
         /* D=2 needs the explicit mask: the slli-then-OR below would otherwise
          * leak high bits across byte boundaries within each u32 lane. */
         __m512i cb = _mm512_and_si512(
-            pivco_pack_load_codes_byte(codes_la + i, right_shift),
+            pivco_pack_load_byte(ranks + i, base),
             _mm512_set1_epi8(0x03));
         __m512i g0 = _mm512_permutexvar_epi8(shuf0, cb);
         __m512i g1 = _mm512_permutexvar_epi8(shuf1, cb);
@@ -137,9 +125,10 @@ static inline int pack_d2_avx512(uint8_t *out, const uint16_t *codes_la,
     return i;
 }
 
-/* D=3: 4 groups (codes mod 4).  Each chunk of 8 codes -> 3 output bytes. */
-static inline int pack_d3_avx512(uint8_t *out, const uint16_t *codes_la,
-                                   int n, int right_shift)
+/* D=3: 4 groups (ranks mod 4).  Each chunk of 8 ranks -> 3 output bytes. */
+
+static inline int pack_d3_avx512(uint8_t *out, const uint8_t *ranks,
+                                   int n, uint8_t base)
 {
     const __m512i mA = _mm512_set1_epi64((int64_t)0x0000000700000007ULL); /* bytes 0,4 */
     const __m512i mB = _mm512_set1_epi64((int64_t)0x0000070000000700ULL); /* bytes 1,5 */
@@ -147,14 +136,14 @@ static inline int pack_d3_avx512(uint8_t *out, const uint16_t *codes_la,
     const __m512i mD = _mm512_set1_epi64((int64_t)0x0700000007000000ULL); /* bytes 3,7 */
     /* Per-byte multishift ctrls (lo->hi byte order).  Byte 2 of cA reads
      * a zero region of lane_A (Group A doesn't contribute to output byte
-     * 2; pulling from a masked-zero byte avoids leaking code 0 in). */
+     * 2; pulling from a masked-zero byte avoids leaking rank 0 in). */
     const __m512i cA = _mm512_set1_epi64((int64_t)0x0000000000081C00ULL); /* {0,28,8,...} */
     const __m512i cB = _mm512_set1_epi64((int64_t)0x0000000000292105ULL); /* {5,33,41,...} */
     const __m512i cC = _mm512_set1_epi64((int64_t)0x00000000002E120AULL); /* {10,18,46,...} */
     const __m512i cD = _mm512_set1_epi64((int64_t)0x0000000000331700ULL); /* {0,23,51,...} */
     int i = 0;
     for (; i + 64 <= n; i += 64) {
-        __m512i cb = pivco_pack_load_codes_byte(codes_la + i, right_shift);
+        __m512i cb = pivco_pack_load_byte(ranks + i, base);
         __m512i a = _mm512_multishift_epi64_epi8(cA, _mm512_and_si512(cb, mA));
         __m512i b = _mm512_multishift_epi64_epi8(cB, _mm512_and_si512(cb, mB));
         __m512i c = _mm512_multishift_epi64_epi8(cC, _mm512_and_si512(cb, mC));
@@ -169,9 +158,10 @@ static inline int pack_d3_avx512(uint8_t *out, const uint16_t *codes_la,
     return i;
 }
 
-/* D=4 (2 codes per byte): 2 groups (even/odd), gather + shift + OR. */
-static inline int pack_d4_avx512(uint8_t *out, const uint16_t *codes_la,
-                                   int n, int right_shift)
+/* D=4 (2 ranks per byte): 2 groups (even/odd), gather + shift + OR. */
+
+static inline int pack_d4_avx512(uint8_t *out, const uint8_t *ranks,
+                                   int n, uint8_t base)
 {
     const __m512i shuf0 = _mm512_set_epi8(
         0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,
@@ -185,7 +175,7 @@ static inline int pack_d4_avx512(uint8_t *out, const uint16_t *codes_la,
     for (; i + 64 <= n; i += 64) {
         /* D=4 needs the explicit mask: see D=2 comment. */
         __m512i cb = _mm512_and_si512(
-            pivco_pack_load_codes_byte(codes_la + i, right_shift),
+            pivco_pack_load_byte(ranks + i, base),
             _mm512_set1_epi8(0x0F));
         __m512i g0 = _mm512_permutexvar_epi8(shuf0, cb);
         __m512i g1 = _mm512_permutexvar_epi8(shuf1, cb);
@@ -197,7 +187,7 @@ static inline int pack_d4_avx512(uint8_t *out, const uint16_t *codes_la,
 }
 
 /* D=5/6/7 pack via ryg multiply-as-shift (port of AVX2 a1aa6b9):
- *   - mask byte-laid codes to D bits
+ *   - mask byte-laid ranks to D bits
  *   - vpmaddubsw c0   word[i] = cb[2i]   + cb[2i+1]   * 2^D    (2D bits)
  *   - vpmaddwd   c1   dword[i] = word[2i] + word[2i+1] * 2^(2D) (4D bits)
  *   - vpsrlq + vpternlogq 0xE4 to merge dword[2i+1] into dword[2i]'s
@@ -213,9 +203,19 @@ static inline int pack_d4_avx512(uint8_t *out, const uint16_t *codes_la,
  * up to 31 + 31*32 = 1023 (fits u16), then vpmaddwd up to 1023 + 1023 *
  * 1024 ≈ 1.05M (fits u32) -- 4D = 20 bits is the maximum used.  Same
  * envelope analysis for D=6 (24 bits) and D=7 (28 bits). */
+
+/* D=8: byte-aligned; 64 ranks -> 64 bytes (sub base + store). */
+static inline int pack_d8_avx512(uint8_t *out, const uint8_t *ranks, int n, uint8_t base)
+{
+    int i = 0;
+    for (; i + 64 <= n; i += 64)
+        _mm512_storeu_si512((__m512i *)(out + i), pivco_pack_load_byte(ranks + i, base));
+    return i;
+}
+
 #define PIVCO_PACK_AVX512_RYG_DN(NAME, D_VAL, COMPACT_TAB, STORE_MASK)            \
-static inline int NAME(uint8_t *out, const uint16_t *codes_la,                  \
-                       int n, int right_shift)                                    \
+static inline int NAME(uint8_t *out, const uint8_t *ranks,                  \
+                       int n, uint8_t base)                                    \
 {                                                                                 \
     const __m512i c0 = _mm512_set1_epi16(                                         \
         (int16_t)(((1 << (D_VAL)) << 8) | 1));                                    \
@@ -226,7 +226,7 @@ static inline int NAME(uint8_t *out, const uint16_t *codes_la,                  
     const __m512i d_mask = _mm512_set1_epi8((char)((1 << (D_VAL)) - 1));          \
     int i = 0;                                                                    \
     for (; i + 64 <= n; i += 64) {                                                \
-        __m512i cb = pivco_pack_load_codes_byte(codes_la + i, right_shift);       \
+        __m512i cb = pivco_pack_load_byte(ranks + i, base);       \
         cb = _mm512_and_si512(cb, d_mask);                                        \
         __m512i x  = _mm512_maddubs_epi16(c0, cb);                                \
         x = _mm512_madd_epi16(x, c1);                                             \

@@ -713,301 +713,223 @@ static inline void merge_flat_neon(uint8_t *out, int n,
     PROF_TOC(PROF_BU_MERGE_FLAT, n);
 }
 
-/* ---------- Encode primitives (bitmap + partition) ----------
- *
- * The non-flat-internal-node hot path.  Builds the n-bit partition
- * bitmap from codes_la[0..n) (each codes_la[i] is the per-symbol left-
- * aligned Huffman code; bit (15 - depth) is the current depth's
- * partition decision) and partitions codes_la in place: left (bit==0)
- * stays in codes_la[0..n_left), right (bit==1) moves to right_out[0..n_right).
- * codes_la lanes are written through to next-level recursion unchanged
- * -- the codes_la representation is depth-threaded, NOT shifted across
- * levels.
- *
- * See pivco_huffman_primitives.h for the codec.c boundary convention.
- */
 
-/* Dense movmask helper: given 8 left-aligned codes and a negative shift
- * amount = -(15 - depth), produce the 8-bit partition mask for this
- * batch.  Right-shifts each lane by (15-depth) so the partition bit
- * lands in the LSB, then horizontal-add weighted by 2^k.
- * Cost: 4 NEON ops (shl, and, shl, addv) per 8 codes. */
-static inline uint8_t enc_mask8_codes_la_neon(uint16x8_t code_vec,
-                                                int neg_shift_d)
+/* ---------- Encode primitives: rank-based encoding (8-bit in-order ranks) ----------
+ * Partition 8-bit leaf ranks against a per-node threshold (split_rank).  A
+ * u8 port of the code_la COM64 partition: masks64_neon builds the
+ * 8 chunk masks (vcgtq > thr replacing the code bit-test), a vcnt + 0x0101..
+ * prefix sum precomputes per-chunk cursors, and each 8-rank chunk is compacted
+ * by a vtbl1_u8 over ctab8 (the 1-byte-per-rank analog of compress_tab).
+ * Flat pack subtracts flat_base_rank then reuses the production pack_dN. */
+#include <stdlib.h>
+
+/* Per-mask LUTs (built once by build_tabs):
+ *   pc8[m]          popcount of mask byte m
+ *   ctab8[m][0:8]   right source lanes packed at [0,n_right), 0xff fill
+ *   ctab8[m][8:16]  left  source lanes packed at [0,n_left), 0xff fill
+ * vtbl1_u8 returns 0 for the 0xff (out-of-range) padding indices. */
+static uint8_t pc8[256];
+static uint8_t ctab8[256][16]  __attribute__((aligned(16)));
+static int     tabs_ready = 0;
+
+static void build_tabs(void)
 {
-    int16x8_t shr_vec = vdupq_n_s16((int16_t)neg_shift_d);
-    uint16x8_t bit_lsb = vandq_u16(vshlq_u16(code_vec, shr_vec),
-                                    vdupq_n_u16(1));
-    static const int16_t weights[8] = {0, 1, 2, 3, 4, 5, 6, 7};
-    uint16x8_t weighted = vshlq_u16(bit_lsb, vld1q_s16(weights));
-    return (uint8_t)vaddvq_u16(weighted);
+    if (tabs_ready) return;
+    for (int m = 0; m < 256; m++) {
+        pc8[m] = (uint8_t)__builtin_popcount(m);
+        memset(ctab8[m], 0xff, 16);
+        int qr = 0, ql = 0;
+        for (int k = 0; k < 8; k++) {
+            if (m & (1 << k)) ctab8[m][qr++]     = (uint8_t)k;     /* right -> [0:8]  */
+            else              ctab8[m][8 + ql++] = (uint8_t)k;     /* left  -> [8:16] */
+        }
+    }
+    tabs_ready = 1;
 }
 
-/* enc_masks8x8_codes_la_neon — build the partition masks for EIGHT 8-code
- * chunks at once, packed LE into a u64 (byte k = mask of chunk k).
- *
- * Per chunk: vtstq_u16(code, 1<<shift_d) -> 0x0000/0xFFFF per lane, AND with
- * the {1,2,4,..,128} bit-weights.  Then a vpaddq_u16 tree (4+2+1 = 7 ops)
- * reduces the 8 weighted vectors to one uint16x8 whose lane k is mask_k --
- * replacing 8 lane-crossing vaddvq reductions + 8 SIMD->GPR moves with 7
- * vpaddq + 1 vmovn + 1 fmov.  Big win on Graviton's narrow pipes (the
- * 8 addv were the bottleneck), neutral on Apple.  See the ARM "porting
- * x86 movemask to NEON" pairwise-reduction technique.  shift_d = 15-depth. */
-static inline uint64_t enc_masks8x8_codes_la_neon(
-        uint16x8_t c0, uint16x8_t c1, uint16x8_t c2, uint16x8_t c3,
-        uint16x8_t c4, uint16x8_t c5, uint16x8_t c6, uint16x8_t c7,
-        int shift_d)
+static const uint8_t BW8[8] = {1, 2, 4, 8, 16, 32, 64, 128};
+
+/* 8-bit mask of (ids > thr) over the 8 ranks in `ids`. */
+static inline uint8_t nmask8(uint8x8_t ids, uint8x8_t thr)
 {
-    uint16x8_t bit = vdupq_n_u16((uint16_t)(1u << shift_d));
-    static const uint16_t powers_arr[8] = {1,2,4,8,16,32,64,128};
-    uint16x8_t pw = vld1q_u16(powers_arr);
-    uint16x8_t w0=vandq_u16(vtstq_u16(c0,bit),pw), w1=vandq_u16(vtstq_u16(c1,bit),pw),
-               w2=vandq_u16(vtstq_u16(c2,bit),pw), w3=vandq_u16(vtstq_u16(c3,bit),pw),
-               w4=vandq_u16(vtstq_u16(c4,bit),pw), w5=vandq_u16(vtstq_u16(c5,bit),pw),
-               w6=vandq_u16(vtstq_u16(c6,bit),pw), w7=vandq_u16(vtstq_u16(c7,bit),pw);
-    uint16x8_t p01=vpaddq_u16(w0,w1), p23=vpaddq_u16(w2,w3),
-               p45=vpaddq_u16(w4,w5), p67=vpaddq_u16(w6,w7);
-    uint16x8_t q0=vpaddq_u16(p01,p23), q1=vpaddq_u16(p45,p67);
-    uint16x8_t r=vpaddq_u16(q0,q1);   /* lane k = mask_k */
-    return vget_lane_u64(vreinterpret_u64_u8(vmovn_u16(r)), 0);
+    return vaddv_u8(vand_u8(vcgt_u8(ids, thr), vld1_u8(BW8)));
 }
 
-/* part_core_neon — the single shared partition loop.  Parameterized by
- * compile-time-constant flags so each always-inline wrapper folds to a
- * specialized branch-free loop with no dead stores:
- *   BUILD=1  build the bitmap from codes_la's depth bit (fused, encode)
- *   BUILD=0  read the mask from bm_in (from-bitmap; future TD-decode share)
- *   EMIT_RIGHT/EMIT_LEFT  scatter that half (full=1,1 right=1,0 left=0,1 none=0,0)
- * The stride-8 scatter (the "partition8" step) is inlined here rather than
- * factored into a helper — a helper-call boundary cost the FULL path ~9% on
- * M4 because the compiler stopped folding the cursor math.  LEFT is written in
- * place over codes_la (n_left <= j keeps the 16-byte store safe); RIGHT goes to
- * right_out.  Returns n_right. */
-/* build_bitmap_partition_full_neon — the FULL (both-sides) fused partition,
- * kept hand-written.  The generic part_core_neon below (with EMIT_RIGHT=
- * EMIT_LEFT=1) is logically identical but schedules ~8% slower on M4 for this
- * specific 1,1,1 case — and FULL is the hot common path, so it stays
- * specialized.  part_core handles every other variant (right/left/none and
- * the from-bitmap share) where the generic form matches hand-written speed. */
-static inline int build_bitmap_partition_full_neon(uint16_t *codes_la, int n,
-                                                    int depth, uint8_t *bm,
-                                                    uint16_t *right_out)
+static inline void init_neon(uint8_t *ranks, int n,
+                                const uint8_t *sym, const uint8_t *s2r)
 {
-    int n_left = 0, n_right = 0, j = 0;
-    int neg_shift_d = -(15 - depth);
+    for (int i = 0; i < n; i++) ranks[i] = s2r[sym[i]];
+}
 
-    /* V5 wide path: 64 codes/iter, 8 independent chunks.  Mirrors the
-     * COM64 merge idea on the encode side (Jeff Plaisance).  Load all 8
-     * code_vecs first so the in-place left compaction has no read-after-
-     * write hazard, build all 8 bitmap bytes (one 8-byte store instead of
-     * eight 1-byte stores), then a vcnt + 0x0101.. prefix sum precomputes
-     * every chunk's left/right scatter cursor -- so the 8 compact+scatter
-     * chunks are independent (no serial n_left/n_right add chain) and the
-     * 8 compress_popcnt[mask] loads are replaced by one vcnt.
-     * The 8-code loop below handles the n mod 64 residual. */
+/* Build 8 partition mask bytes for 64 ranks in one vpaddq_u8 reduction tree,
+ * packed LE into a u64 (byte k = mask of chunk k = ranks[8k .. 8k+7]).  The
+ * rank analog of enc_masks8x8_codes_la_neon: vcgtq replaces the code bit-test,
+ * and since u8 packs two 8-rank chunks per 128-bit vector, FOUR inputs (not
+ * eight) feed the pairwise-add tree.  Each lane already holds its bit-weight
+ * (0 or 2^(lane&7)); the 4 vpaddq_u8 collapse all 8 lanes of every chunk into
+ * one byte, so r's low 8 bytes are mask_0..mask_7 directly.  This replaces the
+ * old 4x mred (12 vpaddq) + 8 vgetq_lane SIMD->GPR extracts with 4 vpaddq +
+ * one vget_lane_u64 -- the chunk masks now arrive as a single word that also
+ * feeds a vcnt popcount with no stack round-trip. */
+static inline uint64_t masks64_neon(uint8x16_t v0, uint8x16_t v1,
+                                       uint8x16_t v2, uint8x16_t v3,
+                                       uint8x16_t vt, uint8x16_t bw)
+{
+    uint8x16_t w0 = vandq_u8(vcgtq_u8(v0, vt), bw);   /* chunks 0,1 */
+    uint8x16_t w1 = vandq_u8(vcgtq_u8(v1, vt), bw);   /* chunks 2,3 */
+    uint8x16_t w2 = vandq_u8(vcgtq_u8(v2, vt), bw);   /* chunks 4,5 */
+    uint8x16_t w3 = vandq_u8(vcgtq_u8(v3, vt), bw);   /* chunks 6,7 */
+    uint8x16_t t0 = vpaddq_u8(w0, w1);
+    uint8x16_t t1 = vpaddq_u8(w2, w3);
+    uint8x16_t u0 = vpaddq_u8(t0, t1);
+    uint8x16_t r  = vpaddq_u8(u0, u0);                /* low 8 bytes = mask_0..7 */
+    return vget_lane_u64(vreinterpret_u64_u8(vget_low_u8(r)), 0);
+}
+
+/* full: both sides compacted (right -> tmp, left in place into ranks).
+ * Near-verbatim port of build_bitmap_partition_full_neon (the production
+ * code_la COM64 path): same 64/iter structure, same vcnt + 0x0101.. prefix-sum
+ * cursor precompute, same per-8-chunk compress-table shuffle.  The only changes
+ * for the rank-based encoding: masks64_neon (vcgtq > thr) replaces enc_masks8x8's bit
+ * test, and the chunk compaction is a u8x8 vtbl1 over ctab8 (1 byte/rank)
+ * instead of a u8x16 vqtbl1 over compress_tab (2 bytes/code). */
+static inline int part_full_neon(uint8_t *ranks, int n, uint8_t thr,
+                                    uint8_t *bm, uint8_t *tmp)
+{
+    build_tabs();
+    int n_left = 0, n_right = 0;
+    int j = 0;
+    uint8x16_t vt = vdupq_n_u8(thr);
+    static const uint8_t bw_a[16] = {1,2,4,8,16,32,64,128, 1,2,4,8,16,32,64,128};
+    uint8x16_t bw = vld1q_u8(bw_a);
     for (; j + 64 <= n; j += 64) {
-        uint16x8_t cv0=vld1q_u16(codes_la+j),    cv1=vld1q_u16(codes_la+j+8),
-                   cv2=vld1q_u16(codes_la+j+16), cv3=vld1q_u16(codes_la+j+24),
-                   cv4=vld1q_u16(codes_la+j+32), cv5=vld1q_u16(codes_la+j+40),
-                   cv6=vld1q_u16(codes_la+j+48), cv7=vld1q_u16(codes_la+j+56);
-        uint64_t mask_word = enc_masks8x8_codes_la_neon(
-            cv0,cv1,cv2,cv3,cv4,cv5,cv6,cv7, 15 - depth);
-        uint8_t m0=(uint8_t)mask_word,        m1=(uint8_t)(mask_word>>8),
-                m2=(uint8_t)(mask_word>>16),  m3=(uint8_t)(mask_word>>24),
-                m4=(uint8_t)(mask_word>>32),  m5=(uint8_t)(mask_word>>40),
-                m6=(uint8_t)(mask_word>>48),  m7=(uint8_t)(mask_word>>56);
+        uint8x16_t v0 = vld1q_u8(ranks + j);
+        uint8x16_t v1 = vld1q_u8(ranks + j + 16);
+        uint8x16_t v2 = vld1q_u8(ranks + j + 32);
+        uint8x16_t v3 = vld1q_u8(ranks + j + 48);
+        uint64_t mask_word = masks64_neon(v0, v1, v2, v3, vt, bw);
         memcpy(bm + (j >> 3), &mask_word, 8);
         uint8x8_t pc_v = vcnt_u8(vcreate_u8(mask_word));
         uint64_t pc_word = vget_lane_u64(vreinterpret_u64_u8(pc_v), 0);
         uint64_t pfx = pc_word * 0x0101010101010101ULL;
-#define _V5_PART(K_, CV, M) do {                                              \
+        /* chunk k's 8 ranks = vget_{low,high}_u8 of v0..v3 (chunks 0..7). */
+        uint8x8_t cv[8] = {
+            vget_low_u8(v0), vget_high_u8(v0),
+            vget_low_u8(v1), vget_high_u8(v1),
+            vget_low_u8(v2), vget_high_u8(v2),
+            vget_low_u8(v3), vget_high_u8(v3),
+        };
+#define _PART(K_) do {                                                      \
         uint32_t cr = (K_)==0 ? 0u : (uint32_t)((pfx >> (8*((K_)-1))) & 0xFF); \
-        uint32_t cl = 8u*(K_) - cr;                                           \
-        const uint8_t *tab = compress_tab[(M)];                               \
-        uint8x16_t data  = vreinterpretq_u8_u16(CV);                          \
-        uint8x16_t right = vqtbl1q_u8(data, vld1q_u8(tab));                    \
-        uint8x16_t left  = vqtbl1q_u8(data, vld1q_u8(tab + 16));               \
-        vst1q_u8((uint8_t *)(right_out + n_right + cr), right);               \
-        vst1q_u8((uint8_t *)(codes_la  + n_left  + cl), left);                \
+        uint32_t cl = 8u*(K_) - cr;                                            \
+        const uint8_t *tab = ctab8[(uint8_t)(mask_word >> (8*(K_)))];       \
+        uint8x8_t right = vtbl1_u8(cv[K_], vld1_u8(tab));                      \
+        uint8x8_t left  = vtbl1_u8(cv[K_], vld1_u8(tab + 8));                  \
+        vst1_u8(tmp   + n_right + cr, right);                                       \
+        vst1_u8(ranks + n_left + cl, left);                                        \
     } while (0)
-        _V5_PART(0,cv0,m0); _V5_PART(1,cv1,m1); _V5_PART(2,cv2,m2); _V5_PART(3,cv3,m3);
-        _V5_PART(4,cv4,m4); _V5_PART(5,cv5,m5); _V5_PART(6,cv6,m6); _V5_PART(7,cv7,m7);
-#undef _V5_PART
+        _PART(0); _PART(1); _PART(2); _PART(3);
+        _PART(4); _PART(5); _PART(6); _PART(7);
+#undef _PART
         uint32_t total_r = (uint32_t)(pfx >> 56);
-        n_right += total_r; n_left += 64 - total_r;
+        n_right += total_r;
+        n_left += 64 - total_r;
     }
-
-    for (; j + 8 <= n; j += 8) {
-        uint16x8_t code_vec = vld1q_u16(codes_la + j);
-        uint8_t mask = enc_mask8_codes_la_neon(code_vec, neg_shift_d);
-        bm[j >> 3] = mask;
-        const uint8_t *tab = compress_tab[mask];
-        uint8x16_t shuf_r = vld1q_u8(tab);
-        uint8x16_t shuf_l = vld1q_u8(tab + 16);
-        uint8x16_t data   = vreinterpretq_u8_u16(code_vec);
-        uint8x16_t right  = vqtbl1q_u8(data, shuf_r);
-        uint8x16_t left   = vqtbl1q_u8(data, shuf_l);
-        int nr = compress_popcnt[mask];
-        vst1q_u8((uint8_t *)(right_out + n_right), right);
-        vst1q_u8((uint8_t *)(codes_la  + n_left ), left);
-        n_right += nr;
-        n_left  += (8 - nr);
-    }
-    if (j < n) {
-        int tail = n - j, shift_d = 15 - depth;
-        uint16_t tail_buf[8];
-        for (int k = 0; k < tail; k++) tail_buf[k] = codes_la[j + k];
-        uint8_t mask = 0;
-        for (int k = 0; k < tail; k++)
-            mask |= (uint8_t)(((tail_buf[k] >> shift_d) & 1) << k);
-        bm[j >> 3] = mask;
-        for (int k = 0; k < tail; k++) {
-            if (mask & (1 << k)) right_out[n_right++] = tail_buf[k];
-            else                 codes_la[n_left++]   = tail_buf[k];
-        }
+    for (; j < n; j++) {
+        if ((j & 7) == 0) bm[j >> 3] = 0;
+        uint8_t r = ranks[j];
+        if (r > thr) { bm[j >> 3] |= (uint8_t)(1u << (j & 7)); tmp[n_right++] = r; }
+        else         { ranks[n_left++] = r; }
     }
     return n_right;
 }
 
+/* part_core_neon — the one-sided (right/left/none) rank partition, a
+ * u8 port of the code_la partition core: same 64/iter COM64 wide path (mask via
+ * masks64_neon, vcnt + 0x0101.. prefix-sum cursors, per-8-chunk ctab8
+ * shuffle), same 8/iter middle loop, same scalar tail.  EMIT_RIGHT/EMIT_LEFT
+ * are compile-time so the unused side's scatter + cursor fold away.  Right ->
+ * tmp, left in place into ranks. */
 __attribute__((always_inline)) static inline
-int part_core_neon(uint16_t *codes_la, int n, int depth,
-                                  uint8_t *bm, const uint8_t *bm_in,
-                                  uint16_t *right_out,
-                                  int BUILD, int EMIT_RIGHT, int EMIT_LEFT)
+int part_core_neon(uint8_t *ranks, int n, uint8_t thr,
+                      uint8_t *bm, uint8_t *tmp, int EMIT_RIGHT, int EMIT_LEFT)
 {
-    int n_left = 0, n_right = 0, j = 0;
-    int neg_shift_d = -(15 - depth);
-
-    /* V5 wide path: 64 codes/iter, 8 independent chunks -- same prefix-sum
-     * cursor decoupling + vpaddq 8-mask build as build_bitmap_partition_full_
-     * neon, specialized here for the one-sided (right/left/none) emit cases.
-     * BUILD=1 only (all live callers build the bitmap; the BUILD=0 from-bitmap
-     * share is unused, falls through to the 8-code loop).  EMIT_RIGHT/
-     * EMIT_LEFT are compile-time, so the unused scatter + cursor drop out. */
-    if (BUILD) {
-        int shift_d = 15 - depth;
-        for (; j + 64 <= n; j += 64) {
-            uint16x8_t cv0=vld1q_u16(codes_la+j),    cv1=vld1q_u16(codes_la+j+8),
-                       cv2=vld1q_u16(codes_la+j+16), cv3=vld1q_u16(codes_la+j+24),
-                       cv4=vld1q_u16(codes_la+j+32), cv5=vld1q_u16(codes_la+j+40),
-                       cv6=vld1q_u16(codes_la+j+48), cv7=vld1q_u16(codes_la+j+56);
-            uint64_t mask_word = enc_masks8x8_codes_la_neon(
-                cv0,cv1,cv2,cv3,cv4,cv5,cv6,cv7, shift_d);
-            memcpy(bm + (j >> 3), &mask_word, 8);
-            uint8x8_t pc_v = vcnt_u8(vcreate_u8(mask_word));
-            uint64_t pc_word = vget_lane_u64(vreinterpret_u64_u8(pc_v), 0);
-            uint64_t pfx = pc_word * 0x0101010101010101ULL;
-#define _V5_PART1(K_, CV) do {                                                \
-            uint32_t cr = (K_)==0 ? 0u : (uint32_t)((pfx >> (8*((K_)-1))) & 0xFF);\
-            if (EMIT_RIGHT || EMIT_LEFT) {                                     \
-                uint8_t M = (uint8_t)(mask_word >> (8*(K_)));                  \
-                const uint8_t *tab = compress_tab[M];                         \
-                uint8x16_t data = vreinterpretq_u8_u16(CV);                   \
-                if (EMIT_RIGHT) vst1q_u8((uint8_t *)(right_out + n_right + cr),\
-                                          vqtbl1q_u8(data, vld1q_u8(tab)));     \
-                if (EMIT_LEFT)  vst1q_u8((uint8_t *)(codes_la + n_left         \
-                                          + (8u*(K_) - cr)),                   \
-                                          vqtbl1q_u8(data, vld1q_u8(tab + 16)));\
-            }                                                                 \
-        } while (0)
-            _V5_PART1(0,cv0); _V5_PART1(1,cv1); _V5_PART1(2,cv2); _V5_PART1(3,cv3);
-            _V5_PART1(4,cv4); _V5_PART1(5,cv5); _V5_PART1(6,cv6); _V5_PART1(7,cv7);
-#undef _V5_PART1
-            uint32_t total_r = (uint32_t)(pfx >> 56);
-            n_right += total_r; n_left += 64 - total_r;
-        }
+    build_tabs();
+    int n_left = 0, n_right = 0;
+    int j = 0;
+    uint8x16_t vt = vdupq_n_u8(thr);
+    uint8x8_t  vt8 = vdup_n_u8(thr);
+    static const uint8_t bw_a[16] = {1,2,4,8,16,32,64,128, 1,2,4,8,16,32,64,128};
+    uint8x16_t bw = vld1q_u8(bw_a);
+    for (; j + 64 <= n; j += 64) {
+        uint8x16_t v0 = vld1q_u8(ranks + j);
+        uint8x16_t v1 = vld1q_u8(ranks + j + 16);
+        uint8x16_t v2 = vld1q_u8(ranks + j + 32);
+        uint8x16_t v3 = vld1q_u8(ranks + j + 48);
+        uint64_t mask_word = masks64_neon(v0, v1, v2, v3, vt, bw);
+        memcpy(bm + (j >> 3), &mask_word, 8);
+        uint8x8_t pc_v = vcnt_u8(vcreate_u8(mask_word));
+        uint64_t pc_word = vget_lane_u64(vreinterpret_u64_u8(pc_v), 0);
+        uint64_t pfx = pc_word * 0x0101010101010101ULL;
+        uint8x8_t cv[8] = {
+            vget_low_u8(v0), vget_high_u8(v0),
+            vget_low_u8(v1), vget_high_u8(v1),
+            vget_low_u8(v2), vget_high_u8(v2),
+            vget_low_u8(v3), vget_high_u8(v3),
+        };
+#define _PART1(K_) do {                                                    \
+        uint32_t cr = (K_)==0 ? 0u : (uint32_t)((pfx >> (8*((K_)-1))) & 0xFF); \
+        if (EMIT_RIGHT || EMIT_LEFT) {                                        \
+            const uint8_t *tab = ctab8[(uint8_t)(mask_word >> (8*(K_)))];   \
+            if (EMIT_RIGHT) vst1_u8(tmp + n_right + cr,                            \
+                                    vtbl1_u8(cv[K_], vld1_u8(tab)));          \
+            if (EMIT_LEFT)  vst1_u8(ranks + n_left + (8u*(K_) - cr),             \
+                                    vtbl1_u8(cv[K_], vld1_u8(tab + 8)));      \
+        }                                                                    \
+    } while (0)
+        _PART1(0); _PART1(1); _PART1(2); _PART1(3);
+        _PART1(4); _PART1(5); _PART1(6); _PART1(7);
+#undef _PART1
+        uint32_t total_r = (uint32_t)(pfx >> 56);
+        n_right += total_r;
+        n_left += 64 - total_r;
     }
-
     for (; j + 8 <= n; j += 8) {
-        uint16x8_t code_vec = vld1q_u16(codes_la + j);
-        uint8_t mask;
-        if (BUILD) { mask = enc_mask8_codes_la_neon(code_vec, neg_shift_d); bm[j >> 3] = mask; }
-        else         mask = bm_in[j >> 3];
-        const uint8_t *tab = compress_tab[mask];
-        uint8x16_t data = vreinterpretq_u8_u16(code_vec);
-        if (EMIT_RIGHT) vst1q_u8((uint8_t *)(right_out + n_right),
-                                 vqtbl1q_u8(data, vld1q_u8(tab)));
-        if (EMIT_LEFT)  vst1q_u8((uint8_t *)(codes_la + n_left),
-                                 vqtbl1q_u8(data, vld1q_u8(tab + 16)));
-        int nr = compress_popcnt[mask];
-        n_right += nr;
-        n_left  += 8 - nr;
+        uint8x8_t v = vld1_u8(ranks + j);
+        uint8_t mask = nmask8(v, vt8);
+        bm[j >> 3] = mask;
+        const uint8_t *tab = ctab8[mask];
+        if (EMIT_RIGHT) vst1_u8(tmp + n_right,   vtbl1_u8(v, vld1_u8(tab)));
+        if (EMIT_LEFT)  vst1_u8(ranks + n_left, vtbl1_u8(v, vld1_u8(tab + 8)));
+        int rc = pc8[mask];
+        n_right += rc;
+        n_left += 8 - rc;
     }
-    if (j < n) {
-        int tail = n - j, shift_d = 15 - depth;
-        uint16_t tail_buf[8];
-        for (int k = 0; k < tail; k++) tail_buf[k] = codes_la[j + k];
-        uint8_t mask;
-        if (BUILD) {
-            mask = 0;
-            for (int k = 0; k < tail; k++)
-                mask |= (uint8_t)(((tail_buf[k] >> shift_d) & 1) << k);
-            bm[j >> 3] = mask;
-        } else mask = bm_in[j >> 3];
-        for (int k = 0; k < tail; k++) {
-            if (mask & (1 << k)) { if (EMIT_RIGHT) right_out[n_right] = tail_buf[k]; n_right++; }
-            else                 { if (EMIT_LEFT)  codes_la[n_left]   = tail_buf[k]; n_left++;  }
-        }
+    for (; j < n; j++) {
+        if ((j & 7) == 0) bm[j >> 3] = 0;
+        uint8_t r = ranks[j];
+        if (r > thr) { bm[j >> 3] |= (uint8_t)(1u << (j & 7));
+                       if (EMIT_RIGHT) tmp[n_right] = r; n_right++; }
+        else         { if (EMIT_LEFT) ranks[n_left] = r; n_left++; }
     }
     return n_right;
 }
 
-/* ---------- Encode primitives (init) ----------
- *
- * enc_init_neon — gather per-symbol left-aligned codes into codes_la.
- * `code_la_lut` is table->code_la (256 uint16 entries).
- *
- * Today this is a straight scalar loop; the compiler often auto-
- * vectorises it via vqtbl1q_u8 over a 256-entry LUT, but the codegen
- * is fragile and the LSU is the bottleneck in either form (microbench
- * at extras/bench/bench_enc_init.c established the NEON TBL pattern buys
- * only ~11% over the scalar loop on M4 -- not worth the source
- * complexity).  Kept here as a primitive so AVX-512's actual SIMD
- * win via vpermi2w (commit 7c08c19) has a contract slot to fill. */
-static inline void enc_init_neon(uint16_t *codes_la, int n,
-                                   const uint8_t *symbols,
-                                   const uint16_t *code_la_lut)
-{
-    for (int i = 0; i < n; i++) codes_la[i] = code_la_lut[symbols[i]];
-}
+/* Flat pack, native u8: the local code (rank - base) is already a D-bit value
+ * in the low bits of each byte, so we pack straight from u8 — no u16 widen, no
+ * round-trip.  Per-D byte kernels mirror the code_la packers (D5/6/7 reuse the
+ * byte-laid backend from pivco_huffman_neon_pack.h via pack_d{5,6,7}). */
 
-/* ---------- Encode primitives (flat-subtree pack) ----------
- *
- * Per-D SIMD bit-pack helpers.  Each reads D-bit codes from codes_la
- * (each lane holds the left-aligned Huffman code -- bit-d of the
- * original code is at position 15-d) and packs them LSB-first into
- * the output byte stream.
- *
- * The legacy ergonomic: each `pack_dN_neon` helper takes `right_shift
- * = 16 - depth - D`, applies it via vshlq_u16 with a runtime negative
- * shift vector, ANDs to (1<<D)-1, then packs.  Each helper OVERPACKS
- * (processes ceil(n / stride) * stride elements) so callers can drop
- * the scalar tail entirely if they pre-zero `codes_la[n .. n+15]`.
- * The dispatcher pack_dN_dispatch_neon below handles the residual
- * scalar tail when overpacking isn't possible.
- *
- * For the codec.c contract, prim_enc_pack_dN(codes_la, n, D, depth, out_packed)
- * forwards to pack_dN_neon(out_packed, codes_la, n, D, depth). */
-
-/* D=2: 16 codes -> 4 bytes (4 codes per byte, no byte crossings). */
-static inline int pack_d2_neon(uint8_t *out, const uint16_t *codes_la,
-                                 int n, int right_shift)
+/* D=2: 16 ranks -> 4 bytes (4 ranks per byte, no byte crossings). */
+static inline int pack_d2_neon(uint8_t *out, const uint8_t *ranks, int n, uint8_t base)
 {
-    static const int8_t shifts_d2[16] = {
-        0, 2, 4, 6,  0, 2, 4, 6,  0, 2, 4, 6,  0, 2, 4, 6
-    };
+    static const int8_t shifts_d2[16] = { 0,2,4,6, 0,2,4,6, 0,2,4,6, 0,2,4,6 };
+    uint8x16_t vb = vdupq_n_u8(base);
     int i = 0;
     for (; i + 16 <= n; i += 16) {
-        uint16x8_t v0 = vshlq_u16(vld1q_u16(codes_la + i    ),
-                                   vdupq_n_s16((int16_t)-right_shift));
-        uint16x8_t v1 = vshlq_u16(vld1q_u16(codes_la + i + 8),
-                                   vdupq_n_s16((int16_t)-right_shift));
-        v0 = vandq_u16(v0, vdupq_n_u16(0x3));
-        v1 = vandq_u16(v1, vdupq_n_u16(0x3));
-        uint8x16_t bytes = vcombine_u8(vmovn_u16(v0), vmovn_u16(v1));
-        bytes = vshlq_u8(bytes, vld1q_s8(shifts_d2));
-        /* Sum groups of 4 via two paired-adds; low 4 lanes = 4 output bytes. */
-        uint8x16_t s1 = vpaddq_u8(bytes, bytes);
+        uint8x16_t b = vandq_u8(vsubq_u8(vld1q_u8(ranks + i), vb), vdupq_n_u8(0x3));
+        b = vshlq_u8(b, vld1q_s8(shifts_d2));
+        uint8x16_t s1 = vpaddq_u8(b, b);
         uint8x16_t s2 = vpaddq_u8(s1, s1);
         uint32_t packed4 = vgetq_lane_u32(vreinterpretq_u32_u8(s2), 0);
         memcpy(out + (i * 2 / 8), &packed4, 4);
@@ -1015,114 +937,73 @@ static inline int pack_d2_neon(uint8_t *out, const uint16_t *codes_la,
     return i;
 }
 
-/* D=3: 8 codes -> 24 bits.  Cross byte boundaries; uint32 accumulator
- * (max shift 7*3 = 21).  Overpacks to ceil(n/8)*8. */
-static inline int pack_d3_neon(uint8_t *out, const uint16_t *codes_la,
-                                 int n, int right_shift)
+/* D=3: 8 ranks -> 24 bits, u32 horizontal accumulator. */
+static inline int pack_d3_neon(uint8_t *out, const uint8_t *ranks, int n, uint8_t base)
 {
-    static const int32_t shifts_lo[4] = {0,   3,  6,  9};
-    static const int32_t shifts_hi[4] = {12, 15, 18, 21};
+    static const int32_t shifts_lo[4] = { 0, 3, 6, 9 };
+    static const int32_t shifts_hi[4] = { 12, 15, 18, 21 };
+    uint8x8_t vb = vdup_n_u8(base);
     int i = 0;
     for (; i + 8 <= n; i += 8) {
-        uint16x8_t v = vshlq_u16(vld1q_u16(codes_la + i),
-                                  vdupq_n_s16((int16_t)-right_shift));
-        v = vandq_u16(v, vdupq_n_u16(0x7));
-        uint32x4_t lo = vshlq_u32(vmovl_u16(vget_low_u16(v)),
-                                   vld1q_s32(shifts_lo));
-        uint32x4_t hi = vshlq_u32(vmovl_u16(vget_high_u16(v)),
-                                   vld1q_s32(shifts_hi));
-        uint32x4_t sum = vaddq_u32(lo, hi);
-        uint32_t packed = vaddvq_u32(sum);
+        uint8x8_t b8 = vand_u8(vsub_u8(vld1_u8(ranks + i), vb), vdup_n_u8(0x7));
+        uint16x8_t v = vmovl_u8(b8);
+        uint32x4_t lo = vshlq_u32(vmovl_u16(vget_low_u16(v)),  vld1q_s32(shifts_lo));
+        uint32x4_t hi = vshlq_u32(vmovl_u16(vget_high_u16(v)), vld1q_s32(shifts_hi));
+        uint32_t packed = vaddvq_u32(vaddq_u32(lo, hi));
         int bi = i * 3 / 8;
-        out[bi    ] = (uint8_t)(packed       & 0xff);
+        out[bi]     = (uint8_t)(packed       & 0xff);
         out[bi + 1] = (uint8_t)((packed >> 8 ) & 0xff);
         out[bi + 2] = (uint8_t)((packed >> 16) & 0xff);
     }
     return i;
 }
 
-/* D=4: 16 codes -> 8 bytes.  Pair (c[2k], c[2k+1]) into one byte each. */
-static inline int pack_d4_neon(uint8_t *out, const uint16_t *codes_la,
-                                 int n, int right_shift)
+/* D=4: 16 ranks -> 8 bytes.  Pair (r[2k], r[2k+1]) into one byte each. */
+static inline int pack_d4_neon(uint8_t *out, const uint8_t *ranks, int n, uint8_t base)
 {
-    static const int8_t shifts_d4[16] = {
-        0, 4, 0, 4, 0, 4, 0, 4, 0, 4, 0, 4, 0, 4, 0, 4
-    };
+    static const int8_t shifts_d4[16] = { 0,4, 0,4, 0,4, 0,4, 0,4, 0,4, 0,4, 0,4 };
+    uint8x16_t vb = vdupq_n_u8(base);
     int i = 0;
     for (; i + 16 <= n; i += 16) {
-        uint16x8_t v0 = vshlq_u16(vld1q_u16(codes_la + i    ),
-                                   vdupq_n_s16((int16_t)-right_shift));
-        uint16x8_t v1 = vshlq_u16(vld1q_u16(codes_la + i + 8),
-                                   vdupq_n_s16((int16_t)-right_shift));
-        v0 = vandq_u16(v0, vdupq_n_u16(0xF));
-        v1 = vandq_u16(v1, vdupq_n_u16(0xF));
-        uint8x16_t bytes = vcombine_u8(vmovn_u16(v0), vmovn_u16(v1));
-        bytes = vshlq_u8(bytes, vld1q_s8(shifts_d4));
-        uint8x16_t paired = vpaddq_u8(bytes, bytes);
+        uint8x16_t b = vandq_u8(vsubq_u8(vld1q_u8(ranks + i), vb), vdupq_n_u8(0xF));
+        b = vshlq_u8(b, vld1q_s8(shifts_d4));
+        uint8x16_t paired = vpaddq_u8(b, b);
         vst1_u8(out + (i * 4 / 8), vget_low_u8(paired));
     }
     return i;
 }
 
-/* D=5/6/7 pack moved to pivco_huffman_neon_pack.h (ryg multiply-as-shift,
- * 16 codes/iter via byte-laid intermediate). */
-
-/* D=8: 16 codes -> 16 bytes.  Byte-aligned; one shift+AND pass. */
-static inline int pack_d8_neon(uint8_t *out, const uint16_t *codes_la,
-                                 int n, int right_shift)
+/* D=8: 16 ranks -> 16 bytes.  Byte-aligned; one shift+AND pass. */
+static inline int pack_d8_neon(uint8_t *out, const uint8_t *ranks, int n, uint8_t base)
 {
+    uint8x16_t vb = vdupq_n_u8(base);
     int i = 0;
     for (; i + 16 <= n; i += 16) {
-        uint16x8_t v0 = vshlq_u16(vld1q_u16(codes_la + i    ),
-                                   vdupq_n_s16((int16_t)-right_shift));
-        uint16x8_t v1 = vshlq_u16(vld1q_u16(codes_la + i + 8),
-                                   vdupq_n_s16((int16_t)-right_shift));
-        uint8x16_t bytes = vcombine_u8(vmovn_u16(v0), vmovn_u16(v1));
-        vst1q_u8(out + i, bytes);
+        vst1q_u8(out + i, vsubq_u8(vld1q_u8(ranks + i), vb));
     }
     return i;
 }
 
-/* Dispatcher: pack n D-bit codes from codes_la into out[].  Selects the
- * SIMD per-D pack helper, then handles any residual scalar tail (the
- * per-D helpers stride at 8 or 16; callers that haven't pre-zero-padded
- * codes_la beyond n need the tail).
- *
- * codec.c contract: codes_la is the per-block left-aligned-codes array
- * (NOT mutated across recursion levels), `depth` is the current tree
- * depth.  The D-bit local code at a flat-subtree node lives at
- * positions [15-depth .. 15-depth-D+1] of each codes_la[i] = bits
- * shifted right by (16 - depth - D). */
-static inline void pack_dN_neon(uint8_t *out, const uint16_t *codes_la,
-                                  int n, int D, int depth)
+/* Dispatcher: SIMD per-D path + scalar tail (packs (rank - base) LSB-first). */
+static inline void pack_dN_neon(uint8_t *out, const uint8_t *ranks,
+                                   int n, int D, uint8_t base)
 {
     int total_bytes = (n * D + 7) >> 3;
     if (total_bytes > 0) out[total_bytes - 1] = 0;
-    int right_shift = 16 - depth - D;
 
     int i = 0;
     switch (D) {
-    case 2: i = pack_d2_neon(out, codes_la, n, right_shift); break;
-    case 3: i = pack_d3_neon(out, codes_la, n, right_shift); break;
-    case 4: i = pack_d4_neon(out, codes_la, n, right_shift); break;
-    case 5: i = pack_d5_neon(out, codes_la, n, right_shift); break;
-    case 6: i = pack_d6_neon(out, codes_la, n, right_shift); break;
-    case 7: i = pack_d7_neon(out, codes_la, n, right_shift); break;
-    case 8: i = pack_d8_neon(out, codes_la, n, right_shift); break;
-    default: break;  /* D >= 9: scalar tail below handles it
-                      * (shouldn't happen with PIVCO_MAX_CODE_LEN = 11) */
+    case 2: i = pack_d2_neon(out, ranks, n, base); break;
+    case 3: i = pack_d3_neon(out, ranks, n, base); break;
+    case 4: i = pack_d4_neon(out, ranks, n, base); break;
+    case 5: i = pack_d5_neon(out, ranks, n, base); break;
+    case 6: i = pack_d6_neon(out, ranks, n, base); break;
+    case 7: i = pack_d7_neon(out, ranks, n, base); break;
+    case 8: i = pack_d8_neon(out, ranks, n, base); break;
+    default: break;
     }
-
-    /* With overpacking, i = ceil(n / stride) * stride >= n.  Clamp the
-     * counter to avoid uint64 underflow in PROF_COUNT_ONLY. */
-    int simd_n = i > n ? n : i;
-    PROF_COUNT_ONLY(PROF_ENC_FLAT_SIMD_ELEMS, simd_n);
-    PROF_COUNT_ONLY(PROF_ENC_FLAT_TAIL_ELEMS, n - simd_n);
-    (void)simd_n;  /* unused when PIVCO_PROF=0 */
-
     if (i >= n) return;
 
-    /* Scalar tail: pick up where the SIMD path left off. */
     uint32_t mask = (1u << D) - 1;
     int bit_pos = i * D;
     int byte_idx = bit_pos >> 3;
@@ -1131,8 +1012,8 @@ static inline void pack_dN_neon(uint8_t *out, const uint16_t *codes_la,
         ? (uint64_t)out[byte_idx] & ((1u << bits_in_buf) - 1)
         : 0;
     for (; i < n; i++) {
-        uint32_t local = ((uint32_t)codes_la[i] >> right_shift) & mask;
-        buf |= ((uint64_t)local) << bits_in_buf;
+        uint32_t local = (uint32_t)(uint8_t)(ranks[i] - base) & mask;
+        buf |= (uint64_t)local << bits_in_buf;
         bits_in_buf += D;
         while (bits_in_buf >= 8) {
             out[byte_idx++] = (uint8_t)(buf & 0xff);
@@ -1140,9 +1021,7 @@ static inline void pack_dN_neon(uint8_t *out, const uint16_t *codes_la,
             bits_in_buf -= 8;
         }
     }
-    if (bits_in_buf > 0) {
-        out[byte_idx] = (uint8_t)(buf & ((1u << bits_in_buf) - 1));
-    }
+    if (bits_in_buf > 0) out[byte_idx] = (uint8_t)(buf & ((1u << bits_in_buf) - 1));
 }
 
 /* ---------- Aliases consumed by codec.c ---------- */
@@ -1152,37 +1031,26 @@ static inline void pack_dN_neon(uint8_t *out, const uint16_t *codes_la,
 PIVCO_PRIM_ALWAYS_INLINE void prim_codec_init(void)
 { codec_init_neon(); }
 
-PIVCO_PRIM_ALWAYS_INLINE void prim_enc_init(uint16_t *codes_la, int n,
-                                              const uint8_t *symbols,
-                                              const uint16_t *code_la_lut)
-{ enc_init_neon(codes_la, n, symbols, code_la_lut); }
 
-PIVCO_PRIM_ALWAYS_INLINE int prim_enc_partition_full(uint16_t *codes_la,
-                                                      int n, int depth,
-                                                      uint8_t *bm,
-                                                      uint16_t *right_out)
-{ return build_bitmap_partition_full_neon(codes_la, n, depth, bm, right_out); }
-
-PIVCO_PRIM_ALWAYS_INLINE int prim_enc_partition_right(uint16_t *codes_la,
-                                                      int n, int depth,
-                                                      uint8_t *bm,
-                                                      uint16_t *right_out)
-{ return part_core_neon(codes_la, n, depth, bm, NULL, right_out, 1, 1, 0); }
-
-PIVCO_PRIM_ALWAYS_INLINE int prim_enc_partition_left(uint16_t *codes_la,
-                                                     int n, int depth,
-                                                     uint8_t *bm)
-{ return part_core_neon(codes_la, n, depth, bm, NULL, NULL, 1, 0, 1); }
-
-PIVCO_PRIM_ALWAYS_INLINE int prim_enc_partition_none(uint16_t *codes_la,
-                                                     int n, int depth,
-                                                     uint8_t *bm)
-{ return part_core_neon(codes_la, n, depth, bm, NULL, NULL, 1, 0, 0); }
-
-PIVCO_PRIM_ALWAYS_INLINE void prim_enc_pack_dN(const uint16_t *codes_la,
-                                             int n, int D, int depth,
-                                             uint8_t *out_packed)
-{ pack_dN_neon(out_packed, codes_la, n, D, depth); }
+/* rank-based encode aliases (consumed by codec.c) */
+PIVCO_PRIM_ALWAYS_INLINE void prim_enc_init(uint8_t *ranks, int n,
+                                             const uint8_t *symbols, const uint8_t *sym_to_rank)
+{ init_neon(ranks, n, symbols, sym_to_rank); }
+PIVCO_PRIM_ALWAYS_INLINE int prim_enc_partition_full(uint8_t *ranks, int n,
+                                             uint8_t thr, uint8_t *bm, uint8_t *right_out)
+{ return part_full_neon(ranks, n, thr, bm, right_out); }
+PIVCO_PRIM_ALWAYS_INLINE int prim_enc_partition_right(uint8_t *ranks, int n,
+                                             uint8_t thr, uint8_t *bm, uint8_t *right_out)
+{ return part_core_neon(ranks, n, thr, bm, right_out, 1, 0); }
+PIVCO_PRIM_ALWAYS_INLINE int prim_enc_partition_left(uint8_t *ranks, int n,
+                                             uint8_t thr, uint8_t *bm)
+{ return part_core_neon(ranks, n, thr, bm, NULL, 0, 1); }
+PIVCO_PRIM_ALWAYS_INLINE int prim_enc_partition_none(uint8_t *ranks, int n,
+                                             uint8_t thr, uint8_t *bm)
+{ return part_core_neon(ranks, n, thr, bm, NULL, 0, 0); }
+PIVCO_PRIM_ALWAYS_INLINE void prim_enc_pack_dN(const uint8_t *ranks,
+                                             int n, int D, uint8_t base, uint8_t *out_packed)
+{ pack_dN_neon(out_packed, ranks, n, D, base); }
 
 PIVCO_PRIM_ALWAYS_INLINE void prim_merge_flat(uint8_t *out, int n,
                                                           const uint8_t *bm, int D,

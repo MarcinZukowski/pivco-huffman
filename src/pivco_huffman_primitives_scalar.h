@@ -20,62 +20,42 @@
 /* Backend lifecycle.  Scalar has no runtime tables to lazy-init. */
 static inline void codec_init_scalar(void) { /* no-op */ }
 
-/* ---------- Encode primitives ---------- */
+/* ---------- Encode primitives: rank-based encoding (8-bit in-order ranks) ---------- *
+ * Partition compares a per-node threshold (split_rank) to the leaf rank, so
+ * the values are 8-bit and partition routing is byte-identical to the code_la
+ * bit-test.  Flat pack subtracts flat_base_rank to get the local D-bit code. */
+static inline void enc_init_scalar(uint8_t *ranks, int n,
+                                        const uint8_t *symbols, const uint8_t *sym_to_rank)
+{ for (int i = 0; i < n; i++) ranks[i] = sym_to_rank[symbols[i]]; }
 
-/* Build per-block codes_la array.  Just an indexed gather; the LUT
- * is `table->code_la`. */
-static inline void enc_init_scalar(uint16_t *codes_la, int n,
-                                    const uint8_t *symbols,
-                                    const uint16_t *code_la_lut)
+static inline int part_core_scalar(uint8_t *ranks, int n, uint8_t thr,
+                                        uint8_t *bm, uint8_t *right_out,
+                                        int EMIT_RIGHT, int EMIT_LEFT)
 {
-    for (int i = 0; i < n; i++) codes_la[i] = code_la_lut[symbols[i]];
-}
-
-/* Build the n-bit partition bitmap from codes_la[0..n) and partition
- * codes_la in place.  See pivco_huffman_primitives.h for the contract.
- *
- * codes_la is not mutated across recursion levels; the current-depth
- * partition bit lives at position `15 - depth` of each codes_la[j]. */
-/* part_core_scalar — parameterized partition core shared by the fused
- * (BUILD=1: build bitmap from the depth bit) and from-bitmap (BUILD=0: read
- * bm_in) families, across full/right/left/none (EMIT flags).  LEFT is written
- * in place over codes_la (n_left <= j); RIGHT goes to right_out.  Values are
- * left UNSHIFTED so children read their own depth's bit from the same lane. */
-static inline int part_core_scalar(uint16_t *codes_la, int n, int depth,
-                                    uint8_t *bm, const uint8_t *bm_in,
-                                    uint16_t *right_out,
-                                    int BUILD, int EMIT_RIGHT, int EMIT_LEFT)
-{
-    if (BUILD) memset(bm, 0, (size_t)bitmap_bytes(n));
-    int bit_shift = 15 - depth, n_left = 0, n_right = 0;
+    memset(bm, 0, (size_t)bitmap_bytes(n));
+    int n_left = 0, n_right = 0;
     for (int j = 0; j < n; j++) {
-        uint16_t v = codes_la[j];
-        int bit;
-        if (BUILD) {
-            bit = (v >> bit_shift) & 1;
-            if (bit) bm[j >> 3] |= (uint8_t)(1u << (j & 7));
+        uint8_t v = ranks[j];
+        if (v > thr) {
+            bm[j >> 3] |= (uint8_t)(1u << (j & 7));
+            if (EMIT_RIGHT) right_out[n_right] = v;
+            n_right++;
         } else {
-            bit = (bm_in[j >> 3] >> (j & 7)) & 1;
+            if (EMIT_LEFT) ranks[n_left] = v;
+            n_left++;
         }
-        if (bit) { if (EMIT_RIGHT) right_out[n_right] = v; n_right++; }
-        else     { if (EMIT_LEFT)  codes_la[n_left]   = v; n_left++;  }
     }
     return n_right;
 }
 
-/* Flat-subtree path: pack the D bits at positions [15-depth ..
- * 15-depth-D+1] of each codes_la[i] LSB-first into out. */
-static inline void pack_dN_scalar(uint8_t *out,
-                                   const uint16_t *codes_la,
-                                   int n, int D, int depth)
+static inline void pack_dN_scalar(uint8_t *out, const uint8_t *ranks,
+                                       int n, int D, uint8_t base)
 {
     uint32_t mask = (1u << D) - 1;
-    int right_shift = 16 - depth - D;
     uint64_t buf = 0;
-    int bits_in_buf = 0;
-    int byte_idx = 0;
+    int bits_in_buf = 0, byte_idx = 0;
     for (int i = 0; i < n; i++) {
-        uint32_t local = ((uint32_t)codes_la[i] >> right_shift) & mask;
+        uint32_t local = (uint32_t)(uint8_t)(ranks[i] - base) & mask;
         buf |= (uint64_t)local << bits_in_buf;
         bits_in_buf += D;
         while (bits_in_buf >= 8) {
@@ -84,9 +64,7 @@ static inline void pack_dN_scalar(uint8_t *out,
             bits_in_buf -= 8;
         }
     }
-    if (bits_in_buf > 0) {
-        out[byte_idx] = (uint8_t)(buf & ((1u << bits_in_buf) - 1));
-    }
+    if (bits_in_buf > 0) out[byte_idx] = (uint8_t)(buf & ((1u << bits_in_buf) - 1));
 }
 
 /* ---------- Decode primitives ---------- */
@@ -172,33 +150,25 @@ static inline void merge_vec_vec_scalar(const uint8_t *bm, int K,
 PIVCO_PRIM_ALWAYS_INLINE void prim_codec_init(void)
 { codec_init_scalar(); }
 
-PIVCO_PRIM_ALWAYS_INLINE void prim_enc_init(uint16_t *codes_la, int n,
-                                              const uint8_t *symbols,
-                                              const uint16_t *code_la_lut)
-{ enc_init_scalar(codes_la, n, symbols, code_la_lut); }
-
-PIVCO_PRIM_ALWAYS_INLINE int prim_enc_partition_full(uint16_t *codes_la, int n,
-                                                      int depth, uint8_t *bm,
-                                                      uint16_t *right_out)
-{ return part_core_scalar(codes_la, n, depth, bm, NULL, right_out, 1, 1, 1); }
-
-PIVCO_PRIM_ALWAYS_INLINE int prim_enc_partition_right(uint16_t *codes_la, int n,
-                                                      int depth, uint8_t *bm,
-                                                      uint16_t *right_out)
-{ return part_core_scalar(codes_la, n, depth, bm, NULL, right_out, 1, 1, 0); }
-
-PIVCO_PRIM_ALWAYS_INLINE int prim_enc_partition_left(uint16_t *codes_la, int n,
-                                                     int depth, uint8_t *bm)
-{ return part_core_scalar(codes_la, n, depth, bm, NULL, NULL, 1, 0, 1); }
-
-PIVCO_PRIM_ALWAYS_INLINE int prim_enc_partition_none(uint16_t *codes_la, int n,
-                                                     int depth, uint8_t *bm)
-{ return part_core_scalar(codes_la, n, depth, bm, NULL, NULL, 1, 0, 0); }
-
-PIVCO_PRIM_ALWAYS_INLINE void prim_enc_pack_dN(const uint16_t *codes_la,
-                                             int n, int D, int depth,
-                                             uint8_t *out_packed)
-{ pack_dN_scalar(out_packed, codes_la, n, D, depth); }
+/* rank-based encode aliases (consumed by codec.c) */
+PIVCO_PRIM_ALWAYS_INLINE void prim_enc_init(uint8_t *ranks, int n,
+                                             const uint8_t *symbols, const uint8_t *sym_to_rank)
+{ enc_init_scalar(ranks, n, symbols, sym_to_rank); }
+PIVCO_PRIM_ALWAYS_INLINE int prim_enc_partition_full(uint8_t *ranks, int n,
+                                             uint8_t thr, uint8_t *bm, uint8_t *right_out)
+{ return part_core_scalar(ranks, n, thr, bm, right_out, 1, 1); }
+PIVCO_PRIM_ALWAYS_INLINE int prim_enc_partition_right(uint8_t *ranks, int n,
+                                             uint8_t thr, uint8_t *bm, uint8_t *right_out)
+{ return part_core_scalar(ranks, n, thr, bm, right_out, 1, 0); }
+PIVCO_PRIM_ALWAYS_INLINE int prim_enc_partition_left(uint8_t *ranks, int n,
+                                             uint8_t thr, uint8_t *bm)
+{ return part_core_scalar(ranks, n, thr, bm, NULL, 0, 1); }
+PIVCO_PRIM_ALWAYS_INLINE int prim_enc_partition_none(uint8_t *ranks, int n,
+                                             uint8_t thr, uint8_t *bm)
+{ return part_core_scalar(ranks, n, thr, bm, NULL, 0, 0); }
+PIVCO_PRIM_ALWAYS_INLINE void prim_enc_pack_dN(const uint8_t *ranks,
+                                             int n, int D, uint8_t base, uint8_t *out_packed)
+{ pack_dN_scalar(out_packed, ranks, n, D, base); }
 
 PIVCO_PRIM_ALWAYS_INLINE void prim_merge_flat(uint8_t *out, int n,
                                                            const uint8_t *bm, int D,

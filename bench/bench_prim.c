@@ -9,8 +9,10 @@
  *   unpack    — read N D-bit codes from the packed stream -> codes[]  (flat_dN_unpack)
  *   scatter   — codes[] + c2s[2^D] -> out[]                           (NEON TBL)
  *   merge     — packed stream + c2s -> out[]  (production prim_merge_flat)
- *   pack      — codes_la[] -> packed N*D-bit stream  (production prim_enc_pack_dN)
- *   partition — codes_la[] + depth -> bitmap + left/right split  (prim_enc_partition)
+ *   pack      — ranks[] -> packed N*D-bit stream  (production prim_enc_pack_dN)
+ *   partition — ranks[] + split_rank -> bitmap + left/right split (prim_enc_partition)
+ *
+ * The retired u16 (code_la) encode is benched alongside under u16enc_* rows.
  *
  * unpack/scatter/merge/pack are per-depth-D; partition is a 1-bit split (one
  * representative depth).  Every SIMD variant is checked against a scalar
@@ -54,8 +56,13 @@
 #endif
 #include "pivco_huffman.h"
 #if defined(HAVE_SIMD)
-#  include "pivco_huffman_primitives.h"   /* prim_enc_pack_dN / prim_enc_partition /
-                                             prim_merge_flat (+ NEON flat_dN) */
+#  include "pivco_huffman_primitives.h"   /* prim_enc_* (u8 rank) / prim_merge_flat
+                                             (+ NEON flat_dN) */
+   /* Retired u16 (code_la) encode kernels (owned by ph-td; production encodes on
+      u8 ranks).  Provides the u16enc_* rows + enc_mask8_codes_la_* used by
+      the adapters below and by prims-partition.h.  Needs the shared header above
+      first (compress_tab / *_pack.h helpers / PIVCO_PRIM_ALWAYS_INLINE). */
+#  include "pivco_huffman_u16enc.h"
 #endif
 #ifndef BK
 #  define BK "scalar-only"
@@ -152,7 +159,15 @@ static void scalar_merge_vec_cst(uint8_t *out, const uint8_t *bm, int n,
 typedef struct {
     uint8_t  *bm, *codes, *c2s, *out, *pack_out;
     uint8_t  *merge_left, *merge_right;   /* dense byte sources for prim_merge_vec_vec */
-    uint16_t *la_work, *tmp16;
+    uint16_t *la_work, *tmp16;            /* u16 (code_la) encode: work buf + right scratch */
+    /* u8 (rank) encode buffers. */
+    uint8_t  *symbuf;                     /* input symbols (gather source)               */
+    uint8_t  *ranks;                      /* gathered ranks, kept pristine for re-runs    */
+    uint8_t  *ranks_work;                 /* partitioned in place (reset from ranks/rep)  */
+    uint8_t  *tmp8;                       /* right-side scatter target                     */
+    const uint16_t *code_la_lut;          /* sym -> u16 left-aligned code (u16enc gather) */
+    const uint8_t  *sym_to_rank;          /* sym -> u8 rank              (prim_enc gather) */
+    uint8_t  rank_thr, rank_base;
     int n, D, depth;
 } ctx_t;
 
@@ -167,6 +182,31 @@ static void p_part_scalar   (const ctx_t *c){
     scalar_partition(c->la_work, c->n, c->depth, c->bm, lbuf, c->tmp16);
     memcpy(c->la_work, lbuf, (size_t)(c->n - 0) * 2); /* keep left in place like the prim */
 }
+/* rank-based scalar reference implementations, used to verify the SIMD output */
+static void scalar_rank_init(uint8_t *ranks, int n, const uint8_t *sym, const uint8_t *s2r) {
+    for (int i = 0; i < n; i++) ranks[i] = s2r[sym[i]];
+}
+static int scalar_rank_partition(const uint8_t *ranks, int n, uint8_t thr,
+                                 uint8_t *bm, uint8_t *left, uint8_t *right) {
+    int nl = 0, nr = 0;
+    memset(bm, 0, (size_t)((n + 7) >> 3));
+    for (int j = 0; j < n; j++) {
+        uint8_t v = ranks[j];
+        if (v > thr) { bm[j >> 3] |= (uint8_t)(1u << (j & 7)); right[nr++] = v; }
+        else         { left[nl++] = v; }
+    }
+    return nr;
+}
+static void scalar_rank_pack(uint8_t *out, const uint8_t *ranks, int n, int D, uint8_t base) {
+    uint32_t mask = (1u << D) - 1; uint64_t buf = 0; int bib = 0, bi = 0;
+    for (int i = 0; i < n; i++) {
+        uint32_t v = (uint32_t)(uint8_t)(ranks[i] - base) & mask;
+        buf |= (uint64_t)v << bib; bib += D;
+        while (bib >= 8) { out[bi++] = (uint8_t)buf; buf >>= 8; bib -= 8; }
+    }
+    if (bib > 0) out[bi] = (uint8_t)(buf & ((1u << bib) - 1));
+}
+
 /* scalar refs for the new binary-merge stages */
 static void p_merge_vec_vec_scalar     (const ctx_t *c){ scalar_merge_vec_vec(c->out, c->bm, c->n, c->merge_left, c->merge_right); }
 static void p_merge_cst_cst_scalar     (const ctx_t *c){ scalar_merge_cst_cst(c->out, c->bm, c->n, MERGE_LEFT_SYM, MERGE_RIGHT_SYM); }
@@ -229,10 +269,21 @@ static void neon_scatter(const ctx_t *c) {
 #endif /* USE_NEON_KERNELS */
 
 #if defined(HAVE_SIMD)   /* pack/merge/partition: production prim_*, all backends */
-static void simd_pack (const ctx_t *c){ prim_enc_pack_dN(c->la_work, c->n, c->D, c->depth, c->pack_out); }
 static void simd_merge_flat(const ctx_t *c){ prim_merge_flat(c->out, c->n, c->bm, c->D, c->c2s); }
-static void simd_part (const ctx_t *c){ prim_enc_partition_full(c->la_work, c->n, c->depth, c->bm, c->tmp16); }
+/* rank-based production primitives */
+static void simd_enc_init(const ctx_t *c){ prim_enc_init(c->ranks_work, c->n, c->symbuf, c->sym_to_rank); }
+static void simd_part    (const ctx_t *c){ prim_enc_partition_full(c->ranks_work, c->n, c->rank_thr, c->bm, c->tmp8); }
+static void simd_pack    (const ctx_t *c){ prim_enc_pack_dN(c->ranks, c->n, c->D, c->rank_base, c->pack_out); }
+/* retired u16 encode (benched alongside for A/B) */
+static void simd_u16pack(const ctx_t *c){ u16enc_pack_dN(c->la_work, c->n, c->D, c->depth, c->pack_out); }
+static void simd_u16part(const ctx_t *c){ u16enc_partition_full(c->la_work, c->n, c->depth, c->bm, c->tmp16); }
+static void simd_u16enc_init(const ctx_t *c){ u16enc_init(c->la_work, c->n, c->symbuf, c->code_la_lut); }
 #endif
+/* scalar refs for enc_init (overwrite output each call; not inplace) */
+static void p_enc_init_scalar      (const ctx_t *c){ for(int i=0;i<c->n;i++) c->la_work[i]    = c->code_la_lut[c->symbuf[i]]; }
+static void p_enc_init_rank_scalar (const ctx_t *c){ scalar_rank_init(c->ranks_work, c->n, c->symbuf, c->sym_to_rank); }
+static void p_pack_rank_scalar     (const ctx_t *c){ scalar_rank_pack(c->pack_out, c->ranks, c->n, c->D, c->rank_base); }
+static void p_part_rank_scalar     (const ctx_t *c){ scalar_rank_partition(c->ranks_work, c->n, c->rank_thr, c->bm, c->ranks_work, c->tmp8); }
 #if defined(HAVE_SIMD)   /* binary-merge production primitives — all backends */
 static void simd_merge_vec_vec     (const ctx_t *c){ prim_merge_vec_vec(c->bm, c->n, c->merge_left, c->merge_right, c->out); }
 static void simd_merge_cst_cst     (const ctx_t *c){ prim_merge_cst_cst(c->bm, c->n, MERGE_LEFT_SYM, MERGE_RIGHT_SYM, c->out); }
@@ -325,19 +376,46 @@ static void simd_plus_one (const ctx_t *c){
 
 
 #if defined(USE_NEON_KERNELS)   /* partition family + unfused comparison (NEON only) */
-/* production fused variants */
-static void simd_bmbuild (const ctx_t *c){ prim_enc_partition_none(c->la_work, c->n, c->depth, c->bm); }
-static void simd_fusedhalf(const ctx_t *c){ prim_enc_partition_right(c->la_work, c->n, c->depth, c->bm, c->tmp16); }
+/* u16 partition variants for the fused/unfused cost decomposition: bmbuild
+ * builds the bitmap only (no scatter); fusedhalf builds + scatters one side. */
+static void simd_u16bmbuild (const ctx_t *c){ u16enc_partition_none(c->la_work, c->n, c->depth, c->bm); }
+static void simd_u16fusedhalf(const ctx_t *c){ u16enc_partition_right(c->la_work, c->n, c->depth, c->bm, c->tmp16); }
 /* non-fused (from prebuilt bm) via the same shared core, BUILD=0 — for the
    unfusing-cost comparison only; not used in production. */
-static void simd_partbm  (const ctx_t *c){ part_core_neon(c->la_work, c->n, c->depth, NULL, c->bm, c->tmp16, 0, 1, 1); }
-static void simd_parthalf(const ctx_t *c){ part_core_neon(c->la_work, c->n, c->depth, NULL, c->bm, c->tmp16, 0, 1, 0); }
+static void simd_u16partbm  (const ctx_t *c){ u16part_core_neon(c->la_work, c->n, c->depth, NULL, c->bm, c->tmp16, 0, 1, 1); }
+static void simd_u16parthalf(const ctx_t *c){ u16part_core_neon(c->la_work, c->n, c->depth, NULL, c->bm, c->tmp16, 0, 1, 0); }
 #endif
 
-typedef enum { ST_UNPACK, ST_SCATTER, ST_PACK, ST_MERGE_FLAT, ST_PART,
-               ST_BMBUILD, ST_PARTBM, ST_PARTHALF, ST_FUSEDHALF,
-               ST_MERGE_VEC_VEC, ST_MERGE_CST_CST, ST_MERGE_CST_VEC, ST_MERGE_VEC_CST,
-               ST_XOR, ST_XOR_ACCUM, ST_PLUS_ONE } stage_t;
+typedef enum {
+    /* ---- flat-subtree decode (per depth-D) ---- */
+    ST_UNPACK,        /* flat_dN_unpack: packed D-bit stream -> codes[]            */
+    ST_SCATTER,       /* flat_scatter:   codes[] + c2s[2^D]  -> out[]             */
+    ST_MERGE_FLAT,    /* merge_flat:     packed stream + c2s -> out[] (fused)     */
+
+    /* ---- production encode (u8 in-order ranks, partbyrank) ---- */
+    ST_ENC_INIT,      /* prim_enc_init:           symbols -> ranks[] (gather)      */
+    ST_PART,          /* prim_enc_partition_full: ranks -> bitmap + L/R split      */
+    ST_PACK,          /* prim_enc_pack_dN:        ranks -> packed D-bit stream     */
+
+    /* ---- retired u16 (code_la) encode — bench-only, alongside the u8 rows ---- */
+    ST_U16_ENC_INIT,  /* u16enc_init           (vs ST_ENC_INIT)                    */
+    ST_U16_PART,      /* u16enc_partition_full (vs ST_PART)                        */
+    ST_U16_PACK,      /* u16enc_pack_dN        (vs ST_PACK)                        */
+
+    /* ---- u16 partition cost-decomposition (NEON instrumentation) ----
+     * Splits the fused partition (build bitmap + scatter) into parts to size
+     * the bitmap re-read cost; no standalone production primitive. */
+    ST_BMBUILD,       /* u16enc_partition_none:  build bitmap only, no scatter     */
+    ST_FUSEDHALF,     /* u16enc_partition_right: build + one-sided scatter         */
+    ST_PARTBM,        /* scatter both sides from a prebuilt bitmap                 */
+    ST_PARTHALF,      /* scatter one side from a prebuilt bitmap                   */
+
+    /* ---- binary merge (decode, one per internal node) ---- */
+    ST_MERGE_VEC_VEC, ST_MERGE_CST_CST, ST_MERGE_CST_VEC, ST_MERGE_VEC_CST,
+
+    /* ---- misc primitives ---- */
+    ST_XOR, ST_XOR_ACCUM, ST_PLUS_ONE,
+} stage_t;
 #include "prim_variants/prims.h"   /* pv_isa_t + PV_VARIANT (needs stage_t) */
 typedef struct {
     const char       *variant;
@@ -355,7 +433,7 @@ static void reg(const char *v, stage_t s, int D, int ip, void (*fn)(const ctx_t 
     PRIMS[NPRIMS++] = (prim_t){ .variant=v, .stage=s, .D=D, .inplace=ip, .run=fn };
 }
 /* Graveyard variant families (bench-only; ctx_t / compress_tab /
-   enc_mask8_codes_la_neon etc. are all in scope by here). */
+   enc_mask8_codes_la_neon (from pivco_huffman_u16enc.h above) all in scope). */
 #include "prim_variants/prims-partition.h"
 #include "prim_variants/prims-merge.h"
 #include "prim_variants/prims-flat.h"
@@ -368,11 +446,11 @@ static const char *stage_name(stage_t s){
     switch(s){
     case ST_UNPACK:     return "flat_dN_unpack";
     case ST_SCATTER:    return "flat_scatter";
-    case ST_PACK:       return "enc_pack_dN";
+    case ST_U16_PACK:       return "u16enc_pack_dN";
     case ST_MERGE_FLAT: return "merge_flat";
-    case ST_PART:       return "enc_partition_full";
-    case ST_BMBUILD:    return "enc_partition_none";
-    case ST_FUSEDHALF:  return "enc_partition_right";
+    case ST_U16_PART:       return "u16enc_partition_full";
+    case ST_BMBUILD:    return "u16enc_partition_none";
+    case ST_FUSEDHALF:  return "u16enc_partition_right";
     case ST_PARTBM:     return "part_bm";        /* no prod primitive */
     case ST_PARTHALF:   return "part_half";      /* no prod primitive */
     case ST_MERGE_VEC_VEC:  return "merge_vec_vec";
@@ -382,6 +460,10 @@ static const char *stage_name(stage_t s){
     case ST_XOR:        return "xor";
     case ST_XOR_ACCUM:  return "xor_accum";
     case ST_PLUS_ONE:   return "plus_one";
+    case ST_U16_ENC_INIT:      return "u16enc_init";
+    case ST_ENC_INIT: return "enc_init";
+    case ST_PART:     return "enc_partition_full";
+    case ST_PACK:     return "enc_pack_dN";
     }
     return "?";
 }
@@ -459,9 +541,9 @@ static void stage_bits(stage_t s, int D, double *in, double *out, double *lut) {
     switch (s) {
     case ST_UNPACK:     *in=D;        *out=8;        *lut=0;       break;
     case ST_SCATTER:    *in=8;        *out=8;        *lut=8;       break;
-    case ST_PACK:       *in=16;       *out=D;        *lut=0;       break;
+    case ST_U16_PACK:       *in=16;       *out=D;        *lut=0;       break;
     case ST_MERGE_FLAT: *in=D;        *out=8;        *lut=8;       break;
-    case ST_PART:       *in=16;       *out=1+32;     *lut=32+1;    break;
+    case ST_U16_PART:       *in=16;       *out=1+32;     *lut=32+1;    break;
     case ST_BMBUILD:    *in=16;       *out=1;        *lut=0;       break;
     case ST_PARTBM:     *in=16+1;     *out=32;       *lut=32+1;    break;
     case ST_PARTHALF:   *in=16+1;     *out=16;       *lut=16+1;    break;
@@ -473,6 +555,11 @@ static void stage_bits(stage_t s, int D, double *in, double *out, double *lut) {
     case ST_XOR:        *in=16;       *out=8;        *lut=0;       break;
     case ST_XOR_ACCUM:  *in=8;        *out=0;        *lut=0;       break;
     case ST_PLUS_ONE:   *in=0;        *out=8;        *lut=0;       break;
+    /* rank-based encoding: ranks are 8-bit (in=1) vs the code_la path's 16-bit codes. */
+    case ST_U16_ENC_INIT:      *in=1;        *out=2;        *lut=2;       break;  /* sym->u16 code_la */
+    case ST_ENC_INIT: *in=1;        *out=1;        *lut=1;       break;  /* sym->u8 rank */
+    case ST_PART:     *in=1;        *out=1+1;      *lut=16+1;    break;  /* u8 in/out + bitmap */
+    case ST_PACK:     *in=1;        *out=D;        *lut=0;       break;
     }
 }
 
@@ -529,10 +616,18 @@ int main(int argc, char **argv) {
     uint16_t *la_pristine = malloc((n+16)*2), *la_work = malloc((n+16)*2),
              *tmp16 = malloc((n+16)*2), *ref16l = malloc((n+16)*2), *ref16r = malloc((n+16)*2);
     uint8_t   c2s[256], ref_bm[ (8192/8) + 64 ];   /* 2^8 entries (D up to 8) */
+    /* rank-based buffers: ranks (pristine), ranks_work (mutated), tmp8 (right),
+     * symbuf (enc_init input), ref8l/r (partition ref), and the two gather LUTs. */
+    uint8_t  *ranks = malloc(n+64), *ranks_work = malloc(n+64), *tmp8 = malloc(n+64);
+    uint8_t  *symbuf = malloc(n+64), *ref8l = malloc(n+64), *ref8r = malloc(n+64);
+    uint16_t code_la_lut[256]; uint8_t sym_to_rank[256];
     srand(0xC0FFEE);
     for (int i=0;i<n+16;i++){ bm[i]=(uint8_t)rand(); la_pristine[i]=(uint16_t)rand(); }
     for (int i=0;i<n+16;i++){ merge_left[i]=(uint8_t)rand(); merge_right[i]=(uint8_t)rand(); }
     for (int i=0;i<256;i++) c2s[i]=(uint8_t)rand();
+    for (int i=0;i<n+64;i++){ ranks[i]=(uint8_t)rand(); symbuf[i]=(uint8_t)rand(); }
+    for (int i=0;i<256;i++){ code_la_lut[i]=(uint16_t)rand(); sym_to_rank[i]=(uint8_t)rand(); }
+    uint8_t rank_thr = 127, rank_base = 0;
 
     for (int d=2; d<=MAXD; d++) {
         if (!want[d]) continue;
@@ -550,26 +645,39 @@ int main(int argc, char **argv) {
 #if defined(USE_NEON_KERNELS)
         if (d <= 7) reg(BK,ST_SCATTER,d,0,neon_scatter);
 #endif
-        reg("scalar",ST_PACK,   d,0,p_pack_scalar);
+        reg("scalar",ST_U16_PACK,   d,0,p_pack_scalar);
 #if defined(HAVE_SIMD)
-        reg(BK,ST_PACK,   d,0,simd_pack);
+        reg(BK,ST_U16_PACK,   d,0,simd_u16pack);
+#endif
+        reg("scalar",ST_PACK, d,0,p_pack_rank_scalar);
+#if defined(HAVE_SIMD)
+        reg(BK,ST_PACK, d,0,simd_pack);
 #endif
         reg("scalar",ST_MERGE_FLAT,  d,0,p_merge_scalar);
 #if defined(HAVE_SIMD)
         reg(BK,ST_MERGE_FLAT,  d,0,simd_merge_flat);
 #endif
     }
-    reg("scalar",ST_PART,0,1,p_part_scalar);
+    reg("scalar",ST_U16_PART,0,1,p_part_scalar);
 #if defined(HAVE_SIMD)
-    reg(BK,      ST_PART,0,1,simd_part);
+    reg(BK,      ST_U16_PART,0,1,simd_u16part);
+#endif
+    /* rank-based encode: enc_init (u16 code_la vs u8 rank gather), partition full. */
+    reg("scalar",ST_U16_ENC_INIT,      0,0,p_enc_init_scalar);
+    reg("scalar",ST_ENC_INIT, 0,0,p_enc_init_rank_scalar);
+    reg("scalar",ST_PART,     0,0,p_part_rank_scalar);
+#if defined(HAVE_SIMD)
+    reg(BK,      ST_U16_ENC_INIT,      0,0,simd_u16enc_init);
+    reg(BK,      ST_ENC_INIT, 0,0,simd_enc_init);
+    reg(BK,      ST_PART,     0,0,simd_part);
 #endif
 #if defined(USE_NEON_KERNELS)
     /* Unfused decomposition: fused part == bm_build + part_bm (re-read cost).
        part_half == HALF-node saving (one-sided scatter). */
-    reg(BK, ST_BMBUILD, 0,0, simd_bmbuild);
-    reg(BK, ST_PARTBM,  0,1, simd_partbm);
-    reg(BK, ST_PARTHALF,0,0, simd_parthalf);
-    reg(BK, ST_FUSEDHALF,0,0, simd_fusedhalf);
+    reg(BK, ST_BMBUILD, 0,0, simd_u16bmbuild);
+    reg(BK, ST_PARTBM,  0,1, simd_u16partbm);
+    reg(BK, ST_PARTHALF,0,0, simd_u16parthalf);
+    reg(BK, ST_FUSEDHALF,0,0, simd_u16fusedhalf);
 #endif
     /* Binary-merge family: production prims used at every internal node in
        the bottom-up codec.  Same bm consumption pattern as merge_flat D=1
@@ -708,8 +816,13 @@ int main(int argc, char **argv) {
         prim_t *p = &PRIMS[k];
         if (!p->run) continue;   /* other-arch stub (not built here); see --list */
         if (vfilter && strcmp(stage_name(p->stage), vfilter)) continue;
-        ctx_t cx = { bm, codes, c2s, out, pack_out, merge_left, merge_right,
-                     la_work, tmp16, n, p->D, PART_DEPTH };
+        ctx_t cx = { .bm=bm, .codes=codes, .c2s=c2s, .out=out, .pack_out=pack_out,
+                     .merge_left=merge_left, .merge_right=merge_right,
+                     .la_work=la_work, .tmp16=tmp16,
+                     .ranks=ranks, .ranks_work=ranks_work, .tmp8=tmp8, .symbuf=symbuf,
+                     .code_la_lut=code_la_lut, .sym_to_rank=sym_to_rank,
+                     .rank_thr=rank_thr, .rank_base=rank_base,
+                     .n=n, .D=p->D, .depth=PART_DEPTH };
         const char *chk = "ok";
 
         /* per-stage input prep + correctness vs scalar reference */
@@ -720,7 +833,7 @@ int main(int argc, char **argv) {
         } else if (p->stage == ST_UNPACK) {
             scalar_unpack(ref,bm,n,p->D); memset(codes,0,n); p->run(&cx);
             if (memcmp(codes,ref,n)) chk="FAIL";
-        } else if (p->stage == ST_PACK) {
+        } else if (p->stage == ST_U16_PACK) {
             memcpy(la_work,la_pristine,(size_t)n*2);
             scalar_pack(ref,la_pristine,n,p->D,PART_DEPTH); memset(pack_out,0,n); p->run(&cx);
             if (memcmp(pack_out,ref,(n*p->D+7)>>3)) chk="FAIL";
@@ -762,6 +875,22 @@ int main(int argc, char **argv) {
             scalar_plus_one(ref, n);
             memset(out,0,n); p->run(&cx);
             if (memcmp(out,ref,n)) chk="FAIL";
+        } else if (p->stage == ST_U16_ENC_INIT) {
+            for (int i=0;i<n;i++) ((uint16_t*)ref16l)[i] = code_la_lut[symbuf[i]];
+            p->run(&cx);
+            if (memcmp(la_work,ref16l,(size_t)n*2)) chk="FAIL";
+        } else if (p->stage == ST_ENC_INIT) {
+            scalar_rank_init(ref8l,n,symbuf,sym_to_rank); p->run(&cx);
+            if (memcmp(ranks_work,ref8l,(size_t)n)) chk="FAIL";
+        } else if (p->stage == ST_PART) {
+            int nr_ref = scalar_rank_partition(ranks,n,rank_thr,ref_bm,ref8l,ref8r);
+            int nl_ref = n - nr_ref;
+            memcpy(ranks_work,ranks,(size_t)n); p->run(&cx);
+            if (memcmp(bm,ref_bm,(n+7)>>3) || memcmp(ranks_work,ref8l,(size_t)nl_ref)
+                || memcmp(tmp8,ref8r,(size_t)nr_ref)) chk="FAIL";
+        } else if (p->stage == ST_PACK) {
+            scalar_rank_pack(ref,ranks,n,p->D,rank_base); memset(pack_out,0,n); p->run(&cx);
+            if (memcmp(pack_out,ref,(n*p->D+7)>>3)) chk="FAIL";
         } else if (p->stage == ST_BMBUILD) {
             scalar_partition(la_pristine,n,PART_DEPTH,ref_bm,ref16l,ref16r);
             memcpy(la_work,la_pristine,(size_t)n*2); p->run(&cx);
@@ -792,13 +921,21 @@ int main(int argc, char **argv) {
                 || memcmp(tmp16,ref16r,(size_t)nr_ref*2)) chk="FAIL";
         }
 
+        /* rank partition mutates ranks_work in place -> needs a per-rep u8
+           reset (n bytes), distinct from the u16 `inplace` path (n*2). */
+        int inplace8 = (p->stage == ST_PART);
         double best = 1e30;
         for (int s=0;s<9;s++) {
             double t0 = now_ns();
-            if (p->inplace) for (int r=0;r<reps;r++){ memcpy(la_work,la_pristine,(size_t)n*2); p->run(&cx); }
-            else            for (int r=0;r<reps;r++) p->run(&cx);
+            if (inplace8)        for (int r=0;r<reps;r++){ memcpy(ranks_work,ranks,(size_t)n);     p->run(&cx); }
+            else if (p->inplace) for (int r=0;r<reps;r++){ memcpy(la_work,la_pristine,(size_t)n*2); p->run(&cx); }
+            else                 for (int r=0;r<reps;r++) p->run(&cx);
             double e = now_ns()-t0;
-            if (p->inplace) {  /* subtract the per-rep memcpy baseline */
+            if (inplace8) {        /* subtract the per-rep u8 memcpy baseline */
+                double b0=now_ns();
+                for (int r=0;r<reps;r++){ memcpy(ranks_work,ranks,(size_t)n); sink^=ranks_work[0]; }
+                e -= (now_ns()-b0);
+            } else if (p->inplace) {  /* subtract the per-rep u16 memcpy baseline */
                 double b0=now_ns();
                 for (int r=0;r<reps;r++){ memcpy(la_work,la_pristine,(size_t)n*2); sink^=la_work[0]; }
                 e -= (now_ns()-b0);

@@ -618,288 +618,153 @@ static inline void merge_flat_avx512(uint8_t *out, int n,
     PROF_TOC(PROF_BU_MERGE_FLAT, n);
 }
 
-/* ---------- Encode primitives (bitmap + partition) ----------
+/* ---------- Encode primitives: rank-based encoding (8-bit in-order ranks) ----------
+ * Partition 8-bit leaf ranks against split_rank via vpcompressb (64/iter).
+ * Flat pack subtracts flat_base_rank then reuses pack_dN_avx512. */
+#include <stdlib.h>
+
+/* init_avx512 — gather ranks[i] = sym_to_rank[symbols[i]] via two vpermi2b
+ * over the 256-byte LUT.  Simpler than the code_la enc_init (output is a single
+ * rank byte, no lo/hi code split): each vpermi2b covers 128 entries indexed by
+ * the symbol's low 7 bits; blend the two halves by bit 7.  64 ranks/iter.
  *
- * Stride-32 main loop: load 32 left-aligned codes, build the 32-bit
- * mask via vpsllw + vpmovw2m (the AVX-512 analog of SSE's vpsllw +
- * vpacksw + vpmovmskb sequence -- single instruction).  Partition with
- * vpcompressw, two stores.  SSE-stride-8 tail uses _mm_maskz_compress_
- * epi16 (VL).  No shuffle table needed at either tier.
- *
- * codes_la is depth-threaded: not shifted across recursion levels.
- * The current-depth partition bit is at position (15 - depth) of each
- * lane; we left-shift by `depth` to move it to bit 15 (sign bit of
- * int16) so vpmovw2m reads it directly. */
-
-static inline uint32_t enc_mask32_codes_la_avx512(__m512i code_vec, int depth)
+ * This is the AVX-512 encode bottleneck if left scalar: a scalar 1 MB byte
+ * gather runs several x longer than the whole vectorized partition tree, so on
+ * AVX-512 it (not the partition) was what made the rank encode trail code_la. */
+static inline void init_avx512(uint8_t *ranks, int n,
+                                  const uint8_t *sym, const uint8_t *s2r)
 {
-    __m512i shifted = _mm512_slli_epi16(code_vec, depth);
-    return (uint32_t)_mm512_movepi16_mask(shifted);
-}
-
-static inline int build_bitmap_partition_avx512(uint16_t *codes_la, int n,
-                                                  int depth,
-                                                  uint8_t *bm,
-                                                  uint16_t *right_out)
-{
-    int n_left = 0, n_right = 0;
-    int j = 0;
-
-    for (; j + 32 <= n; j += 32) {
-        __m512i code_vec = _mm512_loadu_si512((const __m512i *)(codes_la + j));
-        uint32_t mask = enc_mask32_codes_la_avx512(code_vec, depth);
-        memcpy(bm + (j >> 3), &mask, 4);
-
-        __m512i right_v = _mm512_maskz_compress_epi16((__mmask32) mask, code_vec);
-        __m512i left_v  = _mm512_maskz_compress_epi16((__mmask32)~mask, code_vec);
-        _mm512_storeu_si512((__m512i *)(right_out      + n_right), right_v);
-        _mm512_storeu_si512((__m512i *)(codes_la + n_left ), left_v);
-        int nr = __builtin_popcount(mask);
-        n_right += nr;
-        n_left  += (32 - nr);
-    }
-    /* SSE-stride-8 remainder via _mm_maskz_compress_epi16 (VL). */
-    __m128i shift_count = _mm_cvtsi32_si128(depth);
-    for (; j + 8 <= n; j += 8) {
-        __m128i code_vec = _mm_loadu_si128((const __m128i *)(codes_la + j));
-        __m128i shifted  = _mm_sll_epi16(code_vec, shift_count);
-        __m128i bytes    = _mm_packs_epi16(shifted, _mm_setzero_si128());
-        uint8_t mask     = (uint8_t)_mm_movemask_epi8(bytes);
-        bm[j >> 3] = mask;
-
-        __m128i right_v = _mm_maskz_compress_epi16((__mmask8) mask, code_vec);
-        __m128i left_v  = _mm_maskz_compress_epi16((__mmask8)~mask, code_vec);
-        _mm_storeu_si128((__m128i *)(right_out      + n_right), right_v);
-        _mm_storeu_si128((__m128i *)(codes_la + n_left ), left_v);
-        int nr = __builtin_popcount(mask);
-        n_right += nr;
-        n_left  += (8 - nr);
-    }
-    /* Scalar tail. */
-    if (j < n) {
-        int tail = n - j;
-        uint16_t tail_buf[8];
-        for (int k = 0; k < tail; k++) tail_buf[k] = codes_la[j + k];
-        uint8_t mask = 0;
-        int shift_d = 15 - depth;
-        for (int k = 0; k < tail; k++) {
-            int bit = (tail_buf[k] >> shift_d) & 1;
-            mask |= (uint8_t)(bit << k);
-        }
-        bm[j >> 3] = mask;
-        for (int k = 0; k < tail; k++) {
-            if (mask & (1 << k))
-                right_out[n_right++] = tail_buf[k];
-            else
-                codes_la[n_left++] = tail_buf[k];
-        }
-    }
-    return n_right;
-}
-
-/* part_core_avx512 — shared partition loop for the right/left/none variants
- * (and the from-bitmap BUILD=0 form for a future TD-decode share).  FULL stays
- * hand-written in build_bitmap_partition_avx512 (same rationale as NEON/x86).
- * 32-wide vpcompressw main path + 8-wide VL remainder + scalar tail; stores
- * gated by compile-time EMIT flags. */
-__attribute__((always_inline)) static inline
-int part_core_avx512(uint16_t *codes_la, int n, int depth,
-                     uint8_t *bm, const uint8_t *bm_in, uint16_t *right_out,
-                     int BUILD, int EMIT_RIGHT, int EMIT_LEFT)
-{
-    int n_left = 0, n_right = 0, j = 0;
-    for (; j + 32 <= n; j += 32) {
-        __m512i code_vec = _mm512_loadu_si512((const __m512i *)(codes_la + j));
-        uint32_t mask;
-        if (BUILD) { mask = enc_mask32_codes_la_avx512(code_vec, depth); memcpy(bm + (j >> 3), &mask, 4); }
-        else         memcpy(&mask, bm_in + (j >> 3), 4);
-        if (EMIT_RIGHT) _mm512_storeu_si512((__m512i *)(right_out + n_right),
-                            _mm512_maskz_compress_epi16((__mmask32) mask, code_vec));
-        if (EMIT_LEFT)  _mm512_storeu_si512((__m512i *)(codes_la + n_left),
-                            _mm512_maskz_compress_epi16((__mmask32)~mask, code_vec));
-        int nr = __builtin_popcount(mask);
-        n_right += nr;
-        n_left  += 32 - nr;
-    }
-    __m128i shift_count = _mm_cvtsi32_si128(depth);
-    for (; j + 8 <= n; j += 8) {
-        __m128i code_vec = _mm_loadu_si128((const __m128i *)(codes_la + j));
-        uint8_t mask;
-        if (BUILD) {
-            __m128i shifted = _mm_sll_epi16(code_vec, shift_count);
-            __m128i bytes   = _mm_packs_epi16(shifted, _mm_setzero_si128());
-            mask = (uint8_t)_mm_movemask_epi8(bytes);
-            bm[j >> 3] = mask;
-        } else mask = bm_in[j >> 3];
-        if (EMIT_RIGHT) _mm_storeu_si128((__m128i *)(right_out + n_right),
-                            _mm_maskz_compress_epi16((__mmask8) mask, code_vec));
-        if (EMIT_LEFT)  _mm_storeu_si128((__m128i *)(codes_la + n_left),
-                            _mm_maskz_compress_epi16((__mmask8)~mask, code_vec));
-        int nr = __builtin_popcount(mask);
-        n_right += nr;
-        n_left  += 8 - nr;
-    }
-    if (j < n) {
-        int tail = n - j, shift_d = 15 - depth;
-        uint16_t tail_buf[8];
-        for (int k = 0; k < tail; k++) tail_buf[k] = codes_la[j + k];
-        uint8_t mask;
-        if (BUILD) {
-            mask = 0;
-            for (int k = 0; k < tail; k++)
-                mask |= (uint8_t)(((tail_buf[k] >> shift_d) & 1) << k);
-            bm[j >> 3] = mask;
-        } else mask = bm_in[j >> 3];
-        for (int k = 0; k < tail; k++) {
-            if (mask & (1 << k)) { if (EMIT_RIGHT) right_out[n_right] = tail_buf[k]; n_right++; }
-            else                 { if (EMIT_LEFT)  codes_la[n_left]   = tail_buf[k]; n_left++;  }
-        }
-    }
-    return n_right;
-}
-
-/* ---------- Encode primitives (init) ----------
- *
- * enc_init_avx512 — gather per-symbol left-aligned codes via byte-split
- * vpermex2var_epi8 (AVX-512 VBMI).  64 chars per iter, 12 ops, ~0.19
- * ops/char.  See the comment block for the lookup geometry.
- *
- * Lifted verbatim (minus the surrounding encoder driver) from the
- * legacy pivco_huffman_avx512.c.  All design notes preserved. */
-static inline void enc_init_avx512(uint16_t *codes_la, int n,
-                                     const uint8_t *symbols,
-                                     const uint16_t *code_la_lut)
-{
-    /* Build lo/hi byte tables from the uint16 code_la table.  Each
-     * byte-table chunk holds 64 sequential entries' lo (or hi) bytes;
-     * two chunks per byte-half pair the chars [0,128) and [128,256)
-     * regions for vpermex2var_epi8. */
-    __m512i u0 = _mm512_loadu_si512((const __m512i *)&code_la_lut[  0]);
-    __m512i u1 = _mm512_loadu_si512((const __m512i *)&code_la_lut[ 32]);
-    __m512i u2 = _mm512_loadu_si512((const __m512i *)&code_la_lut[ 64]);
-    __m512i u3 = _mm512_loadu_si512((const __m512i *)&code_la_lut[ 96]);
-    __m512i u4 = _mm512_loadu_si512((const __m512i *)&code_la_lut[128]);
-    __m512i u5 = _mm512_loadu_si512((const __m512i *)&code_la_lut[160]);
-    __m512i u6 = _mm512_loadu_si512((const __m512i *)&code_la_lut[192]);
-    __m512i u7 = _mm512_loadu_si512((const __m512i *)&code_la_lut[224]);
-
-    __m512i lo_c0p1 = _mm512_inserti64x4(
-        _mm512_castsi256_si512(_mm512_cvtepi16_epi8(u0)),
-        _mm512_cvtepi16_epi8(u1), 1);
-    __m512i lo_c0p2 = _mm512_inserti64x4(
-        _mm512_castsi256_si512(_mm512_cvtepi16_epi8(u2)),
-        _mm512_cvtepi16_epi8(u3), 1);
-    __m512i lo_c1p1 = _mm512_inserti64x4(
-        _mm512_castsi256_si512(_mm512_cvtepi16_epi8(u4)),
-        _mm512_cvtepi16_epi8(u5), 1);
-    __m512i lo_c1p2 = _mm512_inserti64x4(
-        _mm512_castsi256_si512(_mm512_cvtepi16_epi8(u6)),
-        _mm512_cvtepi16_epi8(u7), 1);
-
-    __m512i hi_c0p1 = _mm512_inserti64x4(
-        _mm512_castsi256_si512(_mm512_cvtepi16_epi8(_mm512_srli_epi16(u0, 8))),
-        _mm512_cvtepi16_epi8(_mm512_srli_epi16(u1, 8)), 1);
-    __m512i hi_c0p2 = _mm512_inserti64x4(
-        _mm512_castsi256_si512(_mm512_cvtepi16_epi8(_mm512_srli_epi16(u2, 8))),
-        _mm512_cvtepi16_epi8(_mm512_srli_epi16(u3, 8)), 1);
-    __m512i hi_c1p1 = _mm512_inserti64x4(
-        _mm512_castsi256_si512(_mm512_cvtepi16_epi8(_mm512_srli_epi16(u4, 8))),
-        _mm512_cvtepi16_epi8(_mm512_srli_epi16(u5, 8)), 1);
-    __m512i hi_c1p2 = _mm512_inserti64x4(
-        _mm512_castsi256_si512(_mm512_cvtepi16_epi8(_mm512_srli_epi16(u6, 8))),
-        _mm512_cvtepi16_epi8(_mm512_srli_epi16(u7, 8)), 1);
-
-    static const uint8_t inter_sel0_tab[64] __attribute__((aligned(64))) = {
-         0, 64,  1, 65,  2, 66,  3, 67,  4, 68,  5, 69,  6, 70,  7, 71,
-         8, 72,  9, 73, 10, 74, 11, 75, 12, 76, 13, 77, 14, 78, 15, 79,
-        16, 80, 17, 81, 18, 82, 19, 83, 20, 84, 21, 85, 22, 86, 23, 87,
-        24, 88, 25, 89, 26, 90, 27, 91, 28, 92, 29, 93, 30, 94, 31, 95
-    };
-    static const uint8_t inter_sel1_tab[64] __attribute__((aligned(64))) = {
-        32, 96, 33, 97, 34, 98, 35, 99, 36,100, 37,101, 38,102, 39,103,
-        40,104, 41,105, 42,106, 43,107, 44,108, 45,109, 46,110, 47,111,
-        48,112, 49,113, 50,114, 51,115, 52,116, 53,117, 54,118, 55,119,
-        56,120, 57,121, 58,122, 59,123, 60,124, 61,125, 62,126, 63,127
-    };
-    __m512i sel0 = _mm512_load_si512((const __m512i *)inter_sel0_tab);
-    __m512i sel1 = _mm512_load_si512((const __m512i *)inter_sel1_tab);
+    __m512i t_lo0 = _mm512_loadu_si512((const __m512i *)(s2r +   0));  /* entries [  0: 64) */
+    __m512i t_lo1 = _mm512_loadu_si512((const __m512i *)(s2r +  64));  /* entries [ 64:128) */
+    __m512i t_hi0 = _mm512_loadu_si512((const __m512i *)(s2r + 128));  /* entries [128:192) */
+    __m512i t_hi1 = _mm512_loadu_si512((const __m512i *)(s2r + 192));  /* entries [192:256) */
 
     PROF_TIC();
     int i = 0;
     for (; i + 64 <= n; i += 64) {
-        __m512i chars = _mm512_loadu_si512((const __m512i *)(symbols + i));
-        __mmask64 hi_chunk = _mm512_movepi8_mask(chars);
-
-        __m512i lo0 = _mm512_permutex2var_epi8(lo_c0p1, chars, lo_c0p2);
-        __m512i lo1 = _mm512_permutex2var_epi8(lo_c1p1, chars, lo_c1p2);
-        __m512i lo  = _mm512_mask_blend_epi8(hi_chunk, lo0, lo1);
-
-        __m512i hi0 = _mm512_permutex2var_epi8(hi_c0p1, chars, hi_c0p2);
-        __m512i hi1 = _mm512_permutex2var_epi8(hi_c1p1, chars, hi_c1p2);
-        __m512i hi  = _mm512_mask_blend_epi8(hi_chunk, hi0, hi1);
-
-        __m512i out0 = _mm512_permutex2var_epi8(lo, sel0, hi);
-        __m512i out1 = _mm512_permutex2var_epi8(lo, sel1, hi);
-
-        _mm512_storeu_si512((__m512i *)(codes_la + i     ), out0);
-        _mm512_storeu_si512((__m512i *)(codes_la + i + 32), out1);
+        __m512i c = _mm512_loadu_si512((const __m512i *)(sym + i));
+        __mmask64 hib = _mm512_movepi8_mask(c);                       /* bit 7 of each symbol */
+        __m512i lo = _mm512_permutex2var_epi8(t_lo0, c, t_lo1);       /* LUT[ c & 127]        */
+        __m512i hi = _mm512_permutex2var_epi8(t_hi0, c, t_hi1);       /* LUT[128 + (c & 127)] */
+        _mm512_storeu_si512((__m512i *)(ranks + i),
+                            _mm512_mask_blend_epi8(hib, lo, hi));
     }
-    /* Scalar tail (PIVCO_BLOCK_SIZE is a multiple of 64 on AVX-512
-     * hosts so this is currently dead, but kept defensively). */
-    for (; i < n; i++) codes_la[i] = code_la_lut[symbols[i]];
+    for (; i < n; i++) ranks[i] = s2r[sym[i]];
     PROF_TOC(PROF_ENC_INIT, n);
 }
 
-/* ---------- Encode primitives (flat-subtree pack) ----------
- *
- * D=2..7: 64 codes per zmm iter via byte-laid intermediate +
- * vpmultishiftqb (D=3,5,6,7) or vpermb-stride gather + shift (D=2,4).
- * See pivco_huffman_avx512_pack.h for the per-D helpers.
- * D=8: byte-aligned, 32 codes per iter via vpmovwb narrow + store. */
-
-static inline int pack_d8_avx512(uint8_t *out, const uint16_t *codes_la,
-                                   int n, int right_shift)
+/* full: both sides compacted (right -> tmp, left in place into ranks). */
+static inline int part_full_avx512(uint8_t *ranks, int n, uint8_t thr,
+                                      uint8_t *bm, uint8_t *tmp)
 {
-    int i = 0;
-    for (; i + 32 <= n; i += 32) {
-        __m512i v = _mm512_loadu_si512((const __m512i *)(codes_la + i));
-        v = _mm512_srli_epi16(v, right_shift);
-        __m256i bytes = _mm512_cvtepi16_epi8(v);
-        _mm256_storeu_si256((__m256i *)(out + i), bytes);
+    int n_left = 0, n_right = 0;
+    int j = 0;
+    __m512i vt = _mm512_set1_epi8((char)thr);
+    for (; j + 64 <= n; j += 64) {
+        __m512i v = _mm512_loadu_si512((const void *)(ranks + j));
+        __mmask64 k = _mm512_cmpgt_epu8_mask(v, vt);
+        int p = __builtin_popcountll(k);
+        memcpy(bm + (j >> 3), &k, 8);
+        _mm512_storeu_si512((void *)(tmp + n_right),   _mm512_maskz_compress_epi8(k, v));
+        _mm512_storeu_si512((void *)(ranks + n_left), _mm512_maskz_compress_epi8(~k, v));
+        n_right += p;
+        n_left += 64 - p;
     }
-    return i;
+    for (; j < n; j++) {
+        if ((j & 7) == 0) bm[j >> 3] = 0;
+        uint8_t r = ranks[j];
+        if (r > thr) { bm[j >> 3] |= (uint8_t)(1u << (j & 7)); tmp[n_right++] = r; }
+        else         { ranks[n_left++] = r; }
+    }
+    return n_right;
 }
 
-/* Dispatcher: pack n D-bit codes from codes_la into out[].  Selects
- * the SIMD per-D pack helper; scalar tail picks up the residual. */
-static inline void pack_dN_avx512(uint8_t *out, const uint16_t *codes_la,
-                                    int n, int D, int depth)
+/* right (HALF_RIGHT): compact the right side only, to tmp. */
+static inline int part_right_avx512(uint8_t *ranks, int n, uint8_t thr,
+                                       uint8_t *bm, uint8_t *tmp)
+{
+    int n_right = 0, j = 0;
+    __m512i vt = _mm512_set1_epi8((char)thr);
+    for (; j + 64 <= n; j += 64) {
+        __m512i v = _mm512_loadu_si512((const void *)(ranks + j));
+        __mmask64 k = _mm512_cmpgt_epu8_mask(v, vt);
+        memcpy(bm + (j >> 3), &k, 8);
+        _mm512_storeu_si512((void *)(tmp + n_right), _mm512_maskz_compress_epi8(k, v));
+        n_right += __builtin_popcountll(k);
+    }
+    for (; j < n; j++) {
+        if ((j & 7) == 0) bm[j >> 3] = 0;
+        uint8_t r = ranks[j];
+        if (r > thr) { bm[j >> 3] |= (uint8_t)(1u << (j & 7)); tmp[n_right++] = r; }
+    }
+    return n_right;
+}
+
+/* left (HALF_LEFT): compact the left side only, in place into ranks. */
+static inline int part_left_avx512(uint8_t *ranks, int n, uint8_t thr, uint8_t *bm)
+{
+    int n_left = 0, n_right = 0;
+    int j = 0;
+    __m512i vt = _mm512_set1_epi8((char)thr);
+    for (; j + 64 <= n; j += 64) {
+        __m512i v = _mm512_loadu_si512((const void *)(ranks + j));
+        __mmask64 k = _mm512_cmpgt_epu8_mask(v, vt);
+        int p = __builtin_popcountll(k);
+        memcpy(bm + (j >> 3), &k, 8);
+        _mm512_storeu_si512((void *)(ranks + n_left), _mm512_maskz_compress_epi8(~k, v));
+        n_left += 64 - p;
+        n_right += p;
+    }
+    for (; j < n; j++) {
+        if ((j & 7) == 0) bm[j >> 3] = 0;
+        uint8_t r = ranks[j];
+        if (r > thr) { bm[j >> 3] |= (uint8_t)(1u << (j & 7)); n_right++; }
+        else         { ranks[n_left++] = r; }
+    }
+    return n_right;
+}
+
+/* none (BOTH_LEAVES): bitmap + right count only, no compaction. */
+static inline int part_none_avx512(uint8_t *ranks, int n, uint8_t thr, uint8_t *bm)
+{
+    int n_right = 0, j = 0;
+    __m512i vt = _mm512_set1_epi8((char)thr);
+    for (; j + 64 <= n; j += 64) {
+        __m512i v = _mm512_loadu_si512((const void *)(ranks + j));
+        __mmask64 k = _mm512_cmpgt_epu8_mask(v, vt);
+        memcpy(bm + (j >> 3), &k, 8);
+        n_right += __builtin_popcountll(k);
+    }
+    for (; j < n; j++) {
+        if ((j & 7) == 0) bm[j >> 3] = 0;
+        uint8_t r = ranks[j];
+        if (r > thr) { bm[j >> 3] |= (uint8_t)(1u << (j & 7)); n_right++; }
+    }
+    return n_right;
+}
+
+/* Flat pack, native u8: the local code (rank - base) is already a D-bit byte,
+ * so we pack straight from u8 (no u16 widen + cvtepi16 narrow round-trip).
+ * Per-D kernels in pivco_huffman_avx512_pack.h; scalar tail for the residual. */
+static inline void pack_dN_avx512(uint8_t *out, const uint8_t *ranks,
+                                     int n, int D, uint8_t base)
 {
     int total_bytes = (n * D + 7) >> 3;
     if (total_bytes > 0) out[total_bytes - 1] = 0;
-    int right_shift = 16 - depth - D;
 
     int i = 0;
     switch (D) {
-    case 2: i = pack_d2_avx512(out, codes_la, n, right_shift); break;
-    case 3: i = pack_d3_avx512(out, codes_la, n, right_shift); break;
-    case 4: i = pack_d4_avx512(out, codes_la, n, right_shift); break;
-    case 5: i = pack_d5_avx512(out, codes_la, n, right_shift); break;
-    case 6: i = pack_d6_avx512(out, codes_la, n, right_shift); break;
-    case 7: i = pack_d7_avx512(out, codes_la, n, right_shift); break;
-    case 8: i = pack_d8_avx512(out, codes_la, n, right_shift); break;
+    case 2: i = pack_d2_avx512(out, ranks, n, base); break;
+    case 3: i = pack_d3_avx512(out, ranks, n, base); break;
+    case 4: i = pack_d4_avx512(out, ranks, n, base); break;
+    case 5: i = pack_d5_avx512(out, ranks, n, base); break;
+    case 6: i = pack_d6_avx512(out, ranks, n, base); break;
+    case 7: i = pack_d7_avx512(out, ranks, n, base); break;
+    case 8: i = pack_d8_avx512(out, ranks, n, base); break;
     default: break;
     }
-
-    int simd_n = i > n ? n : i;
-    PROF_COUNT_ONLY(PROF_ENC_FLAT_SIMD_ELEMS, simd_n);
-    PROF_COUNT_ONLY(PROF_ENC_FLAT_TAIL_ELEMS, n - simd_n);
-    (void)simd_n;  /* unused when PIVCO_PROF=0 */
-
     if (i >= n) return;
 
-    /* Scalar tail (fires only for D >= 9, currently impossible with
-     * PIVCO_MAX_CODE_LEN = 11 and flat-D <= depth bound). */
     uint32_t mask = (1u << D) - 1;
     int bit_pos = i * D;
     int byte_idx = bit_pos >> 3;
@@ -908,18 +773,12 @@ static inline void pack_dN_avx512(uint8_t *out, const uint16_t *codes_la,
         ? (uint64_t)out[byte_idx] & ((1u << bits_in_buf) - 1)
         : 0;
     for (; i < n; i++) {
-        uint32_t local = ((uint32_t)codes_la[i] >> right_shift) & mask;
-        buf |= ((uint64_t)local) << bits_in_buf;
+        uint32_t local = (uint32_t)(uint8_t)(ranks[i] - base) & mask;
+        buf |= (uint64_t)local << bits_in_buf;
         bits_in_buf += D;
-        while (bits_in_buf >= 8) {
-            out[byte_idx++] = (uint8_t)(buf & 0xff);
-            buf >>= 8;
-            bits_in_buf -= 8;
-        }
+        while (bits_in_buf >= 8) { out[byte_idx++] = (uint8_t)buf; buf >>= 8; bits_in_buf -= 8; }
     }
-    if (bits_in_buf > 0) {
-        out[byte_idx] = (uint8_t)(buf & ((1u << bits_in_buf) - 1));
-    }
+    if (bits_in_buf > 0) out[byte_idx] = (uint8_t)(buf & ((1u << bits_in_buf) - 1));
 }
 
 /* ---------- Aliases consumed by codec.c ---------- */
@@ -929,37 +788,38 @@ static inline void pack_dN_avx512(uint8_t *out, const uint16_t *codes_la,
 PIVCO_PRIM_ALWAYS_INLINE void prim_codec_init(void)
 { codec_init_avx512(); }
 
-PIVCO_PRIM_ALWAYS_INLINE void prim_enc_init(uint16_t *codes_la, int n,
+PIVCO_PRIM_ALWAYS_INLINE void prim_enc_init(uint8_t *ranks, int n,
                                               const uint8_t *symbols,
-                                              const uint16_t *code_la_lut)
-{ enc_init_avx512(codes_la, n, symbols, code_la_lut); }
+                                              const uint8_t *sym_to_rank)
+{ init_avx512(ranks, n, symbols, sym_to_rank); }
 
-PIVCO_PRIM_ALWAYS_INLINE int prim_enc_partition_full(uint16_t *codes_la,
-                                                      int n, int depth,
+PIVCO_PRIM_ALWAYS_INLINE int prim_enc_partition_full(uint8_t *ranks,
+                                                      int n, uint8_t thr,
                                                       uint8_t *bm,
-                                                      uint16_t *right_out)
-{ return build_bitmap_partition_avx512(codes_la, n, depth, bm, right_out); }
+                                                      uint8_t *right_out)
+{ return part_full_avx512(ranks, n, thr, bm, right_out); }
 
-PIVCO_PRIM_ALWAYS_INLINE int prim_enc_partition_right(uint16_t *codes_la,
-                                                      int n, int depth,
+PIVCO_PRIM_ALWAYS_INLINE int prim_enc_partition_right(uint8_t *ranks,
+                                                      int n, uint8_t thr,
                                                       uint8_t *bm,
-                                                      uint16_t *right_out)
-{ return part_core_avx512(codes_la, n, depth, bm, NULL, right_out, 1, 1, 0); }
+                                                      uint8_t *right_out)
+{ return part_right_avx512(ranks, n, thr, bm, right_out); }
 
-PIVCO_PRIM_ALWAYS_INLINE int prim_enc_partition_left(uint16_t *codes_la,
-                                                     int n, int depth,
+PIVCO_PRIM_ALWAYS_INLINE int prim_enc_partition_left(uint8_t *ranks,
+                                                     int n, uint8_t thr,
                                                      uint8_t *bm)
-{ return part_core_avx512(codes_la, n, depth, bm, NULL, NULL, 1, 0, 1); }
+{ return part_left_avx512(ranks, n, thr, bm); }
 
-PIVCO_PRIM_ALWAYS_INLINE int prim_enc_partition_none(uint16_t *codes_la,
-                                                     int n, int depth,
+PIVCO_PRIM_ALWAYS_INLINE int prim_enc_partition_none(uint8_t *ranks,
+                                                     int n, uint8_t thr,
                                                      uint8_t *bm)
-{ return part_core_avx512(codes_la, n, depth, bm, NULL, NULL, 1, 0, 0); }
+{ return part_none_avx512(ranks, n, thr, bm); }
 
-PIVCO_PRIM_ALWAYS_INLINE void prim_enc_pack_dN(const uint16_t *codes_la,
-                                             int n, int D, int depth,
+PIVCO_PRIM_ALWAYS_INLINE void prim_enc_pack_dN(const uint8_t *ranks,
+                                             int n, int D, uint8_t base,
                                              uint8_t *out_packed)
-{ pack_dN_avx512(out_packed, codes_la, n, D, depth); }
+{ pack_dN_avx512(out_packed, ranks, n, D, base); }
+
 
 PIVCO_PRIM_ALWAYS_INLINE void prim_merge_flat(uint8_t *out, int n,
                                                           const uint8_t *bm, int D,

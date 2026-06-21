@@ -544,8 +544,13 @@ static int run_verify_dist_mode(int main_only)
         for (int b = 0; b < N_BLOCKS; b++) {
             uint64_t seed = (uint64_t)(i + 1) * 1000003ULL + b;
             bench_generate_symbols(i, symbols, PIVCO_BLOCK_SIZE, seed);
-            for (int j = 0; j < PIVCO_BLOCK_SIZE; j++)
-                codes_la[j] = tbl->code_la[symbols[j]];
+            for (int j = 0; j < PIVCO_BLOCK_SIZE; j++) {
+                /* code_la is no longer a table field (production encodes on
+                 * ranks); compute the left-aligned code locally for the sim. */
+                uint8_t s = symbols[j], len = tbl->code_len[s];
+                codes_la[j] = len > 0
+                    ? (uint16_t)(tbl->code[s] << (16 - len)) : 0;
+            }
             simulate_partition(tbl, codes_la, PIVCO_BLOCK_SIZE, tbl->tree_root, 0,
                                &flat_bits, depth_stats, tmp_buf);
         }
