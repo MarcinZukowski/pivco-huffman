@@ -392,6 +392,274 @@ static void prim_merge_cc_d1flat(const ctx_t *c) {
     for (; j < K; j++) out[j] = ((bm[j >> 3] >> (j & 7)) & 1) ? MERGE_RIGHT_SYM : MERGE_LEFT_SYM;
 }
 
+/* com64 — the V5 stride-64 COM merge that was production before the
+ * two-table merge landed (saved here for A/B). */
+static void prim_merge_vv_com64_neon(const uint8_t *bm, int K,
+                                     const uint8_t *left,
+                                     const uint8_t *right,
+                                     uint8_t *out)
+{
+    int lc = 0, rc = 0;
+    int j = 0;
+
+    /* V5 main: 64 codes per iter, 4 independent chunks. */
+    for (; j + 64 <= K; j += 64) {
+        uint64_t mask_u64;
+        memcpy(&mask_u64, bm + (j >> 3), 8);
+        uint8x8_t bm_v = vcreate_u8(mask_u64);
+        uint8x8_t pc_v = vcnt_u8(bm_v);
+        uint64_t pc_u64 = vget_lane_u64(vreinterpret_u64_u8(pc_v), 0);
+        uint64_t pfx = pc_u64 * 0x0101010101010101ULL;
+
+        uint8_t cr0 = 0;
+        uint8_t cr1 = (uint8_t)(pfx >>  8);
+        uint8_t cr2 = (uint8_t)(pfx >> 24);
+        uint8_t cr3 = (uint8_t)(pfx >> 40);
+        uint8_t in0 = (uint8_t)pc_u64;
+        uint8_t in1 = (uint8_t)(pc_u64 >> 16);
+        uint8_t in2 = (uint8_t)(pc_u64 >> 32);
+        uint8_t in3 = (uint8_t)(pc_u64 >> 48);
+
+        uint8_t m0 = (uint8_t) mask_u64;
+        uint8_t m1 = (uint8_t)(mask_u64 >>  8);
+        uint8_t m2 = (uint8_t)(mask_u64 >> 16);
+        uint8_t m3 = (uint8_t)(mask_u64 >> 24);
+        uint8_t m4 = (uint8_t)(mask_u64 >> 32);
+        uint8_t m5 = (uint8_t)(mask_u64 >> 40);
+        uint8_t m6 = (uint8_t)(mask_u64 >> 48);
+        uint8_t m7 = (uint8_t)(mask_u64 >> 56);
+
+#define _V5_CHUNK(idx, cr, in, ma, mb) do {                                  \
+            uint8_t cl = (uint8_t)((idx)*16 - (cr));                         \
+            uint8x16_t L = vld1q_u8(left  + lc + cl);                        \
+            uint8x16_t R = vld1q_u8(right + rc + (cr));                      \
+            uint8x16_t both = vcombine_u8(vget_low_u8(L), vget_low_u8(R));   \
+            uint8x8_t  s0   = vld1_u8(expand_tab[ma]);                       \
+            vst1_u8(out + j + (idx)*16,     vqtbl1_u8(both, s0));            \
+            uint8x16x2_t src = {{ L, R }};                                   \
+            uint8x8_t s1 = vld1_u8(expand_tab_pre[in][mb]);                  \
+            vst1_u8(out + j + (idx)*16 + 8, vqtbl2_u8(src, s1));             \
+        } while (0)
+        _V5_CHUNK(0, cr0, in0, m0, m1);
+        _V5_CHUNK(1, cr1, in1, m2, m3);
+        _V5_CHUNK(2, cr2, in2, m4, m5);
+        _V5_CHUNK(3, cr3, in3, m6, m7);
+#undef _V5_CHUNK
+
+        uint8_t total_r = (uint8_t)(pfx >> 56);
+        rc += total_r;
+        lc += 64 - total_r;
+    }
+
+    /* V4 stride-16 fallback for the residual (handles K mod 128). */
+    for (; j + 16 <= K; j += 16) {
+        uint8x16_t L_full = vld1q_u8(left  + lc);
+        uint8x16_t R_full = vld1q_u8(right + rc);
+
+        uint8_t m0 = bm[j >> 3];
+        uint8x16_t both0 = vcombine_u8(vget_low_u8(L_full),
+                                        vget_low_u8(R_full));
+        uint8x8_t  shuf0 = vld1_u8(expand_tab[m0]);
+        uint8x8_t  o0    = vqtbl1_u8(both0, shuf0);
+        vst1_u8(out + j, o0);
+        int nr0 = expand_popcnt[m0];
+
+        uint8_t m1 = bm[(j >> 3) + 1];
+        uint8x16x2_t src = {{ L_full, R_full }};
+        uint8x8_t shuf1  = vld1_u8(expand_tab_pre[nr0][m1]);
+        uint8x8_t o1     = vqtbl2_u8(src, shuf1);
+        vst1_u8(out + j + 8, o1);
+        int nr1 = expand_popcnt[m1];
+
+        rc += nr0 + nr1;
+        lc += (16 - nr0 - nr1);
+    }
+    for (; j + 8 <= K; j += 8) {
+        uint8_t m  = bm[j >> 3];
+        uint8x8_t  L    = vld1_u8(left + lc);
+        uint8x8_t  R    = vld1_u8(right + rc);
+        uint8x16_t both = vcombine_u8(L, R);
+        uint8x8_t  shuf = vld1_u8(expand_tab[m]);
+        uint8x8_t  o    = vqtbl1_u8(both, shuf);
+        vst1_u8(out + j, o);
+        int nr = expand_popcnt[m];
+        rc += nr;
+        lc += (8 - nr);
+    }
+    /* Scalar tail (1..7 leftover). */
+    for (; j < K; j++) {
+        int mb = (bm[j >> 3] >> (j & 7)) & 1;
+        out[j] = mb ? right[rc++] : left[lc++];
+    }
+}
+static void prim_merge_vv_com64(const ctx_t *c){
+    prim_merge_vv_com64_neon(c->bm, c->n, c->merge_left, c->merge_right, c->out);
+}
+
+/* com64 — V5 COM cst_vec (broadcast L), prior production (A/B). */
+static inline void prim_merge_cv_com64_neon(const uint8_t *bm, int K,
+                                                uint8_t left_sym,
+                                                const uint8_t *right,
+                                                uint8_t *out)
+{
+    int rc = 0;
+    int j = 0;
+    uint8x8_t  Lbcast   = vdup_n_u8(left_sym);
+    uint8x16_t Lbcast_q = vdupq_n_u8(left_sym);
+
+    /* V5 main: 64 codes per iter, 4 independent chunks. */
+    for (; j + 64 <= K; j += 64) {
+        uint64_t mask_u64;
+        memcpy(&mask_u64, bm + (j >> 3), 8);
+        uint8x8_t bm_v = vcreate_u8(mask_u64);
+        uint8x8_t pc_v = vcnt_u8(bm_v);
+        uint64_t pc_u64 = vget_lane_u64(vreinterpret_u64_u8(pc_v), 0);
+        uint64_t pfx = pc_u64 * 0x0101010101010101ULL;
+
+        uint8_t cr0=0,             cr1=(uint8_t)(pfx>> 8);
+        uint8_t cr2=(uint8_t)(pfx>>24), cr3=(uint8_t)(pfx>>40);
+        uint8_t in0=(uint8_t)pc_u64,     in1=(uint8_t)(pc_u64>>16);
+        uint8_t in2=(uint8_t)(pc_u64>>32), in3=(uint8_t)(pc_u64>>48);
+
+        uint8_t m0=(uint8_t) mask_u64,        m1=(uint8_t)(mask_u64>> 8);
+        uint8_t m2=(uint8_t)(mask_u64>>16),   m3=(uint8_t)(mask_u64>>24);
+        uint8_t m4=(uint8_t)(mask_u64>>32),   m5=(uint8_t)(mask_u64>>40);
+        uint8_t m6=(uint8_t)(mask_u64>>48),   m7=(uint8_t)(mask_u64>>56);
+
+#define _V5_CHUNK_CV(idx, cr, in, ma, mb) do {                               \
+            uint8x16_t R = vld1q_u8(right + rc + (cr));                      \
+            uint8x16_t both = vcombine_u8(Lbcast, vget_low_u8(R));           \
+            uint8x8_t  s0   = vld1_u8(expand_tab[ma]);                       \
+            vst1_u8(out + j + (idx)*16,     vqtbl1_u8(both, s0));            \
+            uint8x16x2_t src = {{ Lbcast_q, R }};                            \
+            uint8x8_t s1 = vld1_u8(expand_tab_pre[in][mb]);                  \
+            vst1_u8(out + j + (idx)*16 + 8, vqtbl2_u8(src, s1));             \
+        } while (0)
+        _V5_CHUNK_CV(0, cr0, in0, m0, m1);
+        _V5_CHUNK_CV(1, cr1, in1, m2, m3);
+        _V5_CHUNK_CV(2, cr2, in2, m4, m5);
+        _V5_CHUNK_CV(3, cr3, in3, m6, m7);
+#undef _V5_CHUNK_CV
+
+        rc += (uint8_t)(pfx >> 56);
+    }
+
+    for (; j + 16 <= K; j += 16) {
+        uint8x16_t R_full = vld1q_u8(right + rc);
+        uint8_t m0 = bm[j >> 3];
+        uint8x16_t both0 = vcombine_u8(Lbcast, vget_low_u8(R_full));
+        uint8x8_t  shuf0 = vld1_u8(expand_tab[m0]);
+        uint8x8_t  o0    = vqtbl1_u8(both0, shuf0);
+        vst1_u8(out + j, o0);
+        int nr0 = expand_popcnt[m0];
+
+        uint8_t m1 = bm[(j >> 3) + 1];
+        uint8x16x2_t src = {{ Lbcast_q, R_full }};
+        uint8x8_t shuf1  = vld1_u8(expand_tab_pre[nr0][m1]);
+        uint8x8_t o1     = vqtbl2_u8(src, shuf1);
+        vst1_u8(out + j + 8, o1);
+
+        rc += nr0 + expand_popcnt[m1];
+    }
+    for (; j + 8 <= K; j += 8) {
+        uint8_t m = bm[j >> 3];
+        uint8x8_t  R    = vld1_u8(right + rc);
+        uint8x16_t both = vcombine_u8(Lbcast, R);
+        uint8x8_t  shuf = vld1_u8(expand_tab[m]);
+        uint8x8_t  o    = vqtbl1_u8(both, shuf);
+        vst1_u8(out + j, o);
+        rc += expand_popcnt[m];
+    }
+    for (; j < K; j++) {
+        int mb = (bm[j >> 3] >> (j & 7)) & 1;
+        out[j] = mb ? right[rc++] : left_sym;
+    }
+}
+static void prim_merge_cv_com64(const ctx_t *c){ prim_merge_cv_com64_neon(c->bm, c->n, MERGE_LEFT_SYM, c->merge_right, c->out); }
+
+/* com64 — V5 COM vec_cst (broadcast R), prior production (A/B). */
+static inline void prim_merge_vc_com64_neon(const uint8_t *bm, int K,
+                                                 const uint8_t *left,
+                                                 uint8_t right_sym,
+                                                 uint8_t *out)
+{
+    int lc = 0;
+    int j = 0;
+    uint8x8_t  Rbcast   = vdup_n_u8(right_sym);
+    uint8x16_t Rbcast_q = vdupq_n_u8(right_sym);
+
+    /* V5 main: 64 codes per iter, 4 independent chunks. */
+    for (; j + 64 <= K; j += 64) {
+        uint64_t mask_u64;
+        memcpy(&mask_u64, bm + (j >> 3), 8);
+        uint8x8_t bm_v = vcreate_u8(mask_u64);
+        uint8x8_t pc_v = vcnt_u8(bm_v);
+        uint64_t pc_u64 = vget_lane_u64(vreinterpret_u64_u8(pc_v), 0);
+        uint64_t pfx = pc_u64 * 0x0101010101010101ULL;
+
+        uint8_t cr0=0,             cr1=(uint8_t)(pfx>> 8);
+        uint8_t cr2=(uint8_t)(pfx>>24), cr3=(uint8_t)(pfx>>40);
+        uint8_t in0=(uint8_t)pc_u64,     in1=(uint8_t)(pc_u64>>16);
+        uint8_t in2=(uint8_t)(pc_u64>>32), in3=(uint8_t)(pc_u64>>48);
+
+        uint8_t m0=(uint8_t) mask_u64,        m1=(uint8_t)(mask_u64>> 8);
+        uint8_t m2=(uint8_t)(mask_u64>>16),   m3=(uint8_t)(mask_u64>>24);
+        uint8_t m4=(uint8_t)(mask_u64>>32),   m5=(uint8_t)(mask_u64>>40);
+        uint8_t m6=(uint8_t)(mask_u64>>48),   m7=(uint8_t)(mask_u64>>56);
+
+#define _V5_CHUNK_VC(idx, cr, in, ma, mb) do {                               \
+            uint8_t cl = (uint8_t)((idx)*16 - (cr));                         \
+            uint8x16_t L = vld1q_u8(left + lc + cl);                         \
+            uint8x16_t both = vcombine_u8(vget_low_u8(L), Rbcast);           \
+            uint8x8_t  s0   = vld1_u8(expand_tab[ma]);                       \
+            vst1_u8(out + j + (idx)*16,     vqtbl1_u8(both, s0));            \
+            uint8x16x2_t src = {{ L, Rbcast_q }};                            \
+            uint8x8_t s1 = vld1_u8(expand_tab_pre[in][mb]);                  \
+            vst1_u8(out + j + (idx)*16 + 8, vqtbl2_u8(src, s1));             \
+        } while (0)
+        _V5_CHUNK_VC(0, cr0, in0, m0, m1);
+        _V5_CHUNK_VC(1, cr1, in1, m2, m3);
+        _V5_CHUNK_VC(2, cr2, in2, m4, m5);
+        _V5_CHUNK_VC(3, cr3, in3, m6, m7);
+#undef _V5_CHUNK_VC
+
+        uint8_t total_r = (uint8_t)(pfx >> 56);
+        lc += 64 - total_r;
+    }
+
+    for (; j + 16 <= K; j += 16) {
+        uint8x16_t L_full = vld1q_u8(left + lc);
+        uint8_t m0 = bm[j >> 3];
+        uint8x16_t both0 = vcombine_u8(vget_low_u8(L_full), Rbcast);
+        uint8x8_t  shuf0 = vld1_u8(expand_tab[m0]);
+        uint8x8_t  o0    = vqtbl1_u8(both0, shuf0);
+        vst1_u8(out + j, o0);
+        int nr0 = expand_popcnt[m0];
+
+        uint8_t m1 = bm[(j >> 3) + 1];
+        uint8x16x2_t src = {{ L_full, Rbcast_q }};
+        uint8x8_t shuf1  = vld1_u8(expand_tab_pre[nr0][m1]);
+        uint8x8_t o1     = vqtbl2_u8(src, shuf1);
+        vst1_u8(out + j + 8, o1);
+
+        lc += (16 - nr0 - expand_popcnt[m1]);
+    }
+    for (; j + 8 <= K; j += 8) {
+        uint8_t m = bm[j >> 3];
+        uint8x8_t  L    = vld1_u8(left + lc);
+        uint8x16_t both = vcombine_u8(L, Rbcast);
+        uint8x8_t  shuf = vld1_u8(expand_tab[m]);
+        uint8x8_t  o    = vqtbl1_u8(both, shuf);
+        vst1_u8(out + j, o);
+        lc += (8 - expand_popcnt[m]);
+    }
+    for (; j < K; j++) {
+        int mb = (bm[j >> 3] >> (j & 7)) & 1;
+        out[j] = mb ? right_sym : left[lc++];
+    }
+}
+static void prim_merge_vc_com64(const ctx_t *c){ prim_merge_vc_com64_neon(c->bm, c->n, c->merge_left, MERGE_RIGHT_SYM, c->out); }
+
 #endif /* USE_NEON_KERNELS */
 
 /* ============================================================================
@@ -622,6 +890,140 @@ static void prim_merge_vv_prepop(const ctx_t *c){
     prim_merge_vv_prepop_x86(c->bm, c->n, c->merge_left, c->merge_right, c->out);
 }
 #endif /* __AVX2__ */
+/* unroll16 — the 2x-unrolled stride-16 expand_tab merge that was
+ * production before the two-table merge landed (saved for A/B). */
+static void prim_merge_vv_unroll16_x86(const uint8_t *bm, int K,
+                                    const uint8_t *left,
+                                    const uint8_t *right,
+                                    uint8_t *out)
+{
+    int lc = 0, rc = 0;
+    int j = 0;
+    for (; j + 16 <= K; j += 16) {
+        uint8_t m0 = bm[j >> 3];
+        __m128i L0 = _mm_loadl_epi64((const __m128i *)(left + lc));
+        __m128i R0 = _mm_loadl_epi64((const __m128i *)(right + rc));
+        __m128i both0 = _mm_unpacklo_epi64(L0, R0);
+        __m128i shuf0 = _mm_loadl_epi64((const __m128i *)expand_tab[m0]);
+        __m128i o0    = _mm_shuffle_epi8(both0, shuf0);
+        _mm_storel_epi64((__m128i *)(out + j), o0);
+        int nr0 = expand_popcnt[m0];
+        rc += nr0; lc += (8 - nr0);
+
+        uint8_t m1 = bm[(j >> 3) + 1];
+        __m128i L1 = _mm_loadl_epi64((const __m128i *)(left + lc));
+        __m128i R1 = _mm_loadl_epi64((const __m128i *)(right + rc));
+        __m128i both1 = _mm_unpacklo_epi64(L1, R1);
+        __m128i shuf1 = _mm_loadl_epi64((const __m128i *)expand_tab[m1]);
+        __m128i o1    = _mm_shuffle_epi8(both1, shuf1);
+        _mm_storel_epi64((__m128i *)(out + j + 8), o1);
+        int nr1 = expand_popcnt[m1];
+        rc += nr1; lc += (8 - nr1);
+    }
+    for (; j + 8 <= K; j += 8) {
+        uint8_t m = bm[j >> 3];
+        __m128i L = _mm_loadl_epi64((const __m128i *)(left + lc));
+        __m128i R = _mm_loadl_epi64((const __m128i *)(right + rc));
+        __m128i both = _mm_unpacklo_epi64(L, R);
+        __m128i shuf = _mm_loadl_epi64((const __m128i *)expand_tab[m]);
+        __m128i o    = _mm_shuffle_epi8(both, shuf);
+        _mm_storel_epi64((__m128i *)(out + j), o);
+        int nr = expand_popcnt[m];
+        rc += nr; lc += (8 - nr);
+    }
+    for (; j < K; j++) {
+        int mb = (bm[j >> 3] >> (j & 7)) & 1;
+        out[j] = mb ? right[rc++] : left[lc++];
+    }
+}
+static void prim_merge_vv_unroll16(const ctx_t *c){
+    prim_merge_vv_unroll16_x86(c->bm, c->n, c->merge_left, c->merge_right, c->out);
+}
+
+/* unroll16 — 2x-unrolled expand_tab cst_vec, prior production (A/B). */
+static inline void prim_merge_cv_unroll16_x86(const uint8_t *bm, int K,
+                                               uint8_t left_sym,
+                                               const uint8_t *right,
+                                               uint8_t *out)
+{
+    int rc = 0;
+    int j = 0;
+    __m128i Lbcast8 = _mm_set1_epi8((char)left_sym);
+    for (; j + 16 <= K; j += 16) {
+        uint8_t m0 = bm[j >> 3];
+        __m128i R0 = _mm_loadl_epi64((const __m128i *)(right + rc));
+        __m128i both0 = _mm_unpacklo_epi64(Lbcast8, R0);
+        __m128i shuf0 = _mm_loadl_epi64((const __m128i *)expand_tab[m0]);
+        __m128i o0    = _mm_shuffle_epi8(both0, shuf0);
+        _mm_storel_epi64((__m128i *)(out + j), o0);
+        rc += expand_popcnt[m0];
+
+        uint8_t m1 = bm[(j >> 3) + 1];
+        __m128i R1 = _mm_loadl_epi64((const __m128i *)(right + rc));
+        __m128i both1 = _mm_unpacklo_epi64(Lbcast8, R1);
+        __m128i shuf1 = _mm_loadl_epi64((const __m128i *)expand_tab[m1]);
+        __m128i o1    = _mm_shuffle_epi8(both1, shuf1);
+        _mm_storel_epi64((__m128i *)(out + j + 8), o1);
+        rc += expand_popcnt[m1];
+    }
+    for (; j + 8 <= K; j += 8) {
+        uint8_t m = bm[j >> 3];
+        __m128i R = _mm_loadl_epi64((const __m128i *)(right + rc));
+        __m128i both = _mm_unpacklo_epi64(Lbcast8, R);
+        __m128i shuf = _mm_loadl_epi64((const __m128i *)expand_tab[m]);
+        __m128i o    = _mm_shuffle_epi8(both, shuf);
+        _mm_storel_epi64((__m128i *)(out + j), o);
+        rc += expand_popcnt[m];
+    }
+    for (; j < K; j++) {
+        int mb = (bm[j >> 3] >> (j & 7)) & 1;
+        out[j] = mb ? right[rc++] : left_sym;
+    }
+}
+static void prim_merge_cv_unroll16(const ctx_t *c){ prim_merge_cv_unroll16_x86(c->bm, c->n, MERGE_LEFT_SYM, c->merge_right, c->out); }
+
+/* unroll16 — 2x-unrolled expand_tab vec_cst, prior production (A/B). */
+static inline void prim_merge_vc_unroll16_x86(const uint8_t *bm, int K,
+                                                const uint8_t *left,
+                                                uint8_t right_sym,
+                                                uint8_t *out)
+{
+    int lc = 0;
+    int j = 0;
+    __m128i Rbcast8 = _mm_set1_epi8((char)right_sym);
+    for (; j + 16 <= K; j += 16) {
+        uint8_t m0 = bm[j >> 3];
+        __m128i L0 = _mm_loadl_epi64((const __m128i *)(left + lc));
+        __m128i both0 = _mm_unpacklo_epi64(L0, Rbcast8);
+        __m128i shuf0 = _mm_loadl_epi64((const __m128i *)expand_tab[m0]);
+        __m128i o0    = _mm_shuffle_epi8(both0, shuf0);
+        _mm_storel_epi64((__m128i *)(out + j), o0);
+        lc += (8 - expand_popcnt[m0]);
+
+        uint8_t m1 = bm[(j >> 3) + 1];
+        __m128i L1 = _mm_loadl_epi64((const __m128i *)(left + lc));
+        __m128i both1 = _mm_unpacklo_epi64(L1, Rbcast8);
+        __m128i shuf1 = _mm_loadl_epi64((const __m128i *)expand_tab[m1]);
+        __m128i o1    = _mm_shuffle_epi8(both1, shuf1);
+        _mm_storel_epi64((__m128i *)(out + j + 8), o1);
+        lc += (8 - expand_popcnt[m1]);
+    }
+    for (; j + 8 <= K; j += 8) {
+        uint8_t m = bm[j >> 3];
+        __m128i L = _mm_loadl_epi64((const __m128i *)(left + lc));
+        __m128i both = _mm_unpacklo_epi64(L, Rbcast8);
+        __m128i shuf = _mm_loadl_epi64((const __m128i *)expand_tab[m]);
+        __m128i o    = _mm_shuffle_epi8(both, shuf);
+        _mm_storel_epi64((__m128i *)(out + j), o);
+        lc += (8 - expand_popcnt[m]);
+    }
+    for (; j < K; j++) {
+        int mb = (bm[j >> 3] >> (j & 7)) & 1;
+        out[j] = mb ? right_sym : left[lc++];
+    }
+}
+static void prim_merge_vc_unroll16(const ctx_t *c){ prim_merge_vc_unroll16_x86(c->bm, c->n, c->merge_left, MERGE_RIGHT_SYM, c->out); }
+
 #endif /* __SSE4_1__ */
 
 /* ============================================================================
@@ -757,6 +1159,8 @@ static void pv_register_merge(void) {
                      "e5a199a~1 merge_flat_dN_avx512",
                      "pre-widening 16 codes/iter", 0, PV_FN_VBMI2(prim_merge_flat_e5a199a));
     /* merge_vec_vec — NEON */
+    PV_VARIANT(ST_MERGE_VEC_VEC, "com64",     PV_ISA_NEON, "asof-d24c0eb (prior production)",
+               "V5 stride-64 COM, 4 chunks, byte prefix-sum cursors; production before the two-table merge", 0, PV_FN_NEON(prim_merge_vv_com64));
     PV_VARIANT(ST_MERGE_VEC_VEC, "asof-4dd08e3", PV_ISA_NEON, "4dd08e3 (2026-05-10)",
                "genesis bottom-up tree_merge: stride-8, 1 vqtbl1/8, serial cursor", 0, PV_FN_NEON(prim_merge_vv_asof_4dd08e3));
     PV_VARIANT(ST_MERGE_VEC_VEC, "cursor16",  PV_ISA_NEON, "historical 2c8606e (pre-5cccccc)",
@@ -786,6 +1190,14 @@ static void pv_register_merge(void) {
                "8-lane vtst + vtbl1 x2", 0, PV_FN_NEON(prim_merge_cc_vtbl));
     PV_VARIANT(ST_MERGE_CST_CST, "d1flat",    PV_ISA_NEON, "bench_prim experiment",
                "D=1 flat-decode shape (vshl + vqtbl1q)", 0, PV_FN_NEON(prim_merge_cc_d1flat));
+    PV_VARIANT(ST_MERGE_CST_VEC, "com64",     PV_ISA_NEON, "asof-d24c0eb (prior production)",
+               "V5 COM cst_vec, broadcast L; production before the two-table merge", 0, PV_FN_NEON(prim_merge_cv_com64));
+    PV_VARIANT(ST_MERGE_VEC_CST, "com64",     PV_ISA_NEON, "asof-d24c0eb (prior production)",
+               "V5 COM vec_cst, broadcast R; production before the two-table merge", 0, PV_FN_NEON(prim_merge_vc_com64));
+    PV_VARIANT(ST_MERGE_CST_VEC, "unroll16",  PV_ISA_SSE4, "asof-d24c0eb (prior production)",
+               "2x-unrolled expand_tab cst_vec; production before the two-table merge", 0, PV_FN_SSE(prim_merge_cv_unroll16));
+    PV_VARIANT(ST_MERGE_VEC_CST, "unroll16",  PV_ISA_SSE4, "asof-d24c0eb (prior production)",
+               "2x-unrolled expand_tab vec_cst; production before the two-table merge", 0, PV_FN_SSE(prim_merge_vc_unroll16));
     /* merge_vec_vec — x86 COM / prefix-sum forms (IDEAS: x86 COM merge). */
     PV_VARIANT(ST_MERGE_VEC_VEC, "sse_com",        PV_ISA_SSE4, "bench_merge_x86.c",
                "64 codes/iter, 8 pshufb merges, SWAR-popcnt prefix cursors", 0,
@@ -802,6 +1214,9 @@ static void pv_register_merge(void) {
     PV_VARIANT(ST_MERGE_VEC_VEC, "prepop",         PV_ISA_AVX2, "bench_merge_avx2.c",
                "16 B/iter, on-the-fly prefix-popcount pshufb controls (no tab)", 0,
                PV_FN_SSE_AVX2(prim_merge_vv_prepop));
+    PV_VARIANT(ST_MERGE_VEC_VEC, "unroll16",       PV_ISA_SSE4, "asof-d24c0eb (prior production)",
+               "2x-unrolled stride-16 expand_tab merge; production before the two-table merge", 0,
+               PV_FN_SSE(prim_merge_vv_unroll16));
 }
 
 #endif /* PIVCO_PRIM_VARIANTS_MERGE_H */

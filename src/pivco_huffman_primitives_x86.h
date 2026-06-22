@@ -48,10 +48,12 @@
 /* Backend lifecycle.  Lazily build the compress_tab + expand_tab pre-
  * bake tables that the x86 partition / merge primitives index
  * into.  Idempotent and cheap after the first call. */
+static void init_x86_merge_tables(void);   /* two-table merge_vec_vec shuffles (below) */
 static inline void codec_init_x86(void)
 {
     init_compress_table_x86();
     init_expand_table_x86();
+    init_x86_merge_tables();
 }
 
 /* ---------- Decode primitives (bottom-up) ---------- */
@@ -100,51 +102,94 @@ static inline int popcount_K_right_x86(const uint8_t *bm, int nbytes, int K)
     return K_right;
 }
 
-/* merge_vec_vec_x86 — SSE 8-byte chunk via pshufb on
- * _mm_unpacklo_epi64(L8, R8) with expand_tab[mask].  2x-unrolled
- * stride-16 main path: two independent 8-byte merges per iter so OOO
- * overlaps loads / shuffles / stores.  Only lc/rc cursor adds carry a
- * real dep, and that's short-latency add.  AVX-512 VBMI2 64-byte
- * vpexpandb fast path lives in primitives_avx512.h. */
+/* ---- merge_vec_vec_x86: two-table merge (PSHUFB-complement + OR) ----
+ *
+ * x86 has no 2-source PSHUFB, but PSHUFB zeroes any lane whose index MSB is
+ * set: shuffle R with the merged index (R lanes valid, L lanes -> 0 via the
+ * 255-off indices), shuffle L with the complemented index (L valid, R -> 0),
+ * then OR.  The high half's +pop0 offset is folded in by replicating pop0
+ * across shuf0's top 8 bytes and adding shuf1 (L entries stored 247-off).
+ * Two index tables (g_x86_merge_shuf0[.][16] + g_x86_merge_shuf1[.][8]) are
+ * built once in codec_init_x86.  With AVX2 the main loop runs 32 B/iter as two
+ * 128-bit lanes (broadcast + vpblendd index assembly, asm-pinned for
+ * llvm#203132); the SSE 16 B form handles the residual (and all of K on
+ * SSE4.1-only hosts).  AVX-512 VBMI2 uses the vpexpandb path in
+ * primitives_avx512.h instead. */
+static uint8_t g_x86_merge_shuf0[256][16] __attribute__((aligned(16)));
+static uint8_t g_x86_merge_shuf1[256][8];
+static void init_x86_merge_tables(void)
+{
+    static int built = 0;
+    if (built) return;
+    for (int m = 0; m < 256; m++) {
+        int rset = 0, rclr = 0, pop = __builtin_popcount(m);
+        for (int i = 0; i < 8; i++)
+            g_x86_merge_shuf0[m][i] = ((m >> i) & 1) ? (uint8_t)(rset++)
+                                                     : (uint8_t)(255 - rclr++);
+        for (int i = 8; i < 16; i++) g_x86_merge_shuf0[m][i] = (uint8_t)pop;
+        rset = 0; rclr = 0;
+        for (int t = 0; t < 8; t++)
+            g_x86_merge_shuf1[m][t] = ((m >> t) & 1) ? (uint8_t)(rset++)
+                                                     : (uint8_t)(247 - rclr++);
+    }
+    built = 1;
+}
+#if defined(__AVX2__)
+static inline __m256i x86_merge_bcastq(const void *src)
+{ return _mm256_broadcastq_epi64(_mm_loadl_epi64((const __m128i *)src)); }
+static inline __m256i x86_merge_load_halves(const void *s0, const void *s1)
+{
+    __m256i v = _mm256_castsi128_si256(_mm_loadu_si128((const __m128i *)s0));
+    return _mm256_inserti128_si256(v, _mm_loadu_si128((const __m128i *)s1), 1);
+}
+#endif
 static inline void merge_vec_vec_x86(const uint8_t *bm, int K,
                                     const uint8_t *left,
                                     const uint8_t *right,
                                     uint8_t *out)
 {
     PROF_TIC();
-    int lc = 0, rc = 0;
-    int j = 0;
-    for (; j + 16 <= K; j += 16) {
-        uint8_t m0 = bm[j >> 3];
-        __m128i L0 = _mm_loadl_epi64((const __m128i *)(left + lc));
-        __m128i R0 = _mm_loadl_epi64((const __m128i *)(right + rc));
-        __m128i both0 = _mm_unpacklo_epi64(L0, R0);
-        __m128i shuf0 = _mm_loadl_epi64((const __m128i *)expand_tab[m0]);
-        __m128i o0    = _mm_shuffle_epi8(both0, shuf0);
-        _mm_storel_epi64((__m128i *)(out + j), o0);
-        int nr0 = expand_popcnt[m0];
-        rc += nr0; lc += (8 - nr0);
-
-        uint8_t m1 = bm[(j >> 3) + 1];
-        __m128i L1 = _mm_loadl_epi64((const __m128i *)(left + lc));
-        __m128i R1 = _mm_loadl_epi64((const __m128i *)(right + rc));
-        __m128i both1 = _mm_unpacklo_epi64(L1, R1);
-        __m128i shuf1 = _mm_loadl_epi64((const __m128i *)expand_tab[m1]);
-        __m128i o1    = _mm_shuffle_epi8(both1, shuf1);
-        _mm_storel_epi64((__m128i *)(out + j + 8), o1);
-        int nr1 = expand_popcnt[m1];
-        rc += nr1; lc += (8 - nr1);
+    int lc = 0, rc = 0, j = 0;
+#if defined(__AVX2__)
+    {
+        const __m256i ones = _mm256_set1_epi8(-1), zeros = _mm256_setzero_si256();
+        for (; j + 32 <= K; j += 32) {
+            uint32_t mask; memcpy(&mask, bm + (j >> 3), 4);
+            unsigned m0 = mask & 0xff, m1 = (mask >> 8) & 0xff,
+                     m2 = (mask >> 16) & 0xff, m3 = (mask >> 24) & 0xff;
+            __m256i vShuf02 = x86_merge_load_halves(g_x86_merge_shuf0[m0], g_x86_merge_shuf0[m2]);
+            __m256i vShuf1  = x86_merge_bcastq(g_x86_merge_shuf1[m1]);
+            __m256i vShuf3  = x86_merge_bcastq(g_x86_merge_shuf1[m3]);
+            __asm__("" : "+x"(vShuf1)); __asm__("" : "+x"(vShuf3));   /* dodge llvm#203132 */
+            __m256i vShuf13  = _mm256_blend_epi32(vShuf1, vShuf3, 0xf0);
+            __m256i vShuf13M = _mm256_blend_epi32(zeros, vShuf13, 0xcc);
+            __m256i vShuf    = _mm256_add_epi8(vShuf02, vShuf13M);
+            int lo_pop = _mm_popcnt_u32(mask & 0xffff);
+            __m256i vR = x86_merge_load_halves(right + rc, right + rc + lo_pop);
+            __m256i vL = x86_merge_load_halves(left  + lc, left  + lc + 16 - lo_pop);
+            __m256i rr = _mm256_shuffle_epi8(vR, vShuf);
+            __m256i rl = _mm256_shuffle_epi8(vL, _mm256_xor_si256(vShuf, ones));
+            _mm256_storeu_si256((__m256i *)(out + j), _mm256_or_si256(rl, rr));
+            int pr = _mm_popcnt_u32(mask);
+            rc += pr; lc += 32 - pr;
+        }
     }
-    for (; j + 8 <= K; j += 8) {
-        uint8_t m = bm[j >> 3];
-        __m128i L = _mm_loadl_epi64((const __m128i *)(left + lc));
-        __m128i R = _mm_loadl_epi64((const __m128i *)(right + rc));
-        __m128i both = _mm_unpacklo_epi64(L, R);
-        __m128i shuf = _mm_loadl_epi64((const __m128i *)expand_tab[m]);
-        __m128i o    = _mm_shuffle_epi8(both, shuf);
-        _mm_storel_epi64((__m128i *)(out + j), o);
-        int nr = expand_popcnt[m];
-        rc += nr; lc += (8 - nr);
+#endif
+    {
+        const __m128i ones = _mm_set1_epi8(-1);
+        for (; j + 16 <= K; j += 16) {
+            unsigned lo = bm[j >> 3], hi = bm[(j >> 3) + 1];
+            __m128i shuf0 = _mm_load_si128((const __m128i *)g_x86_merge_shuf0[lo]);
+            __m128i shuf1 = _mm_slli_si128(_mm_loadl_epi64((const __m128i *)g_x86_merge_shuf1[hi]), 8);
+            __m128i merged = _mm_add_epi8(shuf0, shuf1);
+            __m128i R16 = _mm_loadu_si128((const __m128i *)(right + rc));
+            __m128i L16 = _mm_loadu_si128((const __m128i *)(left  + lc));
+            __m128i rr = _mm_shuffle_epi8(R16, merged);
+            __m128i rl = _mm_shuffle_epi8(L16, _mm_xor_si128(merged, ones));
+            _mm_storeu_si128((__m128i *)(out + j), _mm_or_si128(rr, rl));
+            int pr = __builtin_popcount(lo) + __builtin_popcount(hi);
+            rc += pr; lc += 16 - pr;
+        }
     }
     for (; j < K; j++) {
         int mb = (bm[j >> 3] >> (j & 7)) & 1;
@@ -156,88 +201,102 @@ static inline void merge_vec_vec_x86(const uint8_t *bm, int K,
 /* merge_cst_vec_x86 — left input is a broadcast constant.
  * Same 2x-unrolled structure; the L lane is a duplicated 16-byte
  * register holding left_sym. */
+/* merge_cst_vec_x86 — two-table merge, L = broadcast const (no L load/cursor);
+ * only R advances.  AVX2 32B main + SSE 16B residual.  See merge_vec_vec_x86. */
 static inline void merge_cst_vec_x86(const uint8_t *bm, int K,
-                                               uint8_t left_sym,
-                                               const uint8_t *right,
-                                               uint8_t *out)
+                                     uint8_t left_sym,
+                                     const uint8_t *right,
+                                     uint8_t *out)
 {
     PROF_TIC();
-    int rc = 0;
-    int j = 0;
-    __m128i Lbcast8 = _mm_set1_epi8((char)left_sym);
-    for (; j + 16 <= K; j += 16) {
-        uint8_t m0 = bm[j >> 3];
-        __m128i R0 = _mm_loadl_epi64((const __m128i *)(right + rc));
-        __m128i both0 = _mm_unpacklo_epi64(Lbcast8, R0);
-        __m128i shuf0 = _mm_loadl_epi64((const __m128i *)expand_tab[m0]);
-        __m128i o0    = _mm_shuffle_epi8(both0, shuf0);
-        _mm_storel_epi64((__m128i *)(out + j), o0);
-        rc += expand_popcnt[m0];
-
-        uint8_t m1 = bm[(j >> 3) + 1];
-        __m128i R1 = _mm_loadl_epi64((const __m128i *)(right + rc));
-        __m128i both1 = _mm_unpacklo_epi64(Lbcast8, R1);
-        __m128i shuf1 = _mm_loadl_epi64((const __m128i *)expand_tab[m1]);
-        __m128i o1    = _mm_shuffle_epi8(both1, shuf1);
-        _mm_storel_epi64((__m128i *)(out + j + 8), o1);
-        rc += expand_popcnt[m1];
+    int rc = 0, j = 0;
+#if defined(__AVX2__)
+    {
+        const __m256i ones = _mm256_set1_epi8(-1), zeros = _mm256_setzero_si256();
+        const __m256i vLb = _mm256_set1_epi8((char)left_sym);
+        for (; j + 32 <= K; j += 32) {
+            uint32_t mask; memcpy(&mask, bm + (j >> 3), 4);
+            unsigned m0=mask&0xff, m1=(mask>>8)&0xff, m2=(mask>>16)&0xff, m3=(mask>>24)&0xff;
+            __m256i vShuf02 = x86_merge_load_halves(g_x86_merge_shuf0[m0], g_x86_merge_shuf0[m2]);
+            __m256i vShuf1  = x86_merge_bcastq(g_x86_merge_shuf1[m1]);
+            __m256i vShuf3  = x86_merge_bcastq(g_x86_merge_shuf1[m3]);
+            __asm__("" : "+x"(vShuf1)); __asm__("" : "+x"(vShuf3));
+            __m256i vShuf13  = _mm256_blend_epi32(vShuf1, vShuf3, 0xf0);
+            __m256i vShuf13M = _mm256_blend_epi32(zeros, vShuf13, 0xcc);
+            __m256i vShuf    = _mm256_add_epi8(vShuf02, vShuf13M);
+            int lo_pop = _mm_popcnt_u32(mask & 0xffff);
+            __m256i vR = x86_merge_load_halves(right + rc, right + rc + lo_pop);
+            __m256i rr = _mm256_shuffle_epi8(vR,  vShuf);
+            __m256i rl = _mm256_shuffle_epi8(vLb, _mm256_xor_si256(vShuf, ones));
+            _mm256_storeu_si256((__m256i *)(out + j), _mm256_or_si256(rl, rr));
+            rc += _mm_popcnt_u32(mask);
+        }
     }
-    for (; j + 8 <= K; j += 8) {
-        uint8_t m = bm[j >> 3];
-        __m128i R = _mm_loadl_epi64((const __m128i *)(right + rc));
-        __m128i both = _mm_unpacklo_epi64(Lbcast8, R);
-        __m128i shuf = _mm_loadl_epi64((const __m128i *)expand_tab[m]);
-        __m128i o    = _mm_shuffle_epi8(both, shuf);
-        _mm_storel_epi64((__m128i *)(out + j), o);
-        rc += expand_popcnt[m];
+#endif
+    {
+        const __m128i ones = _mm_set1_epi8(-1), Lb = _mm_set1_epi8((char)left_sym);
+        for (; j + 16 <= K; j += 16) {
+            unsigned lo = bm[j >> 3], hi = bm[(j >> 3) + 1];
+            __m128i shuf0 = _mm_load_si128((const __m128i *)g_x86_merge_shuf0[lo]);
+            __m128i shuf1 = _mm_slli_si128(_mm_loadl_epi64((const __m128i *)g_x86_merge_shuf1[hi]), 8);
+            __m128i merged = _mm_add_epi8(shuf0, shuf1);
+            __m128i R16 = _mm_loadu_si128((const __m128i *)(right + rc));
+            __m128i rr = _mm_shuffle_epi8(R16, merged);
+            __m128i rl = _mm_shuffle_epi8(Lb, _mm_xor_si128(merged, ones));
+            _mm_storeu_si128((__m128i *)(out + j), _mm_or_si128(rr, rl));
+            rc += __builtin_popcount(lo) + __builtin_popcount(hi);
+        }
     }
-    for (; j < K; j++) {
-        int mb = (bm[j >> 3] >> (j & 7)) & 1;
-        out[j] = mb ? right[rc++] : left_sym;
-    }
+    for (; j < K; j++) { int mb = (bm[j >> 3] >> (j & 7)) & 1; out[j] = mb ? right[rc++] : left_sym; }
     PROF_TOC(PROF_BU_MERGE_CST_VEC, K);
 }
 
-/* merge_vec_cst_x86 — mirror of merge_cst_vec_x86. */
+/* merge_vec_cst_x86 — mirror: R = broadcast const, only L advances. */
 static inline void merge_vec_cst_x86(const uint8_t *bm, int K,
-                                                const uint8_t *left,
-                                                uint8_t right_sym,
-                                                uint8_t *out)
+                                     const uint8_t *left,
+                                     uint8_t right_sym,
+                                     uint8_t *out)
 {
     PROF_TIC();
-    int lc = 0;
-    int j = 0;
-    __m128i Rbcast8 = _mm_set1_epi8((char)right_sym);
-    for (; j + 16 <= K; j += 16) {
-        uint8_t m0 = bm[j >> 3];
-        __m128i L0 = _mm_loadl_epi64((const __m128i *)(left + lc));
-        __m128i both0 = _mm_unpacklo_epi64(L0, Rbcast8);
-        __m128i shuf0 = _mm_loadl_epi64((const __m128i *)expand_tab[m0]);
-        __m128i o0    = _mm_shuffle_epi8(both0, shuf0);
-        _mm_storel_epi64((__m128i *)(out + j), o0);
-        lc += (8 - expand_popcnt[m0]);
-
-        uint8_t m1 = bm[(j >> 3) + 1];
-        __m128i L1 = _mm_loadl_epi64((const __m128i *)(left + lc));
-        __m128i both1 = _mm_unpacklo_epi64(L1, Rbcast8);
-        __m128i shuf1 = _mm_loadl_epi64((const __m128i *)expand_tab[m1]);
-        __m128i o1    = _mm_shuffle_epi8(both1, shuf1);
-        _mm_storel_epi64((__m128i *)(out + j + 8), o1);
-        lc += (8 - expand_popcnt[m1]);
+    int lc = 0, j = 0;
+#if defined(__AVX2__)
+    {
+        const __m256i ones = _mm256_set1_epi8(-1), zeros = _mm256_setzero_si256();
+        const __m256i vRb = _mm256_set1_epi8((char)right_sym);
+        for (; j + 32 <= K; j += 32) {
+            uint32_t mask; memcpy(&mask, bm + (j >> 3), 4);
+            unsigned m0=mask&0xff, m1=(mask>>8)&0xff, m2=(mask>>16)&0xff, m3=(mask>>24)&0xff;
+            __m256i vShuf02 = x86_merge_load_halves(g_x86_merge_shuf0[m0], g_x86_merge_shuf0[m2]);
+            __m256i vShuf1  = x86_merge_bcastq(g_x86_merge_shuf1[m1]);
+            __m256i vShuf3  = x86_merge_bcastq(g_x86_merge_shuf1[m3]);
+            __asm__("" : "+x"(vShuf1)); __asm__("" : "+x"(vShuf3));
+            __m256i vShuf13  = _mm256_blend_epi32(vShuf1, vShuf3, 0xf0);
+            __m256i vShuf13M = _mm256_blend_epi32(zeros, vShuf13, 0xcc);
+            __m256i vShuf    = _mm256_add_epi8(vShuf02, vShuf13M);
+            int lo_pop = _mm_popcnt_u32(mask & 0xffff);
+            __m256i vL = x86_merge_load_halves(left + lc, left + lc + 16 - lo_pop);
+            __m256i rr = _mm256_shuffle_epi8(vRb, vShuf);
+            __m256i rl = _mm256_shuffle_epi8(vL,  _mm256_xor_si256(vShuf, ones));
+            _mm256_storeu_si256((__m256i *)(out + j), _mm256_or_si256(rl, rr));
+            lc += 32 - _mm_popcnt_u32(mask);
+        }
     }
-    for (; j + 8 <= K; j += 8) {
-        uint8_t m = bm[j >> 3];
-        __m128i L = _mm_loadl_epi64((const __m128i *)(left + lc));
-        __m128i both = _mm_unpacklo_epi64(L, Rbcast8);
-        __m128i shuf = _mm_loadl_epi64((const __m128i *)expand_tab[m]);
-        __m128i o    = _mm_shuffle_epi8(both, shuf);
-        _mm_storel_epi64((__m128i *)(out + j), o);
-        lc += (8 - expand_popcnt[m]);
+#endif
+    {
+        const __m128i ones = _mm_set1_epi8(-1), Rb = _mm_set1_epi8((char)right_sym);
+        for (; j + 16 <= K; j += 16) {
+            unsigned lo = bm[j >> 3], hi = bm[(j >> 3) + 1];
+            __m128i shuf0 = _mm_load_si128((const __m128i *)g_x86_merge_shuf0[lo]);
+            __m128i shuf1 = _mm_slli_si128(_mm_loadl_epi64((const __m128i *)g_x86_merge_shuf1[hi]), 8);
+            __m128i merged = _mm_add_epi8(shuf0, shuf1);
+            __m128i L16 = _mm_loadu_si128((const __m128i *)(left + lc));
+            __m128i rr = _mm_shuffle_epi8(Rb, merged);
+            __m128i rl = _mm_shuffle_epi8(L16, _mm_xor_si128(merged, ones));
+            _mm_storeu_si128((__m128i *)(out + j), _mm_or_si128(rr, rl));
+            lc += 16 - (__builtin_popcount(lo) + __builtin_popcount(hi));
+        }
     }
-    for (; j < K; j++) {
-        int mb = (bm[j >> 3] >> (j & 7)) & 1;
-        out[j] = mb ? right_sym : left[lc++];
-    }
+    for (; j < K; j++) { int mb = (bm[j >> 3] >> (j & 7)) & 1; out[j] = mb ? right_sym : left[lc++]; }
     PROF_TOC(PROF_BU_MERGE_VEC_CST, K);
 }
 
