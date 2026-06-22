@@ -1,0 +1,180 @@
+16-BYTE-AT-A-TIME ENCODE (PARTITION) VIA RYG-STYLE TABLES
+=========================================================
+Status: design / not yet prototyped. Hand-off notes for a follow-up agent.
+Date: 2026-06-22. Backend in scope: NEON (and other big-L1 hosts). See L1 gate below.
+
+CONTEXT
+-------
+Decode uses a "merge" op (interleave two sorted lists guided by a bitstream).
+Fabian Giesen's two-table 16B merge is parked in ryg-merge.patch /
+neon_merge_kernel.cpp:
+  shuf = vabdq_s8(tab0[mask_lo], tab1[mask_hi]);   // SABD folds the cross-half
+  result = vqtbl2q_u8({R16, L16}, shuf);           //   popcount carry into the index
+  vst1q(out); advance by popcount
+That works because (a) merge's output is ONE contiguous 16B store and (b) the
+cross-half popcount carry is a pure ADDITIVE index offset applied to a STATIC
+set of output lanes (the high 8) — known at table-build time.
+
+NOTE ON LICENSING: ryg's MERGE idea is NOT licensed (keep ryg-merge.patch
+parked). The PARTITION/encode idea here IS green-lit. The construction below is
+a partition technique; it does NOT use the merge two-table-additive trick
+(which provably doesn't apply to encode anyway — see "Why the naive..." below).
+
+THE QUESTION
+------------
+Encode is the inverse: "partition". Per Huffman node, split n input ranks by a
+threshold into a right stream (tmp) and a left stream (in place into ranks),
+plus emit the bitmap. Current production primitive: part_full_neon /
+part_core_neon in src/pivco_huffman_primitives_neon.h (~line 774 / 831).
+It compacts per 8-lane chunk with vtbl1_u8 over ctab8[mask] (256x16B table,
+[8 right-compaction idx | 8 left-compaction idx]) and SCATTER-stores each chunk
+at a prefix-sum cursor offset (cr/cl from the 0x0101.. popcount trick).
+Goal: do the byte-moving 16 lanes at a time, merge-style.
+
+WHY THE NAIVE 2-TABLE-ADDITIVE TRICK DOES NOT TRANSFER
+------------------------------------------------------
+For a 16-lane right-compaction, output position p holds the lane of the p-th
+set bit. Whether position p comes from the low or high input half depends on
+pop_lo = popcount(low mask byte) — a DATA-DEPENDENT boundary, unlike merge's
+fixed lane-8 split. So r_mask[p] = A[low][p] (+/SABD) B[high][p] is impossible:
+  - low=0xFF, p=3: 3rd set bit is lane 3, independent of high => B[high][3] const => 0
+  - low=0x07,high=0x01, p=3: first high set bit = lane 8 => B[0x01][3] = 0  (ok)
+  - low=0x07,high=0x02, p=3: now lane 9        => B[0x02][3] = 1
+B[.][3] must be both 0 and 1. Contradiction. The high table can't see whether
+the low byte already "consumed" output position p. SABD doesn't help.
+
+THE CONSTRUCTION THAT WORKS (the design to build)
+-------------------------------------------------
+Fold the data-dependent stitch into a TABLE AXIS instead of a runtime shift.
+Key efficiency: pc0 = popcount(low mask byte) has only 9 values (0..8), so a
+[pc0][m1] axis is cheap.
+
+Right-compaction of a 16-byte input vector `input16` under 16-bit mask m
+(m0 = low byte, m1 = high byte, pc0 = popcount(m0)):
+
+  tab1[m0][p]       = (p < pc0)             ? lane_of(p-th set bit in m0)        : 0   // values 0..7
+  tab2[pc0][m1][p]  = (pc0 <= p < pc0+pc1)  ? 8 + lane_of((p-pc0)-th set bit m1) : 0   // values 8..15
+                       where pc1 = popcount(m1)
+
+  idx = tab1[m0] | tab2[pc0][m1];            // OR is exact: supports are disjoint
+                                             //   tab1 nonzero on [0,pc0), tab2 on [pc0, pc0+pc1)
+  r   = vqtbl1q_u8(input16, idx);            // ONE 16-lane shuffle, no vcombine
+  vst1q(tmp + n_right, r); n_right += pc0+pc1;   // merge-style: store 16, advance by popcount
+
+Correctness of the OR: the only ambiguity is index value 0 == lane 0. It never
+collides: tab2 writes position 0 only when pc0==0, but then tab1 has no used
+positions (its 0 there is "unused", not "lane 0"); and lane 0 is selected into
+position 0 only when bit 0 set => pc0>=1 => tab2 doesn't touch position 0.
+All index values are 0..15 (valid lanes); the unused tail just reads lane 0 as
+garbage and is overwritten by the next chunk's overlapping store-advance.
+
+BOTH SIDES FROM THE SAME TABLES (inverted mask)
+-----------------------------------------------
+Left-compaction = compact lanes where m is CLEAR = right-compaction under ~m.
+So reuse tab1/tab2 with complemented mask bytes (popcount(~m0) = 8 - pc0):
+
+  l = vqtbl1q_u8(input16, tab1[~m0] | tab2[8-pc0][~m1]);
+  vst1q(ranks + n_left, l); n_left += 16 - (pc0+pc1);
+
+Complement is free (vmvn on the loaded mask byte / NOT m0,m1); 8-pc0 is already
+on hand. Same lane-0 safety argument holds under ~m. => NO separate left tables.
+
+TABLE SIZES + L1 GATE
+---------------------
+  tab1: 256 x 16B = 4 KB   (could shrink to 256 x 8B; only low 8 positions ever nonzero)
+  tab2: 9 x 256 x 16B = 36 KB   (the pc0 axis is just 9 byte-slides of a 4KB base table;
+                                 storing all 9 is what AVOIDS the runtime stitch-shuffle)
+  TOTAL ~40 KB, and the SAME ~40 KB serves BOTH sides via the inverted mask.
+
+tab2 is accessed pseudo-randomly across m1, so it must stay L1-resident.
+  - M4 (128 KB L1d): fine.
+  - Graviton4 / c8g (64 KB L1d): fits both-sides alongside streaming input.
+  - Zen3 / c6a (32 KB L1d): BUSTS L1 -> do not enable. Gate to NEON/big-L1,
+    same shape as the BMI2-pext gating (reference_bmi2_pext_uarch).
+
+OP COUNT (per 16 lanes)
+-----------------------
+  Right-only:  2 table loads + vorr + 1 vqtbl1q + 1 store
+               vs current part_core EMIT_RIGHT: 2 vtbl1 + 2 stores  (each vtbl1 also loads a table)
+               => -1 shuffle, -1 store, +1 vorr.
+  Two-sided:   4 table loads + 2 vorr + 2 vqtbl1q + 2 stores
+               vs current part_full: 4 vtbl1 + 4 stores
+               => same store BYTES, HALF the store COUNT, one fewer shuffle.
+The store-count halving (merge-style store-16/advance-by-popcount) is the win
+on a store-port-bound encoder.
+
+IMPLEMENTATION NOTES / HAZARDS
+------------------------------
+1. Right side -> separate tmp buffer: no aliasing, trivially safe.
+2. Left side writes back into `ranks` IN PLACE with overlapping 16B stores
+   (valid prefix = 16-pop, garbage tail). Safe ONLY if all input loads for the
+   iteration are HOISTED before any store. The current 64/iter loop already
+   does all four vld1q up front -- preserve that ordering. Across iterations
+   n_left <= j so no clobber. Keep 16B slack at the end of tmp AND ranks.
+3. masks64_neon already produces the 64-bit mask word; pc0 per 8-chunk is the
+   per-byte popcount already computed for the 0x0101.. prefix sum. Reuse it.
+4. Index values are always valid lanes (0..15); no need to rely on vqtbl1q
+   zeroing out-of-range. The garbage tail is overwritten by store-advance.
+
+BENCH PLAN
+----------
+Add ONE prim_enc_* variant in bench/prim_variants (NEON, USE_NEON_KERNELS):
+  - build the single ~40 KB tab1/tab2 pair once (lazy, like pv_build_ryg_neon)
+  - right side: tab1[m0] | tab2[pc0][m1]
+  - left side : tab1[~m0] | tab2[8-pc0][~m1]
+  - two-sided, store-16/advance-by-popcount, loads hoisted
+Bench against current part_full / part_core EMIT_RIGHT on c8g and M4.
+Question to answer: does the store-count halving + single wide shuffle beat the
+extra ~40 KB L1 footprint? Per feedback_never_replicate_primitives, call the
+real production part_* as the baseline row; only the new kernel is new code.
+Save the sweep under results/ per feedback_results_file_per_sweep.
+
+KEY FILES
+---------
+  src/pivco_huffman_primitives_neon.h   part_full_neon / part_core_neon, masks64_neon, ctab8 usage
+  src/pivco_huffman_neon_tables.{c,h}    ctab8 / compress_tab / expand_tab
+  bench/prim_variants/prims-merge.h      ryg merge variants (the merge-side analog, for reference)
+  ryg-merge.patch / neon_merge_kernel.cpp   parked ryg merge kernel (decode side)
+
+RESULT (2026-06-22, prototyped + benched)
+-----------------------------------------
+Built as bench variant prim_part_p16 (prims-partition.h, NEON ST_PART), reusing
+production masks64_neon for the mask+bitmap.  Verifies ok.  A/B vs production
+part_full_neon (bench_prim enc_partition_full, --variants):
+  M4 (Apple, wide):          0.0526 -> 0.0597  ns/elem  (-12%)
+  Graviton2 / c6g (N1):      0.2835 -> 0.3221           (-14%, worst)
+  Graviton3 / c7g (V1):      0.1626 -> 0.1585           (+2.6%, ONLY win)
+  Graviton4 / c8g (V2):      0.1304 -> 0.1353           (-4%)
+  Neoverse V3 / m9g:         0.1061 -> 0.1080           (-2%)
+Verdict: marginal +2.6% on Graviton3/V1 only; loses on M4/N1/V2/V3 (N1 -14%).  The store-count halving (the only
+win) does not offset the extra 2 table loads/side + 2 vorr + the 36 KB tab2
+pseudo-random load latency.  Structural problem: the win needs BIG L1 (40 KB
+tabs) AND a store-port-bound uarch, but the big-L1 NEON hosts (M4, G4) are
+wide-store (not store-bound), and the store-bound narrow cores (Zen3, 32 KB L1)
+can't hold the tables -- no host satisfies both.  Unlike merge, partition can't
+use the SABD additive fusion (data-dependent boundary), so it pays the 36 KB
+tab2.  Kept as a documented graveyard variant; not promoted.
+
+X86 FOLLOW-UP (2026-06-22): does x86 already do this, and does a half-table help?
+------------------------------------------------------------------------------
+x86 production part_full_x86 ALREADY implements the 16-wide two-table partition
+idea (X86_COMPACT16: MIN-merge of x86_ctab_r/l[mlo] with x86_pre_r/l[rlo][mhi],
+0x80 fill, one pshufb + one 16B store per side; ~80 KB tables, sse32 = 32
+ranks/iter).  It WINS on x86 because the merge there is shuffle/store-bound and
+x86 has hardware POPCNT for the cursors (no 0x0101.. prefix-sum needed).
+So the 16b-enc idea is the production x86 path, not a new variant.
+
+Tried a HALF-TABLE x86 variant (prim_part_halftab, prims-partition.h): left side
+= right side under ~mask (ctab_r[~mlo] MIN pre_r[8-rlo][~mhi]), reusing the SAME
+~40 KB tables for both sides, dropping ctab_l/pre_l (80 KB -> 40 KB).  Verifies
+ok.  A/B vs production `* sse/avx2` (bench_prim enc_partition_full --variants):
+  c6a  Zen3        (SSE4.1 prod): 0.1624 -> 0.1612  (+0.7%, marginal)
+  AVX2 host A      (Haswell/Sky): 0.1896 -> 0.1982  (-4.5%)
+  AVX2 host B      (Haswell/Sky): 0.1878 -> 0.1927  (-2.6%)
+  c3   Ivy Bridge  (SSE4.1 only): 0.1979 -> 0.2127  (-7.5%, worst)
+Verdict: not worth it.  The complement work (~mlo/~mhi + 8-rlo on the left side)
+costs more than the 40 KB L1 saving buys back -- all these hosts have 32 KB L1
+and the 80 KB prod tables already spill, but the prod kernel keeps the hot
+ctab/pre slices resident regardless, so halving the table doesn't change the
+working set that matters while the extra ALU ops are paid every iteration.  Only
+Zen3 sees a hair of benefit.  Not promoted; documented graveyard like p16.

@@ -524,6 +524,71 @@ static void prim_part_coal_tbl(const ctx_t *c) {
  * here to mismatch the scalar reference, so they're omitted (they would
  * report FAIL).  The kernels are preserved in bench_coalesce.c. */
 
+/* p16 — 16-byte-at-a-time rank partition via two-table compaction (16b-enc.txt,
+ * green-lit).  Per 16 lanes: idx = tab1[m0] | tab2[pc0][m1] (disjoint supports,
+ * OR is exact), one vqtbl1q over the 16 input ranks, store 16 / advance by
+ * popcount (merge-style) -- half the store count of the per-8 ctab8 scatter.
+ * Left side reuses the same tables under ~mask.  ~40 KB tables (tab1 4 KB +
+ * tab2 9x4 KB): NEON/big-L1 only (would bust Zen3 32 KB L1).  Reuses the
+ * production masks64_neon for the mask + bitmap. */
+static uint8_t pv_p16_tab1[256][16]      __attribute__((aligned(16)));
+static uint8_t pv_p16_tab2[9][256][16]   __attribute__((aligned(16)));
+static int pv_p16_built = 0;
+static void pv_build_p16(void) {
+    if (pv_p16_built) return;
+    for (int m = 0; m < 256; m++) {
+        memset(pv_p16_tab1[m], 0, 16);
+        int p = 0;
+        for (int k = 0; k < 8; k++) if ((m >> k) & 1) pv_p16_tab1[m][p++] = (uint8_t)k;
+    }
+    for (int pc0 = 0; pc0 <= 8; pc0++)
+        for (int m1 = 0; m1 < 256; m1++) {
+            memset(pv_p16_tab2[pc0][m1], 0, 16);
+            int p = pc0;
+            for (int k = 0; k < 8; k++)
+                if ((m1 >> k) & 1) { if (p < 16) pv_p16_tab2[pc0][m1][p] = (uint8_t)(8 + k); p++; }
+        }
+    pv_p16_built = 1;
+}
+static int prim_part_p16_neon(uint8_t *ranks, int n, uint8_t thr, uint8_t *bm, uint8_t *tmp) {
+    pv_build_p16();
+    int n_left = 0, n_right = 0, j = 0;
+    uint8x16_t vt = vdupq_n_u8(thr);
+    static const uint8_t bw_a[16] = {1,2,4,8,16,32,64,128, 1,2,4,8,16,32,64,128};
+    uint8x16_t bw = vld1q_u8(bw_a);
+    for (; j + 64 <= n; j += 64) {
+        uint8x16_t v0 = vld1q_u8(ranks + j),      v1 = vld1q_u8(ranks + j + 16);
+        uint8x16_t v2 = vld1q_u8(ranks + j + 32), v3 = vld1q_u8(ranks + j + 48);
+        uint64_t mask_word = masks64_neon(v0, v1, v2, v3, vt, bw);
+        memcpy(bm + (j >> 3), &mask_word, 8);
+        uint64_t pcw = vget_lane_u64(vreinterpret_u64_u8(vcnt_u8(vcreate_u8(mask_word))), 0);
+        uint8x16_t vg[4] = { v0, v1, v2, v3 };
+#define _P16(g) do {                                                            \
+        uint8_t  m0 = (uint8_t)(mask_word >> (16*(g)));                          \
+        uint8_t  m1 = (uint8_t)(mask_word >> (16*(g) + 8));                      \
+        uint32_t pc0 = (uint32_t)((pcw >> (16*(g)))     & 0xFF);                 \
+        uint32_t pc1 = (uint32_t)((pcw >> (16*(g) + 8)) & 0xFF);                 \
+        uint8x16_t ri = vorrq_u8(vld1q_u8(pv_p16_tab1[m0]),                      \
+                                 vld1q_u8(pv_p16_tab2[pc0][m1]));                \
+        vst1q_u8(tmp + n_right, vqtbl1q_u8(vg[g], ri));                          \
+        uint8x16_t li = vorrq_u8(vld1q_u8(pv_p16_tab1[(uint8_t)~m0]),            \
+                                 vld1q_u8(pv_p16_tab2[8 - pc0][(uint8_t)~m1]));  \
+        vst1q_u8(ranks + n_left, vqtbl1q_u8(vg[g], li));                         \
+        n_right += pc0 + pc1; n_left += 16 - (pc0 + pc1);                        \
+    } while (0)
+        _P16(0); _P16(1); _P16(2); _P16(3);
+#undef _P16
+    }
+    for (; j < n; j++) {
+        if ((j & 7) == 0) bm[j >> 3] = 0;
+        uint8_t r = ranks[j];
+        if (r > thr) { bm[j >> 3] |= (uint8_t)(1u << (j & 7)); tmp[n_right++] = r; }
+        else         { ranks[n_left++] = r; }
+    }
+    return n_right;
+}
+static void prim_part_p16(const ctx_t *c){ prim_part_p16_neon(c->ranks_work, c->n, c->rank_thr, c->bm, c->tmp8); }
+
 #endif /* USE_NEON_KERNELS */
 
 /* ============================================================================
@@ -672,6 +737,61 @@ static void prim_part_sse32_u8(const ctx_t *c) {
         memcpy(bm + (j >> 3), &mm, 2);
         int rlo = x86_pc8[(uint8_t)mm], rhi = x86_pc8[(uint8_t)(mm >> 8)];
         X86_COMPACT16(v, (uint8_t)mm, (uint8_t)(mm >> 8), rlo, n_left, n_right);
+        n_right += rlo + rhi; n_left += 16 - rlo - rhi;
+    }
+    for (; j < n; j++) {
+        if ((j & 7) == 0) bm[j >> 3] = 0;
+        uint8_t r = ranks[j];
+        if (r > thr) { bm[j >> 3] |= (uint8_t)(1u << (j & 7)); tmp[n_right++] = r; }
+        else         { ranks[n_left++] = r; }
+    }
+}
+
+/* halftab: sse32 but drop ctab_l/pre_l — left = right under ~mask
+ * (ctab_l[m]==ctab_r[~m], pre_l[llo][m]==pre_r[llo][~m]).  40 KB tables vs 80 KB,
+ * same SIMD op count (+2 scalar NOT), better L1 reuse (both sides share one set). */
+#define X86_COMPACT16_HALF(v, mlo, mhi, rlo, ldst, rdst)                        \
+    do {                                                                        \
+        __m128i ridx_ = _mm_min_epu8(                                           \
+            _mm_load_si128((const __m128i *)x86_ctab_r[mlo]),                   \
+            _mm_load_si128((const __m128i *)x86_pre_r[rlo][mhi]));              \
+        _mm_storeu_si128((__m128i *)(tmp + (rdst)), _mm_shuffle_epi8((v), ridx_)); \
+        unsigned nmlo_ = (uint8_t)~(unsigned)(mlo);                             \
+        unsigned nmhi_ = (uint8_t)~(unsigned)(mhi);                             \
+        int      llo_  = 8 - (rlo);                                             \
+        __m128i lidx_ = _mm_min_epu8(                                           \
+            _mm_load_si128((const __m128i *)x86_ctab_r[nmlo_]),                 \
+            _mm_load_si128((const __m128i *)x86_pre_r[llo_][nmhi_]));           \
+        _mm_storeu_si128((__m128i *)(ranks + (ldst)), _mm_shuffle_epi8((v), lidx_)); \
+    } while (0)
+static void prim_part_halftab(const ctx_t *c) {
+    uint8_t *ranks = c->ranks_work, *bm = c->bm, *tmp = c->tmp8;
+    int n = c->n; uint8_t thr = c->rank_thr;
+    x86_build_tabs();
+    int n_left = 0, n_right = 0, j = 0;
+    __m128i thr1 = _mm_set1_epi8((char)(thr + 1));
+    for (; j + 32 <= n; j += 32) {
+        __m128i v0 = _mm_loadu_si128((const __m128i *)(ranks + j));
+        __m128i v1 = _mm_loadu_si128((const __m128i *)(ranks + j + 16));
+        uint32_t mlo = (uint16_t)_mm_movemask_epi8(_mm_cmpeq_epi8(_mm_min_epu8(v0, thr1), thr1));
+        uint32_t mhi = (uint16_t)_mm_movemask_epi8(_mm_cmpeq_epi8(_mm_min_epu8(v1, thr1), thr1));
+        uint32_t mm = mlo | (mhi << 16);
+        memcpy(bm + (j >> 3), &mm, 4);
+        int r0 = x86_pc8[(uint8_t)mlo];
+        X86_COMPACT16_HALF(v0, (uint8_t)mlo, (uint8_t)(mlo >> 8), r0, n_left, n_right);
+        int nr01 = __builtin_popcount(mlo);
+        n_right += nr01; n_left += 16 - nr01;
+        int r2 = x86_pc8[(uint8_t)mhi];
+        X86_COMPACT16_HALF(v1, (uint8_t)mhi, (uint8_t)(mhi >> 8), r2, n_left, n_right);
+        int nr23 = __builtin_popcount(mhi);
+        n_right += nr23; n_left += 16 - nr23;
+    }
+    for (; j + 16 <= n; j += 16) {
+        __m128i v = _mm_loadu_si128((const __m128i *)(ranks + j));
+        uint16_t mm = (uint16_t)_mm_movemask_epi8(_mm_cmpeq_epi8(_mm_min_epu8(v, thr1), thr1));
+        memcpy(bm + (j >> 3), &mm, 2);
+        int rlo = x86_pc8[(uint8_t)mm], rhi = x86_pc8[(uint8_t)(mm >> 8)];
+        X86_COMPACT16_HALF(v, (uint8_t)mm, (uint8_t)(mm >> 8), rlo, n_left, n_right);
         n_right += rlo + rhi; n_left += 16 - rlo - rhi;
     }
     for (; j < n; j++) {
@@ -1037,10 +1157,16 @@ static void pv_register_partition(void) {
                "32 ranks/iter, 2x SSE movemask + 2x X86_COMPACT16",
                "32/iter; halves loop+mask+bitmap, same compaction traffic", 1,
                PV_FN_SSE(prim_part_sse32_u8));
+    PV_VARIANT(ST_PART, "halftab", PV_ISA_SSE4, "16b-enc.txt half-table",
+               "sse32 but left = right under ~mask; drops ctab_l/pre_l (40KB vs 80KB); Zen3 +0.7% but AVX2 -3..-5% / IvyB -7.5% (complement ALU > L1 saving); not promoted", 1,
+               PV_FN_SSE(prim_part_halftab));
     PV_VARIANT(ST_PART, "avx32", PV_ISA_AVX2,
                "32 ranks/iter, 1x ymm movemask + 2x X86_COMPACT16",
                "32/iter; single 32-bit mask build vs 2x SSE", 1,
                PV_FN_SSE_AVX2(prim_part_avx32_u8));
+    PV_VARIANT(ST_PART, "p16", PV_ISA_NEON, "16b-enc.txt (two-table partition)",
+               "16 ranks/iter two-table compaction; only V1/Graviton3 +2.6%, loses M4 -12% N1 -14% V2 -4% V3 -2% (extra loads + 36KB tab2 latency); not promoted", 1,
+               PV_FN_NEON(prim_part_p16));
     /* x86 enc_partition_full (u16 code_la graveyard) */
     PV_VARIANT(ST_U16_PART, "sse_com", PV_ISA_SSE4,
                "bench_partition_x86.c / IDEAS x86 COM partition",
