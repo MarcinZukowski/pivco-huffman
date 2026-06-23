@@ -22,6 +22,7 @@
 #include "pivco_huffman_common.h"
 #include "pivco_huffman_wire.h"
 #include "pivco_huffman_primitives.h"
+#include "pivco_prof.h"
 #ifdef PIVCO_HAS_FSE
 #include "pivco_fse.h"
 #endif
@@ -191,6 +192,7 @@ static void codec_encode_node(const pivco_huffman_table_t *table,
                                uint8_t *tmp)
 {
     if (n == 0) return;
+    PROF_COUNT_ONLY(PROF_ENC_NODE_VISIT, n);
 
     const pivco_tree_node_t *node = &table->tree[node_id];
     if (node->symbol >= 0) return;  /* leaf — nothing to emit */
@@ -199,7 +201,9 @@ static void codec_encode_node(const pivco_huffman_table_t *table,
     if (table->flat_depth[node_id] >= 2) {
         int D = table->flat_depth[node_id];
         int total_bytes = (n * D + 7) >> 3;
+        PROF_TIC();
         prim_enc_pack_dN(ranks, n, D, table->flat_base_rank[node_id], *out_ptr);
+        PROF_TOC(PROF_ENC_FLAT, n);
         *out_ptr += total_bytes;
         return;
     }
@@ -226,6 +230,7 @@ static void codec_encode_node(const pivco_huffman_table_t *table,
      * never reads its scattered side, so HALF/BOTH_LEAVES skip that scatter. */
     uint8_t thr = table->split_rank[node_id];
     int n_right;
+    PROF_TIC();
     switch ((pivco_node_type_t)table->node_type[node_id]) {
     case PIVCO_NODE_BOTH_LEAVES:
         n_right = prim_enc_partition_none(ranks, n, thr, bm);        break;
@@ -236,6 +241,7 @@ static void codec_encode_node(const pivco_huffman_table_t *table,
     default:
         n_right = prim_enc_partition_full(ranks, n, thr, bm, tmp);   break;
     }
+    PROF_TOC(PROF_ENC_NODE_FULL, n);
     int n_left  = n - n_right;
 
     /* Optional FSE attempt on the raw bitmap.  On commit, marker_slot
@@ -280,7 +286,10 @@ int CODEC_ENCODE_ENTRY(const uint8_t *symbols, size_t n,
     uint8_t *tmp = ranks + ranks_capacity;
 
     /* ranks[i] = in-order rank of symbols[i] (gather table->sym_to_rank). */
+    PROF_COUNT_ONLY(PROF_ENC_ENTRY, N);
+    PROF_TIC();
     prim_enc_init(ranks, N, symbols, table->sym_to_rank);
+    PROF_TOC(PROF_ENC_INIT, N);
 
     codec_encode_node(table, table->tree_root, ranks, N, 0, &ptr, tmp);
 

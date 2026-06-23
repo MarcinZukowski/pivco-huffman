@@ -4,23 +4,6 @@
 #include <stddef.h>
 #include <assert.h>
 
-#ifdef PIVCO_BUILD_PROFILE
-#include <mach/mach_time.h>            /* M4-native counter; no clock syscall */
-double      pivco_prof_ticks[32];      /* accumulated raw mach ticks per phase */
-const char *pivco_prof_name[32];
-int         pivco_prof_n;
-static uint64_t pivco_prof_t0;
-static int      pivco_prof_i;
-#define PROF_RESET()  do { pivco_prof_t0 = mach_absolute_time(); pivco_prof_i = 0; } while (0)
-#define PROF_MARK(nm) do { uint64_t _t = mach_absolute_time();                  \
-    pivco_prof_ticks[pivco_prof_i] += (double)(_t - pivco_prof_t0);             \
-    pivco_prof_name[pivco_prof_i] = (nm); pivco_prof_t0 = _t;                    \
-    if (++pivco_prof_i > pivco_prof_n) pivco_prof_n = pivco_prof_i; } while (0)
-#else
-#define PROF_RESET()
-#define PROF_MARK(nm)
-#endif
-
 /* ---------- Code lengths via van Leeuwen's two-queue method ----------
  * Replaces the index-indirected binary min-heap.  The heap spent ~⅔ of the
  * whole table build pointer-chasing (nodes[indices[i]].freq is two dependent
@@ -271,7 +254,6 @@ int pivco_huffman_build_table(const uint64_t freq[PIVCO_MAX_SYMBOLS],
                               pivco_huffman_table_t *table)
 {
     if (!freq || !table) return PIVCO_ERR_NULL;
-    PROF_RESET();   /* the freq (encode) path was previously un-instrumented */
 
     memset(table, 0, sizeof(*table));
 
@@ -301,7 +283,6 @@ int pivco_huffman_build_table(const uint64_t freq[PIVCO_MAX_SYMBOLS],
     /* Limit code lengths to PIVCO_MAX_CODE_LEN */
     limit_code_lengths(lengths, PIVCO_MAX_SYMBOLS, PIVCO_MAX_CODE_LEN);
 
-    PROF_MARK("huff_lengths");   /* freq->lengths: two-queue build + limit */
     return build_table_finish(lengths, table);
 }
 
@@ -343,7 +324,6 @@ static int build_table_finish(const uint8_t lengths[PIVCO_MAX_SYMBOLS],
     for (int i = 0; i < PIVCO_MAX_SYMBOLS; i++) {
         table->code_len[i] = lengths[i];
     }
-    PROF_MARK("copy_len");
 
     /* Histogram code lengths.  The len>0 guard isn't about correctness
        (sym_count[0] is an unread scratch bin) -- it keeps the unused symbols
@@ -354,7 +334,6 @@ static int build_table_finish(const uint8_t lengths[PIVCO_MAX_SYMBOLS],
         if (lengths[i] > 0)
             table->sym_count[lengths[i]]++;
     }
-    PROF_MARK("count_len");
 
     /* Derive min/max code length from the (<=11) length bins. */
     uint8_t max_len = 0, min_len = PIVCO_MAX_CODE_LEN + 1;
@@ -366,7 +345,6 @@ static int build_table_finish(const uint8_t lengths[PIVCO_MAX_SYMBOLS],
     }
     table->max_len = max_len;
     table->min_len = min_len;
-    PROF_MARK("minmax");
 
     /* ---------- Flat-aware code assignment ----------
      *
@@ -422,7 +400,6 @@ static int build_table_finish(const uint8_t lengths[PIVCO_MAX_SYMBOLS],
             if (L) flat_items[cursor[L]++].sym = (uint8_t)s;
         }
     }
-    PROF_MARK("gather_2a");
 
     /* Decompose each c_L into chunks.  Strategy depends on tree mode --
        see pivco_huffman_set_tree_mode().  Default OPTIMIZED matches the
@@ -548,7 +525,6 @@ static int build_table_finish(const uint8_t lengths[PIVCO_MAX_SYMBOLS],
         }
     }
 
-    PROF_MARK("decompose_2b");
 
     /* For CANONICAL_FLAT, chunks already carry canonical root_codes; assign
        symbol codes directly from them and skip the depth-sort + sequential
@@ -565,7 +541,6 @@ static int build_table_finish(const uint8_t lengths[PIVCO_MAX_SYMBOLS],
                 table->code[sym] = (uint16_t)(((uint32_t)root << bit) | (uint32_t)i);
             }
         }
-        PROF_MARK("assign_2d");
     } else {
         /* Sort chunks by depth asc (stable; ties keep their natural order
            which is L asc by length, larger-bit-first within length). */
@@ -579,7 +554,6 @@ static int build_table_finish(const uint8_t lengths[PIVCO_MAX_SYMBOLS],
             chunks[j + 1] = cur;
         }
 
-        PROF_MARK("sort_2c");
 
         /* Canonical-assign codes to chunks (chunk-level Kraft sum = 1).
            Each chunk gets a code prefix of length `chunk.depth`.  Within
@@ -602,7 +576,6 @@ static int build_table_finish(const uint8_t lengths[PIVCO_MAX_SYMBOLS],
             }
         }
 
-        PROF_MARK("assign_2d");
     }
 
     /* Populate sorted_symbols / first_sym_idx / first_code from the
@@ -629,7 +602,6 @@ static int build_table_finish(const uint8_t lengths[PIVCO_MAX_SYMBOLS],
      * pivco_huffman_build_traditional_table() so the normal build -- and the
      * decode-side rebuild from code lengths -- don't pay for the 2 KB fill. */
 
-    PROF_MARK("sorted_syms_3");
 
     /* Build the PIVCO tree-walk tree, one node-creating walk per chunk.
        A flat subtree (D>=2) stops at its root: the decoder reaches its 2^D
@@ -697,7 +669,6 @@ static int build_table_finish(const uint8_t lengths[PIVCO_MAX_SYMBOLS],
         table->tree_node_count = nc;
     }
 
-    PROF_MARK("tree_build_4");
 
     /* Find the most frequent symbol (shortest code) for prefill.
        Walk the tree to find its node ID. */
@@ -716,7 +687,6 @@ static int build_table_finish(const uint8_t lengths[PIVCO_MAX_SYMBOLS],
         }
     }
 
-    PROF_MARK("prefill");
 
     /* Classify each node for decode-dispatch.  Mirrors the existing
      * conditional priority in decode_node_neon:
@@ -757,7 +727,6 @@ static int build_table_finish(const uint8_t lengths[PIVCO_MAX_SYMBOLS],
         }
     }
 
-    PROF_MARK("classify");
 
     /* Populate max_leaf_depth[node] for every internal node.  Used by
      * the encoder to detect when a subtree's remaining bits fit in a
@@ -805,12 +774,10 @@ static int build_table_finish(const uint8_t lengths[PIVCO_MAX_SYMBOLS],
             }
         }
     }
-    PROF_MARK("max_leaf_depth");
 
     /* partbyrank: one in-order pass assigns every leaf its rank and every
      * internal node its split_rank / flat_base_rank (see assign_inorder_ranks). */
     assign_inorder_ranks(table, table->tree_root, 0);
-    PROF_MARK("partbyrank");
 
     return PIVCO_OK;
 }
@@ -825,7 +792,6 @@ int pivco_huffman_build_table_from_code_lens(
     pivco_huffman_table_t *table)
 {
     if (!code_lens || !table) return PIVCO_ERR_NULL;
-    PROF_RESET();
     /* Clear everything except the 4 KB decode_sym/decode_len pair: those are
      * filled independently by pivco_huffman_build_traditional_table() and are
      * never read by the bulk decoder, so zeroing them here is wasted work. */
@@ -835,12 +801,10 @@ int pivco_huffman_build_table_from_code_lens(
         memset(table, 0, offsetof(pivco_huffman_table_t, decode_sym));
         memset((char *)table + skip_end, 0, sizeof(*table) - skip_end);
     }
-    PROF_MARK("memset");
 
     int n_used = 0, last = 0;
     for (int i = 0; i < PIVCO_MAX_SYMBOLS; i++)
         if (code_lens[i] > 0) { n_used++; last = i; }
-    PROF_MARK("count_used");
     if (n_used == 0) return PIVCO_ERR_EMPTY;
     table->num_symbols = (uint16_t)n_used;
 
