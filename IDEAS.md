@@ -8,9 +8,7 @@
 ### CONSIDERED — open / parked / research direction
 
 **General**
-- [Fast Huffman builder (drop the index-indirected min-heap)](#fast-huffman-builder-drop-the-index-indirected-min-heap-2026-06-21)
 - [4-way root merge (top 2 levels in one pass)](#4-way-root-merge-top-2-levels-in-one-pass-2026-06-19)
-- [Cross-port post-June-5 x86 optimizations to NEON](#cross-port-post-june-5-x86-optimizations-to-neon-2026-06-13)
 - [SIMD-ify scalar tails (overwrite or masked stores)](#simd-ify-scalar-tails-overwrite-or-masked-stores-2026-06-15)
 - [Golomb/Rice tier for very-high-skew nodes (p > 0.95)](#golombrice-tier-for-very-high-skew-nodes-p--095-2026-05-16-research)
 - [pivcohuf block-structured file format + tiny-input header](#pivcohuf-block-structured-file-format--tiny-input-header-2026-05-17-parked)
@@ -36,6 +34,8 @@
 ### DONE — shipped
 
 **General**
+- [Fast Huffman builder (two-queue + radix, no min-heap)](#fast-huffman-builder-drop-the-index-indirected-min-heap-2026-06-21)
+- [Cross-port post-June-5 x86 optimizations to NEON](#cross-port-post-june-5-x86-optimizations-to-neon-2026-06-13)
 - [Unify-framework refactor (5 phases)](#unify-framework-refactor-2026-05-14)
 - [encode_node infinite recursion (stack OOB write) fix](#encode_node-infinite-recursion-stack-oob-write-fix-2026-05-13)
 - [Flat-aware Huffman tree restructurer](#flat-aware-huffman-tree-restructurer-2026-04-25)
@@ -119,16 +119,8 @@
 
 **General**
 
-### Fast Huffman builder (drop the index-indirected min-heap), 2026-06-21
-`pivco_huffman_build_table`'s freq→lengths step uses a binary min-heap that stores `int indices[]` into a separate `nodes[]` array, so every compare is two dependent loads (`nodes[indices[i]].freq`) plus a tie-broken data-dependent branch.  For ≤256 symbols this is pathologically slow: c3 (Ivy Bridge) build-profile sub-marks (`extras/bench/bench_buildprof.c`, zipf 256-sym, build ~35 µs) show **heap_merge 56.7% (~20 µs) + heap_build 9.4% (~3 µs)** — ~⅔ of the whole table build in heap pointer-chasing + mispredicts for a trivial 256-leaf tree.  `limit_code_lengths` is *not* the issue (<5%).  Fix: the standard sort-then-no-heap builder (zstd `HUF_buildCTable` / zlib): counting/radix-sort the ≤256 symbols by frequency, then **van Leeuwen two-queue** O(n) merge (leaves sorted + internal nodes generated monotonic → each min is an O(1) front-compare, branch-light) or the **Moffat–Katajainen in-place** length algorithm (code lengths directly in the sorted array, no explicit tree).  Expected ~23 µs → ~2–4 µs, ≈halving the table build.  Context: with correct per-128 KB-window amortization (8 blocks/table) the table build is only ~9% of e2e and the histogram ~22%, but this is the single biggest table-prep lever vs huf0 and removes the worst per-chunk latency spike.  Independent of the partbyrank branch.
-
-**IMPLEMENTED 2026-06-22.** `build_lengths_twoqueue` in `huffman_table.c`: stable LSD-radix sort of the ≤256 leaves by frequency, then the van Leeuwen two-queue merge, then a parent-walk for depths.  Tie discipline (`<=`, leaf-before-internal) reproduces the old heap's lengths **byte-identically** — validated by a 3M-case cross-check fuzz vs the old min-heap on M4 + x86 (c3/c6a) + NEON (c8g) (the heap + harness were removed after validation).  freq→lengths phase (M4, ratio is timebase-independent): heap→two-queue **~2.5× uniform / ~2.5× zipf / 1.6× skew80 / 1.25× english** — and freq→lengths is 60–77% of `build_table`, so this roughly **halves the whole table build** (~7→3 µs uniform).  Confirmed our two-queue is the same algorithm as zstd's `HUF_buildTree`; zstd's hybrid bucket sort (`HUF_sort`) benchmarked as a wash-to-loss on x86 and would break byte-identical — not adopted, LSD radix kept.  E2e weight: under the **per-128 KB re-table model** (`bench_fair`, matching huf0) `build_table` is ~3–4% of encode (so this saves ~1.5–2% e2e); under the **one-global-table file CLI** it is ~0.07% (one build for the whole file).  Per-encode-stage profile separately shows histogram (~29–49%) and the rank-gather (~23%) as the larger encode levers — see the profiling-instrumentation commit.
-
 ### 4-way root merge (top 2 levels in one pass), 2026-06-19
 Merge the root's 4 grandchild streams in one pass instead of 3 binary merges (write N once, not ~2N).  Microbench `extras/bench/bench_merge4way.c`: **VBMI2-only** — Zen5 1.35–2.0×, Granite Rapids 1.9–2.9× (more leaf grandchildren = faster, via const-buffer `vpexpandb` over `set1`); NEON loses ~0.36× (no byte-expand → the 4-way rank costs more than the saved pass).  7/9 main dists qualify.  Blocker: wire-format change (top-2-levels as 2 routing bitplanes + 4 substreams).  Next: c8a/c8i decode PROF for the end-to-end %.
-
-### Cross-port post-June-5 x86 optimizations to NEON, 2026-06-13
-Recent x86 wins targeted SSE/AVX2 + AVX-512 only: AVX-512 pack_d{2..7} multishift 64 codes/iter (`0c80e3a`), AVX-512 merge_flat_d{2..7} widened to 64 codes/iter (`e5a199a`), x86 AVX2 pack_d{2,3,5,6,7} via ryg multiply-as-shift (`a1aa6b9`), x86 partition 2x-unrolled stride-16 (`83e23a0`).  Open question on NEON (M4 + Graviton 4): is the analogous primitive already at width ceiling, or is there headroom?  Multishift has no NEON analogue (x86-only), and the multiply-as-shift trick is irrelevant on NEON (`vshlq_u32` is native).  But the merge_flat widening pattern and the 2x partition unroll may transfer.  Action: per-primitive bench (`bench_prim`) before/after a NEON 64-codes/iter sketch + fair_bench A/B on c8g.
 
 ### SIMD-ify scalar tails (overwrite or masked stores), 2026-06-15
 Most primitives (partition, merge, pack, unpack) drop to scalar for the final 1..K-1 elements where K is the SIMD stride (8/16/32 depending on primitive).  At small block sizes (deep recursion or short final block) those tails dominate.  Two general approaches: (a) **overwrite tails** — round n up to the next stride boundary, write valid+garbage past the real n, then truncate via cursor adjustment (already done in some AVX-512 paths; works when downstream readers know n).  (b) **masked SIMD** — `vmaskmovps`/AVX-512 `k` masks / NEON's `vbslq_u8` on a tail-mask vector to do exactly n elements per SIMD op.  AVX-512 full-tail masked partition shipped 2026-05-08 (+23% on c8i); same pattern hasn't been tried on NEON/SSE/AVX2 tails of merge / pack / unpack / scatter primitives.
@@ -206,6 +198,12 @@ RVV maps well: `vcompress` = partition, `vrgather` = TBL, **`vsuxei8` = native i
 ## DONE
 
 **General**
+
+### Fast Huffman builder (drop the index-indirected min-heap), 2026-06-21
+Replaced the freq→lengths min-heap (60–77% of `build_table`, all pointer-chasing) with LSD-radix sort + van Leeuwen two-queue + parent-walk depths (`build_lengths_twoqueue`, `4e0f288`) — ~2.5× uniform/zipf on the phase, roughly halving the table build.  Byte-identical: the `<=` tie-break reproduces the old heap's lengths (3M-case cross-check fuzz on M4/x86/NEON).  Same algorithm as zstd `HUF_buildTree`; its hybrid bucket sort was a wash-to-loss on x86, not adopted.  E2e weight ~1.5–2% under the per-128 KB re-table model (`bench_fair`), ~0.07% for one-global-table files.
+
+### Cross-port post-June-5 x86 optimizations to NEON, 2026-06-13
+Investigated whether the AVX-512/AVX2 pack + partition + merge_flat wins transfer to NEON.  Verdict: little to port.  Multishift pack and ryg multiply-as-shift are x86-only (NEON has native `vshlq`).  The 16-wide partition (the x86 store-count win) was tried as the `p16` variant and lost on 4/5 NEON uarchs — `part_full_neon` already runs 64/iter, 8× unrolled, which is NEON-optimal.  Only `merge_flat` D≤4 widening could transfer (D≥5 needs a 64-entry byte-permute NEON lacks), but flat decode is ~7% of decode — low ROI, not pursued.
 
 ### Unify-framework refactor, 2026-05-14
 All 4 backends now share `src/pivco_huffman_codec.c` (compiled once per backend as an OBJECT library); SIMD lives only in `primitives_<backend>.h`.  Net -3036/+1867 LoC across the codec source.  Surfaced + fixed the wire-format drift bug (FSE marker byte missing from legacy AVX-512 encoder).  Adding a 5th backend is now a primitives header + a CMake entry.  Commits: `2429c80`, `91bea73`, `5d85874`, `3c5ecf8`.  Sweep: `results/SUMMARY-20260514-unify-framework.md`.
