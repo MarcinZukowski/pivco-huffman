@@ -89,8 +89,8 @@ static inline int popcount_K_right_neon(const uint8_t *bm, int nbytes, int K)
  *
  * One 2-source vqtbl2q over {R16, L16} per 16-byte chunk; the cross-half
  * cursor offset is folded into the shuffle index by SABD (|shuf0 - shuf1|),
- * so no explicit add.  Four chunks per 64-byte iter share one vpadd-folded
- * 64-bit popcount for the per-chunk cursor splits and the L/R advance.  The
+ * so no explicit add.  Four chunks per 64-byte iter share one vcnt + 64-bit
+ * multiply prefix-sum for the per-chunk cursor splits and the L/R advance.  The
  * two 256x16 index tables (g_merge_shuf0/1, 8 KiB) are built once in
  * codec_init_neon.  Tail (K mod 64) falls back to the expand_tab
  * stride-16/-8/scalar ladder. */
@@ -141,13 +141,17 @@ static inline void merge_vec_vec_neon(const uint8_t *bm, int K,
         uint64_t mask; memcpy(&mask, bm + (i >> 3), 8);
         uint8x8_t vmask = vcreate_u8(mask);
         uint8x8_t pop8  = vcnt_u8(vmask);
-        uint8x8_t pop16 = vpadd_u8(pop8, pop8);
-        uint32x2_t pop64 = vmul_n_u32(vreinterpret_u32_u8(pop16), 0x01010101u);
-        uint32_t all_pop = vget_lane_u32(pop64, 0);
-        intptr_t pop0 = all_pop & 0xff;
-        intptr_t pop1 = (all_pop >> 8) & 0xff;
-        intptr_t pop2 = (all_pop >> 16) & 0xff;
-        intptr_t pop3 = all_pop >> 24;
+        /* Per-chunk cursor splits: move the 8 byte-popcounts to a GPR and
+         * prefix-sum them with a single 64-bit multiply (offloads to the scalar
+         * pipe; cheaper than the SIMD vpadd+vmul fold).  Byte k of the product
+         * holds sum(pop8[0..k]), so bytes 1/3/5/7 are the 16-bit chunk
+         * boundaries c0, c0+c1, c0+c1+c2, total. */
+        uint64_t all_pop = vget_lane_u64(vreinterpret_u64_u8(pop8), 0);
+        uint64_t pfx = all_pop * 0x0101010101010101ull;
+        intptr_t pop0 = (pfx >> 8)  & 0xff;
+        intptr_t pop1 = (pfx >> 24) & 0xff;
+        intptr_t pop2 = (pfx >> 40) & 0xff;
+        intptr_t pop3 =  pfx >> 56;
         merge_neon_16B(out + i,      l_list,             r_list,        mask,       g_merge_shuf0, g_merge_shuf1);
         merge_neon_16B(out + i + 16, l_list + 16 - pop0, r_list + pop0, mask >> 16, g_merge_shuf0, g_merge_shuf1);
         merge_neon_16B(out + i + 32, l_list + 32 - pop1, r_list + pop1, mask >> 32, g_merge_shuf0, g_merge_shuf1);
@@ -218,9 +222,8 @@ static inline void merge_cst_vec_neon(const uint8_t *bm, int K,
     for (; i + 64 <= K; i += 64) {
         uint64_t mask; memcpy(&mask, bm + (i >> 3), 8);
         uint8x8_t pop8 = vcnt_u8(vcreate_u8(mask));
-        uint8x8_t pop16 = vpadd_u8(pop8, pop8);
-        uint32_t ap = vget_lane_u32(vmul_n_u32(vreinterpret_u32_u8(pop16), 0x01010101u), 0);
-        intptr_t p0 = ap & 0xff, p1 = (ap >> 8) & 0xff, p2 = (ap >> 16) & 0xff, p3 = ap >> 24;
+        uint64_t pfx = vget_lane_u64(vreinterpret_u64_u8(pop8), 0) * 0x0101010101010101ull;
+        intptr_t p0 = (pfx >> 8) & 0xff, p1 = (pfx >> 24) & 0xff, p2 = (pfx >> 40) & 0xff, p3 = pfx >> 56;
 #define _MCV(off, rd, mk) do {                                                   \
         int8x16_t s0 = vld1q_s8(&g_merge_shuf0[(((intptr_t)(mk)) << 4) & 0xff0]); \
         int8x16_t s1 = vld1q_s8(&g_merge_shuf1[(((intptr_t)(mk)) >> 4) & 0xff0]); \
@@ -263,9 +266,8 @@ static inline void merge_vec_cst_neon(const uint8_t *bm, int K,
     for (; i + 64 <= K; i += 64) {
         uint64_t mask; memcpy(&mask, bm + (i >> 3), 8);
         uint8x8_t pop8 = vcnt_u8(vcreate_u8(mask));
-        uint8x8_t pop16 = vpadd_u8(pop8, pop8);
-        uint32_t ap = vget_lane_u32(vmul_n_u32(vreinterpret_u32_u8(pop16), 0x01010101u), 0);
-        intptr_t p0 = ap & 0xff, p1 = (ap >> 8) & 0xff, p2 = (ap >> 16) & 0xff, p3 = ap >> 24;
+        uint64_t pfx = vget_lane_u64(vreinterpret_u64_u8(pop8), 0) * 0x0101010101010101ull;
+        intptr_t p0 = (pfx >> 8) & 0xff, p1 = (pfx >> 24) & 0xff, p2 = (pfx >> 40) & 0xff, p3 = pfx >> 56;
 #define _MVC(off, ld, mk) do {                                                   \
         int8x16_t s0 = vld1q_s8(&g_merge_shuf0[(((intptr_t)(mk)) << 4) & 0xff0]); \
         int8x16_t s1 = vld1q_s8(&g_merge_shuf1[(((intptr_t)(mk)) >> 4) & 0xff0]); \
