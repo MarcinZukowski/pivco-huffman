@@ -21,95 +21,87 @@ static int      pivco_prof_i;
 #define PROF_MARK(nm)
 #endif
 
-/* ---------- Min-heap for Huffman tree construction ---------- */
+/* ---------- Code lengths via van Leeuwen's two-queue method ----------
+ * Replaces the index-indirected binary min-heap.  The heap spent ~⅔ of the
+ * whole table build pointer-chasing (nodes[indices[i]].freq is two dependent
+ * loads per compare) for a trivial <=256-leaf tree.  The two-queue method is
+ * O(n) after one sort: leaves pre-sorted ascending by frequency go in one
+ * queue, internal nodes (whose frequencies are generated monotonically) in a
+ * second FIFO, so each of the two minima per merge is an O(1) front compare.
+ *
+ * Tie discipline reproduces the heap's exactly, giving byte-identical lengths:
+ * the heap broke ties by node index, and leaves (indices 0..n-1) always sort
+ * before internals (indices >=n), so on an equal frequency a leaf wins -- the
+ * `<=` below -- and within a queue the front already holds the lowest index
+ * (leaves sorted by (freq,sym); internals in creation order). */
+typedef struct { uint64_t freq; uint16_t sym; } leaf_t;
 
-typedef struct {
-    uint64_t freq;
-    int      symbol;  /* >= 0 for leaf, < 0 for internal (-1 - index) */
-    int      left;
-    int      right;
-} huff_node_t;
-
-typedef struct {
-    int      indices[PIVCO_MAX_SYMBOLS * 2];
-    int      size;
-    huff_node_t *nodes;
-} min_heap_t;
-
-static void heap_swap(min_heap_t *h, int a, int b)
+/* Stable LSD radix sort of leaf[0..n) by frequency ascending, over only the
+ * bytes the max frequency needs (typically 2-3 for per-window counts).  Beats
+ * qsort here: no indirect compare per element, and stability over the
+ * symbol-ordered seed keeps the (freq,sym) tie discipline the heap relied on. */
+static void sort_leaves_by_freq(leaf_t *leaf, int n)
 {
-    int tmp = h->indices[a];
-    h->indices[a] = h->indices[b];
-    h->indices[b] = tmp;
-}
+    uint64_t mx = 0;
+    for (int i = 0; i < n; i++) if (leaf[i].freq > mx) mx = leaf[i].freq;
+    int nbytes = 0;
+    while (mx) { nbytes++; mx >>= 8; }   /* freq>0 for every leaf => nbytes>=1 */
 
-static void heap_sift_up(min_heap_t *h, int i)
-{
-    while (i > 0) {
-        int parent = (i - 1) / 2;
-        uint64_t fi = h->nodes[h->indices[i]].freq;
-        uint64_t fp = h->nodes[h->indices[parent]].freq;
-        if (fi < fp || (fi == fp && h->indices[i] < h->indices[parent])) {
-            heap_swap(h, i, parent);
-            i = parent;
-        } else {
-            break;
-        }
+    leaf_t tmp[PIVCO_MAX_SYMBOLS];
+    leaf_t *src = leaf, *dst = tmp;
+    for (int b = 0; b < nbytes; b++) {
+        int shift = b * 8;
+        int cnt[256] = {0};
+        for (int i = 0; i < n; i++) cnt[(src[i].freq >> shift) & 0xFF]++;
+        int sum = 0;
+        for (int c = 0; c < 256; c++) { int t = cnt[c]; cnt[c] = sum; sum += t; }
+        for (int i = 0; i < n; i++) { int k = (src[i].freq >> shift) & 0xFF; dst[cnt[k]++] = src[i]; }
+        leaf_t *t = src; src = dst; dst = t;
     }
+    if (src != leaf) memcpy(leaf, src, (size_t)n * sizeof(leaf_t));
 }
 
-static void heap_sift_down(min_heap_t *h, int i)
+/* Derives code lengths for n_used (>=2) symbols into lengths[] (indexed by
+ * symbol; untouched entries stay 0).  No length limiting -- the caller applies
+ * limit_code_lengths afterwards, same as the heap path did. */
+static void build_lengths_twoqueue(const uint64_t freq[PIVCO_MAX_SYMBOLS],
+                                   int n_used, const int used[PIVCO_MAX_SYMBOLS],
+                                   uint8_t lengths[PIVCO_MAX_SYMBOLS])
 {
-    while (1) {
-        int smallest = i;
-        int left = 2 * i + 1;
-        int right = 2 * i + 2;
-        if (left < h->size) {
-            uint64_t fl = h->nodes[h->indices[left]].freq;
-            uint64_t fs = h->nodes[h->indices[smallest]].freq;
-            if (fl < fs || (fl == fs && h->indices[left] < h->indices[smallest]))
-                smallest = left;
-        }
-        if (right < h->size) {
-            uint64_t fr = h->nodes[h->indices[right]].freq;
-            uint64_t fs = h->nodes[h->indices[smallest]].freq;
-            if (fr < fs || (fr == fs && h->indices[right] < h->indices[smallest]))
-                smallest = right;
-        }
-        if (smallest == i) break;
-        heap_swap(h, i, smallest);
-        i = smallest;
+    leaf_t leaf[PIVCO_MAX_SYMBOLS];
+    for (int i = 0; i < n_used; i++) {
+        leaf[i].freq = freq[used[i]];
+        leaf[i].sym  = (uint16_t)used[i];
     }
-}
+    sort_leaves_by_freq(leaf, n_used);
 
-static void heap_push(min_heap_t *h, int node_idx)
-{
-    h->indices[h->size] = node_idx;
-    heap_sift_up(h, h->size);
-    h->size++;
-}
+    /* nodes 0..n_used-1 = leaves (sorted order); n_used.. = internals.
+     * The internal queue is the contiguous index range [ih, it). */
+    const int N = n_used;
+    uint64_t nfreq[PIVCO_MAX_SYMBOLS * 2];
+    int      parent[PIVCO_MAX_SYMBOLS * 2];
+    for (int i = 0; i < N; i++) nfreq[i] = leaf[i].freq;
 
-static int heap_pop(min_heap_t *h)
-{
-    int result = h->indices[0];
-    h->size--;
-    h->indices[0] = h->indices[h->size];
-    if (h->size > 0) heap_sift_down(h, 0);
-    return result;
-}
-
-/* ---------- Code length extraction via DFS ---------- */
-
-static void extract_lengths(const huff_node_t *nodes, int idx, int depth,
-                            uint8_t *lengths)
-{
-    if (nodes[idx].symbol >= 0) {
-        /* Leaf */
-        lengths[nodes[idx].symbol] = (uint8_t)(depth > 0 ? depth : 1);
-        return;
+    int li = 0;          /* next unconsumed leaf */
+    int ih = N;          /* internal-queue head (oldest) */
+    int ni = N;          /* next internal node index to create (== queue tail) */
+    for (int remaining = N; remaining > 1; remaining--) {
+        int a, b;
+        if (li < N && (ih == ni || nfreq[li] <= nfreq[ih])) a = li++; else a = ih++;
+        if (li < N && (ih == ni || nfreq[li] <= nfreq[ih])) b = li++; else b = ih++;
+        nfreq[ni] = nfreq[a] + nfreq[b];
+        parent[a] = ni;
+        parent[b] = ni;
+        ni++;            /* extends the internal queue tail */
     }
-    extract_lengths(nodes, nodes[idx].left, depth + 1, lengths);
-    extract_lengths(nodes, nodes[idx].right, depth + 1, lengths);
+
+    const int root = ni - 1;            /* == 2N-2 */
+    uint8_t depth[PIVCO_MAX_SYMBOLS * 2];
+    depth[root] = 0;
+    for (int i = root - 1; i >= 0; i--) /* parent index always > child index */
+        depth[i] = (uint8_t)(depth[parent[i]] + 1);
+    for (int i = 0; i < N; i++)
+        lengths[leaf[i].sym] = depth[i] > 0 ? depth[i] : 1;
 }
 
 /* ---------- Code length limiting (DEFLATE-style, RFC 1951) ---------- */
@@ -301,45 +293,15 @@ int pivco_huffman_build_table(const uint64_t freq[PIVCO_MAX_SYMBOLS],
         return PIVCO_OK;
     }
 
-    /* Build Huffman tree using min-heap */
-    huff_node_t nodes[PIVCO_MAX_SYMBOLS * 2];
-    memset(nodes, 0, sizeof(nodes));
-    min_heap_t heap;
-    heap.size = 0;
-    heap.nodes = nodes;
-
-    int next_node = 0;
-    for (int i = 0; i < n_used; i++) {
-        nodes[next_node].freq = freq[used[i]];
-        nodes[next_node].symbol = used[i];
-        nodes[next_node].left = -1;
-        nodes[next_node].right = -1;
-        heap_push(&heap, next_node);
-        next_node++;
-    }
-
-    while (heap.size > 1) {
-        int a = heap_pop(&heap);
-        int b = heap_pop(&heap);
-        nodes[next_node].freq = nodes[a].freq + nodes[b].freq;
-        nodes[next_node].symbol = -1; /* internal */
-        nodes[next_node].left = a;
-        nodes[next_node].right = b;
-        heap_push(&heap, next_node);
-        next_node++;
-    }
-
-    int root = heap_pop(&heap);
-
-    /* Extract code lengths */
+    /* Derive code lengths from frequencies (two-queue, no heap) */
     uint8_t lengths[PIVCO_MAX_SYMBOLS];
     memset(lengths, 0, sizeof(lengths));
-    extract_lengths(nodes, root, 0, lengths);
+    build_lengths_twoqueue(freq, n_used, used, lengths);
 
     /* Limit code lengths to PIVCO_MAX_CODE_LEN */
     limit_code_lengths(lengths, PIVCO_MAX_SYMBOLS, PIVCO_MAX_CODE_LEN);
 
-    PROF_MARK("huff_heap");   /* freq->lengths: heap tree build + extract + limit */
+    PROF_MARK("huff_lengths");   /* freq->lengths: two-queue build + limit */
     return build_table_finish(lengths, table);
 }
 

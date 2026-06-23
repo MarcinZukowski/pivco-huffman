@@ -8,6 +8,7 @@
 ### CONSIDERED — open / parked / research direction
 
 **General**
+- [Fast Huffman builder (drop the index-indirected min-heap)](#fast-huffman-builder-drop-the-index-indirected-min-heap-2026-06-21)
 - [4-way root merge (top 2 levels in one pass)](#4-way-root-merge-top-2-levels-in-one-pass-2026-06-19)
 - [Cross-port post-June-5 x86 optimizations to NEON](#cross-port-post-june-5-x86-optimizations-to-neon-2026-06-13)
 - [SIMD-ify scalar tails (overwrite or masked stores)](#simd-ify-scalar-tails-overwrite-or-masked-stores-2026-06-15)
@@ -117,6 +118,11 @@
 ## CONSIDERED
 
 **General**
+
+### Fast Huffman builder (drop the index-indirected min-heap), 2026-06-21
+`pivco_huffman_build_table`'s freq→lengths step uses a binary min-heap that stores `int indices[]` into a separate `nodes[]` array, so every compare is two dependent loads (`nodes[indices[i]].freq`) plus a tie-broken data-dependent branch.  For ≤256 symbols this is pathologically slow: c3 (Ivy Bridge) build-profile sub-marks (`extras/bench/bench_buildprof.c`, zipf 256-sym, build ~35 µs) show **heap_merge 56.7% (~20 µs) + heap_build 9.4% (~3 µs)** — ~⅔ of the whole table build in heap pointer-chasing + mispredicts for a trivial 256-leaf tree.  `limit_code_lengths` is *not* the issue (<5%).  Fix: the standard sort-then-no-heap builder (zstd `HUF_buildCTable` / zlib): counting/radix-sort the ≤256 symbols by frequency, then **van Leeuwen two-queue** O(n) merge (leaves sorted + internal nodes generated monotonic → each min is an O(1) front-compare, branch-light) or the **Moffat–Katajainen in-place** length algorithm (code lengths directly in the sorted array, no explicit tree).  Expected ~23 µs → ~2–4 µs, ≈halving the table build.  Context: with correct per-128 KB-window amortization (8 blocks/table) the table build is only ~9% of e2e and the histogram ~22%, but this is the single biggest table-prep lever vs huf0 and removes the worst per-chunk latency spike.  Independent of the partbyrank branch.
+
+**IMPLEMENTED 2026-06-22.** `build_lengths_twoqueue` in `huffman_table.c`: stable LSD-radix sort of the ≤256 leaves by frequency, then the van Leeuwen two-queue merge, then a parent-walk for depths.  Tie discipline (`<=`, leaf-before-internal) reproduces the old heap's lengths **byte-identically** — validated by a 3M-case cross-check fuzz vs the old min-heap on M4 + x86 (c3/c6a) + NEON (c8g) (the heap + harness were removed after validation).  freq→lengths phase (M4, ratio is timebase-independent): heap→two-queue **~2.5× uniform / ~2.5× zipf / 1.6× skew80 / 1.25× english** — and freq→lengths is 60–77% of `build_table`, so this roughly **halves the whole table build** (~7→3 µs uniform).  Confirmed our two-queue is the same algorithm as zstd's `HUF_buildTree`; zstd's hybrid bucket sort (`HUF_sort`) benchmarked as a wash-to-loss on x86 and would break byte-identical — not adopted, LSD radix kept.  E2e weight: under the **per-128 KB re-table model** (`bench_fair`, matching huf0) `build_table` is ~3–4% of encode (so this saves ~1.5–2% e2e); under the **one-global-table file CLI** it is ~0.07% (one build for the whole file).  Per-encode-stage profile separately shows histogram (~29–49%) and the rank-gather (~23%) as the larger encode levers — see the profiling-instrumentation commit.
 
 ### 4-way root merge (top 2 levels in one pass), 2026-06-19
 Merge the root's 4 grandchild streams in one pass instead of 3 binary merges (write N once, not ~2N).  Microbench `extras/bench/bench_merge4way.c`: **VBMI2-only** — Zen5 1.35–2.0×, Granite Rapids 1.9–2.9× (more leaf grandchildren = faster, via const-buffer `vpexpandb` over `set1`); NEON loses ~0.36× (no byte-expand → the 4-way rank costs more than the saved pass).  7/9 main dists qualify.  Blocker: wire-format change (top-2-levels as 2 routing bitplanes + 4 substreams).  Next: c8a/c8i decode PROF for the end-to-end %.
