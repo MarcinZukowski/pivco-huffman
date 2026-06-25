@@ -6,7 +6,10 @@
 #        libpivco_huffman.a is the PH/PHA stream codec phaz links)
 set -e
 PHAZ="$(cd "$(dirname "$0")/.." && pwd)"
-SRC="$PHAZ/../../ext/zstd"          # reuse the enclosing pivco-huffman's zstd checkout
+# zstd source to copy + patch (any checkout pinned at 5233c58e).  Default: the
+# enclosing pivco-huffman's ext/zstd; override with ZSTD_SRC (e.g. an embedder
+# like TurboBench points this at its own zstd/ submodule at the same SHA).
+SRC="${ZSTD_SRC:-$PHAZ/../../ext/zstd}"
 WORK="$PHAZ/build/zstd"
 PH="${PH:-$PHAZ/../..}"             # pivco-huffman is two levels up
 CC="${CC:-cc}"
