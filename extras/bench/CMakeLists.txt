@@ -1,18 +1,96 @@
 # extras/bench/CMakeLists.txt -- research / micro / one-off bench targets.
 #
-# Invoked via `add_subdirectory(extras/bench)` from the top CMakeLists.txt
-# (inside BUILD_BENCH).  Parent variables (TARGET_ARCH, COMPILER_HAS_AVX512_VBMI2,
-# CPU_HAS_AVX512, PIVCO_FSE, OODLE_DETECTED, OODLE_STATIC_LIB,
-# OODLE_ROOT, LZ4_LIB, LZ4_INC, ZSTD_LIB, ZSTD_INC, PIVCO_HAS_EWAH) propagate in
-# from there.  Core libraries (pivco_huffman, huf0, counters,
-# ph_td) and the top-kept targets (pivco_huffman_bench, pivco_fair_bench,
-# pivco_bench_prim, dump/fuzz/metal) are defined in the parent.
+# Invoked via `add_subdirectory(extras/bench)` from bench/CMakeLists.txt (inside
+# BUILD_BENCH).  From the parent it inherits the core libraries (pivco_huffman,
+# huf0), the ph_td support lib, and the Oodle detection vars (OODLE_DETECTED,
+# OODLE_STATIC_LIB, OODLE_ROOT) -- Oodle lives in the parent because
+# pivco_fair_bench needs it too.  Everything else this directory needs
+# (lemire/counters, system LZ4/ZSTD, EWAH, Metal) is detected right here, since
+# only these targets consume it.
 #
 # Sources are local (CMAKE_CURRENT_SOURCE_DIR is extras/bench/), so each
 # target lists its file as just `bench_X.c`.  Cross-tree sources use
 # ${CMAKE_SOURCE_DIR} explicitly.
 
 set(BENCH_DIST ${CMAKE_SOURCE_DIR}/bench/bench_distributions.c)
+
+# ---- Dependency detection (consumed only by targets in this directory) -------
+
+# lemire/counters — hardware counter access (cycles, IPC, branch/cache miss) for
+# the *_cnt microbenches.  Via CPM so a fresh checkout needs no manual clone;
+# fetched only when BUILD_BENCH is on (this dir is only added then).
+include(${CMAKE_SOURCE_DIR}/cmake/CPM.cmake)
+set(COUNTERS_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(COUNTERS_INSTALL OFF CACHE BOOL "" FORCE)
+CPMAddPackage(NAME counters GITHUB_REPOSITORY lemire/counters VERSION 4.1.0)
+# Mark the counters headers SYSTEM so its template-instantiation warning noise
+# doesn't drown out warnings in our own code.
+if(TARGET counters)
+    get_target_property(_counters_incs counters INTERFACE_INCLUDE_DIRECTORIES)
+    if(_counters_incs)
+        set_target_properties(counters PROPERTIES INTERFACE_INCLUDE_DIRECTORIES "")
+        target_include_directories(counters SYSTEM INTERFACE ${_counters_incs})
+    endif()
+endif()
+
+# System LZ4 + zstd (homebrew) for the lz4-split / lz4-ph / fuzz benches.
+find_library(LZ4_LIB lz4 PATHS /opt/homebrew/lib /usr/local/lib)
+find_path(LZ4_INC lz4.h PATHS /opt/homebrew/include /usr/local/include)
+find_library(ZSTD_LIB zstd PATHS /opt/homebrew/lib /usr/local/lib)
+find_path(ZSTD_INC zstd.h PATHS /opt/homebrew/include /usr/local/include)
+
+# EWAH (header-only) for pivco_bench_golomb's EWAH column.
+if(EXISTS ${CMAKE_SOURCE_DIR}/ext/ewah/include/ewah/ewah.h)
+    set(PIVCO_HAS_EWAH 1)
+    message(STATUS "EWAH detected at ext/ewah — pivco_bench_golomb will include EWAH column")
+else()
+    set(PIVCO_HAS_EWAH 0)
+    message(STATUS "EWAH not detected at ext/ewah — pivco_bench_golomb will skip EWAH column")
+endif()
+
+# ---- Standalone extras tools (moved out of the top CMakeLists).  Pinned to
+#      build/ so documented paths like ./build/pivco_dump_distributions and
+#      ./build/pivco_file_to_dist keep working. --------------------------------
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
+
+# Dump distribution histograms as a JS-loadable data file for figures/tree_viz.html.
+add_executable(pivco_dump_distributions
+    ${CMAKE_SOURCE_DIR}/extras/dump_distributions.c
+    ${BENCH_DIST}
+)
+target_link_libraries(pivco_dump_distributions pivco_huffman m)
+
+# Dump the production C-built decode tree in the figure's "download tree text"
+# format so the two can be diff'd to confirm the figure matches the real codec.
+add_executable(pivco_dump_tree_text
+    ${CMAKE_SOURCE_DIR}/extras/dump_tree_text.c
+    ${BENCH_DIST}
+)
+target_link_libraries(pivco_dump_tree_text pivco_huffman m)
+
+add_executable(pivco_file_to_dist ${CMAKE_SOURCE_DIR}/extras/file_to_dist.c)
+target_link_libraries(pivco_file_to_dist m)
+
+# Metal compute primitive microbench (Apple only): GPU throughput of the ph
+# partition (encoder) + tree_merge (BU decoder) primitives vs the CPU NEON path.
+# The .metal shader is loaded at runtime from a path relative to CWD (root).
+if(APPLE)
+    find_library(METAL_LIB Metal)
+    find_library(FOUNDATION_LIB Foundation)
+    if(METAL_LIB AND FOUNDATION_LIB)
+        message(STATUS "Metal framework detected — enabling pivco_bench_metal_partition")
+        add_executable(pivco_bench_metal_partition
+            ${CMAKE_SOURCE_DIR}/extras/gpu/bench_metal_partition.mm)
+        target_link_libraries(pivco_bench_metal_partition "${METAL_LIB}" "${FOUNDATION_LIB}")
+        set_source_files_properties(${CMAKE_SOURCE_DIR}/extras/gpu/bench_metal_partition.mm
+            PROPERTIES COMPILE_FLAGS "-fobjc-arc")
+    else()
+        message(STATUS "Metal framework not found — pivco_bench_metal_partition skipped")
+    endif()
+endif()
+
+# Research micro-benches below stay under build/extras/bench/.
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/extras/bench)
 
 # -------- Encoder-side standalone benches --------
 
@@ -386,6 +464,19 @@ if(PIVCO_FSE)
                 ${CMAKE_SOURCE_DIR}/extras/lz4hc_split.c
                 ${CMAKE_SOURCE_DIR}/ext/lz4/lib/lz4.c
                 PROPERTIES COMPILE_FLAGS "-w")
+
+            # Correctness/fuzz harness for the same 4-stream split encoder+decoder.
+            add_executable(pivco_fuzz_lz4_split
+                ${CMAKE_SOURCE_DIR}/extras/fuzz_lz4_split.c
+                ${CMAKE_SOURCE_DIR}/extras/lz4hc_split.c
+                ${CMAKE_SOURCE_DIR}/extras/lz4_split_decode.c
+                ${CMAKE_SOURCE_DIR}/ext/lz4/lib/lz4.c
+            )
+            target_link_libraries(pivco_fuzz_lz4_split m "${LZ4_LIB}")
+            target_include_directories(pivco_fuzz_lz4_split PRIVATE
+                ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/include
+                ${CMAKE_SOURCE_DIR}/ext/lz4/lib ${CMAKE_SOURCE_DIR}/extras
+                "${LZ4_INC}" "${ZSTD_INC}")
         endif()
     endif()
 
