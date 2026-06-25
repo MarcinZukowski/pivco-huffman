@@ -104,17 +104,14 @@ production-grade Huffman decoders we consider state of the art:
   an Oodle SDK is symlinked at `ext/oodle`.
 
 Older legacy baselines (in-tree `trad_1s` / `trad_4s` 4-stream
-reference decoders, `ryg_rans`) have been retired from the headline
-tables.  ph is positioned against the two codecs people actually
-ship.
+reference decoders) have been retired from the headline tables.  ph is
+positioned against the two codecs people actually ship.
 
 ## Build & Test
 
 ```sh
 # Prerequisites (first time only)
-git submodule update --init ext/fse                                  # FSE entropy coder (required, for PHA)
-git clone --depth 1 https://github.com/rygorous/ryg_rans.git ext/ryg_rans
-git clone --depth 1 https://github.com/google/brotli.git ext/brotli  # optional
+git submodule update --init ext/fse   # FSE entropy coder (required, for PHA)
 
 # Build
 cmake -B build -DCMAKE_BUILD_TYPE=Release

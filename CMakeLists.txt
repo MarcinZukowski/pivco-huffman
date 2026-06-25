@@ -256,33 +256,6 @@ add_library(huf0 ${HUF0_SOURCES})
 target_include_directories(huf0 PUBLIC ext/fse/lib)
 target_compile_options(huf0 PRIVATE -w)  # suppress warnings in external code
 
-# Brotli Huffman primitives (decoder + encoder).  Vendored under
-# ext/brotli/ via `git clone --depth 1 https://github.com/google/brotli.git`.
-# We only build the minimal Huffman subset; the rest of brotli (LZ77,
-# bit stream framing) is unused.
-set(BROTLI_HUFFMAN_SOURCES
-    ext/brotli/c/dec/huffman.c
-    ext/brotli/c/dec/bit_reader.c
-    ext/brotli/c/enc/entropy_encode.c
-    ext/brotli/c/common/platform.c
-    ext/brotli/c/common/constants.c
-)
-if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/ext/brotli/c/dec/huffman.c)
-    add_library(brotli_huffman ${BROTLI_HUFFMAN_SOURCES})
-    target_include_directories(brotli_huffman PUBLIC
-        ext/brotli/c/include
-        ext/brotli/c/common
-        ext/brotli/c/dec
-        ext/brotli/c/enc)
-    target_compile_options(brotli_huffman PRIVATE -w)
-    set(HAVE_BROTLI_HUFFMAN ON)
-else()
-    message(STATUS "Brotli sources not found at ext/brotli; bench_brotli "
-                   "will be skipped.  Clone with: "
-                   "git clone --depth 1 https://github.com/google/brotli.git ext/brotli")
-    set(HAVE_BROTLI_HUFFMAN OFF)
-endif()
-
 # Library — backend-agnostic sources plus the per-backend codec objects.
 # The scalar codec is always linked.  NEON is linked on aarch64 hosts;
 # x86 (SSE / AVX2) is linked on x86_64 hosts; AVX-512 is additionally
@@ -374,10 +347,9 @@ if(BUILD_BENCH)
     add_executable(pivco_huffman_bench
         bench/bench_main.c
         bench/bench_distributions.c
-        extras/bench/bench_rans.cpp
     )
     target_link_libraries(pivco_huffman_bench pivco_huffman huf0 m)
-    target_include_directories(pivco_huffman_bench PRIVATE ext/fse/lib ext/ryg_rans)
+    target_include_directories(pivco_huffman_bench PRIVATE ext/fse/lib)
 
     # Independent (namespaced) top-down TD library, retired from the main
     # lib but resurrected as its own lib so the fair-bench can show the

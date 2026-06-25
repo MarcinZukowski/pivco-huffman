@@ -16,18 +16,6 @@ extern int          bench_dist_is_main(int idx);
 extern void         bench_generate_symbols(int dist_idx, uint8_t *symbols,
                                            int n_symbols, uint64_t seed);
 
-/* From bench_rans.cpp */
-extern void  *rans_alias_create(const uint64_t *freq256);
-extern void   rans_alias_destroy(void *ctx);
-extern size_t rans_alias_encode(void *ctx, const uint8_t *symbols, size_t n,
-                                uint8_t *out, size_t out_cap);
-extern size_t rans_alias_decode(void *ctx, const uint8_t *in, size_t in_len,
-                                uint8_t *symbols, size_t n);
-extern size_t rans_alias_encode_x2(void *ctx, const uint8_t *symbols, size_t n,
-                                   uint8_t *out, size_t out_cap);
-extern size_t rans_alias_decode_x2(void *ctx, const uint8_t *in, size_t in_len,
-                                   uint8_t *symbols, size_t n);
-
 static double now_sec(void)
 {
     struct timespec ts;
@@ -102,10 +90,10 @@ int main(int argc, char **argv)
                    "  --all     run every distribution AND every comparator\n"
                    "            (default MAIN: 9 distributions; pivco_s/n/bu,\n"
                    "             trad_4s, huf0_x1/x2 — no trad_1s,\n"
-                   "             no huf0_1s, no rans_x2)\n"
+                   "             no huf0_1s)\n"
                    "  --tdbu    skip every comparator (run only pivco_n + pivco_bu);\n"
                    "            keeps the full 5-run methodology.  Use for prof-on/off\n"
-                   "            A/B without paying for trad / huf0 / rans timing.\n"
+                   "            A/B without paying for trad / huf0 timing.\n"
                    "  --no-fse  disable the encoder's FSE dispatch at runtime\n"
                    "            (still v0.2+ wire format; marker stays 0).\n",
                    argv[0], DEFAULT_REPEATS);
@@ -162,7 +150,6 @@ int main(int argc, char **argv)
         size_t trad_4s_bytes;
         size_t huf0_bytes;
         size_t huf0_1s_bytes;
-        size_t rans_bytes;
     };
     struct comp_stats_t comp_stats[n_dist];
     memset(comp_stats, 0, sizeof(comp_stats));
@@ -174,15 +161,15 @@ int main(int argc, char **argv)
         printf("%-13s | %7s %7s\n", "DECODE M/s", "pivco_n", "pivco_bu");
         printf("--------------|-----------------\n");
     } else if (run_all) {
-        printf("%-13s | %7s %7s %7s | %7s %7s | %7s %7s %7s | %7s | %7s\n",
+        printf("%-13s | %7s %7s %7s | %7s %7s | %7s %7s %7s | %7s\n",
                "DECODE M/s", "pivco_s", "pivco_n", "pivco_bu",
                "trad_1s", "trad_4s",
                "huf0_1s", "huf0_x1", "huf0_x2",
-               "rans_x2", "ratio");
+               "ratio");
         printf("--------------|-------------------------|-----------------|------"
-               "----------------------|---------|--------\n");
+               "----------------------|--------\n");
     } else {
-        /* MAIN comparator set: drop trad_1s, huf0_1s, rans_x2. */
+        /* MAIN comparator set: drop trad_1s, huf0_1s. */
         printf("%-13s | %7s %7s %7s | %7s | %7s %7s | %7s\n",
                "DECODE M/s", "pivco_s", "pivco_n", "pivco_bu",
                "trad_4s",
@@ -293,12 +280,6 @@ int main(int argc, char **argv)
             huf0_1s_off[c + 1] = huf0_1s_off[c] + r;
         }
 
-        /* ---- Pre-encode: rANS alias x2 (full 4M) ---- */
-        void *rans_ctx = rans_alias_create(freq);
-        uint8_t *rans_x2_enc = (uint8_t *)malloc(TOTAL_SYMBOLS * 2);
-        size_t rans_x2_enc_len = rans_alias_encode_x2(rans_ctx, symbols, TOTAL_SYMBOLS,
-                                                       rans_x2_enc, TOTAL_SYMBOLS * 2);
-
         /* ---- Verify correctness (first block / chunk only) ---- */
         {
             uint8_t *dec = (uint8_t *)malloc(TOTAL_SYMBOLS);
@@ -322,12 +303,6 @@ int main(int argc, char **argv)
                 }
             }
 
-            /* rANS x2 — full sequence */
-            rans_alias_decode_x2(rans_ctx, rans_x2_enc, rans_x2_enc_len, dec, TOTAL_SYMBOLS);
-            if (memcmp(symbols, dec, TOTAL_SYMBOLS) != 0) {
-                printf("%-13s ERROR: rANS x2 roundtrip failed\n", name);
-                free(dec); goto cleanup;
-            }
             free(dec);
         }
 
@@ -368,7 +343,6 @@ int main(int argc, char **argv)
         double p_dec_s = 0, p_dec_n = 0, p_dec_pfx = 0, p_dec_bu = 0;
         double t_dec_1s = 0, t_dec_4s = 0;
         double h_dec_1s = 0, h_dec_4s = 0, h_dec_x2 = 0;
-        double r_dec_2 = 0;
 
         /* Establish reference checksum from the scalar decoder (untimed).
          * Computing it here — outside any BENCH call — keeps scalar
@@ -498,13 +472,6 @@ int main(int argc, char **argv)
             }, "huf0_x2");
         }
 
-        /* rANS 2-stream: full 4M at once (ALL-only) */
-        if (run_all) {
-            BENCH(r_dec_2, {
-                rans_alias_decode_x2(rans_ctx, rans_x2_enc, rans_x2_enc_len,
-                                      dec_buf, TOTAL_SYMBOLS);
-            }, "rans_2");
-        }
       } /* !quick */
 #undef BENCH
 
@@ -516,7 +483,6 @@ int main(int argc, char **argv)
         if (t_dec_4s > t_best) t_best = t_dec_4s;
         if (t_dec_1s > t_best) t_best = t_dec_1s;
         if (h_dec_1s > t_best) t_best = h_dec_1s;
-        if (r_dec_2 > t_best)  t_best = r_dec_2;
         double ratio = t_best > 0 ? p_best / t_best : 0;
 
         if (quick) {
@@ -526,9 +492,9 @@ int main(int argc, char **argv)
             (void)ratio;
             printf("%-13s | %7.0f %7.0f\n", name, p_dec_n, p_dec_bu);
         } else if (run_all) {
-            printf("%-13s | %7.0f %7.0f %7.0f %7.0f | %7.0f %7.0f | %7.0f %7.0f %7.0f | %7.0f | %5.2fx\n",
+            printf("%-13s | %7.0f %7.0f %7.0f %7.0f | %7.0f %7.0f | %7.0f %7.0f %7.0f | %5.2fx\n",
                    name, p_dec_s, p_dec_n, p_dec_bu, p_dec_pfx, t_dec_1s, t_dec_4s,
-                   h_dec_1s, h_dec_4s, h_dec_x2, r_dec_2, ratio);
+                   h_dec_1s, h_dec_4s, h_dec_x2, ratio);
         } else {
             /* MAIN: pivco_s, pivco_n, pivco_bu | trad_4s | huf0_x1, huf0_x2 | ratio */
             printf("%-13s | %7.0f %7.0f %7.0f | %7.0f | %7.0f %7.0f | %5.2fx\n",
@@ -580,18 +546,15 @@ int main(int argc, char **argv)
         comp_stats[d].trad_4s_bytes = trad_4s_off[trad_nblocks];
         comp_stats[d].huf0_bytes    = huf0_ok ? huf0_enc_off[huf0_nchunks] : 0;
         comp_stats[d].huf0_1s_bytes = huf0_1s_ok ? huf0_1s_off[huf0_nchunks] : 0;
-        comp_stats[d].rans_bytes    = rans_x2_enc_len;
 
 cleanup:
         free(dec_buf);
-        rans_alias_destroy(rans_ctx);
         free(table);
         free(symbols); free(pivco_enc_buf); free(pivco_enc_off);
         free(trad_enc); free(trad_enc_off); free(trad_enc_bits_arr);
         free(trad_4s_enc); free(trad_4s_off);
         free(huf0_enc); free(huf0_enc_off);
         free(huf0_1s_enc); free(huf0_1s_off);
-        free(rans_x2_enc);
 #if defined(PIVCO_HAS_NEON) || defined(PIVCO_HAS_SSE4) || defined(PIVCO_HAS_AVX512) || defined(PIVCO_HAS_SVE)
         free(neon_enc_buf); free(neon_enc_off);
 #endif
@@ -604,20 +567,20 @@ cleanup:
      *                Total = (n_internal*7 + n_leaves*9) * NBLOCKS / 8.
      * pivco_total  = pivco_raw + pivco_hdr.
      * "ratio_*"    = compressed / original bytes (lower = better).
-     * trad/huf0/rans are codec-native (include their own headers). */
+     * trad/huf0 are codec-native (include their own headers). */
     if (!quick) {
         const size_t orig = (size_t)TOTAL_SYMBOLS;
         printf("\n=== Compression sizes (bytes for 4M input) ===\n");
-        printf("%-13s | %5s %4s %4s %4s %4s %4s | %4s %4s | %10s %10s | %10s %10s %10s %10s\n",
+        printf("%-13s | %5s %4s %4s %4s %4s %4s | %4s %4s | %10s %10s | %10s %10s %10s\n",
                "DIST",
                "Dmax", "Lvs", "Ful", "Flt", "Hal", "B2L",
                "vIN", "vLv",
                "pivco_raw", "+hdr_est",
-               "trad_4s", "huf0_1s", "huf0_x2", "rans_x2");
+               "trad_4s", "huf0_1s", "huf0_x2");
         printf("--------------|-----------------------------|"
                "-----------|"
                "----------------------|"
-               "-----------------------------------------------\n");
+               "------------------------------------\n");
         for (int d = 0; d < n_dist; d++) {
             struct comp_stats_t *s = &comp_stats[d];
             if (!s->name) continue;
@@ -630,7 +593,7 @@ cleanup:
                 (size_t)(s->n_internal_visible * 7 + s->n_leaves_visible * 9);
             size_t hdr_total = hdr_bits_per_block * NBLOCKS / 8;
             size_t pivco_total = s->pivco_bytes + hdr_total;
-            printf("%-13s | %5.0f %4d %4d %4d %4d %4d | %4d %4d | %10zu %10zu | %10zu %10zu %10zu %10zu\n",
+            printf("%-13s | %5.0f %4d %4d %4d %4d %4d | %4d %4d | %10zu %10zu | %10zu %10zu %10zu\n",
                    s->name,
                    s->max_code_len,
                    s->n_leaves,
@@ -644,8 +607,7 @@ cleanup:
                    pivco_total,
                    s->trad_4s_bytes,
                    s->huf0_1s_bytes,
-                   s->huf0_bytes,
-                   s->rans_bytes);
+                   s->huf0_bytes);
             (void)orig;
         }
         printf("  Dmax=max Huffman code length; Lvs=# leaves; "
@@ -666,7 +628,6 @@ cleanup:
            drop_worst, MAX_SPREAD * 100);
     printf("  PIVCO/trad decode in %d-symbol blocks\n", BLK);
     printf("  huf0 uses 128KB chunks (its max block size)\n");
-    printf("  rANS decodes full 4M at once\n");
     double wall_elapsed = now_sec() - wall_start;
     if (drift < -0.05)
         printf("  WARNING: CPU freq dropped %.1f%% (throttling?)\n", drift * -100);

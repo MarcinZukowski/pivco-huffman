@@ -19,8 +19,6 @@ already powered the full-tree flat path.
 ```sh
 # Prerequisites (first time only)
 git submodule update --init ext/fse  # FSE entropy coder (required, for PHA)
-git clone --depth 1 https://github.com/rygorous/ryg_rans.git ext/ryg_rans
-git clone --depth 1 https://github.com/google/brotli.git ext/brotli  # optional, for extras/bench/bench_brotli
 
 # Build
 cmake -B build -DCMAKE_BUILD_TYPE=Release

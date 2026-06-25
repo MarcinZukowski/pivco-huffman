@@ -2,9 +2,9 @@
 #
 # Invoked via `add_subdirectory(extras/bench)` from the top CMakeLists.txt
 # (inside BUILD_BENCH).  Parent variables (TARGET_ARCH, COMPILER_HAS_AVX512_VBMI2,
-# CPU_HAS_AVX512, HAVE_BROTLI_HUFFMAN, PIVCO_FSE, OODLE_DETECTED, OODLE_STATIC_LIB,
+# CPU_HAS_AVX512, PIVCO_FSE, OODLE_DETECTED, OODLE_STATIC_LIB,
 # OODLE_ROOT, LZ4_LIB, LZ4_INC, ZSTD_LIB, ZSTD_INC, PIVCO_HAS_EWAH) propagate in
-# from there.  Core libraries (pivco_huffman, huf0, brotli_huffman, counters,
+# from there.  Core libraries (pivco_huffman, huf0, counters,
 # ph_td) and the top-kept targets (pivco_huffman_bench, pivco_fair_bench,
 # pivco_bench_prim, dump/fuzz/metal) are defined in the parent.
 #
@@ -66,26 +66,6 @@ if(OODLE_DETECTED)
         "${OODLE_ROOT}/src/oodle2/base"
         "${OODLE_ROOT}/include")
     target_compile_definitions(pivco_bench_tree_modes PRIVATE PIVCO_HAS_OODLE=1)
-endif()
-
-# Brotli vs pivco vs huf0_x1 comparison bench.  Standalone harness:
-# encode + decode timing across the MAIN distribution set.  Skipped
-# if ext/brotli/ is not present.  See IDEAS.md 2026-05-12 for the
-# negative-result verdict; this binary kept under extras/ so the
-# comparison stays reproducible if libjxl/brotli ever change.
-if(HAVE_BROTLI_HUFFMAN)
-    add_executable(pivco_bench_brotli
-        bench_brotli.c
-        ${BENCH_DIST}
-    )
-    target_link_libraries(pivco_bench_brotli
-        pivco_huffman huf0 brotli_huffman m)
-    target_include_directories(pivco_bench_brotli PRIVATE
-        ${CMAKE_SOURCE_DIR}/ext/fse/lib
-        ${CMAKE_SOURCE_DIR}/ext/brotli/c/include
-        ${CMAKE_SOURCE_DIR}/ext/brotli/c/common
-        ${CMAKE_SOURCE_DIR}/ext/brotli/c/dec
-        ${CMAKE_SOURCE_DIR}/ext/brotli/c/enc)
 endif()
 
 # NEON-only encoder micros.
