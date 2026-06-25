@@ -26,20 +26,9 @@
 #include <stdint.h>
 #include <time.h>
 
-/* ---- patched-libzstd globals (compress capture hook) + decoder ---- */
-extern int g_phaz_dump;
-extern unsigned char *g_phaz_llc, *g_phaz_mlc, *g_phaz_ofc, *g_phaz_lit, *g_phaz_xb;
-extern unsigned long long g_phaz_xbpos;
-extern unsigned *g_phaz_blk_ns, *g_phaz_blk_tl;
-extern size_t g_phaz_nblk, g_phaz_nseq, g_phaz_lits;
-extern unsigned long long g_phaz_extrabits;
-extern size_t ZSTD_phazDecode(void* dst,size_t dstCap,
-    const unsigned char* llc,const unsigned char* mlc,const unsigned char* ofc,
-    const unsigned char* xb,const unsigned char* lit,size_t litSize,
-    const unsigned* blkNs,const unsigned* blkTl,size_t nblk);
-
-#define PHAZ_MAGIC "phaz"
-#define PHAZ_VER   1
+/* Buffer codec + shared helpers (capture hook globals, ZSTD_phazDecode,
+ * phaz_compress/phaz_decompress, phaz_capture_run, phaz_pack_stream). */
+#include "phaz_codec.h"
 
 static double now(void){ struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t);
     return t.tv_sec + t.tv_nsec*1e-9; }
@@ -54,145 +43,66 @@ static void wr_file(const char *p, const void *d, size_t n){
     FILE *f=fopen(p,"wb"); if(!f){perror(p);exit(2);}
     if(fwrite(d,1,n,f)!=n){perror(p);exit(2);} fclose(f); }
 
-/* Run zstd's compressor with the capture hook on; fills the g_phaz_* globals
- * with the pivoted streams.  When want_stock!=0 also runs a plain (no-hook)
- * compress and returns the stock zstd size (for stats); else returns 0. */
-static size_t capture(const unsigned char *src, size_t n, int level, int want_stock){
-    size_t bound=ZSTD_compressBound(n); unsigned char *c=malloc(bound);
-    size_t zsize=0;
-    if(want_stock){ zsize=ZSTD_compress(c,bound,src,n,level);
-        if(ZSTD_isError(zsize)){fprintf(stderr,"phaz: zstd compress error\n");exit(2);} }
-    size_t sb=ZSTD_sequenceBound(n);
-    g_phaz_llc=malloc(sb); g_phaz_mlc=malloc(sb); g_phaz_ofc=malloc(sb); g_phaz_lit=malloc(n+64);
-    g_phaz_xb=calloc(sb*8+64,1);
-    g_phaz_blk_ns=calloc((n>>10)+64,sizeof(unsigned));
-    g_phaz_blk_tl=calloc((n>>10)+64,sizeof(unsigned));
-    g_phaz_nseq=0; g_phaz_lits=0; g_phaz_extrabits=0; g_phaz_xbpos=0; g_phaz_nblk=0; g_phaz_dump=1;
-    /* phaz re-codes the literals itself, so skip zstd's HUF on the (discarded)
-     * literal section -- recovers ~9 ms.  The parse is unchanged at the lazy
-     * strategies; at btopt levels (>=16) disabling literal compression shifts
-     * the parser's cost model, so the captured parse differs slightly from a
-     * stock zstd compress (still byte-exact, just a different parse). */
-    ZSTD_CCtx *cc=ZSTD_createCCtx();
-    ZSTD_CCtx_setParameter(cc, ZSTD_c_compressionLevel, level);
-    ZSTD_CCtx_setParameter(cc, ZSTD_c_literalCompressionMode, ZSTD_lcm_uncompressed);
-    size_t z2=ZSTD_compress2(cc,c,bound,src,n); g_phaz_dump=0;
-    ZSTD_freeCCtx(cc);
-    if(ZSTD_isError(z2)){fprintf(stderr,"phaz: capture hook error\n");exit(2);}
-    free(c); return zsize;
-}
-
-/* PHA-encode a stream into one self-describing blob; write method+len+blob to o.
- * PHA (#PHA) gates FSE per node by compressibility, so it dominates plain PH --
- * no need to try both.  Raw fallback only if PHA expands (tiny streams).  One
- * global table per stream: per-128KB re-table was tried and lost (pivcohuf pays
- * a full 26-byte header + checksum + table per call, no FSE repeat-mode, so the
- * per-block overhead swamps the local-adaptation gain).  Returns container
- * bytes; best_out/tag_out (nullable) report chosen size + tag for stats. */
-static size_t pack_stream(FILE *o, const unsigned char *raw, size_t rawlen,
-                          size_t *best_out, char *tag_out){
-    size_t bound=pivcohuf_compress_bound(rawlen?rawlen:1);
-    unsigned char *t=malloc(bound);
-    size_t l=bound;
-    int ok=rawlen && pivcohuf_compress_ex(raw,rawlen,t,&l,1)==PIVCOHUF_OK;
-    const unsigned char *blob=raw; uint64_t blen=rawlen; unsigned char method=0; char tag='r';
-    if(ok && l<blen){ blob=t; blen=l; method=1; tag='a'; }
-    if(o){ fputc(method,o); fwrite(&blen,sizeof blen,1,o); fwrite(blob,1,blen,o); }
-    free(t);
-    if(best_out) *best_out=blen; if(tag_out) *tag_out=tag;
-    return 1+sizeof(blen)+blen;
-}
-/* Inverse: read method+len+blob from a cursor, return rawlen decoded bytes. */
-static unsigned char *unpack_stream(const unsigned char **p, const unsigned char *end,
-                                    size_t rawlen){
-    if(*p+1+8>end){fprintf(stderr,"phaz: truncated stream header\n");exit(2);}
-    unsigned char method=*(*p)++;
-    uint64_t blen; memcpy(&blen,*p,8); *p+=8;
-    if(*p+blen>end){fprintf(stderr,"phaz: truncated stream body\n");exit(2);}
-    const unsigned char *blob=*p; *p+=blen;
-    unsigned char *raw=malloc(rawlen?rawlen+64:64);
-    if(method==0){ if(blen!=rawlen){fprintf(stderr,"phaz: raw len mismatch\n");exit(2);} memcpy(raw,blob,rawlen); }
-    else { size_t got=rawlen; if(pivcohuf_decompress(blob,blen,raw,&got)!=PIVCOHUF_OK||got!=rawlen){
-        fprintf(stderr,"phaz: stream decode error\n");exit(2);} }
-    return raw;
-}
-
-static const char *STREAM_NM[4]={"ll","ml","of","lit"};
 
 /* ====================== commands ====================== */
 
 static int cmd_c(const char *in, const char *out, int level){
     size_t n; unsigned char *src=rd_file(in,&n);
+    size_t cap=phaz_compress_bound(n); unsigned char *buf=malloc(cap);
+    if(!buf){fprintf(stderr,"phaz: oom\n");return 2;}
+    phaz_stats st; memset(&st,0,sizeof st);
     double t0=now();
-    capture(src,n,level,0);                 /* zstd parse + capture pivoted streams */
-    double t_cap=now()-t0;
-    uint64_t hdr[5]={ (uint64_t)n,(uint64_t)g_phaz_nseq,(uint64_t)g_phaz_lits,
-                      (uint64_t)g_phaz_extrabits,(uint64_t)g_phaz_nblk };
-    uint64_t xblen=(g_phaz_xbpos+7)/8;
-    FILE *o=fopen(out,"wb"); if(!o){perror(out);exit(2);}
-    fwrite(PHAZ_MAGIC,1,4,o); fputc(PHAZ_VER,o);
-    fwrite(hdr,sizeof hdr,1,o);
-    fwrite(g_phaz_blk_ns,sizeof(unsigned),g_phaz_nblk,o);
-    fwrite(g_phaz_blk_tl,sizeof(unsigned),g_phaz_nblk,o);
-    fwrite(&xblen,sizeof xblen,1,o); fwrite(g_phaz_xb,1,xblen,o);
-    const unsigned char *sp[4]={g_phaz_llc,g_phaz_mlc,g_phaz_ofc,g_phaz_lit};
-    size_t srl[4]={g_phaz_nseq,g_phaz_nseq,g_phaz_nseq,g_phaz_lits};
-    size_t scl[4]; double sms[4], t_pk=0;
-    for(int i=0;i<4;i++){ double a=now();   /* PHA-encode each stream, timed */
-        pack_stream(o,sp[i],srl[i],&scl[i],0); sms[i]=now()-a; t_pk+=sms[i]; }
-    double tot=t_cap+t_pk;
-    long osz=ftell(o); fclose(o);
-    printf("%s -> %s  %zu -> %ld  ratio %.3f\n",in,out,n,osz,(double)n/osz);
+    size_t osz=phaz_compress(src,n,buf,cap,level,&st);
+    double tot=now()-t0;
+    if(!osz){fprintf(stderr,"phaz: compress failed\n");return 2;}
+    wr_file(out,buf,osz);
+    double t_pk=st.pack_ms[0]+st.pack_ms[1]+st.pack_ms[2]+st.pack_ms[3];
+    printf("%s -> %s  %zu -> %zu  ratio %.3f\n",in,out,n,osz,(double)n/osz);
     printf("  compress %.2f ms (%.1f MB/s)  [zstd-parse+capture %.2f ms, PH-encode %.2f ms]\n",
-           tot*1e3, n/(tot*1e6), t_cap*1e3, t_pk*1e3);
+           tot*1e3, n/(tot*1e6), st.capture_ms, t_pk);
     for(int i=0;i<4;i++)
         printf("    %-3s %8zu -> %8zu  %.3f ms (%.2f GB/s)\n",
-               STREAM_NM[i],srl[i],scl[i],sms[i]*1e3,srl[i]/(sms[i]*1e9));
+               phaz_stream_names[i],st.stream_raw[i],st.stream_enc[i],
+               st.pack_ms[i], st.stream_raw[i]/(st.pack_ms[i]*1e6));
+    free(src); free(buf);
     return 0;
 }
 
 static int cmd_d(const char *in, const char *out){
     size_t fn; unsigned char *buf=rd_file(in,&fn);
-    const unsigned char *p=buf, *end=buf+fn;
-    if(fn<5+sizeof(uint64_t)*5 || memcmp(p,PHAZ_MAGIC,4)!=0 || p[4]!=PHAZ_VER){
-        fprintf(stderr,"%s: not a phaz v%d container\n",in,PHAZ_VER); return 2; }
-    p+=5;
-    uint64_t hdr[5]; memcpy(hdr,p,sizeof hdr); p+=sizeof hdr;
-    size_t n=hdr[0],nseq=hdr[1],lits=hdr[2],nblk=hdr[4];
-    size_t na=(nblk?nblk:1)*sizeof(unsigned);
-    unsigned *bns=malloc(na),*btl=malloc(na);
-    memcpy(bns,p,nblk*sizeof(unsigned)); p+=nblk*sizeof(unsigned);
-    memcpy(btl,p,nblk*sizeof(unsigned)); p+=nblk*sizeof(unsigned);
-    uint64_t xblen; memcpy(&xblen,p,8); p+=8;
-    const unsigned char *xb=p; p+=xblen;
-    size_t srl[4]={nseq,nseq,nseq,lits};
-    unsigned char *str[4]; double sms[4], t_ent=0;
-    for(int i=0;i<4;i++){ double a=now();   /* PHA entropy-decode each stream, timed */
-        str[i]=unpack_stream(&p,end,srl[i]); sms[i]=now()-a; t_ent+=sms[i]; }
+    if(fn<5+8){fprintf(stderr,"%s: not a phaz container\n",in); return 2;}
+    uint64_t n; memcpy(&n, buf+5, 8);       /* hdr[0] = original size */
     unsigned char *dst=malloc(n+64);
-    double tr0=now();                       /* reconstruct sequences + zstd copy engine */
-    size_t got=ZSTD_phazDecode(dst,n+64,str[0],str[1],str[2],xb,str[3],lits,bns,btl,nblk);
-    double t_rec=now()-tr0, tot=t_ent+t_rec;
-    if(got!=n){fprintf(stderr,"%s: decode produced %zu, expected %zu\n",in,got,n); return 3;}
+    if(!dst){fprintf(stderr,"phaz: oom\n");return 2;}
+    phaz_stats st; memset(&st,0,sizeof st);
+    double t0=now();
+    size_t got=phaz_decompress(buf,fn,dst,n+64,&st);
+    double tot=now()-t0;
+    if(got!=n){fprintf(stderr,"%s: decode failed (got %zu, expected %llu)\n",
+                       in,got,(unsigned long long)n); return 3;}
     wr_file(out,dst,n);
-    printf("%s -> %s  %zu bytes\n",in,out,n);
+    double t_ent=st.entropy_ms[0]+st.entropy_ms[1]+st.entropy_ms[2]+st.entropy_ms[3];
+    printf("%s -> %s  %zu bytes\n",in,out,(size_t)n);
     printf("  decode %.2f ms (%.1f MB/s)  [PH-entropy %.2f ms, reconstruct+copy %.2f ms]\n",
-           tot*1e3, n/(tot*1e6), t_ent*1e3, t_rec*1e3);
+           tot*1e3, n/(tot*1e6), t_ent, st.reconstruct_ms);
     for(int i=0;i<4;i++)
         printf("    %-3s %8zu  %.3f ms (%.2f GB/s)\n",
-               STREAM_NM[i], srl[i], sms[i]*1e3, srl[i]/(sms[i]*1e9));
+               phaz_stream_names[i], st.stream_raw[i],
+               st.entropy_ms[i], st.stream_raw[i]/(st.entropy_ms[i]*1e6));
+    free(buf); free(dst);
     return 0;
 }
 
 static int cmd_stats(const char *in, int level){
     size_t n; unsigned char *src=rd_file(in,&n);
-    size_t zsize=capture(src,n,level,1);
+    size_t zsize=phaz_capture_run(src,n,level,1);
+    if(zsize==(size_t)-1){fprintf(stderr,"phaz: capture failed\n");return 2;}
     size_t nseq=g_phaz_nseq, lits=g_phaz_lits;
     size_t s_ll,s_ml,s_of,s_lit;
-    pack_stream(0,g_phaz_llc,nseq,&s_ll,0);
-    pack_stream(0,g_phaz_mlc,nseq,&s_ml,0);
-    pack_stream(0,g_phaz_ofc,nseq,&s_of,0);
-    pack_stream(0,g_phaz_lit,lits,&s_lit,0);
+    phaz_pack_stream(NULL,NULL,g_phaz_llc,nseq,&s_ll,0);
+    phaz_pack_stream(NULL,NULL,g_phaz_mlc,nseq,&s_ml,0);
+    phaz_pack_stream(NULL,NULL,g_phaz_ofc,nseq,&s_of,0);
+    phaz_pack_stream(NULL,NULL,g_phaz_lit,lits,&s_lit,0);
     size_t s_xb=(g_phaz_xbpos+7)/8;
     size_t our=s_ll+s_ml+s_of+s_lit+s_xb;
     printf("%-22s n=%zu nseq=%zu lits=%zu nblk=%zu\n",in,n,nseq,lits,g_phaz_nblk);
@@ -246,7 +156,8 @@ static int cmd_stats(const char *in, int level){
 
 static int cmd_dump(const char *in, const char *dir, int level){
     size_t n; unsigned char *src=rd_file(in,&n);
-    size_t zsize=capture(src,n,level,1);
+    size_t zsize=phaz_capture_run(src,n,level,1);
+    if(zsize==(size_t)-1){fprintf(stderr,"phaz: capture failed\n");return 2;}
     char p[1024];
 #define WR(nm,d,len) do{ snprintf(p,sizeof p,"%s/%s",dir,nm); \
     FILE*f=fopen(p,"wb"); if(!f){perror(p);exit(2);} fwrite((d),1,(len),f); fclose(f);}while(0)

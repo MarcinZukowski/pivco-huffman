@@ -48,7 +48,30 @@ PLOCAL="$PH/build/libpivco_huffman_local.o"
 echo ">> building phaz"
 # -Werror for real issues; -Wno-deprecated-declarations (ZSTD_generateSequences)
 # and -Wno-misleading-indentation (GCC style-nanny on the terse one-line style).
-$CC -O3 -Wall -Werror -Wno-deprecated-declarations -Wno-misleading-indentation $MARCH $ZINC -I"$PH/include" \
-    "$PHAZ/tools/phaz.c" "$LIB" "$PLOCAL" -o "$PHAZ/phaz"
+# -I"$PHAZ" so the CLI + codec find phaz_codec.h.
+$CC -O3 -Wall -Werror -Wno-deprecated-declarations -Wno-misleading-indentation $MARCH $ZINC -I"$PH/include" -I"$PHAZ" \
+    "$PHAZ/tools/phaz.c" "$PHAZ/phaz_codec.c" "$LIB" "$PLOCAL" -o "$PHAZ/phaz"
 
-echo ">> done. phaz in $PHAZ/"
+# Relocatable, drop-in object for embedding (e.g. the TurboBench plugin):
+# phaz_codec + the *private patched* libzstd + pivco, merged into one .o that
+# exports ONLY phaz_compress / phaz_decompress / phaz_compress_bound.  Every
+# other symbol (all of zstd, FSE/HUF, the g_phaz_* capture globals) is
+# localized, so it coexists with a host that links its own (vanilla) zstd.
+echo ">> building phaz_local.o (embeddable blob)"
+PCODEC="$PHAZ/build/phaz_codec.o"
+PBLOB="$PHAZ/build/phaz_local.o"
+$CC -O3 $MARCH $ZINC -I"$PH/include" -I"$PHAZ" -c "$PHAZ/phaz_codec.c" -o "$PCODEC"
+if [ "$(uname)" = "Darwin" ]; then
+  $CC -nostdlib -Wl,-r -Wl,-all_load \
+      -Wl,-exported_symbol,'_phaz_compress' \
+      -Wl,-exported_symbol,'_phaz_decompress' \
+      -Wl,-exported_symbol,'_phaz_compress_bound' \
+      "$PCODEC" "$LIB" "$PLOCAL" -o "$PBLOB"
+else
+  ld -r -o "$PHAZ/build/phaz_all.o" "$PCODEC" --whole-archive "$LIB" --no-whole-archive "$PLOCAL"
+  objcopy --keep-global-symbol phaz_compress --keep-global-symbol phaz_decompress \
+          --keep-global-symbol phaz_compress_bound \
+          "$PHAZ/build/phaz_all.o" "$PBLOB"
+fi
+
+echo ">> done. phaz in $PHAZ/  (embeddable blob: $PBLOB)"
