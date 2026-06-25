@@ -1,0 +1,31 @@
+--- a/lib/compress/zstd_compress.c
++++ b/lib/compress/zstd_compress.c
+@@ -2714,6 +2714,10 @@
+ 
+ /* See doc/zstd_compression_format.md for detailed format description */
+ 
++/* phaz: entropy-layer transplant — capture hook + globals (see phaz.h) */
++#define PHAZ_COMPRESS_SIDE
++#include "phaz.h"
++
+ int ZSTD_seqToCodes(const SeqStore_t* seqStorePtr)
+ {
+     const SeqDef* const sequences = seqStorePtr->sequencesStart;
+@@ -2939,6 +2943,7 @@
+     entropyWkspSize -= (MaxSeq + 1) * sizeof(*count);
+ 
+     DEBUGLOG(5, "ZSTD_entropyCompressSeqStore_internal (nbSeq=%zu, dstCapacity=%zu)", nbSeq, dstCapacity);
++    if (g_phaz_dump) phaz_capture(seqStorePtr, literals, litSize);   /* phaz capture hook */
+     ZSTD_STATIC_ASSERT(HUF_WORKSPACE_SIZE >= (1<<MAX(MLFSELog,LLFSELog)));
+     assert(entropyWkspSize >= HUF_WORKSPACE_SIZE);
+ 
+--- a/lib/decompress/zstd_decompress_block.c
++++ b/lib/decompress/zstd_decompress_block.c
+@@ -2309,3 +2309,7 @@
+ {
+     return ZSTD_decompressBlock_deprecated(dctx, dst, dstCapacity, src, srcSize);
+ }
++
++/* phaz: entropy-layer transplant — ZSTD_phazDecode (reuses ZSTD_execSequence) */
++#define PHAZ_DECODE_SIDE
++#include "phaz.h"
