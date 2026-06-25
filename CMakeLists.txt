@@ -302,6 +302,45 @@ add_library(pivco_huffman
 )
 target_include_directories(pivco_huffman PUBLIC include)
 
+# Relocatable, drop-in object with the vendored FiniteStateEntropy symbols
+# localized (FSE_*/HUF_*/HIST_*/g_debuglevel, plus XXH/ERR/BIT/POOL/ZSTD
+# defensively).  pivco's public API (pivco_*/pivcohuf_*/trad_*/init_*) stays
+# global.  External consumers that also vendor FSE -- e.g. anything linking
+# zstd (phaz, TurboBench) -- link this single .o instead of libpivco_huffman.a
+# and the duplicate-symbol clash just goes away.  Always built (ALL).
+set(PIVCO_LOCAL_OBJ ${CMAKE_BINARY_DIR}/libpivco_huffman_local.o)
+if(APPLE)
+    # drive the partial link through the compiler (injects -platform_version);
+    # ld64's -unexported_symbol turns matched globals into locals
+    add_custom_command(OUTPUT ${PIVCO_LOCAL_OBJ}
+        COMMAND ${CMAKE_C_COMPILER} -nostdlib -Wl,-r -Wl,-all_load
+            -Wl,-unexported_symbol,_FSE_* -Wl,-unexported_symbol,_HUF_*
+            -Wl,-unexported_symbol,_HIST_* -Wl,-unexported_symbol,_XXH*
+            -Wl,-unexported_symbol,_ERR_* -Wl,-unexported_symbol,_BIT_*
+            -Wl,-unexported_symbol,_POOL* -Wl,-unexported_symbol,_ZSTD*
+            -Wl,-unexported_symbol,_g_debuglevel
+            $<TARGET_FILE:pivco_huffman> -o ${PIVCO_LOCAL_OBJ}
+        DEPENDS pivco_huffman
+        COMMENT "Localizing FSE/HUF symbols -> libpivco_huffman_local.o"
+        VERBATIM)
+else()
+    # GNU binutils: partial-link the whole archive, then localize via objcopy
+    add_custom_command(OUTPUT ${PIVCO_LOCAL_OBJ}
+        COMMAND ld -r -o ${CMAKE_BINARY_DIR}/pivco_huffman_all.o
+            --whole-archive $<TARGET_FILE:pivco_huffman> --no-whole-archive
+        COMMAND objcopy -w
+            --localize-symbol FSE_* --localize-symbol HUF_*
+            --localize-symbol HIST_* --localize-symbol XXH*
+            --localize-symbol ERR_* --localize-symbol BIT_*
+            --localize-symbol POOL* --localize-symbol ZSTD*
+            --localize-symbol g_debuglevel
+            ${CMAKE_BINARY_DIR}/pivco_huffman_all.o ${PIVCO_LOCAL_OBJ}
+        DEPENDS pivco_huffman
+        COMMENT "Localizing FSE/HUF symbols -> libpivco_huffman_local.o"
+        VERBATIM)
+endif()
+add_custom_target(pivco_huffman_local ALL DEPENDS ${PIVCO_LOCAL_OBJ})
+
 # CLI tool: pivcohuf compress/decompress files using our format.
 add_executable(pivcohuf tools/pivcohuf.c)
 target_link_libraries(pivcohuf pivco_huffman)

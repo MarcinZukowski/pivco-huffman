@@ -181,6 +181,21 @@ cmake -B build -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_C_FLAGS="-DPIVCO_BLOCK_SIZE=16384"
 ```
 
+**Linking alongside zstd / FSE** — `libpivco_huffman.a` vendors
+FiniteStateEntropy (`FSE_*`/`HUF_*`/`HIST_*`/`g_debuglevel`), so linking it
+next to anything that *also* vendors FSE (zstd, lz4's entropy layer, …) hits
+duplicate-symbol errors.  For that case the build emits a drop-in relocatable
+object, `build/libpivco_huffman_local.o`, with those symbols localized and
+pivco's public `pivco_*`/`pivcohuf_*` API kept global — link it instead of the
+`.a` and the clash is gone:
+
+```sh
+cmake --build build --target pivco_huffman_local   # built by default too
+cc your_app.c build/libpivco_huffman_local.o -Iinclude -o your_app
+```
+
+This is what e.g. `extras/phaz` links.
+
 ## Interactive tree visualization
 
 [`figures/tree_viz.html`](figures/tree_viz.html) is a self-contained
