@@ -1,6 +1,9 @@
 build/
 build-*/
-ext/
+ext/*
+# ext/fse is a git submodule (FSE entropy coder, needed for PHA); keep it tracked
+# while ignoring the other manual ext/ clones (ryg_rans, brotli, oodle, ...).
+!ext/fse
 # Local build artefact of the golomb harness:
 extras/golomb/golomb
 *.o

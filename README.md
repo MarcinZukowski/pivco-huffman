@@ -112,7 +112,7 @@ ship.
 
 ```sh
 # Prerequisites (first time only)
-git clone --depth 1 https://github.com/cyan4973/FiniteStateEntropy.git ext/fse
+git submodule update --init ext/fse                                  # FSE entropy coder (required, for PHA)
 git clone --depth 1 https://github.com/rygorous/ryg_rans.git ext/ryg_rans
 git clone --depth 1 https://github.com/google/brotli.git ext/brotli  # optional
 
