@@ -826,13 +826,12 @@ static void prim_part_u16like(const ctx_t *c) {
     }
 }
 
-/* sse32: 32 ranks/iter — two SSE movemasks OR'd into a 32-bit mask, one 4-byte
- * bitmap write, two X86_COMPACT16 (16-wide) per iter, POPCNT for the cursor
- * advance (no x86_pc8 sum).  The pshufb+store compaction traffic per byte is
- * identical to the shipped 16/iter part_full_x86; this only folds loop + mask +
- * bitmap overhead in half.  Both 16-byte halves are loaded before any in-place
- * left store, so the dense left write can't clobber an un-loaded rank. */
-static void prim_part_sse32_u8(const ctx_t *c) {
+/* asof-3a138a6: the 32 ranks/iter dense X86_COMPACT16 partition that was
+ * production x86 (part_full_x86) before p16rev was promoted — two SSE movemasks
+ * OR'd into a 32-bit mask, one 4-byte bitmap write, two X86_COMPACT16 (16-wide,
+ * two min-merged indices) per iter, POPCNT cursor advance.  Frozen here verbatim
+ * as the baseline; reuses the production x86_ctab_r/l + x86_pre_r/l (80 KB). */
+static void prim_part_asof_3a138a6_x86(const ctx_t *c) {
     uint8_t *ranks = c->ranks_work, *bm = c->bm, *tmp = c->tmp8;
     int n = c->n; uint8_t thr = c->rank_thr;
     x86_build_tabs();
@@ -926,6 +925,109 @@ static void prim_part_halftab(const ctx_t *c) {
         if (r > thr) { bm[j >> 3] |= (uint8_t)(1u << (j & 7)); tmp[n_right++] = r; }
         else         { ranks[n_left++] = r; }
     }
+}
+
+/* p16rev combined-index LUTs (SSE), used by the p16revback variant below.
+ * tabA[m0] | tabB[pc0][m1] packs {left, forward, front} | {right, reversed,
+ * back} (the two sides tile the 16 lanes, so the OR of two disjoint tables is
+ * exact).  The p16rev kernel itself is now production (part_full_x86 in
+ * pivco_huffman_primitives_x86.h, with its own copy of these tables), so only
+ * the backward-store p16revback variant carries them here. */
+static uint8_t pv_x86p16rev_tabA[256][16]    __attribute__((aligned(16)));
+static uint8_t pv_x86p16rev_tabB[9][256][16] __attribute__((aligned(16)));
+static uint8_t pv_x86p16rev_rev[17][16]      __attribute__((aligned(16)));
+static int pv_x86p16rev_built = 0;
+static void pv_build_x86p16rev(void) {
+    if (pv_x86p16rev_built) return;
+    for (int m0 = 0; m0 < 256; m0++) {
+        memset(pv_x86p16rev_tabA[m0], 0, 16);
+        int lp = 0, rp = 15;
+        for (int k = 0; k < 8; k++) {
+            if ((m0 >> k) & 1) pv_x86p16rev_tabA[m0][rp--] = (uint8_t)k;
+            else               pv_x86p16rev_tabA[m0][lp++] = (uint8_t)k;
+        }
+    }
+    for (int pc0 = 0; pc0 <= 8; pc0++)
+        for (int m1 = 0; m1 < 256; m1++) {
+            memset(pv_x86p16rev_tabB[pc0][m1], 0, 16);
+            int lp = 8 - pc0, rp = 15 - pc0;
+            for (int k = 0; k < 8; k++) {
+                if ((m1 >> k) & 1) pv_x86p16rev_tabB[pc0][m1][rp--] = (uint8_t)(8 + k);
+                else               pv_x86p16rev_tabB[pc0][m1][lp++] = (uint8_t)(8 + k);
+            }
+        }
+    for (int pc = 0; pc <= 16; pc++) {
+        memset(pv_x86p16rev_rev[pc], 0x80, 16);   /* tail lanes -> pshufb 0 */
+        for (int i = 0; i < pc; i++) pv_x86p16rev_rev[pc][i] = (uint8_t)(15 - i);
+    }
+    pv_x86p16rev_built = 1;
+}
+/* p16revback (x86) — p16rev without the per-group right pshufb.  Store the whole
+ * comb register backward into a scratch buffer (keeping the top pc lanes = this
+ * group's rights reversed), then one 16-wide pshufb reverse pass (4x unrolled)
+ * turns the globally-reversed scratch into the forward right output.  Reuses the
+ * p16rev combined-index tables; hot loop drops the right pshufb at the cost of
+ * the streaming reverse pass.  (NEON p16revback won only on Graviton2 — this
+ * tests whether the store-bound SSE port behaves differently.) */
+static uint8_t *pv_x86p16revback_buf = NULL;
+static int      pv_x86p16revback_cap = 0;
+static void prim_part_p16revback_x86(const ctx_t *c) {
+    uint8_t *ranks = c->ranks_work, *bm = c->bm, *tmp = c->tmp8;
+    int n = c->n; uint8_t thr = c->rank_thr;
+    pv_build_x86p16rev();
+    if (n + 64 > pv_x86p16revback_cap) {
+        pv_x86p16revback_buf = (uint8_t *)realloc(pv_x86p16revback_buf, (size_t)n + 64);
+        pv_x86p16revback_cap = n + 64;
+    }
+    uint8_t *rb = pv_x86p16revback_buf;
+    int n_left = 0, j = 0, w = n + 16;
+    __m128i thr1 = _mm_set1_epi8((char)(thr + 1));
+#define _P16REVBACK_X86(v, mlo_, mhi_) do {                                    \
+        uint32_t pc0_ = (uint32_t)__builtin_popcount((unsigned)(mlo_));         \
+        uint32_t pc_  = pc0_ + (uint32_t)__builtin_popcount((unsigned)(mhi_));  \
+        __m128i cidx_ = _mm_or_si128(                                           \
+            _mm_load_si128((const __m128i *)pv_x86p16rev_tabA[(mlo_)]),         \
+            _mm_load_si128((const __m128i *)pv_x86p16rev_tabB[pc0_][(mhi_)]));  \
+        __m128i comb_ = _mm_shuffle_epi8((v), cidx_);                          \
+        _mm_storeu_si128((__m128i *)(ranks + n_left), comb_);                  \
+        _mm_storeu_si128((__m128i *)(rb + w - 16), comb_);                     \
+        w -= pc_; n_left += 16 - pc_;                                           \
+    } while (0)
+    for (; j + 32 <= n; j += 32) {
+        __m128i v0 = _mm_loadu_si128((const __m128i *)(ranks + j));
+        __m128i v1 = _mm_loadu_si128((const __m128i *)(ranks + j + 16));
+        uint32_t mlo = (uint16_t)_mm_movemask_epi8(_mm_cmpeq_epi8(_mm_min_epu8(v0, thr1), thr1));
+        uint32_t mhi = (uint16_t)_mm_movemask_epi8(_mm_cmpeq_epi8(_mm_min_epu8(v1, thr1), thr1));
+        uint32_t mm = mlo | (mhi << 16);
+        memcpy(bm + (j >> 3), &mm, 4);
+        _P16REVBACK_X86(v0, (uint8_t)mlo, (uint8_t)(mlo >> 8));
+        _P16REVBACK_X86(v1, (uint8_t)mhi, (uint8_t)(mhi >> 8));
+    }
+    for (; j + 16 <= n; j += 16) {
+        __m128i v = _mm_loadu_si128((const __m128i *)(ranks + j));
+        uint16_t mm = (uint16_t)_mm_movemask_epi8(_mm_cmpeq_epi8(_mm_min_epu8(v, thr1), thr1));
+        memcpy(bm + (j >> 3), &mm, 2);
+        _P16REVBACK_X86(v, (uint8_t)mm, (uint8_t)(mm >> 8));
+    }
+#undef _P16REVBACK_X86
+    int n_right = (n + 16) - w;
+    for (; j < n; j++) {
+        if ((j & 7) == 0) bm[j >> 3] = 0;
+        uint8_t r = ranks[j];
+        if (r > thr) { bm[j >> 3] |= (uint8_t)(1u << (j & 7)); tmp[n_right++] = r; }
+        else         { ranks[n_left++] = r; }
+    }
+    /* reverse rb[w .. w+T) into tmp[0 .. T), 64 bytes/iter (pshufb REV16). */
+    static const uint8_t REV16_a[16] = {15,14,13,12,11,10,9,8,7,6,5,4,3,2,1,0};
+    __m128i rev16 = _mm_load_si128((const __m128i *)REV16_a);
+    int T = (n + 16) - w, i = 0;
+    const uint8_t *src = rb + w;
+#define _REVST(off) _mm_storeu_si128((__m128i *)(tmp + (T - i - (off) - 16)),   \
+            _mm_shuffle_epi8(_mm_loadu_si128((const __m128i *)(src + i + (off))), rev16))
+    for (; i + 64 <= T; i += 64) { _REVST(0); _REVST(16); _REVST(32); _REVST(48); }
+    for (; i + 16 <= T; i += 16) _REVST(0);
+#undef _REVST
+    for (; i < T; i++) tmp[T - 1 - i] = src[i];
 }
 
 #if defined(__AVX2__)
@@ -1279,13 +1381,16 @@ static void pv_register_partition(void) {
                "30f42a5 per-8-chunk port",
                "per-8-chunk u8 port (mirrors u16 shape); vs shipped 16-wide", 1,
                PV_FN_SSE(prim_part_u16like));
-    PV_VARIANT(ST_PART, "sse32", PV_ISA_SSE4,
-               "32 ranks/iter, 2x SSE movemask + 2x X86_COMPACT16",
-               "32/iter; halves loop+mask+bitmap, same compaction traffic", 1,
-               PV_FN_SSE(prim_part_sse32_u8));
+    PV_VARIANT(ST_PART, "asof-3a138a6", PV_ISA_SSE4,
+               "32/iter dense X86_COMPACT16 (ex-production x86)",
+               "the prior production x86 full partition, before p16rev was promoted; kept benchable as the baseline", 1,
+               PV_FN_SSE(prim_part_asof_3a138a6_x86));
     PV_VARIANT(ST_PART, "halftab", PV_ISA_SSE4, "16b-enc.txt half-table",
                "sse32 but left = right under ~mask; drops ctab_l/pre_l (40KB vs 80KB); Zen3 +0.7% but AVX2 -3..-5% / IvyB -7.5% (complement ALU > L1 saving); not promoted", 1,
                PV_FN_SSE(prim_part_halftab));
+    PV_VARIANT(ST_PART, "p16revback", PV_ISA_SSE4, "p16rev, right stored backward + one reverse pass",
+               "drops p16rev's per-group right pshufb: store comb backward into scratch (keep top pc), one 4x-unrolled pshufb reverse pass after the stride loop. loses to p16rev on all x86 (Zen2/3 Skylake Haswell IvyB) -- the extra reverse-pass stores hurt the store-bound SSE loop; not promoted", 1,
+               PV_FN_SSE(prim_part_p16revback_x86));
     PV_VARIANT(ST_PART, "avx32", PV_ISA_AVX2,
                "32 ranks/iter, 1x ymm movemask + 2x X86_COMPACT16",
                "32/iter; single 32-bit mask build vs 2x SSE", 1,

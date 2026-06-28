@@ -639,6 +639,16 @@ static inline void merge_flat_x86(uint8_t *out, int n,
 static uint8_t x86_pc8[256];
 static uint8_t x86_ctab_r[256][16], x86_ctab_l[256][16];
 static uint8_t x86_pre_r[9][256][16], x86_pre_l[9][256][16];
+
+/* p16rev partition LUTs (part_full_x86).  One combined index per 16-lane group
+ * packs {left, forward, front} | {right, reversed, back}; left+right tile the
+ * 16 lanes so the OR of two disjoint-support tables is exact.  Half the LUT
+ * footprint of the ctab_r/l + pre_r/l pair above (40 KB vs 80 KB) — the win on
+ * x86's 32-48 KB L1.  x86_p16rev_rev[pc] reverses the top pc lanes (0x80 fill on
+ * the unused tail -> pshufb 0); it is indexed only by the right count. */
+static uint8_t x86_p16rev_tabA[256][16];
+static uint8_t x86_p16rev_tabB[9][256][16];
+static uint8_t x86_p16rev_rev[17][16];
 static int     x86_tabs_ready = 0;
 static void x86_build_tabs(void)
 {
@@ -665,6 +675,29 @@ static void x86_build_tabs(void)
                 else              x86_pre_l[nlo][m][pl++] = (uint8_t)(8 + k);
             }
         }
+    }
+    /* p16rev combined-index tables (low byte over m0, high byte over [pc0][m1]),
+     * 0-fill on the non-owned lanes so the OR is exact (every lane owned once). */
+    for (int m0 = 0; m0 < 256; m0++) {
+        memset(x86_p16rev_tabA[m0], 0, 16);
+        int lp = 0, rp = 15;
+        for (int k = 0; k < 8; k++) {
+            if ((m0 >> k) & 1) x86_p16rev_tabA[m0][rp--] = (uint8_t)k;
+            else               x86_p16rev_tabA[m0][lp++] = (uint8_t)k;
+        }
+    }
+    for (int pc0 = 0; pc0 <= 8; pc0++)
+        for (int m1 = 0; m1 < 256; m1++) {
+            memset(x86_p16rev_tabB[pc0][m1], 0, 16);
+            int lp = 8 - pc0, rp = 15 - pc0;
+            for (int k = 0; k < 8; k++) {
+                if ((m1 >> k) & 1) x86_p16rev_tabB[pc0][m1][rp--] = (uint8_t)(8 + k);
+                else               x86_p16rev_tabB[pc0][m1][lp++] = (uint8_t)(8 + k);
+            }
+        }
+    for (int pc = 0; pc <= 16; pc++) {
+        memset(x86_p16rev_rev[pc], 0x80, 16);
+        for (int i = 0; i < pc; i++) x86_p16rev_rev[pc][i] = (uint8_t)(15 - i);
     }
     x86_tabs_ready = 1;
 }
@@ -703,13 +736,16 @@ static inline uint8_t x86_mask8(__m128i ids8, __m128i thr1)
         _mm_storeu_si128((__m128i *)(ranks + (ldst)), _mm_shuffle_epi8((v), lidx_)); \
     } while (0)
 
-/* full: 16-wide dense compaction (one pshufb + one 16-byte store per side),
- * 32 ranks per main-loop iter.  Dense-16 beats the per-8 port (the u16 code_la
- * partition shape) by halving the pshufb + store count — the binding resource
- * on a port-bound SSE loop with no byte-compress.  Doing 32/iter then folds the
- * loop, mask-build and bitmap-write overhead in half again (~10-12% over the
- * 16/iter form on Zen 3 / Skylake-X / Haswell).  The pshufb + store traffic per
- * byte is unchanged — two X86_COMPACT16 per 32 ranks. */
+/* full: p16rev — per 16-lane group, ONE combined index (OR of the two disjoint
+ * x86_p16rev_tabA/tabB) feeds one pshufb that yields {left fwd | right reversed}
+ * in a single register; that register IS the left output (store it), and the
+ * right output is recovered with a second pshufb over the SAME register using
+ * x86_p16rev_rev[pc] (reverse of the top pc lanes, indexed only by the right
+ * count).  vs the prior dense X86_COMPACT16 (two independent min-merged indices):
+ * one OR + one table-pair load instead of two pminub + four loads per 16 lanes,
+ * and the LUTs halve (40 KB vs 80 KB) — the win on x86's 32-48 KB L1.  32 ranks
+ * per iter; the 16-byte tail overstore is absorbed by the ranks +64 / tmp +2N
+ * scratch slack reserved in codec.c. */
 static inline int part_full_x86(uint8_t *ranks, int n, uint8_t thr,
                                    uint8_t *bm, uint8_t *tmp)
 {
@@ -717,10 +753,23 @@ static inline int part_full_x86(uint8_t *ranks, int n, uint8_t thr,
     int n_left = 0, n_right = 0;
     int j = 0;
     __m128i thr1 = _mm_set1_epi8((char)(thr + 1));
+#define _P16REV(v, mlo_, mhi_) do {                                            \
+        uint32_t pc0_ = (uint32_t)__builtin_popcount((unsigned)(mlo_));        \
+        uint32_t pc_  = pc0_ + (uint32_t)__builtin_popcount((unsigned)(mhi_)); \
+        __m128i cidx_ = _mm_or_si128(                                          \
+            _mm_load_si128((const __m128i *)x86_p16rev_tabA[(mlo_)]),          \
+            _mm_load_si128((const __m128i *)x86_p16rev_tabB[pc0_][(mhi_)]));   \
+        __m128i comb_ = _mm_shuffle_epi8((v), cidx_);                         \
+        _mm_storeu_si128((__m128i *)(ranks + n_left), comb_);                 \
+        _mm_storeu_si128((__m128i *)(tmp + n_right),                           \
+            _mm_shuffle_epi8(comb_,                                            \
+                _mm_load_si128((const __m128i *)x86_p16rev_rev[pc_])));        \
+        n_right += pc_; n_left += 16 - pc_;                                    \
+    } while (0)
     /* 32 ranks/iter: two SSE movemasks OR'd into a 32-bit routing mask (one
-     * 4-byte bitmap write), two 16-wide compactions, POPCNT for the cursor
-     * advance.  Both 16-byte halves are loaded before any in-place left store,
-     * so the dense left write can't clobber an un-loaded rank. */
+     * 4-byte bitmap write), two combined-shuffle compactions.  Both 16-byte
+     * halves are loaded before any in-place left store, so the dense left write
+     * can't clobber an un-loaded rank. */
     for (; j + 32 <= n; j += 32) {
         __m128i v0 = _mm_loadu_si128((const __m128i *)(ranks + j));
         __m128i v1 = _mm_loadu_si128((const __m128i *)(ranks + j + 16));
@@ -730,28 +779,18 @@ static inline int part_full_x86(uint8_t *ranks, int n, uint8_t thr,
             _mm_cmpeq_epi8(_mm_min_epu8(v1, thr1), thr1));
         uint32_t mm = mlo | (mhi << 16);
         memcpy(bm + (j >> 3), &mm, 4);
-        int r0 = x86_pc8[(uint8_t)mlo];
-        X86_COMPACT16(v0, (uint8_t)mlo, (uint8_t)(mlo >> 8), r0, n_left, n_right);
-        int nr01 = __builtin_popcount(mlo);
-        n_right += nr01; n_left += 16 - nr01;
-        int r2 = x86_pc8[(uint8_t)mhi];
-        X86_COMPACT16(v1, (uint8_t)mhi, (uint8_t)(mhi >> 8), r2, n_left, n_right);
-        int nr23 = __builtin_popcount(mhi);
-        n_right += nr23; n_left += 16 - nr23;
+        _P16REV(v0, (uint8_t)mlo, (uint8_t)(mlo >> 8));
+        _P16REV(v1, (uint8_t)mhi, (uint8_t)(mhi >> 8));
     }
     /* 16-rank tail of the [32k, 32k+31] remainder: one movemask, one compaction. */
     for (; j + 16 <= n; j += 16) {
         __m128i v = _mm_loadu_si128((const __m128i *)(ranks + j));
         uint16_t mm = (uint16_t)_mm_movemask_epi8(
             _mm_cmpeq_epi8(_mm_min_epu8(v, thr1), thr1));
-        uint8_t mlo = (uint8_t)mm;
-        uint8_t mhi = (uint8_t)(mm >> 8);
         memcpy(bm + (j >> 3), &mm, 2);
-        int rlo = x86_pc8[mlo], rhi = x86_pc8[mhi];
-        X86_COMPACT16(v, mlo, mhi, rlo, n_left, n_right);
-        n_right += rlo + rhi;
-        n_left += (16 - rlo - rhi);
+        _P16REV(v, (uint8_t)mm, (uint8_t)(mm >> 8));
     }
+#undef _P16REV
     for (; j < n; j++) {
         if ((j & 7) == 0) bm[j >> 3] = 0;
         uint8_t r = ranks[j];
