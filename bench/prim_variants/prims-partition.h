@@ -715,6 +715,49 @@ static int prim_part_p16revback_neon(uint8_t *ranks, int n, uint8_t thr, uint8_t
 }
 static void prim_part_p16revback(const ctx_t *c){ prim_part_p16revback_neon(c->ranks_work, c->n, c->rank_thr, c->bm, c->tmp8); }
 
+/* right16 — 16-wide one-sided (right) rank compaction for part_core.  Production
+ * part_core_neon compacts per-8-chunk: 2 vtbl1_u8 + 2 eight-byte stores per 16
+ * lanes (one side).  This does ONE vqtbl1q + ONE 16-byte store per 16 lanes via
+ * the p16 right-pack two-table index (ri = tab1[m0] | tab2[pc0][m1], reused from
+ * the p16 variant), halving both the shuffle and the store-instruction count on
+ * the store-bound loop.  Cost: the 36 KB tab2 latency (the same that sank the
+ * both-sided p16).  Right-only (the common HALF-node case); reads ranks, writes
+ * bm + tmp.  16-byte tmp overstore absorbed by the buffer's tail slack. */
+static int prim_part_right16_neon(uint8_t *ranks, int n, uint8_t thr, uint8_t *bm, uint8_t *tmp) {
+    pv_build_p16();
+    int n_right = 0, j = 0;
+    uint8x16_t vt = vdupq_n_u8(thr);
+    static const uint8_t bw_a[16] = {1,2,4,8,16,32,64,128, 1,2,4,8,16,32,64,128};
+    uint8x16_t bw = vld1q_u8(bw_a);
+    for (; j + 64 <= n; j += 64) {
+        uint8x16_t v0 = vld1q_u8(ranks + j),      v1 = vld1q_u8(ranks + j + 16);
+        uint8x16_t v2 = vld1q_u8(ranks + j + 32), v3 = vld1q_u8(ranks + j + 48);
+        uint64_t mask_word = masks64_neon(v0, v1, v2, v3, vt, bw);
+        memcpy(bm + (j >> 3), &mask_word, 8);
+        uint64_t pcw = vget_lane_u64(vreinterpret_u64_u8(vcnt_u8(vcreate_u8(mask_word))), 0);
+        uint8x16_t vg[4] = { v0, v1, v2, v3 };
+#define _R16(g) do {                                                            \
+        uint8_t  m0 = (uint8_t)(mask_word >> (16*(g)));                         \
+        uint8_t  m1 = (uint8_t)(mask_word >> (16*(g) + 8));                     \
+        uint32_t pc0 = (uint32_t)((pcw >> (16*(g)))     & 0xFF);                \
+        uint32_t pc1 = (uint32_t)((pcw >> (16*(g) + 8)) & 0xFF);                \
+        uint8x16_t ri = vorrq_u8(vld1q_u8(pv_p16_tab1[m0]),                     \
+                                 vld1q_u8(pv_p16_tab2[pc0][m1]));               \
+        vst1q_u8(tmp + n_right, vqtbl1q_u8(vg[g], ri));                         \
+        n_right += pc0 + pc1;                                                   \
+    } while (0)
+        _R16(0); _R16(1); _R16(2); _R16(3);
+#undef _R16
+    }
+    for (; j < n; j++) {
+        if ((j & 7) == 0) bm[j >> 3] = 0;
+        uint8_t r = ranks[j];
+        if (r > thr) { bm[j >> 3] |= (uint8_t)(1u << (j & 7)); tmp[n_right++] = r; }
+    }
+    return n_right;
+}
+static void prim_part_right16(const ctx_t *c){ prim_part_right16_neon(c->ranks_work, c->n, c->rank_thr, c->bm, c->tmp8); }
+
 #endif /* USE_NEON_KERNELS */
 
 /* ============================================================================
@@ -1404,6 +1447,9 @@ static void pv_register_partition(void) {
     PV_VARIANT(ST_PART, "p16revback", PV_ISA_NEON, "p16rev, right stored backward + one final reverse pass",
                "drops p16rev's per-group rev shuffle: store comb backward into scratch (keep top pc), one 16-wide reverse pass after the stride loop. wins only N1/Graviton2 +7.5%; loses M4 -4% V1/G3 -5% V2/G4 -5% V3 -2% (extra reverse-pass store traffic > saved shuffle on wide cores); not promoted", 1,
                PV_FN_NEON(prim_part_p16revback));
+    PV_VARIANT(ST_PART_RIGHT, "right16", PV_ISA_NEON, "16-wide one-sided right compaction",
+               "1 vqtbl1q + 1 16-byte store per 16 lanes (p16 right-pack two-table index) vs the per-8-chunk production 2 vtbl1 + 2 8-byte stores; halves shuffle+store count, pays the 36 KB tab2 latency", 1,
+               PV_FN_NEON(prim_part_right16));
     /* x86 enc_partition_full (u16 code_la graveyard) */
     PV_VARIANT(ST_U16_PART, "sse_com", PV_ISA_SSE4,
                "bench_partition_x86.c / IDEAS x86 COM partition",

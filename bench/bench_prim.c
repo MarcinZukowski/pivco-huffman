@@ -273,6 +273,7 @@ static void simd_merge_flat(const ctx_t *c){ prim_merge_flat(c->out, c->n, c->bm
 /* rank-based production primitives */
 static void simd_enc_init(const ctx_t *c){ prim_enc_init(c->ranks_work, c->n, c->symbuf, c->sym_to_rank); }
 static void simd_part    (const ctx_t *c){ prim_enc_partition_full(c->ranks_work, c->n, c->rank_thr, c->bm, c->tmp8); }
+static void simd_part_right(const ctx_t *c){ prim_enc_partition_right(c->ranks_work, c->n, c->rank_thr, c->bm, c->tmp8); }
 static void simd_pack    (const ctx_t *c){ prim_enc_pack_dN(c->ranks, c->n, c->D, c->rank_base, c->pack_out); }
 /* retired u16 encode (benched alongside for A/B) */
 static void simd_u16pack(const ctx_t *c){ u16enc_pack_dN(c->la_work, c->n, c->D, c->depth, c->pack_out); }
@@ -284,6 +285,12 @@ static void p_enc_init_scalar      (const ctx_t *c){ for(int i=0;i<c->n;i++) c->
 static void p_enc_init_rank_scalar (const ctx_t *c){ scalar_rank_init(c->ranks_work, c->n, c->symbuf, c->sym_to_rank); }
 static void p_pack_rank_scalar     (const ctx_t *c){ scalar_rank_pack(c->pack_out, c->ranks, c->n, c->D, c->rank_base); }
 static void p_part_rank_scalar     (const ctx_t *c){ scalar_rank_partition(c->ranks_work, c->n, c->rank_thr, c->bm, c->ranks_work, c->tmp8); }
+static void p_part_right_rank_scalar(const ctx_t *c){
+    const uint8_t *r = c->ranks_work; uint8_t *bm = c->bm, *tmp = c->tmp8;
+    int n = c->n, nr = 0; uint8_t thr = c->rank_thr;
+    memset(bm, 0, (size_t)((n + 7) >> 3));
+    for (int j = 0; j < n; j++) { uint8_t v = r[j]; if (v > thr) { bm[j>>3] |= (uint8_t)(1u<<(j&7)); tmp[nr++] = v; } }
+}
 #if defined(HAVE_SIMD)   /* binary-merge production primitives — all backends */
 static void simd_merge_vec_vec     (const ctx_t *c){ prim_merge_vec_vec(c->bm, c->n, c->merge_left, c->merge_right, c->out); }
 static void simd_merge_cst_cst     (const ctx_t *c){ prim_merge_cst_cst(c->bm, c->n, MERGE_LEFT_SYM, MERGE_RIGHT_SYM, c->out); }
@@ -395,6 +402,7 @@ typedef enum {
     /* ---- production encode (u8 in-order ranks, partbyrank) ---- */
     ST_ENC_INIT,      /* prim_enc_init:           symbols -> ranks[] (gather)      */
     ST_PART,          /* prim_enc_partition_full: ranks -> bitmap + L/R split      */
+    ST_PART_RIGHT,    /* prim_enc_partition_right: ranks -> bitmap + right scatter  */
     ST_PACK,          /* prim_enc_pack_dN:        ranks -> packed D-bit stream     */
 
     /* ---- retired u16 (code_la) encode — bench-only, alongside the u8 rows ---- */
@@ -463,6 +471,7 @@ static const char *stage_name(stage_t s){
     case ST_U16_ENC_INIT:      return "u16enc_init";
     case ST_ENC_INIT: return "enc_init";
     case ST_PART:     return "enc_partition_full";
+    case ST_PART_RIGHT: return "enc_partition_right";
     case ST_PACK:     return "enc_pack_dN";
     }
     return "?";
@@ -559,6 +568,7 @@ static void stage_bits(stage_t s, int D, double *in, double *out, double *lut) {
     case ST_U16_ENC_INIT:      *in=1;        *out=2;        *lut=2;       break;  /* sym->u16 code_la */
     case ST_ENC_INIT: *in=1;        *out=1;        *lut=1;       break;  /* sym->u8 rank */
     case ST_PART:     *in=1;        *out=1+1;      *lut=16+1;    break;  /* u8 in/out + bitmap */
+    case ST_PART_RIGHT: *in=1;      *out=1+1;      *lut=16+1;    break;  /* one-sided: bitmap + right */
     case ST_PACK:     *in=1;        *out=D;        *lut=0;       break;
     }
 }
@@ -666,10 +676,12 @@ int main(int argc, char **argv) {
     reg("scalar",ST_U16_ENC_INIT,      0,0,p_enc_init_scalar);
     reg("scalar",ST_ENC_INIT, 0,0,p_enc_init_rank_scalar);
     reg("scalar",ST_PART,     0,0,p_part_rank_scalar);
+    reg("scalar",ST_PART_RIGHT,0,0,p_part_right_rank_scalar);
 #if defined(HAVE_SIMD)
     reg(BK,      ST_U16_ENC_INIT,      0,0,simd_u16enc_init);
     reg(BK,      ST_ENC_INIT, 0,0,simd_enc_init);
     reg(BK,      ST_PART,     0,0,simd_part);
+    reg(BK,      ST_PART_RIGHT,0,0,simd_part_right);
 #endif
 #if defined(USE_NEON_KERNELS)
     /* Unfused decomposition: fused part == bm_build + part_bm (re-read cost).
@@ -888,6 +900,10 @@ int main(int argc, char **argv) {
             memcpy(ranks_work,ranks,(size_t)n); p->run(&cx);
             if (memcmp(bm,ref_bm,(n+7)>>3) || memcmp(ranks_work,ref8l,(size_t)nl_ref)
                 || memcmp(tmp8,ref8r,(size_t)nr_ref)) chk="FAIL";
+        } else if (p->stage == ST_PART_RIGHT) {
+            int nr_ref = scalar_rank_partition(ranks,n,rank_thr,ref_bm,ref8l,ref8r);
+            memcpy(ranks_work,ranks,(size_t)n); p->run(&cx);   /* reads ranks_work, no left scatter */
+            if (memcmp(bm,ref_bm,(n+7)>>3) || memcmp(tmp8,ref8r,(size_t)nr_ref)) chk="FAIL";
         } else if (p->stage == ST_PACK) {
             scalar_rank_pack(ref,ranks,n,p->D,rank_base); memset(pack_out,0,n); p->run(&cx);
             if (memcmp(pack_out,ref,(n*p->D+7)>>3)) chk="FAIL";

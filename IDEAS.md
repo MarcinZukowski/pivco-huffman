@@ -18,7 +18,7 @@
 - [LSB-first canonical codes](#lsb-first-canonical-codes-2026-05-12)
 
 **NEON**
-(no open entries)
+- [16-wide one-sided part_core (right16)](#16-wide-one-sided-part_core-right16-2026-06-28-parked)
 
 **SSE/AVX2**
 - [SSE/AVX2 enc_node_full gap vs huf0 on text](#sseavx2-enc_node_full-gap-vs-huf0-on-text-2026-05-12-partial)
@@ -142,6 +142,11 @@ Microbench (`bench_unpack_fl_layout.c`) shows FL-layout 2–22× faster than cur
 
 ### LSB-first canonical codes, 2026-05-12
 Bit-reversing canonical codes (root at bit 0) would let `code` replace `code_la` (-512 B table) but does NOT improve any hot operation: u8 subtree repack and partition kernels are symmetric.  Multi-day rewrite of every SIMD partition kernel for a marginal cleanup — not justified.  Logged so the question doesn't get re-derived.
+
+**NEON**
+
+### 16-wide one-sided part_core (right16), 2026-06-28, parked
+The one-sided rank compaction (`part_core`, used at HALF nodes) compacts per-8-chunk: 2 `vtbl1` + 2 8-byte stores per 16 lanes.  A 16-wide form — one `vqtbl1q` + one 16-byte store per 16 lanes via the p16 right-pack two-table index, left side via the complement mask — is a clean **micro** win (−5% to −20% across M4 / Graviton2–4 / Neoverse V3; `bench_prim enc_partition_right/right16`).  But at the **codec** level it's marginal: +0.5% geomean encode (proba80 +3% on the narrow M4 / Graviton2, a wash on the wide Neoverse cores), because `part_core` is a small fraction of total encode and the unchanged `masks64_neon` bitmap-build dominates it.  It also needs the 40 KB rpack tables — the table-free reuse of the `part_full` p16rev tables *regresses* EMIT_RIGHT (+7% on M4: the second, serial rev-shuffle costs more than the saved store).  Not worth 40 KB for +0.5%, so production stays per-8; kept as the `right16` bench variant.  Contrast: the *same* idea is a big codec win on x86 (+0.7–5.7%, proba80 +3–25%) because `part_core_x86` was an unoptimized stride-8 kernel.  Reevaluate if `part_core`'s encode share grows (e.g. tiny-node fast paths) or a table-free one-shuffle NEON form appears.
 
 **SSE/AVX2**
 
