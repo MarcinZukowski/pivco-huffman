@@ -1,9 +1,9 @@
 --- a/lib/compress/zstd_compress.c
 +++ b/lib/compress/zstd_compress.c
 @@ -2714,6 +2714,10 @@
- 
+
  /* See doc/zstd_compression_format.md for detailed format description */
- 
+
 +/* phaz: entropy-layer transplant — capture hook + globals (see phaz.h) */
 +#define PHAZ_COMPRESS_SIDE
 +#include "phaz.h"
@@ -13,12 +13,18 @@
      const SeqDef* const sequences = seqStorePtr->sequencesStart;
 @@ -2939,6 +2943,7 @@
      entropyWkspSize -= (MaxSeq + 1) * sizeof(*count);
- 
+
      DEBUGLOG(5, "ZSTD_entropyCompressSeqStore_internal (nbSeq=%zu, dstCapacity=%zu)", nbSeq, dstCapacity);
 +    if (g_phaz_dump) phaz_capture(seqStorePtr, literals, litSize);   /* phaz capture hook */
      ZSTD_STATIC_ASSERT(HUF_WORKSPACE_SIZE >= (1<<MAX(MLFSELog,LLFSELog)));
      assert(entropyWkspSize >= HUF_WORKSPACE_SIZE);
- 
+
+@@ -3646,4 +3651,5 @@
+     ZSTD_compressedBlockState_t* const tmp = bs->prevCBlock;
+     bs->prevCBlock = bs->nextCBlock;
+     bs->nextCBlock = tmp;
++    phaz_mark_confirmed();   /* phaz: zstd confirmed this block's repcodes (cSize>1) */
+ }
 --- a/lib/decompress/zstd_decompress_block.c
 +++ b/lib/decompress/zstd_decompress_block.c
 @@ -2309,3 +2309,7 @@

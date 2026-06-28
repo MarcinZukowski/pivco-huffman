@@ -130,7 +130,7 @@ static int cmd_stats(const char *in, int level){
         size_t g; g=nseq; pivcohuf_decompress(cll,ll0,rl,&g);
         g=nseq; pivcohuf_decompress(cml,ml0,rm,&g); g=nseq; pivcohuf_decompress(cof,of0,ro,&g);
         g=lits; pivcohuf_decompress(clit,lit0,rt,&g);
-        size_t got=ZSTD_phazDecode(dst,n+64,rl,rm,ro,g_phaz_xb,rt,lits,g_phaz_blk_ns,g_phaz_blk_tl,g_phaz_nblk);
+        size_t got=ZSTD_phazDecode(dst,n+64,rl,rm,ro,g_phaz_xb,rt,lits,g_phaz_blk_ns,g_phaz_blk_tl,g_phaz_blk_cf,g_phaz_nblk);
         if(got!=n){fprintf(stderr,"phaz: stats decode got %zu != %zu\n",got,n);return 2;}
         double dt=now()-t; if(dt<phaz)phaz=dt; }
     size_t cb=ZSTD_compressBound(n); unsigned char *cz=malloc(cb);
@@ -147,7 +147,7 @@ static int cmd_stats(const char *in, int level){
     for(int r=0;r<reps;r++){double t=now();g=nseq;pivcohuf_decompress(cml,ml0,rm,&g);double d=now()-t;if(d<bml)bml=d;}
     for(int r=0;r<reps;r++){double t=now();g=nseq;pivcohuf_decompress(cof,of0,ro,&g);double d=now()-t;if(d<bof)bof=d;}
     for(int r=0;r<reps;r++){double t=now();g=lits;pivcohuf_decompress(clit,lit0,rt,&g);double d=now()-t;if(d<bli)bli=d;}
-    for(int r=0;r<reps;r++){double t=now();ZSTD_phazDecode(dst,n+64,rl,rm,ro,g_phaz_xb,rt,lits,g_phaz_blk_ns,g_phaz_blk_tl,g_phaz_nblk);double d=now()-t;if(d<brec)brec=d;}
+    for(int r=0;r<reps;r++){double t=now();ZSTD_phazDecode(dst,n+64,rl,rm,ro,g_phaz_xb,rt,lits,g_phaz_blk_ns,g_phaz_blk_tl,g_phaz_blk_cf,g_phaz_nblk);double d=now()-t;if(d<brec)brec=d;}
     double iso=bll+bml+bof+bli+brec;
     printf("  DIAG isolated(old-style): phaz %.3f ms (%.2f GB/s) %.2fx  [ent %.3f + rec %.3f]\n",
            iso*1e3, n/(iso*1e9), zstd/iso, (bll+bml+bof+bli)*1e3, brec*1e3);

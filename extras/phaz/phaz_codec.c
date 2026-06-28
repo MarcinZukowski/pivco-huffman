@@ -4,7 +4,7 @@
  * Container layout (little-endian):
  *   "phaz" magic (4) | version u8 |
  *   hdr[5] u64: n, nseq, lits, extrabits, nblk |
- *   blk_ns[nblk] u32 | blk_tl[nblk] u32 |
+ *   blk_ns[nblk] u32 | blk_tl[nblk] u32 | blk_cf[nblk] u8 |
  *   xblen u64 | xb[xblen] |
  *   4x stream: method u8 | blen u64 | blob[blen]   (ll, ml, of, lit)
  */
@@ -19,7 +19,7 @@
 #include "phaz_codec.h"
 
 #define PHAZ_MAGIC "phaz"
-#define PHAZ_VER   1
+#define PHAZ_VER   2          /* v2: + per-block blk_cf[] repcode-confirmed flags */
 
 const char *const phaz_stream_names[4] = { "ll", "ml", "of", "lit" };
 
@@ -31,9 +31,10 @@ static double now(void) {
 void phaz_capture_free(void) {
     free(g_phaz_llc);    free(g_phaz_mlc);    free(g_phaz_ofc);
     free(g_phaz_lit);    free(g_phaz_xb);
-    free(g_phaz_blk_ns); free(g_phaz_blk_tl);
+    free(g_phaz_blk_ns); free(g_phaz_blk_tl); free(g_phaz_blk_cf);
     g_phaz_llc = g_phaz_mlc = g_phaz_ofc = g_phaz_lit = g_phaz_xb = NULL;
     g_phaz_blk_ns = g_phaz_blk_tl = NULL;
+    g_phaz_blk_cf = NULL;
 }
 
 size_t phaz_capture_run(const unsigned char *src, size_t n, int level, int want_stock) {
@@ -54,8 +55,9 @@ size_t phaz_capture_run(const unsigned char *src, size_t n, int level, int want_
     g_phaz_xb  = calloc(sb * 8 + 64, 1);
     g_phaz_blk_ns = calloc((n >> 10) + 64, sizeof(unsigned));
     g_phaz_blk_tl = calloc((n >> 10) + 64, sizeof(unsigned));
+    g_phaz_blk_cf = calloc((n >> 10) + 64, 1);
     if (!g_phaz_llc || !g_phaz_mlc || !g_phaz_ofc || !g_phaz_lit ||
-        !g_phaz_xb || !g_phaz_blk_ns || !g_phaz_blk_tl) {
+        !g_phaz_xb || !g_phaz_blk_ns || !g_phaz_blk_tl || !g_phaz_blk_cf) {
         free(c); phaz_capture_free(); return (size_t)-1;
     }
     g_phaz_nseq = 0; g_phaz_lits = 0; g_phaz_extrabits = 0;
@@ -132,7 +134,7 @@ static unsigned char *unpack_stream(const unsigned char **p, const unsigned char
 size_t phaz_compress_bound(size_t n) {
     size_t nblk    = (n >> 17) + 2;                          /* ~128KB zstd blocks */
     size_t hdr     = 5 + sizeof(uint64_t) * 5
-                     + nblk * sizeof(unsigned) * 2 + sizeof(uint64_t);
+                     + nblk * (sizeof(unsigned) * 2 + 1) + sizeof(uint64_t);
     size_t xb      = ZSTD_sequenceBound(n) + 64;             /* extra-bits ceiling */
     size_t seqb    = ZSTD_sequenceBound(n);
     size_t streams = 4 * (1 + sizeof(uint64_t))             /* per-stream framing */
@@ -153,7 +155,7 @@ size_t phaz_compress(const void *src_, size_t n, void *dst_, size_t cap,
     uint64_t hdr[5] = { (uint64_t)n, (uint64_t)g_phaz_nseq, (uint64_t)g_phaz_lits,
                         (uint64_t)g_phaz_extrabits, (uint64_t)g_phaz_nblk };
     uint64_t xblen = (g_phaz_xbpos + 7) / 8;
-    size_t fixed = 5 + sizeof hdr + g_phaz_nblk * sizeof(unsigned) * 2
+    size_t fixed = 5 + sizeof hdr + g_phaz_nblk * (sizeof(unsigned) * 2 + 1)
                    + sizeof xblen + xblen;
     if (cur + fixed > end) { phaz_capture_free(); return 0; }
 
@@ -161,6 +163,7 @@ size_t phaz_compress(const void *src_, size_t n, void *dst_, size_t cap,
     memcpy(cur, hdr, sizeof hdr); cur += sizeof hdr;
     memcpy(cur, g_phaz_blk_ns, g_phaz_nblk * sizeof(unsigned)); cur += g_phaz_nblk * sizeof(unsigned);
     memcpy(cur, g_phaz_blk_tl, g_phaz_nblk * sizeof(unsigned)); cur += g_phaz_nblk * sizeof(unsigned);
+    memcpy(cur, g_phaz_blk_cf, g_phaz_nblk); cur += g_phaz_nblk;
     memcpy(cur, &xblen, sizeof xblen); cur += sizeof xblen;
     memcpy(cur, g_phaz_xb, xblen); cur += xblen;
 
@@ -191,13 +194,15 @@ size_t phaz_decompress(const void *src_, size_t fn, void *dst_, size_t cap,
 
     size_t na = (nblk ? nblk : 1) * sizeof(unsigned);
     unsigned *bns = malloc(na), *btl = malloc(na);
-    if (!bns || !btl) { free(bns); free(btl); return 0; }
-    if (p + nblk * sizeof(unsigned) * 2 > end) { free(bns); free(btl); return 0; }
+    unsigned char *bcf = malloc(nblk ? nblk : 1);
+    if (!bns || !btl || !bcf) { free(bns); free(btl); free(bcf); return 0; }
+    if (p + nblk * (sizeof(unsigned) * 2 + 1) > end) { free(bns); free(btl); free(bcf); return 0; }
     memcpy(bns, p, nblk * sizeof(unsigned)); p += nblk * sizeof(unsigned);
     memcpy(btl, p, nblk * sizeof(unsigned)); p += nblk * sizeof(unsigned);
-    if (p + 8 > end) { free(bns); free(btl); return 0; }
+    memcpy(bcf, p, nblk); p += nblk;
+    if (p + 8 > end) { free(bns); free(btl); free(bcf); return 0; }
     uint64_t xblen; memcpy(&xblen, p, 8); p += 8;
-    if (p + xblen > end) { free(bns); free(btl); return 0; }
+    if (p + xblen > end) { free(bns); free(btl); free(bcf); return 0; }
     const unsigned char *xb = p; p += xblen;
 
     size_t srl[4] = { nseq, nseq, nseq, lits };
@@ -206,14 +211,14 @@ size_t phaz_decompress(const void *src_, size_t fn, void *dst_, size_t cap,
         double a = now();
         str[i] = unpack_stream(&p, end, srl[i]);
         if (!str[i]) { for (int j = 0; j < i; j++) free(str[j]);
-                       free(bns); free(btl); return 0; }
+                       free(bns); free(btl); free(bcf); return 0; }
         if (st) { st->entropy_ms[i] = (now() - a) * 1e3; st->stream_raw[i] = srl[i]; }
     }
     double tr = now();
     size_t got = ZSTD_phazDecode(dst_, cap, str[0], str[1], str[2], xb, str[3],
-                                 lits, bns, btl, nblk);
+                                 lits, bns, btl, bcf, nblk);
     if (st) st->reconstruct_ms = (now() - tr) * 1e3;
     for (int i = 0; i < 4; i++) free(str[i]);
-    free(bns); free(btl);
+    free(bns); free(btl); free(bcf);
     return got == n ? got : 0;
 }

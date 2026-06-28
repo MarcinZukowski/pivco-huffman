@@ -49,14 +49,17 @@ extern int g_phaz_dump;
 extern unsigned char *g_phaz_llc, *g_phaz_mlc, *g_phaz_ofc, *g_phaz_lit, *g_phaz_xb;
 extern unsigned long long g_phaz_xbpos;
 extern unsigned *g_phaz_blk_ns, *g_phaz_blk_tl;
+extern unsigned char *g_phaz_blk_cf;             /* per block: repcodes confirmed? */
 extern size_t g_phaz_nblk, g_phaz_nseq, g_phaz_lits;
 extern unsigned long long g_phaz_extrabits;
 
-/* Reconstruct: replay the captured sequences via zstd's exec/copy engine. */
+/* Reconstruct: replay the captured sequences via zstd's exec/copy engine.
+ * blkCf[nblk] flags blocks whose repcodes zstd confirmed (raw/RLE blocks revert
+ * the repcode state); pass NULL for legacy continuous-carry behaviour. */
 extern size_t ZSTD_phazDecode(void *dst, size_t dstCap,
     const unsigned char *llc, const unsigned char *mlc, const unsigned char *ofc,
     const unsigned char *xb, const unsigned char *lit, size_t litSize,
-    const unsigned *blkNs, const unsigned *blkTl, size_t nblk);
+    const unsigned *blkNs, const unsigned *blkTl, const unsigned char *blkCf, size_t nblk);
 
 /* Run zstd's compressor with the capture hook, (re)allocating + filling the
  * g_phaz_* globals.  want_stock!=0 also does a plain compress and returns the
