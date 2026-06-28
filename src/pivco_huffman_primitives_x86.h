@@ -800,9 +800,12 @@ static inline int part_full_x86(uint8_t *ranks, int n, uint8_t thr,
     return n_right;
 }
 
-/* right/left/none: u8 port of part_core_x86 — stride-8, movemask mask,
- * compress_tab pshufb.  EMIT_RIGHT/EMIT_LEFT compile-time -> the unused side's
- * pshufb + store fold away. */
+/* right/left/none: 16-wide one-sided compaction, 32 ranks/iter.  Per 16-lane
+ * group, the emitted side's index is the matching half of X86_COMPACT16 (RIGHT:
+ * min(ctab_r[m0], pre_r[pc0][m1]); LEFT: min(ctab_l[m0], pre_l[8-pc0][m1])), one
+ * pshufb + one 16-byte store — vs the prior stride-8 form's pshufb + 8-byte store
+ * every 8 lanes.  Reuses the production ctab/pre tables.  EMIT_RIGHT/EMIT_LEFT
+ * compile-time so the unused side folds away; EMIT none just builds the bitmap. */
 __attribute__((always_inline)) static inline
 int part_core_x86(uint8_t *ranks, int n, uint8_t thr,
                      uint8_t *bm, uint8_t *tmp, int EMIT_RIGHT, int EMIT_LEFT)
@@ -811,20 +814,36 @@ int part_core_x86(uint8_t *ranks, int n, uint8_t thr,
     int n_left = 0, n_right = 0;
     int j = 0;
     __m128i thr1 = _mm_set1_epi8((char)(thr + 1));
-    for (; j + 8 <= n; j += 8) {
-        __m128i v = _mm_loadl_epi64((const __m128i *)(ranks + j));
-        uint8_t m = x86_mask8(v, thr1);
-        bm[j >> 3] = m;
-        if (EMIT_RIGHT)
-            _mm_storel_epi64((__m128i *)(tmp + n_right),
-                _mm_shuffle_epi8(v, _mm_load_si128((const __m128i *)x86_ctab_r[m])));
-        if (EMIT_LEFT)
-            _mm_storel_epi64((__m128i *)(ranks + n_left),
-                _mm_shuffle_epi8(v, _mm_load_si128((const __m128i *)x86_ctab_l[m])));
-        int rc = x86_pc8[m];
-        n_right += rc;
-        n_left += 8 - rc;
+#define _PC16(v, mlo_, mhi_) do {                                             \
+        uint32_t pc0_ = x86_pc8[(mlo_)];                                      \
+        uint32_t pc_  = pc0_ + x86_pc8[(mhi_)];                               \
+        if (EMIT_RIGHT) _mm_storeu_si128((__m128i *)(tmp + n_right),          \
+            _mm_shuffle_epi8((v), _mm_min_epu8(                               \
+                _mm_load_si128((const __m128i *)x86_ctab_r[(mlo_)]),          \
+                _mm_load_si128((const __m128i *)x86_pre_r[pc0_][(mhi_)]))));  \
+        if (EMIT_LEFT)  _mm_storeu_si128((__m128i *)(ranks + n_left),         \
+            _mm_shuffle_epi8((v), _mm_min_epu8(                               \
+                _mm_load_si128((const __m128i *)x86_ctab_l[(mlo_)]),          \
+                _mm_load_si128((const __m128i *)x86_pre_l[8 - pc0_][(mhi_)])))); \
+        n_right += pc_; n_left += 16 - pc_;                                   \
+    } while (0)
+    for (; j + 32 <= n; j += 32) {
+        __m128i v0 = _mm_loadu_si128((const __m128i *)(ranks + j));
+        __m128i v1 = _mm_loadu_si128((const __m128i *)(ranks + j + 16));
+        uint32_t mlo = (uint16_t)_mm_movemask_epi8(_mm_cmpeq_epi8(_mm_min_epu8(v0, thr1), thr1));
+        uint32_t mhi = (uint16_t)_mm_movemask_epi8(_mm_cmpeq_epi8(_mm_min_epu8(v1, thr1), thr1));
+        uint32_t mm = mlo | (mhi << 16);
+        memcpy(bm + (j >> 3), &mm, 4);
+        _PC16(v0, (uint8_t)mlo, (uint8_t)(mlo >> 8));
+        _PC16(v1, (uint8_t)mhi, (uint8_t)(mhi >> 8));
     }
+    for (; j + 16 <= n; j += 16) {
+        __m128i v = _mm_loadu_si128((const __m128i *)(ranks + j));
+        uint16_t mm = (uint16_t)_mm_movemask_epi8(_mm_cmpeq_epi8(_mm_min_epu8(v, thr1), thr1));
+        memcpy(bm + (j >> 3), &mm, 2);
+        _PC16(v, (uint8_t)mm, (uint8_t)(mm >> 8));
+    }
+#undef _PC16
     for (; j < n; j++) {
         if ((j & 7) == 0) bm[j >> 3] = 0;
         uint8_t r = ranks[j];

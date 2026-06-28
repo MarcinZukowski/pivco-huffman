@@ -1073,6 +1073,31 @@ static void prim_part_p16revback_x86(const ctx_t *c) {
     for (; i < T; i++) tmp[T - 1 - i] = src[i];
 }
 
+/* asof-ae49fe1 — the stride-8 ctab8 one-sided (right) compaction that was
+ * production part_core_x86 before the 16-wide right16 path was promoted
+ * (ae49fe1 = last commit with it as production).  Frozen as the baseline;
+ * reuses the production x86_ctab_r/x86_pc8/x86_mask8. */
+static void prim_part_right_asof_ae49fe1_x86(const ctx_t *c) {
+    uint8_t *ranks = c->ranks_work, *bm = c->bm, *tmp = c->tmp8;
+    int n = c->n; uint8_t thr = c->rank_thr;
+    x86_build_tabs();
+    int n_right = 0, j = 0;
+    __m128i thr1 = _mm_set1_epi8((char)(thr + 1));
+    for (; j + 8 <= n; j += 8) {
+        __m128i v = _mm_loadl_epi64((const __m128i *)(ranks + j));
+        uint8_t m = x86_mask8(v, thr1);
+        bm[j >> 3] = m;
+        _mm_storel_epi64((__m128i *)(tmp + n_right),
+            _mm_shuffle_epi8(v, _mm_load_si128((const __m128i *)x86_ctab_r[m])));
+        n_right += x86_pc8[m];
+    }
+    for (; j < n; j++) {
+        if ((j & 7) == 0) bm[j >> 3] = 0;
+        uint8_t r = ranks[j];
+        if (r > thr) { bm[j >> 3] |= (uint8_t)(1u << (j & 7)); tmp[n_right++] = r; }
+    }
+}
+
 #if defined(__AVX2__)
 /* avx32: like sse32 but the 32-byte routing mask comes from a single ymm
  * vpcmpeqb(vpminub) + vpmovmskb instead of two SSE movemasks. */
@@ -1450,6 +1475,9 @@ static void pv_register_partition(void) {
     PV_VARIANT(ST_PART_RIGHT, "right16", PV_ISA_NEON, "16-wide one-sided right compaction",
                "1 vqtbl1q + 1 16-byte store per 16 lanes (p16 right-pack two-table index) vs the per-8-chunk production 2 vtbl1 + 2 8-byte stores; halves shuffle+store count, pays the 36 KB tab2 latency", 1,
                PV_FN_NEON(prim_part_right16));
+    PV_VARIANT(ST_PART_RIGHT, "asof-ae49fe1", PV_ISA_SSE4, "stride-8 ctab8 one-sided (ex-production x86)",
+               "the prior production x86 one-sided partition, before the 16-wide path was promoted; kept benchable as the baseline", 1,
+               PV_FN_SSE(prim_part_right_asof_ae49fe1_x86));
     /* x86 enc_partition_full (u16 code_la graveyard) */
     PV_VARIANT(ST_U16_PART, "sse_com", PV_ISA_SSE4,
                "bench_partition_x86.c / IDEAS x86 COM partition",
