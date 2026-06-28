@@ -589,6 +589,132 @@ static int prim_part_p16_neon(uint8_t *ranks, int n, uint8_t thr, uint8_t *bm, u
 }
 static void prim_part_p16(const ctx_t *c){ prim_part_p16_neon(c->ranks_work, c->n, c->rank_thr, c->bm, c->tmp8); }
 
+/* asof-a3a3d19 — the per-8-chunk ctab8 COM64 partition that was production NEON
+ * before p16rev was promoted (a3a3d19 = last commit with it as production; p16rev
+ * superseded it on every ARM uarch).  Frozen here verbatim so the prior baseline
+ * stays benchable.  Reuses the production ctab8/build_tabs/masks64_neon. */
+static int prim_part_asof_a3a3d19_neon(uint8_t *ranks, int n, uint8_t thr,
+                                       uint8_t *bm, uint8_t *tmp) {
+    build_tabs();
+    int n_left = 0, n_right = 0;
+    int j = 0;
+    uint8x16_t vt = vdupq_n_u8(thr);
+    static const uint8_t bw_a[16] = {1,2,4,8,16,32,64,128, 1,2,4,8,16,32,64,128};
+    uint8x16_t bw = vld1q_u8(bw_a);
+    for (; j + 64 <= n; j += 64) {
+        uint8x16_t v0 = vld1q_u8(ranks + j);
+        uint8x16_t v1 = vld1q_u8(ranks + j + 16);
+        uint8x16_t v2 = vld1q_u8(ranks + j + 32);
+        uint8x16_t v3 = vld1q_u8(ranks + j + 48);
+        uint64_t mask_word = masks64_neon(v0, v1, v2, v3, vt, bw);
+        memcpy(bm + (j >> 3), &mask_word, 8);
+        uint8x8_t pc_v = vcnt_u8(vcreate_u8(mask_word));
+        uint64_t pc_word = vget_lane_u64(vreinterpret_u64_u8(pc_v), 0);
+        uint64_t pfx = pc_word * 0x0101010101010101ULL;
+        uint8x8_t cv[8] = {
+            vget_low_u8(v0), vget_high_u8(v0),
+            vget_low_u8(v1), vget_high_u8(v1),
+            vget_low_u8(v2), vget_high_u8(v2),
+            vget_low_u8(v3), vget_high_u8(v3),
+        };
+#define _PART_C64(K_) do {                                                      \
+        uint32_t cr = (K_)==0 ? 0u : (uint32_t)((pfx >> (8*((K_)-1))) & 0xFF);   \
+        uint32_t cl = 8u*(K_) - cr;                                              \
+        const uint8_t *tab = ctab8[(uint8_t)(mask_word >> (8*(K_)))];            \
+        uint8x8_t right = vtbl1_u8(cv[K_], vld1_u8(tab));                        \
+        uint8x8_t left  = vtbl1_u8(cv[K_], vld1_u8(tab + 8));                    \
+        vst1_u8(tmp   + n_right + cr, right);                                    \
+        vst1_u8(ranks + n_left + cl, left);                                     \
+    } while (0)
+        _PART_C64(0); _PART_C64(1); _PART_C64(2); _PART_C64(3);
+        _PART_C64(4); _PART_C64(5); _PART_C64(6); _PART_C64(7);
+#undef _PART_C64
+        uint32_t total_r = (uint32_t)(pfx >> 56);
+        n_right += total_r;
+        n_left += 64 - total_r;
+    }
+    for (; j < n; j++) {
+        if ((j & 7) == 0) bm[j >> 3] = 0;
+        uint8_t r = ranks[j];
+        if (r > thr) { bm[j >> 3] |= (uint8_t)(1u << (j & 7)); tmp[n_right++] = r; }
+        else         { ranks[n_left++] = r; }
+    }
+    return n_right;
+}
+static void prim_part_asof_a3a3d19(const ctx_t *c){ prim_part_asof_a3a3d19_neon(c->ranks_work, c->n, c->rank_thr, c->bm, c->tmp8); }
+
+/* p16revback — p16rev without the per-group rev shuffle.  The combined index (one OR
+ * of the production p16rev_tabA/tabB) still yields {left fwd | right reversed} in
+ * one vqtbl1q; the LEFT store is unchanged (comb -> ranks, forward).  But the
+ * RIGHT side stores the WHOLE comb register *backwards* into a scratch buffer
+ * (write at rb+w-16, then w -= pc, keeping the top pc lanes = this group's rights
+ * reversed).  Processing groups in increasing position with a decreasing cursor
+ * lays the rights out globally reversed; one 16-wide reverse pass after the
+ * stride loop turns rb[w..] into the forward right output in tmp.
+ * Hot loop: 2 vld + 1 orr + 1 vqtbl1q + 2 st per group (vs p16rev's extra rev vld +
+ * vqtbl1q on the serial path) — at the cost of the extra streaming reverse pass.
+ * Reuses the production p16rev_tabA/tabB (in scope) + a realloc'd scratch buffer. */
+static uint8_t *pv_p16revback_buf = NULL;
+static int      pv_p16revback_cap = 0;
+static int prim_part_p16revback_neon(uint8_t *ranks, int n, uint8_t thr, uint8_t *bm, uint8_t *tmp) {
+    build_tabs();                         /* ensures p16rev_tabA/tabB are built */
+    if (n + 64 > pv_p16revback_cap) {
+        pv_p16revback_buf = (uint8_t *)realloc(pv_p16revback_buf, (size_t)n + 64);
+        pv_p16revback_cap = n + 64;
+    }
+    uint8_t *rb = pv_p16revback_buf;
+    int n_left = 0, j = 0, w = n + 16;    /* backward right cursor (high end, exclusive) */
+    uint8x16_t vt = vdupq_n_u8(thr);
+    static const uint8_t bw_a[16] = {1,2,4,8,16,32,64,128, 1,2,4,8,16,32,64,128};
+    uint8x16_t bw = vld1q_u8(bw_a);
+    for (; j + 64 <= n; j += 64) {
+        uint8x16_t v0 = vld1q_u8(ranks + j),      v1 = vld1q_u8(ranks + j + 16);
+        uint8x16_t v2 = vld1q_u8(ranks + j + 32), v3 = vld1q_u8(ranks + j + 48);
+        uint64_t mask_word = masks64_neon(v0, v1, v2, v3, vt, bw);
+        memcpy(bm + (j >> 3), &mask_word, 8);
+        uint64_t pcw = vget_lane_u64(vreinterpret_u64_u8(vcnt_u8(vcreate_u8(mask_word))), 0);
+        uint8x16_t vg[4] = { v0, v1, v2, v3 };
+#define _P16REVBACK(g) do {                                                        \
+        uint8_t  m0 = (uint8_t)(mask_word >> (16*(g)));                         \
+        uint8_t  m1 = (uint8_t)(mask_word >> (16*(g) + 8));                     \
+        uint32_t pc0 = (uint32_t)((pcw >> (16*(g)))     & 0xFF);                \
+        uint32_t pc1 = (uint32_t)((pcw >> (16*(g) + 8)) & 0xFF);                \
+        uint32_t pc  = pc0 + pc1;                                               \
+        uint8x16_t ri = vorrq_u8(vld1q_u8(p16rev_tabA[m0]),                       \
+                                 vld1q_u8(p16rev_tabB[pc0][m1]));                 \
+        uint8x16_t comb = vqtbl1q_u8(vg[g], ri);                               \
+        vst1q_u8(ranks + n_left, comb);                                        \
+        vst1q_u8(rb + w - 16, comb);                                           \
+        w -= pc; n_left += 16 - pc;                                             \
+    } while (0)
+        _P16REVBACK(0); _P16REVBACK(1); _P16REVBACK(2); _P16REVBACK(3);
+#undef _P16REVBACK
+    }
+    int n_right = (n + 16) - w;           /* rights produced by the stride loop */
+    for (; j < n; j++) {                  /* scalar tail appends rights forward */
+        if ((j & 7) == 0) bm[j >> 3] = 0;
+        uint8_t r = ranks[j];
+        if (r > thr) { bm[j >> 3] |= (uint8_t)(1u << (j & 7)); tmp[n_right++] = r; }
+        else         { ranks[n_left++] = r; }
+    }
+    /* reverse rb[w .. w+T) into tmp[0 .. T), 16 bytes/iter via a fixed shuffle. */
+    static const uint8_t REV16_a[16] = {15,14,13,12,11,10,9,8,7,6,5,4,3,2,1,0};
+    uint8x16_t rev16 = vld1q_u8(REV16_a);
+    int T = (n + 16) - w, i = 0;
+    const uint8_t *src = rb + w;
+    for (; i + 64 <= T; i += 64) {
+        vst1q_u8(tmp + (T - i - 16), vqtbl1q_u8(vld1q_u8(src + i),      rev16));
+        vst1q_u8(tmp + (T - i - 32), vqtbl1q_u8(vld1q_u8(src + i + 16), rev16));
+        vst1q_u8(tmp + (T - i - 48), vqtbl1q_u8(vld1q_u8(src + i + 32), rev16));
+        vst1q_u8(tmp + (T - i - 64), vqtbl1q_u8(vld1q_u8(src + i + 48), rev16));
+    }
+    for (; i + 16 <= T; i += 16)
+        vst1q_u8(tmp + (T - i - 16), vqtbl1q_u8(vld1q_u8(src + i), rev16));
+    for (; i < T; i++) tmp[T - 1 - i] = src[i];
+    return n_right;
+}
+static void prim_part_p16revback(const ctx_t *c){ prim_part_p16revback_neon(c->ranks_work, c->n, c->rank_thr, c->bm, c->tmp8); }
+
 #endif /* USE_NEON_KERNELS */
 
 /* ============================================================================
@@ -1167,6 +1293,12 @@ static void pv_register_partition(void) {
     PV_VARIANT(ST_PART, "p16", PV_ISA_NEON, "16b-enc.txt (two-table partition)",
                "16 ranks/iter two-table compaction; only V1/Graviton3 +2.6%, loses M4 -12% N1 -14% V2 -4% V3 -2% (extra loads + 36KB tab2 latency); not promoted", 1,
                PV_FN_NEON(prim_part_p16));
+    PV_VARIANT(ST_PART, "asof-a3a3d19", PV_ISA_NEON, "per-8-chunk ctab8 COM64 (ex-production)",
+               "the prior production NEON full partition, before p16rev was promoted; kept benchable as the baseline", 1,
+               PV_FN_NEON(prim_part_asof_a3a3d19));
+    PV_VARIANT(ST_PART, "p16revback", PV_ISA_NEON, "p16rev, right stored backward + one final reverse pass",
+               "drops p16rev's per-group rev shuffle: store comb backward into scratch (keep top pc), one 16-wide reverse pass after the stride loop. wins only N1/Graviton2 +7.5%; loses M4 -4% V1/G3 -5% V2/G4 -5% V3 -2% (extra reverse-pass store traffic > saved shuffle on wide cores); not promoted", 1,
+               PV_FN_NEON(prim_part_p16revback));
     /* x86 enc_partition_full (u16 code_la graveyard) */
     PV_VARIANT(ST_U16_PART, "sse_com", PV_ISA_SSE4,
                "bench_partition_x86.c / IDEAS x86 COM partition",

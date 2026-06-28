@@ -639,6 +639,18 @@ static inline void merge_flat_neon(uint8_t *out, int n,
  * vtbl1_u8 returns 0 for the 0xff (out-of-range) padding indices. */
 static uint8_t pc8[256];
 static uint8_t ctab8[256][16]  __attribute__((aligned(16)));
+
+/* p16rev partition LUTs (part_full_neon).  One combined index per 16-lane group
+ * packs {left, forward, front} | {right, reversed, back}; left+right tile the
+ * 16 lanes so the OR of two disjoint-support tables is exact.
+ *   p16rev_tabA[m0]       low-byte (positions 0..7): left -> front [0,8-pc0),
+ *                       right -> back lanes 15,14,... (reversed)
+ *   p16rev_tabB[pc0][m1]  high-byte (positions 8..15) given pc0=popcount(m0):
+ *                       continues both runs after the low byte
+ *   p16rev_rev[pc]        reverse the top pc lanes back to front/forward order */
+static uint8_t p16rev_tabA[256][16]    __attribute__((aligned(16)));
+static uint8_t p16rev_tabB[9][256][16] __attribute__((aligned(16)));
+static uint8_t p16rev_rev[17][16]      __attribute__((aligned(16)));
 static int     tabs_ready = 0;
 
 static void build_tabs(void)
@@ -652,6 +664,27 @@ static void build_tabs(void)
             if (m & (1 << k)) ctab8[m][qr++]     = (uint8_t)k;     /* right -> [0:8]  */
             else              ctab8[m][8 + ql++] = (uint8_t)k;     /* left  -> [8:16] */
         }
+    }
+    for (int m0 = 0; m0 < 256; m0++) {
+        memset(p16rev_tabA[m0], 0, 16);
+        int lp = 0, rp = 15;
+        for (int k = 0; k < 8; k++) {
+            if ((m0 >> k) & 1) p16rev_tabA[m0][rp--] = (uint8_t)k;
+            else               p16rev_tabA[m0][lp++] = (uint8_t)k;
+        }
+    }
+    for (int pc0 = 0; pc0 <= 8; pc0++)
+        for (int m1 = 0; m1 < 256; m1++) {
+            memset(p16rev_tabB[pc0][m1], 0, 16);
+            int lp = 8 - pc0, rp = 15 - pc0;
+            for (int k = 0; k < 8; k++) {
+                if ((m1 >> k) & 1) p16rev_tabB[pc0][m1][rp--] = (uint8_t)(8 + k);
+                else               p16rev_tabB[pc0][m1][lp++] = (uint8_t)(8 + k);
+            }
+        }
+    for (int pc = 0; pc <= 16; pc++) {
+        memset(p16rev_rev[pc], 0, 16);
+        for (int i = 0; i < pc; i++) p16rev_rev[pc][i] = (uint8_t)(15 - i);
     }
     tabs_ready = 1;
 }
@@ -696,12 +729,20 @@ static inline uint64_t masks64_neon(uint8x16_t v0, uint8x16_t v1,
 }
 
 /* full: both sides compacted (right -> tmp, left in place into ranks).
- * Near-verbatim port of build_bitmap_partition_full_neon (the production
- * code_la COM64 path): same 64/iter structure, same vcnt + 0x0101.. prefix-sum
- * cursor precompute, same per-8-chunk compress-table shuffle.  The only changes
- * for the rank-based encoding: masks64_neon (vcgtq > thr) replaces enc_masks8x8's bit
- * test, and the chunk compaction is a u8x8 vtbl1 over ctab8 (1 byte/rank)
- * instead of a u8x16 vqtbl1 over compress_tab (2 bytes/code). */
+ * p16rev: per 16-lane group, ONE combined shuffle index packs {left, forward,
+ * front} | {right, reversed, back}.  Left and right exactly tile the 16 lanes,
+ * so the OR of two disjoint-support tables (p16rev_tabA over the low-byte mask m0,
+ * p16rev_tabB over [pc0][m1]) is exact.  One vqtbl1q over that index yields BOTH
+ * sides at once: the register IS the left output (store it, advance by the left
+ * count — the right tail is overwritten by the next group / recursion level);
+ * the right output is recovered with a second vqtbl1q over the SAME register
+ * using p16rev_rev[pc], a pc-only reverse of the top pc lanes.
+ * vs the prior per-8-chunk ctab8 COM64 path: one table-pair OR + one shuffle
+ * per 16 lanes instead of two independent 8-lane shuffles — measured 4–22 %
+ * faster across M4 / Graviton2..4 / Neoverse V3 (see bench_prim `com64` vs
+ * `p16rev`).  The ~40 KB p16rev tables (tabA 4 KB + tabB 36 KB) make it NEON / big-
+ * L1 only; the 16-byte tail overstore is absorbed by the ranks +64 / tmp +2N
+ * scratch slack (codec.c). */
 static inline int part_full_neon(uint8_t *ranks, int n, uint8_t thr,
                                     uint8_t *bm, uint8_t *tmp)
 {
@@ -718,31 +759,24 @@ static inline int part_full_neon(uint8_t *ranks, int n, uint8_t thr,
         uint8x16_t v3 = vld1q_u8(ranks + j + 48);
         uint64_t mask_word = masks64_neon(v0, v1, v2, v3, vt, bw);
         memcpy(bm + (j >> 3), &mask_word, 8);
-        uint8x8_t pc_v = vcnt_u8(vcreate_u8(mask_word));
-        uint64_t pc_word = vget_lane_u64(vreinterpret_u64_u8(pc_v), 0);
-        uint64_t pfx = pc_word * 0x0101010101010101ULL;
-        /* chunk k's 8 ranks = vget_{low,high}_u8 of v0..v3 (chunks 0..7). */
-        uint8x8_t cv[8] = {
-            vget_low_u8(v0), vget_high_u8(v0),
-            vget_low_u8(v1), vget_high_u8(v1),
-            vget_low_u8(v2), vget_high_u8(v2),
-            vget_low_u8(v3), vget_high_u8(v3),
-        };
-#define _PART(K_) do {                                                      \
-        uint32_t cr = (K_)==0 ? 0u : (uint32_t)((pfx >> (8*((K_)-1))) & 0xFF); \
-        uint32_t cl = 8u*(K_) - cr;                                            \
-        const uint8_t *tab = ctab8[(uint8_t)(mask_word >> (8*(K_)))];       \
-        uint8x8_t right = vtbl1_u8(cv[K_], vld1_u8(tab));                      \
-        uint8x8_t left  = vtbl1_u8(cv[K_], vld1_u8(tab + 8));                  \
-        vst1_u8(tmp   + n_right + cr, right);                                       \
-        vst1_u8(ranks + n_left + cl, left);                                        \
+        uint64_t pcw = vget_lane_u64(vreinterpret_u64_u8(
+                           vcnt_u8(vcreate_u8(mask_word))), 0);
+        uint8x16_t vg[4] = { v0, v1, v2, v3 };
+#define _PART(g) do {                                                       \
+        uint8_t  m0 = (uint8_t)(mask_word >> (16*(g)));                     \
+        uint8_t  m1 = (uint8_t)(mask_word >> (16*(g) + 8));                 \
+        uint32_t pc0 = (uint32_t)((pcw >> (16*(g)))     & 0xFF);            \
+        uint32_t pc1 = (uint32_t)((pcw >> (16*(g) + 8)) & 0xFF);            \
+        uint32_t pc  = pc0 + pc1;                                           \
+        uint8x16_t ri = vorrq_u8(vld1q_u8(p16rev_tabA[m0]),                   \
+                                 vld1q_u8(p16rev_tabB[pc0][m1]));             \
+        uint8x16_t comb = vqtbl1q_u8(vg[g], ri);                           \
+        vst1q_u8(ranks + n_left, comb);                                    \
+        vst1q_u8(tmp + n_right, vqtbl1q_u8(comb, vld1q_u8(p16rev_rev[pc])));  \
+        n_right += pc; n_left += 16 - pc;                                   \
     } while (0)
         _PART(0); _PART(1); _PART(2); _PART(3);
-        _PART(4); _PART(5); _PART(6); _PART(7);
 #undef _PART
-        uint32_t total_r = (uint32_t)(pfx >> 56);
-        n_right += total_r;
-        n_left += 64 - total_r;
     }
     for (; j < n; j++) {
         if ((j & 7) == 0) bm[j >> 3] = 0;
