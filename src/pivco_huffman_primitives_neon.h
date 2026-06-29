@@ -647,10 +647,10 @@ static uint8_t ctab8[256][16]  __attribute__((aligned(16)));
  *                       right -> back lanes 15,14,... (reversed)
  *   p16rev_tabB[pc0][m1]  high-byte (positions 8..15) given pc0=popcount(m0):
  *                       continues both runs after the low byte
- *   p16rev_rev[pc]        reverse the top pc lanes back to front/forward order */
+ * The right side is recovered with a single loop-invariant full-reverse
+ * constant in part_full_neon. */
 static uint8_t p16rev_tabA[256][16]    __attribute__((aligned(16)));
 static uint8_t p16rev_tabB[9][256][16] __attribute__((aligned(16)));
-static uint8_t p16rev_rev[17][16]      __attribute__((aligned(16)));
 static int     tabs_ready = 0;
 
 static void build_tabs(void)
@@ -682,10 +682,6 @@ static void build_tabs(void)
                 else               p16rev_tabB[pc0][m1][lp++] = (uint8_t)(8 + k);
             }
         }
-    for (int pc = 0; pc <= 16; pc++) {
-        memset(p16rev_rev[pc], 0, 16);
-        for (int i = 0; i < pc; i++) p16rev_rev[pc][i] = (uint8_t)(15 - i);
-    }
     tabs_ready = 1;
 }
 
@@ -736,7 +732,8 @@ static inline uint64_t masks64_neon(uint8x16_t v0, uint8x16_t v1,
  * sides at once: the register IS the left output (store it, advance by the left
  * count — the right tail is overwritten by the next group / recursion level);
  * the right output is recovered with a second vqtbl1q over the SAME register
- * using p16rev_rev[pc], a pc-only reverse of the top pc lanes.
+ * using a single loop-invariant full-reverse constant (full reverse lands the
+ * top-pc reversed right lanes at output [0,pc); the tail is overwritten).
  * vs the prior per-8-chunk ctab8 COM64 path: one table-pair OR + one shuffle
  * per 16 lanes instead of two independent 8-lane shuffles — measured 4–22 %
  * faster across M4 / Graviton2..4 / Neoverse V3 (see bench_prim `com64` vs
@@ -752,6 +749,11 @@ static inline int part_full_neon(uint8_t *ranks, int n, uint8_t thr,
     uint8x16_t vt = vdupq_n_u8(thr);
     static const uint8_t bw_a[16] = {1,2,4,8,16,32,64,128, 1,2,4,8,16,32,64,128};
     uint8x16_t bw = vld1q_u8(bw_a);
+    /* Right recovery: reversing the WHOLE comb register lands the top-pc reversed
+     * right lanes at output [0,pc) (the [pc,16) tail is left-reversed garbage the
+     * next group overwrites). */
+    static const uint8_t rev16_a[16] = {15,14,13,12,11,10,9,8,7,6,5,4,3,2,1,0};
+    uint8x16_t rev16 = vld1q_u8(rev16_a);
     for (; j + 64 <= n; j += 64) {
         uint8x16_t v0 = vld1q_u8(ranks + j);
         uint8x16_t v1 = vld1q_u8(ranks + j + 16);
@@ -772,7 +774,7 @@ static inline int part_full_neon(uint8_t *ranks, int n, uint8_t thr,
                                  vld1q_u8(p16rev_tabB[pc0][m1]));             \
         uint8x16_t comb = vqtbl1q_u8(vg[g], ri);                           \
         vst1q_u8(ranks + n_left, comb);                                    \
-        vst1q_u8(tmp + n_right, vqtbl1q_u8(comb, vld1q_u8(p16rev_rev[pc])));  \
+        vst1q_u8(tmp + n_right, vqtbl1q_u8(comb, rev16));                   \
         n_right += pc; n_left += 16 - pc;                                   \
     } while (0)
         _PART(0); _PART(1); _PART(2); _PART(3);

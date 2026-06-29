@@ -644,11 +644,10 @@ static uint8_t x86_pre_r[9][256][16], x86_pre_l[9][256][16];
  * packs {left, forward, front} | {right, reversed, back}; left+right tile the
  * 16 lanes so the OR of two disjoint-support tables is exact.  Half the LUT
  * footprint of the ctab_r/l + pre_r/l pair above (40 KB vs 80 KB) — the win on
- * x86's 32-48 KB L1.  x86_p16rev_rev[pc] reverses the top pc lanes (0x80 fill on
- * the unused tail -> pshufb 0); it is indexed only by the right count. */
+ * x86's 32-48 KB L1.  The right side is recovered with a single loop-invariant
+ * full-reverse constant in part_full_x86. */
 static uint8_t x86_p16rev_tabA[256][16];
 static uint8_t x86_p16rev_tabB[9][256][16];
-static uint8_t x86_p16rev_rev[17][16];
 static int     x86_tabs_ready = 0;
 static void x86_build_tabs(void)
 {
@@ -695,10 +694,6 @@ static void x86_build_tabs(void)
                 else               x86_p16rev_tabB[pc0][m1][lp++] = (uint8_t)(8 + k);
             }
         }
-    for (int pc = 0; pc <= 16; pc++) {
-        memset(x86_p16rev_rev[pc], 0x80, 16);
-        for (int i = 0; i < pc; i++) x86_p16rev_rev[pc][i] = (uint8_t)(15 - i);
-    }
     x86_tabs_ready = 1;
 }
 
@@ -753,6 +748,11 @@ static inline int part_full_x86(uint8_t *ranks, int n, uint8_t thr,
     int n_left = 0, n_right = 0;
     int j = 0;
     __m128i thr1 = _mm_set1_epi8((char)(thr + 1));
+    /* Right recovery via one loop-invariant full-reverse constant: reversing the
+     * whole comb register lands the top-pc reversed right lanes at output [0,pc)
+     * (the tail is left-reversed garbage the next group overwrites). */
+    static const uint8_t rev16_a[16] = {15,14,13,12,11,10,9,8,7,6,5,4,3,2,1,0};
+    const __m128i rev16 = _mm_loadu_si128((const __m128i *)rev16_a);
 #define _P16REV(v, mlo_, mhi_) do {                                            \
         uint32_t pc0_ = (uint32_t)__builtin_popcount((unsigned)(mlo_));        \
         uint32_t pc_  = pc0_ + (uint32_t)__builtin_popcount((unsigned)(mhi_)); \
@@ -762,8 +762,7 @@ static inline int part_full_x86(uint8_t *ranks, int n, uint8_t thr,
         __m128i comb_ = _mm_shuffle_epi8((v), cidx_);                         \
         _mm_storeu_si128((__m128i *)(ranks + n_left), comb_);                 \
         _mm_storeu_si128((__m128i *)(tmp + n_right),                           \
-            _mm_shuffle_epi8(comb_,                                            \
-                _mm_load_si128((const __m128i *)x86_p16rev_rev[pc_])));        \
+            _mm_shuffle_epi8(comb_, rev16));                                   \
         n_right += pc_; n_left += 16 - pc_;                                    \
     } while (0)
     /* 32 ranks/iter: two SSE movemasks OR'd into a 32-bit routing mask (one
