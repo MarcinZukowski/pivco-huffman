@@ -446,6 +446,7 @@ static void reg(const char *v, stage_t s, int D, int ip, void (*fn)(const ctx_t 
 #include "prim_variants/prims-merge.h"
 #include "prim_variants/prims-flat.h"
 #include "prim_variants/prims-pack.h"
+#include "prim_variants/prims-init.h"
 /* Stage label = the .h primitive name (without the prim_ prefix), or the
    internal name for the few stages that have no production analogue
    (part_bm / part_half exist only as instrumentation for the unfused
@@ -728,7 +729,11 @@ int main(int argc, char **argv) {
     if (do_list) {
         /* --list always shows the full set (production + variants); running
            the variants still requires --variants. */
-        pv_register_partition(); pv_register_merge(); pv_register_flat(); pv_register_pack();
+        pv_register_partition();
+        pv_register_merge();
+        pv_register_flat();
+        pv_register_pack();
+        pv_register_init();
         int verbose = (do_list == 2);
         printf("logical primitives  (* = production, + = variant, - = other-arch, not built here):\n");
         int shown[64] = {0};
@@ -780,7 +785,11 @@ int main(int argc, char **argv) {
     }
 
     if (variants) {
-        pv_register_partition(); pv_register_merge(); pv_register_flat(); pv_register_pack();
+        pv_register_partition();
+        pv_register_merge();
+        pv_register_flat();
+        pv_register_pack();
+        pv_register_init();
         /* Regroup so each logical family (stage) runs as one contiguous block,
            sub-grouped by D — scalar, then production backend, then its variants
            — instead of all variants trailing at the very end.  Stable within

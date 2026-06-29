@@ -693,10 +693,49 @@ static inline uint8_t nmask8(uint8x8_t ids, uint8x8_t thr)
     return vaddv_u8(vand_u8(vcgt_u8(ids, thr), vld1_u8(BW8)));
 }
 
+/* enc_init: ranks[i] = sym_to_rank[sym[i]], a 256-entry byte gather.  
+ * "simd20" version from #5 by dougallj.
+ * The s2r table lives in 16 NEON regs (4x uint8x16x4_t).
+ * Each 16-lane input does one vqtbl4 over the [0,63] half 
+ * + three vqtbx4 over the +64/+128/+192 halves (with offset adjusted).
+ * The tbl/tbx are microcoded and leave scalar load slots idle, so
+ * 4 extra symbols/iter are done with GPR gathers interleaved between them
+ * (20 sym/iter total).
+ */
 static inline void init_neon(uint8_t *ranks, int n,
                                 const uint8_t *sym, const uint8_t *s2r)
 {
-    for (int i = 0; i < n; i++) ranks[i] = s2r[sym[i]];
+    int i = 0;
+    if (n >= 20) {
+        uint8x16x4_t t0, t1, t2, t3;
+        t0.val[0]=vld1q_u8(s2r     ); t0.val[1]=vld1q_u8(s2r + 16);
+        t0.val[2]=vld1q_u8(s2r + 32); t0.val[3]=vld1q_u8(s2r + 48);
+        t1.val[0]=vld1q_u8(s2r + 64); t1.val[1]=vld1q_u8(s2r + 80);
+        t1.val[2]=vld1q_u8(s2r + 96); t1.val[3]=vld1q_u8(s2r +112);
+        t2.val[0]=vld1q_u8(s2r +128); t2.val[1]=vld1q_u8(s2r +144);
+        t2.val[2]=vld1q_u8(s2r +160); t2.val[3]=vld1q_u8(s2r +176);
+        t3.val[0]=vld1q_u8(s2r +192); t3.val[1]=vld1q_u8(s2r +208);
+        t3.val[2]=vld1q_u8(s2r +224); t3.val[3]=vld1q_u8(s2r +240);
+        const uint8x16_t s64  = vdupq_n_u8(64);
+        const uint8x16_t s128 = vdupq_n_u8(128);
+        const uint8x16_t s192 = vdupq_n_u8(192);
+        for (; i + 20 <= n; i += 20) {
+            uint8x16_t c = vld1q_u8(sym + i);
+            uint32_t a; memcpy(&a, sym + i + 16, 4);
+            uint8x16_t r = vqtbl4q_u8(t0, c);
+            unsigned r0 = s2r[(uint8_t)a];
+            r = vqtbx4q_u8(r, t1, vsubq_u8(c, s64));
+            unsigned r1 = s2r[(uint8_t)(a >> 8)];
+            r = vqtbx4q_u8(r, t2, vsubq_u8(c, s128));
+            unsigned r2 = s2r[(uint8_t)(a >> 16)];
+            r = vqtbx4q_u8(r, t3, vsubq_u8(c, s192));
+            unsigned r3 = s2r[(uint8_t)(a >> 24)];
+            vst1q_u8(ranks + i, r);
+            uint32_t h = r0 | (r1 << 8) | (r2 << 16) | (r3 << 24);
+            memcpy(ranks + i + 16, &h, 4);
+        }
+    }
+    for (; i < n; i++) ranks[i] = s2r[sym[i]];
 }
 
 /* Build 8 partition mask bytes for 64 ranks in one vpaddq_u8 reduction tree,
