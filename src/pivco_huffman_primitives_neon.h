@@ -1018,8 +1018,9 @@ PIVCO_PRIM_ALWAYS_INLINE void prim_codec_init(void)
 
 /* rank-based encode aliases (consumed by codec.c) */
 PIVCO_PRIM_ALWAYS_INLINE void prim_enc_init(uint8_t *ranks, int n,
-                                             const uint8_t *symbols, const uint8_t *sym_to_rank)
-{ init_neon(ranks, n, symbols, sym_to_rank); }
+                                             const uint8_t *symbols, const uint8_t *sym_to_rank,
+                                             const pivco_huffman_enc_init_aux_t *aux)
+{ (void)aux; init_neon(ranks, n, symbols, sym_to_rank); }
 PIVCO_PRIM_ALWAYS_INLINE int prim_enc_partition_full(uint8_t *ranks, int n,
                                              uint8_t thr, uint8_t *bm, uint8_t *right_out)
 { return part_full_neon(ranks, n, thr, bm, right_out); }

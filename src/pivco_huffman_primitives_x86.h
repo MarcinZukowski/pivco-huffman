@@ -44,6 +44,7 @@
                                          * on SSE-only builds. */
 #include <stdint.h>
 #include <string.h>
+#include <assert.h>
 
 /* Backend lifecycle.  Lazily build the compress_tab + expand_tab pre-
  * bake tables that the x86 partition / merge primitives index
@@ -994,10 +995,46 @@ static inline void pack_dN_x86(uint8_t *out, const uint8_t *ranks,
 PIVCO_PRIM_ALWAYS_INLINE void prim_codec_init(void)
 { codec_init_x86(); }
 
-PIVCO_PRIM_ALWAYS_INLINE void prim_enc_init(uint8_t *ranks, int n,
-                                              const uint8_t *symbols,
-                                              const uint8_t *sym_to_rank)
-{ for (int i = 0; i < n; i++) ranks[i] = sym_to_rank[symbols[i]]; }
+/* enc_init 2tab no-OR gather: read 16 input symbols as 2x u64 (frees the load
+ * ports for the dependent table loads) and merge each rank pair as
+ * (u16)sym_to_rank[s0] + hi[s1], where hi[s] = sym_to_rank[s]<<8 (aux->s2r_hi,
+ * built once in the table).  Disjoint byte lanes -> + is a single add, no shift
+ * and the hi load folds in as a memory operand -- the shift+or that x86 can't
+ * fuse is gone.  ~1.6x the naive byte loop across the SSE/AVX2 tier, and the
+ * only variant with no pathological host (4tab regresses on Skylake, bc2 on all
+ * Intel).  x86-only: on AArch64 the shift folds into orr, so NEON keeps its SIMD
+ * gather.  See IDEAS.md ("enc_init 4tab / bc2") for the A/B/C that chose 2tab. */
+PIVCO_PRIM_ALWAYS_INLINE void prim_enc_init(uint8_t *restrict ranks, int n,
+                                              const uint8_t *restrict symbols,
+                                              const uint8_t *sym_to_rank,
+                                              const pivco_huffman_enc_init_aux_t *aux)
+{
+    assert(aux && aux->s2r_hi);
+    const uint16_t *restrict hi = aux->s2r_hi;
+#define PIVCO_LO(x) ((uint16_t)sym_to_rank[(uint8_t)(x)])
+#define PIVCO_HI(x) hi[(uint8_t)(x)]
+    int i = 0;
+    for (; i + 16 <= n; i += 16) {
+        uint64_t a, b;
+        memcpy(&a, symbols + i,     8);
+        memcpy(&b, symbols + i + 8, 8);
+        uint16_t h0 = PIVCO_LO(a)       + PIVCO_HI(a >> 8);
+        uint16_t h1 = PIVCO_LO(a >> 16) + PIVCO_HI(a >> 24);
+        uint16_t h2 = PIVCO_LO(a >> 32) + PIVCO_HI(a >> 40);
+        uint16_t h3 = PIVCO_LO(a >> 48) + PIVCO_HI(a >> 56);
+        uint16_t h4 = PIVCO_LO(b)       + PIVCO_HI(b >> 8);
+        uint16_t h5 = PIVCO_LO(b >> 16) + PIVCO_HI(b >> 24);
+        uint16_t h6 = PIVCO_LO(b >> 32) + PIVCO_HI(b >> 40);
+        uint16_t h7 = PIVCO_LO(b >> 48) + PIVCO_HI(b >> 56);
+        memcpy(ranks + i,      &h0, 2); memcpy(ranks + i + 2,  &h1, 2);
+        memcpy(ranks + i + 4,  &h2, 2); memcpy(ranks + i + 6,  &h3, 2);
+        memcpy(ranks + i + 8,  &h4, 2); memcpy(ranks + i + 10, &h5, 2);
+        memcpy(ranks + i + 12, &h6, 2); memcpy(ranks + i + 14, &h7, 2);
+    }
+    for (; i < n; i++) ranks[i] = sym_to_rank[symbols[i]];
+#undef PIVCO_LO
+#undef PIVCO_HI
+}
 
 PIVCO_PRIM_ALWAYS_INLINE int prim_enc_partition_full(uint8_t *ranks,
                                                       int n, uint8_t thr,

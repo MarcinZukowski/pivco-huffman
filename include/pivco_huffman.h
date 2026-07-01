@@ -108,6 +108,16 @@ typedef enum {
 
 /* ---------- Huffman table ---------- */
 
+/* Arch-specific precomputed gather tables for prim_enc_init.  Every pointer is
+ * NULL unless the host arch fills it (only x86 SSE/AVX2 today, for the 4tab
+ * no-shift merge).  Backends that don't need it ignore the struct; a backend
+ * that does asserts the fields it uses are non-NULL.  The struct type is
+ * arch-invariant (always these fields) — only the backing storage in the table
+ * is arch-gated — so it never degenerates to an empty struct. */
+typedef struct {
+    const uint16_t *s2r_hi;      /* sym_to_rank[s] << 8 (u16) — x86 2tab merge */
+} pivco_huffman_enc_init_aux_t;
+
 typedef struct {
     /* Per-symbol encode info */
     uint16_t code[PIVCO_MAX_SYMBOLS];       /* canonical Huffman code */
@@ -118,6 +128,15 @@ typedef struct {
      * and a flat subtree's local code is `rank - flat_base_rank`.  Filled by
      * pivco_huffman_build_table; byte-identical wire output. */
     uint8_t  sym_to_rank[PIVCO_MAX_SYMBOLS];        /* in-order leaf rank per symbol */
+#if defined(__x86_64__) || defined(__i386__)
+    /* Backing storage for enc_init_aux — the x86 2tab merge hi table (sym_to_rank
+     * << 8).  Other arches don't allocate it.  Filled by pivco_huffman_build_table. */
+    uint16_t enc_init_hi[PIVCO_MAX_SYMBOLS];
+#endif
+    /* Aux gather tables: pointers into the arch-gated storage above (x86) or all
+     * NULL (other arches).  Self-referential — rebuild, don't bitwise-copy, a
+     * table after pivco_huffman_build_table. */
+    pivco_huffman_enc_init_aux_t enc_init_aux;
     uint8_t  split_rank[PIVCO_MAX_TREE_NODES];      /* max rank in node's left subtree */
     uint8_t  flat_base_rank[PIVCO_MAX_TREE_NODES];  /* min rank in a flat subtree */
 

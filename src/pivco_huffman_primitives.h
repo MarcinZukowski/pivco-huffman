@@ -46,12 +46,19 @@
  *
  *  void prim_enc_init(uint8_t ranks[n], int n,
  *                      const uint8_t *symbols,
- *                      const uint8_t sym_to_rank[256]);
+ *                      const uint8_t sym_to_rank[256],
+ *                      const pivco_huffman_enc_init_aux_t *aux);
  *
  *    Build the per-block in-order rank array, gathering from `sym_to_rank`
  *    (= table->sym_to_rank) indexed by each input symbol:
  *
  *        ranks[i] = sym_to_rank[symbols[i]]
+ *
+ *    `aux` (= &table->enc_init_aux) carries arch-specific precomputed gather
+ *    tables — its fields are non-NULL only on arches that use them (x86 SSE/AVX2
+ *    uses `s2r_hi` = sym_to_rank<<8 for the 2tab no-OR merge).  A backend that
+ *    consumes a field asserts it is non-NULL; backends that don't need it ignore
+ *    `aux`.
  *
  *    Each leaf's rank is its left-to-right position among the tree's leaves
  *    (partbyrank).  A subtree's leaves form a contiguous rank range, so

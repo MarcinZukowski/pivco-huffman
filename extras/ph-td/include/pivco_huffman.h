@@ -86,6 +86,13 @@ typedef enum {
 
 /* ---------- Huffman table ---------- */
 
+/* Arch-specific enc_init gather tables (see the production header).  ph-td is a
+ * retired backend that never calls prim_enc_init, but it compiles the shared
+ * primitives headers, so the type must exist to parse the declaration. */
+typedef struct {
+    const uint16_t *s2r_hi;
+} pivco_huffman_enc_init_aux_t;
+
 typedef struct {
     /* Per-symbol encode info */
     uint16_t code[PIVCO_MAX_SYMBOLS];       /* canonical Huffman code */

@@ -310,7 +310,7 @@ int CODEC_ENCODE_ENTRY(const uint8_t *symbols, size_t n,
     /* ranks[i] = in-order rank of symbols[i] (gather table->sym_to_rank). */
     PROF_COUNT_ONLY(PROF_ENC_ENTRY, N);
     PROF_TIC();
-    prim_enc_init(ranks, N, symbols, table->sym_to_rank);
+    prim_enc_init(ranks, N, symbols, table->sym_to_rank, &table->enc_init_aux);
     PROF_TOC(PROF_ENC_INIT, N);
 
     codec_encode_node(table, table->tree_root, ranks, N, 0, &ptr, tmp);

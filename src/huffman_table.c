@@ -220,6 +220,21 @@ static int build_table_finish(const uint8_t lengths[PIVCO_MAX_SYMBOLS],
 
 /* Single-symbol degenerate tree: root -> two leaves of the same symbol, with
  * the left leaf prefilled.  Assumes `table` is zeroed. */
+/* Fill enc_init_aux from sym_to_rank: on x86 the 2tab merge hi table (rank<<8)
+ * and point the aux at it; elsewhere leave the aux NULL.  Called by every build
+ * path that finalizes sym_to_rank (build_table_finish and the single-symbol fast
+ * path), so the x86 prim_enc_init never sees a NULL aux. */
+static void fill_enc_init_aux(pivco_huffman_table_t *table)
+{
+#if defined(__x86_64__) || defined(__i386__)
+    for (int s = 0; s < PIVCO_MAX_SYMBOLS; s++)
+        table->enc_init_hi[s] = (uint16_t)((unsigned)table->sym_to_rank[s] << 8);
+    table->enc_init_aux.s2r_hi = table->enc_init_hi;
+#else
+    table->enc_init_aux.s2r_hi = NULL;
+#endif
+}
+
 static void build_single_symbol_table(int sym, pivco_huffman_table_t *table)
 {
     table->code[sym] = 0;
@@ -248,6 +263,7 @@ static void build_single_symbol_table(int sym, pivco_huffman_table_t *table)
     table->node_type[0] = PIVCO_NODE_HALF_RIGHT;
     table->node_type[1] = PIVCO_NODE_SKIP;
     table->node_type[2] = PIVCO_NODE_LEAF;
+    fill_enc_init_aux(table);   /* sym_to_rank is all-zero (rank 0) here; aux must not stay NULL */
 }
 
 int pivco_huffman_build_table(const uint64_t freq[PIVCO_MAX_SYMBOLS],
@@ -778,6 +794,8 @@ static int build_table_finish(const uint8_t lengths[PIVCO_MAX_SYMBOLS],
     /* partbyrank: one in-order pass assigns every leaf its rank and every
      * internal node its split_rank / flat_base_rank (see assign_inorder_ranks). */
     assign_inorder_ranks(table, table->tree_root, 0);
+
+    fill_enc_init_aux(table);   /* x86 2tab/4tab gather tables (or NULL elsewhere) */
 
     return PIVCO_OK;
 }

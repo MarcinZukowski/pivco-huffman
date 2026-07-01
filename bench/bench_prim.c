@@ -168,6 +168,7 @@ typedef struct {
     uint8_t  *tmp8;                       /* right-side scatter target                     */
     const uint16_t *code_la_lut;          /* sym -> u16 left-aligned code (u16enc gather) */
     const uint8_t  *sym_to_rank;          /* sym -> u8 rank              (prim_enc gather) */
+    pivco_huffman_enc_init_aux_t enc_init_aux; /* pre-shifted rank tables (x86 prim_enc 4tab) */
     uint8_t  rank_thr, rank_base;
     int n, D, depth;
 } ctx_t;
@@ -272,7 +273,7 @@ static void neon_scatter(const ctx_t *c) {
 #if defined(HAVE_SIMD)   /* pack/merge/partition: production prim_*, all backends */
 static void simd_merge_flat(const ctx_t *c){ prim_merge_flat(c->out, c->n, c->bm, c->D, c->c2s); }
 /* rank-based production primitives */
-static void simd_enc_init(const ctx_t *c){ prim_enc_init(c->ranks_work, c->n, c->symbuf, c->sym_to_rank); }
+static void simd_enc_init(const ctx_t *c){ prim_enc_init(c->ranks_work, c->n, c->symbuf, c->sym_to_rank, &c->enc_init_aux); }
 static void simd_part    (const ctx_t *c){ prim_enc_partition_full(c->ranks_work, c->n, c->rank_thr, c->bm, c->tmp8); }
 static void simd_part_right(const ctx_t *c){ prim_enc_partition_right(c->ranks_work, c->n, c->rank_thr, c->bm, c->tmp8); }
 static void simd_pack    (const ctx_t *c){ prim_enc_pack_dN(c->ranks, c->n, c->D, c->rank_base, c->pack_out); }
@@ -566,12 +567,13 @@ static void stage_bits(stage_t s, int D, double *in, double *out, double *lut) {
     case ST_XOR:        *in=16;       *out=8;        *lut=0;       break;
     case ST_XOR_ACCUM:  *in=8;        *out=0;        *lut=0;       break;
     case ST_PLUS_ONE:   *in=0;        *out=8;        *lut=0;       break;
-    /* rank-based encoding: ranks are 8-bit (in=1) vs the code_la path's 16-bit codes. */
-    case ST_U16_ENC_INIT:      *in=1;        *out=2;        *lut=2;       break;  /* sym->u16 code_la */
-    case ST_ENC_INIT: *in=1;        *out=1;        *lut=1;       break;  /* sym->u8 rank */
-    case ST_PART:     *in=1;        *out=1+1;      *lut=16+1;    break;  /* u8 in/out + bitmap */
-    case ST_PART_RIGHT: *in=1;      *out=1+1;      *lut=16+1;    break;  /* one-sided: bitmap + right */
-    case ST_PACK:     *in=1;        *out=D;        *lut=0;       break;
+    /* rank-based encoding (counts are bits/elem, like the stages above: a byte
+     * symbol/rank is 8, a u16 code is 16, a bitmap bit is 1). */
+    case ST_U16_ENC_INIT:      *in=8;        *out=16;       *lut=16;      break;  /* sym->u16 code_la */
+    case ST_ENC_INIT: *in=8;        *out=8;        *lut=8;       break;  /* sym->u8 rank */
+    case ST_PART:     *in=8;        *out=8+1;      *lut=16+1;    break;  /* u8 in/out + bitmap */
+    case ST_PART_RIGHT: *in=8;      *out=8+1;      *lut=16+1;    break;  /* one-sided: bitmap + right */
+    case ST_PACK:     *in=8;        *out=D;        *lut=0;       break;
     }
 }
 
@@ -637,12 +639,14 @@ int main(int argc, char **argv) {
     uint8_t  *ranks = malloc(n+64), *ranks_work = malloc(n+64), *tmp8 = malloc(n+64);
     uint8_t  *symbuf = malloc(n+64), *ref8l = malloc(n+64), *ref8r = malloc(n+64);
     uint16_t code_la_lut[256]; uint8_t sym_to_rank[256];
+    uint16_t s2r_hi[256];                                    /* enc_init_aux backing (x86 2tab) */
     srand(0xC0FFEE);
     for (int i=0;i<n+16;i++){ bm[i]=(uint8_t)rand(); la_pristine[i]=(uint16_t)rand(); }
     for (int i=0;i<n+16;i++){ merge_left[i]=(uint8_t)rand(); merge_right[i]=(uint8_t)rand(); }
     for (int i=0;i<256;i++) c2s[i]=(uint8_t)rand();
     for (int i=0;i<n+64;i++){ ranks[i]=(uint8_t)rand(); symbuf[i]=(uint8_t)rand(); }
     for (int i=0;i<256;i++){ code_la_lut[i]=(uint16_t)rand(); sym_to_rank[i]=(uint8_t)rand(); }
+    for (int i=0;i<256;i++) s2r_hi[i]=(uint16_t)((unsigned)sym_to_rank[i]<<8);
     uint8_t rank_thr = 127, rank_base = 0;
 
     for (int d=2; d<=MAXD; d++) {
@@ -854,6 +858,7 @@ int main(int argc, char **argv) {
                      .la_work=la_work, .tmp16=tmp16,
                      .ranks=ranks, .ranks_work=ranks_work, .tmp8=tmp8, .symbuf=symbuf,
                      .code_la_lut=code_la_lut, .sym_to_rank=sym_to_rank,
+                     .enc_init_aux={ .s2r_hi=s2r_hi },
                      .rank_thr=rank_thr, .rank_base=rank_base,
                      .n=n, .D=p->D, .depth=PART_DEPTH };
         const char *chk = "ok";
