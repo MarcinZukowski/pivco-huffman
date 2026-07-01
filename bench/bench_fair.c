@@ -43,6 +43,7 @@
 #endif
 
 #include "pivco_huffman.h"
+#include "bench_canary.h"
 #define HUF_STATIC_LINKING_ONLY
 #include "huf.h"
 #define FSE_STATIC_LINKING_ONLY
@@ -783,10 +784,11 @@ static int in_csv(const char *csv, const char *name){
 }
 
 int main(int argc, char **argv) {
-    int run_all = 0;
+    int run_all = 0, canary = 1;
     const char *eng_filter = NULL, *dist_filter = NULL;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--all")) run_all = 1;
+        else if (!strncmp(argv[i], "--canary=", 9)) canary = atoi(argv[i]+9);
         else if (!strncmp(argv[i], "--G=", 4)) g_table_G = (size_t)atoi(argv[i]+4) * 1024;
         else if (!strncmp(argv[i], "--blk=", 6)) {
             long v = atol(argv[i] + 6);
@@ -809,7 +811,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--list") || !strcmp(argv[i], "--help")
                  || !strcmp(argv[i], "-h")) {
             bench_init();
-            printf("usage: pivco_fair_bench [--all] [--G=KB] [--blk=N] [--engines=a,b] [--dist=x,y] [--timer=cyc]\n\n");
+            printf("usage: pivco_fair_bench [--all] [--G=KB] [--blk=N] [--engines=a,b] [--dist=x,y] [--timer=cyc] [--canary=0|1]\n\n");
             printf("engines:");
             for (int e = 0; e < N_ENGINES; e++) printf(" %s", ENGINES[e].name);
             printf("\n\ndistributions (* = in default 'main' set):\n");
@@ -838,6 +840,7 @@ int main(int argc, char **argv) {
     printf("columns: enc(opaque prebuilt)  dec(opaque prebuilt)  %s | ratio(op pb) | builds/1MB\n\n",
            g_use_cyc ? "MB/Gcyc" : "MB/s");
 
+    if (canary >= 1) bench_canary("start");
     uint8_t *sym = malloc(TOTAL_MAX);
     int nd = bench_num_distributions();
     for (int d = 0; d < nd; d++) {
@@ -858,6 +861,7 @@ int main(int argc, char **argv) {
                 print_row(ENGINES[e].name, ENGINES[e].fn(sym, (size_t)n));
         printf("\n");
     }
+    if (canary >= 1) { bench_canary("end"); bench_canary_summary(); }
     free(sym);
     return 0;
 }

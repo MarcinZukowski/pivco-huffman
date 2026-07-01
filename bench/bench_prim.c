@@ -55,6 +55,7 @@
 #  endif
 #endif
 #include "pivco_huffman.h"
+#include "bench_canary.h"
 #if defined(HAVE_SIMD)
 #  include "pivco_huffman_primitives.h"   /* prim_enc_* (u8 rank) / prim_merge_flat
                                              (+ NEON flat_dN) */
@@ -580,6 +581,8 @@ static void usage(FILE *f) {
         "\n"
         "  --n=N            elements per run (default 8192; rounded down to mult of 16)\n"
         "  --reps=N         inner reps per timed run (default 2000)\n"
+        "  --canary=X       env-stability probe (compute/bw/lat); 0=off,\n"
+        "                   1=start+end (default), 2=+between families, 3=+between each primitive\n"
         "  --D=d,d,...      restrict to these flat depths D (2..%d; default all)\n"
         "  --variants       also run the prim_variants/ graveyard (frozen non-shipping\n"
         "                   kernels) next to production + scalar reference\n"
@@ -595,9 +598,11 @@ static void usage(FILE *f) {
 int main(int argc, char **argv) {
     int n = 8192, reps = 2000, want[MAXD+1] = {0}, any = 0;
     int variants = 0, do_list = 0; const char *vfilter = NULL;
+    int canary = 1;
     for (int i=1;i<argc;i++) {
         if      (!strncmp(argv[i],"--n=",4))    n = atoi(argv[i]+4);
         else if (!strncmp(argv[i],"--reps=",7)) reps = atoi(argv[i]+7);
+        else if (!strncmp(argv[i],"--canary=",9)) canary = atoi(argv[i]+9);
         else if (!strcmp(argv[i],"--variants") || !strncmp(argv[i],"--variants=",11)) {
             variants = 1;
             if (argv[i][10] == '=') vfilter = argv[i] + 11;  /* e.g. enc_partition_full */
@@ -833,10 +838,17 @@ int main(int argc, char **argv) {
         sink ^= (uint8_t)w;
     }
 
+    if (canary >= 1) bench_canary("start");
+    stage_t canary_prevS = (stage_t)-1;
+
     for (int k=0;k<NPRIMS;k++) {
         prim_t *p = &PRIMS[k];
         if (!p->run) continue;   /* other-arch stub (not built here); see --list */
         if (vfilter && strcmp(stage_name(p->stage), vfilter)) continue;
+        /* --canary=2: one probe at each family (stage) boundary */
+        if (canary == 2 && p->stage != canary_prevS && canary_prevS != (stage_t)-1)
+            bench_canary(stage_name(p->stage));
+        canary_prevS = p->stage;
         ctx_t cx = { .bm=bm, .codes=codes, .c2s=c2s, .out=out, .pack_out=pack_out,
                      .merge_left=merge_left, .merge_right=merge_right,
                      .la_work=la_work, .tmp16=tmp16,
@@ -991,7 +1003,10 @@ int main(int argc, char **argv) {
             printf("  [%s] %s%s%s", pv_isa_name(p->isa), p->origin,
                    p->note ? " · " : "", p->note ? p->note : "");
         printf("\n");
+        /* --canary=3: one probe after every primitive */
+        if (canary >= 3) bench_canary(p->variant);
     }
+    if (canary >= 1) { bench_canary("end"); bench_canary_summary(); }
     (void)sink;
     free(merge_left); free(merge_right);
     return 0;
