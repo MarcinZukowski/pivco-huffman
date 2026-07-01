@@ -868,10 +868,8 @@ static inline int pack_d2_sse_x86(uint8_t *out, const uint8_t *ranks, int n, uin
     const __m128i vb = _mm_set1_epi8((char)base);
     int i = 0;
     for (; i + 16 <= n; i += 16) {
-        __m128i bytes = _mm_and_si128(
-            _mm_sub_epi8(_mm_loadu_si128((const __m128i *)(ranks + i)), vb),
-            _mm_set1_epi8(0x3));
-        __m128i step1 = _mm_maddubs_epi16(bytes, weights);
+        __m128i bytes = _mm_sub_epi8(_mm_loadu_si128((const __m128i *)(ranks + i)), vb);
+        __m128i step1 = _mm_maddubs_epi16(bytes, weights);   /* local code in [0,2^D); no mask */
         __m128i step2 = _mm_hadd_epi16(step1, _mm_setzero_si128());
         __m128i out_bytes = _mm_packus_epi16(step2, _mm_setzero_si128());
         uint32_t packed4 = (uint32_t)_mm_cvtsi128_si32(out_bytes);
@@ -888,10 +886,8 @@ static inline int pack_d4_sse_x86(uint8_t *out, const uint8_t *ranks, int n, uin
     const __m128i vb = _mm_set1_epi8((char)base);
     int i = 0;
     for (; i + 16 <= n; i += 16) {
-        __m128i bytes = _mm_and_si128(
-            _mm_sub_epi8(_mm_loadu_si128((const __m128i *)(ranks + i)), vb),
-            _mm_set1_epi8(0xF));
-        __m128i step1 = _mm_maddubs_epi16(bytes, weights);
+        __m128i bytes = _mm_sub_epi8(_mm_loadu_si128((const __m128i *)(ranks + i)), vb);
+        __m128i step1 = _mm_maddubs_epi16(bytes, weights);   /* local code in [0,2^D); no mask */
         __m128i out_bytes = _mm_packus_epi16(step1, _mm_setzero_si128());
         _mm_storel_epi64((__m128i *)(out + (i * 4 / 8)), out_bytes);
     }
@@ -920,10 +916,8 @@ static inline int pack_d3_sse_x86(uint8_t *out, const uint8_t *ranks, int n, uin
     const __m128i vb = _mm_set1_epi8((char)base);
     int i = 0;
     for (; i + 8 <= n; i += 8) {
-        __m128i v8 = _mm_and_si128(
-            _mm_sub_epi8(_mm_loadl_epi64((const __m128i *)(ranks + i)), vb),
-            _mm_set1_epi8(0x7));
-        __m128i v = _mm_cvtepu8_epi16(v8);                 /* 8 ranks -> u16 */
+        __m128i v8 = _mm_sub_epi8(_mm_loadl_epi64((const __m128i *)(ranks + i)), vb);
+        __m128i v = _mm_cvtepu8_epi16(v8);                 /* 8 ranks -> u16; code in [0,2^D) */
         __m128i vlo = _mm_unpacklo_epi16(v, _mm_setzero_si128());
         __m128i vhi = _mm_unpackhi_epi16(v, _mm_setzero_si128());
         vlo = _mm_mullo_epi32(vlo, mlo);
@@ -968,7 +962,6 @@ static inline void pack_dN_x86(uint8_t *out, const uint8_t *ranks,
     if (i >= n) return;
 
     /* Scalar tail. */
-    uint32_t mask = (1u << D) - 1;
     int bit_pos = i * D;
     int byte_idx = bit_pos >> 3;
     int bits_in_buf = bit_pos & 7;
@@ -976,7 +969,7 @@ static inline void pack_dN_x86(uint8_t *out, const uint8_t *ranks,
         ? (uint64_t)out[byte_idx] & ((1u << bits_in_buf) - 1)
         : 0;
     for (; i < n; i++) {
-        uint32_t local = (uint32_t)(uint8_t)(ranks[i] - base) & mask;
+        uint32_t local = (uint32_t)(uint8_t)(ranks[i] - base);  /* code in [0,2^D); no mask */
         buf |= (uint64_t)local << bits_in_buf;
         bits_in_buf += D;
         while (bits_in_buf >= 8) {

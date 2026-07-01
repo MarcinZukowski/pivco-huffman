@@ -31,13 +31,14 @@
 #include <stdint.h>
 #include <string.h>
 
-/* Load 16 ranks, subtract base, mask to D bits (1 rank/byte) — the byte-laid
- * intermediate the multiply-as-shift pack expects, with no u16 narrow. */
+/* Load 16 ranks, subtract base (1 rank/byte) — the byte-laid intermediate the
+ * multiply-as-shift pack expects, with no u16 narrow.  The local code is already
+ * in [0,2^D) (rank - flat_base_rank over a depth-D flat subtree), so no mask to D
+ * bits is needed. */
 static inline uint8x16_t
-pivco_pack_load_byte_neon(const uint8_t *ranks, uint8_t base, uint8_t code_mask)
+pivco_pack_load_byte_neon(const uint8_t *ranks, uint8_t base)
 {
-    uint8x16_t b = vsubq_u8(vld1q_u8(ranks), vdupq_n_u8(base));
-    return vandq_u8(b, vdupq_n_u8(code_mask));
+    return vsubq_u8(vld1q_u8(ranks), vdupq_n_u8(base));
 }
 
 /* Per-D compact shuffles: bytes [0..D-1] from u64[0]'s low part go to
@@ -74,8 +75,7 @@ static inline int NAME(uint8_t *out, const uint8_t *ranks,                     \
     const uint8x16_t compact = vld1q_u8(COMPACT_TAB);                            \
     int i = 0;                                                                   \
     for (; i + 16 <= n; i += 16) {                                               \
-        uint8x16_t cb = pivco_pack_load_byte_neon(                               \
-            ranks + i, base, (uint8_t)((1u << (D_VAL)) - 1u));                   \
+        uint8x16_t cb = pivco_pack_load_byte_neon(ranks + i, base);              \
         /* Step 1: word[i] = cb[2i] + cb[2i+1] * 2^D  (8 u16 lanes)   */         \
         uint16x8_t prod_lo = vmull_u8(vget_low_u8(cb),  vget_low_u8(c0));        \
         uint16x8_t prod_hi = vmull_high_u8(cb, c0);                              \

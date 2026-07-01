@@ -765,7 +765,6 @@ static inline void pack_dN_avx512(uint8_t *out, const uint8_t *ranks,
     }
     if (i >= n) return;
 
-    uint32_t mask = (1u << D) - 1;
     int bit_pos = i * D;
     int byte_idx = bit_pos >> 3;
     int bits_in_buf = bit_pos & 7;
@@ -773,7 +772,7 @@ static inline void pack_dN_avx512(uint8_t *out, const uint8_t *ranks,
         ? (uint64_t)out[byte_idx] & ((1u << bits_in_buf) - 1)
         : 0;
     for (; i < n; i++) {
-        uint32_t local = (uint32_t)(uint8_t)(ranks[i] - base) & mask;
+        uint32_t local = (uint32_t)(uint8_t)(ranks[i] - base);  /* code in [0,2^D); no mask */
         buf |= (uint64_t)local << bits_in_buf;
         bits_in_buf += D;
         while (bits_in_buf >= 8) { out[byte_idx++] = (uint8_t)buf; buf >>= 8; bits_in_buf -= 8; }

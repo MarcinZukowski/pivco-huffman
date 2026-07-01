@@ -107,11 +107,10 @@ static inline int pack_d2_avx512(uint8_t *out, const uint8_t *ranks,
         63,59,55,51,47,43,39,35, 31,27,23,19,15,11,7,3);
     int i = 0;
     for (; i + 64 <= n; i += 64) {
-        /* D=2 needs the explicit mask: the slli-then-OR below would otherwise
-         * leak high bits across byte boundaries within each u32 lane. */
-        __m512i cb = _mm512_and_si512(
-            pivco_pack_load_byte(ranks + i, base),
-            _mm512_set1_epi8(0x03));
+        /* Local code is in [0,2^D) (rank - flat_base_rank over the flat subtree),
+         * so the slli-then-OR below can't leak high bits across byte boundaries
+         * within a u32 lane -- no mask needed. */
+        __m512i cb = pivco_pack_load_byte(ranks + i, base);
         __m512i g0 = _mm512_permutexvar_epi8(shuf0, cb);
         __m512i g1 = _mm512_permutexvar_epi8(shuf1, cb);
         __m512i g2 = _mm512_permutexvar_epi8(shuf2, cb);
@@ -173,10 +172,8 @@ static inline int pack_d4_avx512(uint8_t *out, const uint8_t *ranks,
         31,29,27,25,23,21,19,17, 15,13,11, 9, 7, 5, 3, 1);
     int i = 0;
     for (; i + 64 <= n; i += 64) {
-        /* D=4 needs the explicit mask: see D=2 comment. */
-        __m512i cb = _mm512_and_si512(
-            pivco_pack_load_byte(ranks + i, base),
-            _mm512_set1_epi8(0x0F));
+        /* Local code in [0,2^D); no mask needed (see D=2). */
+        __m512i cb = pivco_pack_load_byte(ranks + i, base);
         __m512i g0 = _mm512_permutexvar_epi8(shuf0, cb);
         __m512i g1 = _mm512_permutexvar_epi8(shuf1, cb);
         __m512i packed = _mm512_or_si512(g0, _mm512_slli_epi32(g1, 4));
@@ -223,11 +220,10 @@ static inline int NAME(uint8_t *out, const uint8_t *ranks,                  \
         (int32_t)(((int32_t)1 << (2*(D_VAL))) << 16) | 1);                        \
     const __m512i c3 = _mm512_set1_epi64(                                         \
         (int64_t)(((int64_t)1 << (4*(D_VAL))) - 1));                              \
-    const __m512i d_mask = _mm512_set1_epi8((char)((1 << (D_VAL)) - 1));          \
     int i = 0;                                                                    \
     for (; i + 64 <= n; i += 64) {                                                \
-        __m512i cb = pivco_pack_load_byte(ranks + i, base);       \
-        cb = _mm512_and_si512(cb, d_mask);                                        \
+        /* local code already in [0,2^D) -- no per-byte mask needed */            \
+        __m512i cb = pivco_pack_load_byte(ranks + i, base);                       \
         __m512i x  = _mm512_maddubs_epi16(c0, cb);                                \
         x = _mm512_madd_epi16(x, c1);                                             \
         __m512i xs = _mm512_srli_epi64(x, 32 - 4*(D_VAL));                        \

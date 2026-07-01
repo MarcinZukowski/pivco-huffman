@@ -28,14 +28,14 @@
 #include <string.h>
 #include <immintrin.h>
 
-/* Load 32 ranks, subtract base, mask to D bits (1 rank/byte) — the byte-laid
- * intermediate the multiply-as-shift pack expects, with no u16 narrow. */
-static inline __m256i pivco_pack_load_byte_avx2(const uint8_t *ranks,
-                                                uint8_t base, uint8_t code_mask)
+/* Load 32 ranks, subtract base (1 rank/byte) — the byte-laid intermediate the
+ * multiply-as-shift pack expects, with no u16 narrow.  The local code is already
+ * in [0,2^D) (rank - flat_base_rank over a depth-D flat subtree), so no mask to D
+ * bits is needed. */
+static inline __m256i pivco_pack_load_byte_avx2(const uint8_t *ranks, uint8_t base)
 {
-    __m256i b = _mm256_sub_epi8(_mm256_loadu_si256((const __m256i *)ranks),
-                                 _mm256_set1_epi8((char)base));
-    return _mm256_and_si256(b, _mm256_set1_epi8((char)code_mask));
+    return _mm256_sub_epi8(_mm256_loadu_si256((const __m256i *)ranks),
+                           _mm256_set1_epi8((char)base));
 }
 
 /* Per-D compact-shuf tables: pattern is bytes [0..D-1] from positions
@@ -70,8 +70,7 @@ static inline int NAME(uint8_t *out, const uint8_t *ranks,                      
     const __m256i compact = COMPACT_SHUF;                                        \
     int i = 0;                                                                   \
     for (; i + 32 <= n; i += 32) {                                               \
-        __m256i cb = pivco_pack_load_byte_avx2(                                  \
-            ranks + i, base, (uint8_t)((1 << (D_VAL)) - 1));                     \
+        __m256i cb = pivco_pack_load_byte_avx2(ranks + i, base);                 \
         __m256i x  = _mm256_maddubs_epi16(c0, cb);                               \
         x = _mm256_madd_epi16(x, c1);                                            \
         __m256i xs = _mm256_srli_epi64(x, 32 - 4*(D_VAL));                       \

@@ -931,7 +931,13 @@ int main(int argc, char **argv) {
             memcpy(ranks_work,ranks,(size_t)n); p->run(&cx);   /* reads ranks_work, no left scatter */
             if (memcmp(bm,ref_bm,(n+7)>>3) || memcmp(tmp8,ref8r,(size_t)nr_ref)) chk="FAIL";
         } else if (p->stage == ST_PACK) {
-            scalar_rank_pack(ref,ranks,n,p->D,rank_base); memset(pack_out,0,n); p->run(&cx);
+            /* Production feeds in-range local codes (rank - flat_base_rank in
+               [0,2^D)); mirror that so the pack sees realistic input (the SIMD
+               packs no longer mask to D bits — they rely on this guarantee). */
+            uint8_t cm = (uint8_t)((1u << p->D) - 1);
+            for (int k = 0; k < n; k++) tmp8[k] = (uint8_t)(ranks[k] & cm);
+            cx.ranks = tmp8;
+            scalar_rank_pack(ref,tmp8,n,p->D,rank_base); memset(pack_out,0,n); p->run(&cx);
             if (memcmp(pack_out,ref,(n*p->D+7)>>3)) chk="FAIL";
         } else if (p->stage == ST_BMBUILD) {
             scalar_partition(la_pristine,n,PART_DEPTH,ref_bm,ref16l,ref16r);

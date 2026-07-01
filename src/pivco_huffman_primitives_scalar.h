@@ -51,11 +51,10 @@ static inline int part_core_scalar(uint8_t *ranks, int n, uint8_t thr,
 static inline void pack_dN_scalar(uint8_t *out, const uint8_t *ranks,
                                        int n, int D, uint8_t base)
 {
-    uint32_t mask = (1u << D) - 1;
     uint64_t buf = 0;
     int bits_in_buf = 0, byte_idx = 0;
     for (int i = 0; i < n; i++) {
-        uint32_t local = (uint32_t)(uint8_t)(ranks[i] - base) & mask;
+        uint32_t local = (uint32_t)(uint8_t)(ranks[i] - base);  /* code in [0,2^D); no mask */
         buf |= (uint64_t)local << bits_in_buf;
         bits_in_buf += D;
         while (bits_in_buf >= 8) {

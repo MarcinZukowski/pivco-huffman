@@ -911,7 +911,7 @@ static inline int pack_d2_neon(uint8_t *out, const uint8_t *ranks, int n, uint8_
     uint8x16_t vb = vdupq_n_u8(base);
     int i = 0;
     for (; i + 16 <= n; i += 16) {
-        uint8x16_t b = vandq_u8(vsubq_u8(vld1q_u8(ranks + i), vb), vdupq_n_u8(0x3));
+        uint8x16_t b = vsubq_u8(vld1q_u8(ranks + i), vb);  /* local code in [0,2^D); no mask needed */
         b = vshlq_u8(b, vld1q_s8(shifts_d2));
         uint8x16_t s1 = vpaddq_u8(b, b);
         uint8x16_t s2 = vpaddq_u8(s1, s1);
@@ -929,7 +929,7 @@ static inline int pack_d3_neon(uint8_t *out, const uint8_t *ranks, int n, uint8_
     uint8x8_t vb = vdup_n_u8(base);
     int i = 0;
     for (; i + 8 <= n; i += 8) {
-        uint8x8_t b8 = vand_u8(vsub_u8(vld1_u8(ranks + i), vb), vdup_n_u8(0x7));
+        uint8x8_t b8 = vsub_u8(vld1_u8(ranks + i), vb);    /* local code in [0,2^D); no mask needed */
         uint16x8_t v = vmovl_u8(b8);
         uint32x4_t lo = vshlq_u32(vmovl_u16(vget_low_u16(v)),  vld1q_s32(shifts_lo));
         uint32x4_t hi = vshlq_u32(vmovl_u16(vget_high_u16(v)), vld1q_s32(shifts_hi));
@@ -949,7 +949,7 @@ static inline int pack_d4_neon(uint8_t *out, const uint8_t *ranks, int n, uint8_
     uint8x16_t vb = vdupq_n_u8(base);
     int i = 0;
     for (; i + 16 <= n; i += 16) {
-        uint8x16_t b = vandq_u8(vsubq_u8(vld1q_u8(ranks + i), vb), vdupq_n_u8(0xF));
+        uint8x16_t b = vsubq_u8(vld1q_u8(ranks + i), vb);  /* local code in [0,2^D); no mask needed */
         b = vshlq_u8(b, vld1q_s8(shifts_d4));
         uint8x16_t paired = vpaddq_u8(b, b);
         vst1_u8(out + (i * 4 / 8), vget_low_u8(paired));
@@ -988,7 +988,6 @@ static inline void pack_dN_neon(uint8_t *out, const uint8_t *ranks,
     }
     if (i >= n) return;
 
-    uint32_t mask = (1u << D) - 1;
     int bit_pos = i * D;
     int byte_idx = bit_pos >> 3;
     int bits_in_buf = bit_pos & 7;
@@ -996,7 +995,7 @@ static inline void pack_dN_neon(uint8_t *out, const uint8_t *ranks,
         ? (uint64_t)out[byte_idx] & ((1u << bits_in_buf) - 1)
         : 0;
     for (; i < n; i++) {
-        uint32_t local = (uint32_t)(uint8_t)(ranks[i] - base) & mask;
+        uint32_t local = (uint32_t)(uint8_t)(ranks[i] - base);  /* code in [0,2^D); no mask */
         buf |= (uint64_t)local << bits_in_buf;
         bits_in_buf += D;
         while (bits_in_buf >= 8) {
