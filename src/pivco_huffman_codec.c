@@ -50,6 +50,28 @@ static uint8_t *decode_scratch_ensure(size_t need)
     return g_decode_scratch;
 }
 
+/* Thread-local growable encode scratch arena.  Mirrors the decode arena
+ * above: holds the per-block ranks buffer + the tree-walk's right-half
+ * recursion scratch, grown on demand and reused across blocks (never shrinks),
+ * so a block-loop encode doesn't malloc/free per block.
+ * @todo stopgap: this per-thread global should become part of an explicit
+ * encoder API context (a pivco_huffman_encoder_t handle) so the scratch's
+ * ownership and lifetime are caller-controlled rather than a hidden
+ * thread_local.  See IDEAS.md. */
+static __thread uint8_t *g_encode_scratch     = NULL;
+static __thread size_t   g_encode_scratch_cap = 0;
+
+static uint8_t *encode_scratch_ensure(size_t need)
+{
+    if (need > g_encode_scratch_cap) {
+        uint8_t *p = (uint8_t *)realloc(g_encode_scratch, need);
+        if (!p) return NULL;
+        g_encode_scratch     = p;
+        g_encode_scratch_cap = need;
+    }
+    return g_encode_scratch;
+}
+
 /* ---------- FSE dispatch parameters ----------
  *
  * The thresholds match the NEON encoder's settings so the wire format
@@ -281,7 +303,7 @@ int CODEC_ENCODE_ENTRY(const uint8_t *symbols, size_t n,
      * scratch holds one right-half per recursion level, hence (MAX_CODE_LEN+2)*N. */
     const size_t ranks_capacity = (size_t)N + 64;
     const size_t tmp_capacity   = (size_t)N * (PIVCO_MAX_CODE_LEN + 2);
-    uint8_t *ranks = (uint8_t *)malloc(ranks_capacity + tmp_capacity);
+    uint8_t *ranks = encode_scratch_ensure(ranks_capacity + tmp_capacity);
     if (!ranks) return PIVCO_ERR_NULL;
     uint8_t *tmp = ranks + ranks_capacity;
 
@@ -293,7 +315,6 @@ int CODEC_ENCODE_ENTRY(const uint8_t *symbols, size_t n,
 
     codec_encode_node(table, table->tree_root, ranks, N, 0, &ptr, tmp);
 
-    free(ranks);
     *out_len = (size_t)(ptr - out);
     return PIVCO_OK;
 }

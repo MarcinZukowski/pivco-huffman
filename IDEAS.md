@@ -8,6 +8,7 @@
 ### CONSIDERED — open / parked / research direction
 
 **General**
+- [Encode scratch thread_local → encoder API context](#encode-scratch-thread_local--encoder-api-context-2026-07-01)
 - [4-way root merge (top 2 levels in one pass)](#4-way-root-merge-top-2-levels-in-one-pass-2026-06-19)
 - [SIMD-ify scalar tails (overwrite or masked stores)](#simd-ify-scalar-tails-overwrite-or-masked-stores-2026-06-15)
 - [Golomb/Rice tier for very-high-skew nodes (p > 0.95)](#golombrice-tier-for-very-high-skew-nodes-p--095-2026-05-16-research)
@@ -118,6 +119,13 @@
 ## CONSIDERED
 
 **General**
+
+### Encode scratch thread_local → encoder API context, 2026-07-01
+The per-block encode scratch (the ranks buffer + the tree-walk's right-half recursion buffer) is a `__thread` growable arena — `g_encode_scratch` / `encode_scratch_ensure` in `pivco_huffman_codec.c`, mirroring the existing decode arena — reused across blocks so a block-loop encode no longer mallocs/frees per block.  This is a stopgap (marked `@todo` at the arena).
+
+**It leaks on thread death.**  `__thread` reclaims the *pointer* when a thread exits but never `free()`s the heap block it points at, so every thread that runs an encode and then terminates leaks its arena (up to ~`N*(MAX_CODE_LEN+2)` ≈ 750 KB at a 32 K block).  The **decode** arena (`g_decode_scratch`) has the identical bug — so the codec already leaks one buffer per codec-touching thread today.  Benign for single-threaded use (OS reclaims at exit) and for a fixed thread pool (allocated once, no churn), but it accumulates unboundedly in any process that repeatedly spawns-and-joins short-lived worker threads that touch the codec.
+
+The right fix is an explicit caller-owned context (a `pivco_huffman_encoder_t` / matching decoder handle) that owns the scratch and is freed explicitly — this kills the thread_local *and* the leak in one move, and also gives caller-controlled lifetime, custom allocators, and a threading model that doesn't assume thread_local granularity.  Cheaper stopgaps if the full API slips: a public `pivco_huffman_thread_cleanup()` that frees both arenas (caller calls it before joining a worker), or a `pthread_key` destructor (POSIX-only, composes poorly with the 4-per-backend TU layout).  A `pivco_huffman_encoder_t` prototype was built and measured earlier (encode-context A/B) then reverted pending a fuller API redesign; revisit when the encode/decode API is reworked together — and fix the decode arena at the same time.
 
 ### 4-way root merge (top 2 levels in one pass), 2026-06-19
 Merge the root's 4 grandchild streams in one pass instead of 3 binary merges (write N once, not ~2N).  Microbench `extras/bench/bench_merge4way.c`: **VBMI2-only** — Zen5 1.35–2.0×, Granite Rapids 1.9–2.9× (more leaf grandchildren = faster, via const-buffer `vpexpandb` over `set1`); NEON loses ~0.36× (no byte-expand → the 4-way rank costs more than the saved pass).  7/9 main dists qualify.  Blocker: wire-format change (top-2-levels as 2 routing bitplanes + 4 substreams).  Next: c8a/c8i decode PROF for the end-to-end %.
