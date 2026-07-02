@@ -367,13 +367,32 @@ static inline uint32_t extract_D_bits_neon(const uint8_t *in,
     return (val >> bit_off) & ((1u << D) - 1);
 }
 
-/* D=2: 4 packed bits per byte -> 16 codes (uint8x16_t), 1 vqtbl1q_u8. */
+/* D=2 (4 codes/byte) */
 static inline void merge_flat_d2_neon(uint8_t *symbols, int n,
                                                 const uint8_t *bm,
                                                 const uint8_t *c2s)
 {
-    uint8x16_t c2s_vec = vld1q_u8(c2s);
     int i = 0;
+    if (n >= 64) {
+        /* fast path maps each input nibble straight to a symbol pair via two
+         * prepped tables (TL[n]=c2s[n&3], TH[n]=c2s[(n>>2)&3]) */
+        static const uint8_t th_idx[16] = {0,0,0,0,1,1,1,1,2,2,2,2,3,3,3,3};
+        uint32_t w; memcpy(&w, c2s, 4);
+        const uint8x16_t TL = vreinterpretq_u8_u32(vdupq_n_u32(w));   /* c2s[n&3] */
+        const uint8x16_t TH = vqtbl1q_u8(TL, vld1q_u8(th_idx));       /* c2s[(n>>2)&3] */
+        const uint8x16_t m  = vdupq_n_u8(0x0F);
+        for (; i + 64 <= n; i += 64) {
+            uint8x16_t v  = vld1q_u8(bm + (i >> 2));
+            uint8x16_t lo = vandq_u8(v, m), hi = vshrq_n_u8(v, 4);
+            /* four planar 16-symbol vectors, one per 2-bit code position */
+            uint8x16x4_t o = {{ vqtbl1q_u8(TL, lo), vqtbl1q_u8(TH, lo),
+                                vqtbl1q_u8(TL, hi), vqtbl1q_u8(TH, hi) }};
+            /* store interleaved, restoring the original code order */
+            vst4q_u8(symbols + i, o);
+        }
+    }
+    uint8x16_t c2s_vec = vld1q_u8(c2s);
+    /* smaller inputs/tail => simpler 16-wide path with no extra prep. */
     for (; i + 16 <= n; i += 16) {
         uint8x16_t codes = flat_d2_unpack(bm + (i >> 2));
         uint8x16_t syms  = vqtbl1q_u8(c2s_vec, codes);
@@ -392,31 +411,55 @@ static inline void merge_flat_d2_neon(uint8_t *symbols, int n,
     }
 }
 
-/* D=3: 3 bytes -> 8 codes (uint8x8_t).  16-elem chunk: two unpacks +
- * vcombine + vqtbl1q_u8; 8-elem chunk: one unpack + vqtbl1_u8. */
+/* D=3 (byte-crossing): 32 codes/iter.  Use the D=6 6-bit unpack to grab TWO
+ * D=3 codes per byte (pair6 = c[2k] | c[2k+1]<<3) -- one gather+shift pass does
+ * 32 codes -- then split lo=&7 (vqtbl1 over c2s16) / hi=>>3 (vqtbl2 over the
+ * 32-byte repeated table, which ignores the high junk) and interleave with
+ * vst2q.  A single 16-wide pair-gather block mops up the <32 remainder; the
+ * trailing <=16 codes use the no-overread safe path (bounded by fast_end). */
 static inline void merge_flat_d3_neon(uint8_t *symbols, int n,
                                                 const uint8_t *bm,
                                                 const uint8_t *c2s)
 {
-    uint8x16_t c2s_vec = vld1q_u8(c2s);
+    const uint8x8_t  c2s8  = vld1_u8(c2s);
+    const uint8x16_t c2s16 = vcombine_u8(c2s8, c2s8);
+    const uint8x16_t m7    = vdupq_n_u8(7);
     int i = 0;
     int fast_end = n >= 16 ? n - 16 : 0;
-    for (; i + 16 <= fast_end; i += 16) {
-        uint8x8_t codes_lo = flat_d3_unpack_fast(bm + ((i      * 3) >> 3));
-        uint8x8_t codes_hi = flat_d3_unpack_fast(bm + (((i + 8) * 3) >> 3));
-        uint8x16_t codes = vcombine_u8(codes_lo, codes_hi);
-        uint8x16_t syms  = vqtbl1q_u8(c2s_vec, codes);
-        vst1q_u8(symbols + i, syms);
+    const uint8_t *bp = bm;
+    if (n >= 48) {
+        uint8x16x2_t c2s32; c2s32.val[0] = c2s16; c2s32.val[1] = c2s16;
+        static const uint8_t pair6_shuf_t[16] = { 0,1, 1,2, 3,4, 4,5, 6,7, 7,8, 9,10, 10,11 };
+        static const int16_t hshift6_t[8]     = { 2,-2, 2,-2, 2,-2, 2,-2 };
+        static const int8_t  bshr6_t[16]      = { -2,0, -2,0, -2,0, -2,0, -2,0, -2,0, -2,0, -2,0 };
+        const uint8x16_t pair6_shuf = vld1q_u8(pair6_shuf_t);
+        const int16x8_t  hshift6    = vld1q_s16(hshift6_t);
+        const int8x16_t  bshr6      = vld1q_s8(bshr6_t);
+        for (; i + 32 <= fast_end; i += 32, bp += 12) {
+            uint8x16_t packed = vld1q_u8(bp);
+            uint16x8_t x = vreinterpretq_u16_u8(vqtbl1q_u8(packed, pair6_shuf));
+            x = vshlq_u16(x, hshift6);
+            uint8x16_t pair6 = vshlq_u8(vreinterpretq_u8_u16(x), bshr6);
+            uint8x16x2_t out;
+            out.val[0] = vqtbl1q_u8(c2s16, vandq_u8(pair6, m7));
+            out.val[1] = vqtbl2q_u8(c2s32, vshrq_n_u8(pair6, 3));
+            vst2q_u8(symbols + i, out);
+        }
     }
-    for (; i + 8 <= fast_end; i += 8) {
-        uint8x8_t codes = flat_d3_unpack_fast(bm + ((i * 3) >> 3));
-        uint8x8_t syms  = vqtbl1_u8(c2s_vec, codes);
-        vst1_u8(symbols + i, syms);
+    if (i + 16 <= fast_end) {   /* one 16-wide pair-gather block for the <32 remainder */
+        static const uint8_t pair_shuf_t[16] = { 0,1, 0,1, 1,2, 2,3, 3,4, 3,4, 4,5, 5,6 };
+        static const int16_t hshift_t[8]     = { 5,-1, 1, 3, 5,-1, 1, 3 };
+        static const int8_t  bshr_t[16]      = { -5,0, -5,0, -5,0, -5,0, -5,0, -5,0, -5,0, -5,0 };
+        uint8x16_t packed = vld1q_u8(bp);
+        uint16x8_t x = vreinterpretq_u16_u8(vqtbl1q_u8(packed, vld1q_u8(pair_shuf_t)));
+        x = vshlq_u16(x, vld1q_s16(hshift_t));
+        uint8x16_t y = vshlq_u8(vreinterpretq_u8_u16(x), vld1q_s8(bshr_t));
+        vst1q_u8(symbols + i, vqtbl1q_u8(c2s16, vandq_u8(y, m7)));
+        i += 16; bp += 6;
     }
     for (; i + 8 <= n; i += 8) {
         uint8x8_t codes = flat_d3_unpack_safe(bm + ((i * 3) >> 3));
-        uint8x8_t syms  = vqtbl1_u8(c2s_vec, codes);
-        vst1_u8(symbols + i, syms);
+        vst1_u8(symbols + i, vqtbl1_u8(c2s16, codes));
     }
     for (; i < n; i++) {
         uint32_t code = extract_D_bits_neon(bm, i * 3, 3);
@@ -424,13 +467,22 @@ static inline void merge_flat_d3_neon(uint8_t *symbols, int n,
     }
 }
 
-/* D=4: 2 nibbles per byte -> 16 codes (uint8x16_t), 1 vqtbl1q_u8. */
+/* D=4: codes are nibbles (2/byte), so &0xF / >>4 index the plain c2s directly
+ * (no dup-shuffle TBL); 32/iter via vzip + plain vst1q.  Stock 16-wide tail. */
 static inline void merge_flat_d4_neon(uint8_t *symbols, int n,
                                                 const uint8_t *bm,
                                                 const uint8_t *c2s)
 {
     uint8x16_t c2s_vec = vld1q_u8(c2s);
+    const uint8x16_t m = vdupq_n_u8(0x0F);
     int i = 0;
+    for (; i + 32 <= n; i += 32) {
+        uint8x16_t v  = vld1q_u8(bm + (i >> 1));
+        uint8x16_t lo = vandq_u8(v, m), hi = vshrq_n_u8(v, 4);
+        uint8x16_t a = vqtbl1q_u8(c2s_vec, lo), b = vqtbl1q_u8(c2s_vec, hi);
+        vst1q_u8(symbols + i,      vzip1q_u8(a, b));
+        vst1q_u8(symbols + i + 16, vzip2q_u8(a, b));
+    }
     for (; i + 16 <= n; i += 16) {
         uint8x16_t codes = flat_d4_unpack(bm + (i >> 1));
         uint8x16_t syms  = vqtbl1q_u8(c2s_vec, codes);
@@ -447,11 +499,10 @@ static inline void merge_flat_d4_neon(uint8_t *symbols, int n,
     }
 }
 
-/* D=5: c2s is 32 bytes (2 regs), TBL via vqtbl2.  Note: on Neoverse-V2
- * (Graviton 4) vqtbl2 is measurably slower than on Apple Silicon, but
- * at the n that BU's contiguous flat-subtree path produces (typically
- * thousands of elements) the SIMD path still wins -- on Graviton 4
- * flat_M5 measured 9121 vs 2845 M/s SIMD-vs-scalar 2026-05-14. */
+/* D=5 (byte-crossing): pair-gather puts two adjacent codes in one u16 lane,
+ * positioned so a byte reinterpret interleaves even/odd for free (no vtrn1);
+ * vshr.u8(even lanes) + vand clean to 0..31; vqtbl2 scatter.  Setup is gated on the
+ * block condition; the stock safe path handles the remainder. */
 static inline void merge_flat_d5_neon(uint8_t *symbols, int n,
                                                 const uint8_t *bm,
                                                 const uint8_t *c2s)
@@ -460,18 +511,24 @@ static inline void merge_flat_d5_neon(uint8_t *symbols, int n,
     c2s_vec.val[0] = vld1q_u8(c2s);
     c2s_vec.val[1] = vld1q_u8(c2s + 16);
     int i = 0;
-    int fast_end = n >= 24 ? n - 24 : 0;
-    for (; i + 16 <= fast_end; i += 16) {
-        uint8x8_t codes_lo = flat_d5_unpack_fast(bm + ((i      * 5) >> 3));
-        uint8x8_t codes_hi = flat_d5_unpack_fast(bm + (((i + 8) * 5) >> 3));
-        uint8x16_t codes = vcombine_u8(codes_lo, codes_hi);
-        uint8x16_t syms  = vqtbl2q_u8(c2s_vec, codes);
-        vst1q_u8(symbols + i, syms);
-    }
-    for (; i + 8 <= fast_end; i += 8) {
-        uint8x8_t codes = flat_d5_unpack_fast(bm + ((i * 5) >> 3));
-        uint8x8_t syms  = vqtbl2_u8(c2s_vec, codes);
-        vst1_u8(symbols + i, syms);
+    if (n >= 25) {
+        static const uint8_t pair_shuf_t[16] = { 0,1, 1,2, 2,3, 3,4, 5,6, 6,7, 7,8, 8,9 };
+        static const int16_t hshift_t[8]     = { 3, 1, -1, -3, 3, 1, -1, -3 };
+        static const int8_t  bshr_t[16]      = { -3,0, -3,0, -3,0, -3,0, -3,0, -3,0, -3,0, -3,0 };
+        const uint8x16_t pair_shuf = vld1q_u8(pair_shuf_t);
+        const int16x8_t  hshift    = vld1q_s16(hshift_t);
+        const int8x16_t  bshr      = vld1q_s8(bshr_t);
+        const uint8x16_t m31       = vdupq_n_u8(0x1f);
+        int blocks = (n - 9) >> 4;
+        for (int b = 0; b < blocks; ++b) {
+            uint8x16_t packed = vld1q_u8(bm + b * 10);
+            uint16x8_t x = vreinterpretq_u16_u8(vqtbl1q_u8(packed, pair_shuf));
+            x = vshlq_u16(x, hshift);
+            uint8x16_t y = vshlq_u8(vreinterpretq_u8_u16(x), bshr);
+            uint8x16_t idx = vandq_u8(y, m31);
+            vst1q_u8(symbols + (b << 4), vqtbl2q_u8(c2s_vec, idx));
+        }
+        i = blocks << 4;
     }
     for (; i + 8 <= n; i += 8) {
         uint8x8_t codes = flat_d5_unpack_safe(bm + ((i * 5) >> 3));
@@ -484,7 +541,8 @@ static inline void merge_flat_d5_neon(uint8_t *symbols, int n,
     }
 }
 
-/* D=6: c2s is 64 bytes (4 regs), TBL via vqtbl4. */
+/* D=6: same pair-gather as D=5 (12-bit pairs, even/odd in one u16 lane), but
+ * the c2s is 64 bytes so the scatter is vqtbl4q.  Setup gated; stock safe tail. */
 static inline void merge_flat_d6_neon(uint8_t *symbols, int n,
                                                 const uint8_t *bm,
                                                 const uint8_t *c2s)
@@ -495,18 +553,24 @@ static inline void merge_flat_d6_neon(uint8_t *symbols, int n,
     c2s_vec.val[2] = vld1q_u8(c2s + 32);
     c2s_vec.val[3] = vld1q_u8(c2s + 48);
     int i = 0;
-    int fast_end = n >= 24 ? n - 24 : 0;
-    for (; i + 16 <= fast_end; i += 16) {
-        uint8x8_t codes_lo = flat_d6_unpack_fast(bm + ((i      * 6) >> 3));
-        uint8x8_t codes_hi = flat_d6_unpack_fast(bm + (((i + 8) * 6) >> 3));
-        uint8x16_t codes = vcombine_u8(codes_lo, codes_hi);
-        uint8x16_t syms  = vqtbl4q_u8(c2s_vec, codes);
-        vst1q_u8(symbols + i, syms);
-    }
-    for (; i + 8 <= fast_end; i += 8) {
-        uint8x8_t codes = flat_d6_unpack_fast(bm + ((i * 6) >> 3));
-        uint8x8_t syms  = vqtbl4_u8(c2s_vec, codes);
-        vst1_u8(symbols + i, syms);
+    if (n >= 24) {
+        static const uint8_t pair_shuf_t[16] = { 0,1, 1,2, 3,4, 4,5, 6,7, 7,8, 9,10, 10,11 };
+        static const int16_t hshift_t[8]     = { 2,-2, 2,-2, 2,-2, 2,-2 };
+        static const int8_t  bshr_t[16]      = { -2,0, -2,0, -2,0, -2,0, -2,0, -2,0, -2,0, -2,0 };
+        const uint8x16_t pair_shuf = vld1q_u8(pair_shuf_t);
+        const int16x8_t  hshift    = vld1q_s16(hshift_t);
+        const int8x16_t  bshr      = vld1q_s8(bshr_t);
+        const uint8x16_t m63       = vdupq_n_u8(0x3f);
+        int blocks = (n - 8) >> 4;
+        for (int b = 0; b < blocks; ++b) {
+            uint8x16_t packed = vld1q_u8(bm + b * 12);
+            uint16x8_t x = vreinterpretq_u16_u8(vqtbl1q_u8(packed, pair_shuf));
+            x = vshlq_u16(x, hshift);
+            uint8x16_t y = vshlq_u8(vreinterpretq_u8_u16(x), bshr);
+            uint8x16_t idx = vandq_u8(y, m63);
+            vst1q_u8(symbols + (b << 4), vqtbl4q_u8(c2s_vec, idx));
+        }
+        i = blocks << 4;
     }
     for (; i + 8 <= n; i += 8) {
         uint8x8_t codes = flat_d6_unpack_safe(bm + ((i * 6) >> 3));
@@ -561,38 +625,19 @@ static inline void merge_flat_d7_neon(uint8_t *symbols, int n,
     }
 }
 
-/* D=8: 256-entry c2s = 4 * vqtbl4.  bm is byte-per-code so no unpack.
- * One vqtbl4 + three vqtbx4 stages with the high tables indexed by
- * code-64 / code-128 / code-192 (wraps out of [0,63] elsewhere).
- * A parallel 4×vqtbl + OR-tree alternative was measured equivalent on
- * M4 (vqtbl4q is wide-register-read-bound, not latency-bound), so the
- * chained-tbx form wins on instruction count. */
+/* D=8: a depth-8 flat region has 2^8 = 256 leaves = the WHOLE byte alphabet,
+ * all at code length 8.  A full-alphabet equal-length canonical code is the
+ * identity permutation (rank == symbol), so c2s[k] == k and the byte-aligned
+ * 8-bit codes ARE the symbols: out[i] = c2s[bm[i]] = bm[i].  Hence a plain
+ * memcpy -- no 256-entry vqtbl4/vqtbx4 needed.  The caller (a full-alphabet
+ * flat root) guarantees c2s == identity for D=8; only reachable for
+ * near-uniform / incompressible blocks (ratio ~1.0). */
 static inline void merge_flat_d8_neon(uint8_t *symbols, int n,
                                                 const uint8_t *bm,
                                                 const uint8_t *c2s)
 {
-    uint8x16x4_t t0, t1, t2, t3;
-    t0.val[0]=vld1q_u8(c2s     ); t0.val[1]=vld1q_u8(c2s + 16);
-    t0.val[2]=vld1q_u8(c2s + 32); t0.val[3]=vld1q_u8(c2s + 48);
-    t1.val[0]=vld1q_u8(c2s + 64); t1.val[1]=vld1q_u8(c2s + 80);
-    t1.val[2]=vld1q_u8(c2s + 96); t1.val[3]=vld1q_u8(c2s +112);
-    t2.val[0]=vld1q_u8(c2s +128); t2.val[1]=vld1q_u8(c2s +144);
-    t2.val[2]=vld1q_u8(c2s +160); t2.val[3]=vld1q_u8(c2s +176);
-    t3.val[0]=vld1q_u8(c2s +192); t3.val[1]=vld1q_u8(c2s +208);
-    t3.val[2]=vld1q_u8(c2s +224); t3.val[3]=vld1q_u8(c2s +240);
-    uint8x16_t s64  = vdupq_n_u8(64);
-    uint8x16_t s128 = vdupq_n_u8(128);
-    uint8x16_t s192 = vdupq_n_u8(192);
-    int i = 0;
-    for (; i + 16 <= n; i += 16) {
-        uint8x16_t codes = vld1q_u8(bm + i);
-        uint8x16_t s = vqtbl4q_u8(t0, codes);
-        s = vqtbx4q_u8(s, t1, vsubq_u8(codes, s64));
-        s = vqtbx4q_u8(s, t2, vsubq_u8(codes, s128));
-        s = vqtbx4q_u8(s, t3, vsubq_u8(codes, s192));
-        vst1q_u8(symbols + i, s);
-    }
-    for (; i < n; i++) symbols[i] = c2s[bm[i]];
+    (void)c2s;
+    memcpy(symbols, bm, (size_t)n);
 }
 
 /* merge_flat_neon -- D-bit flat-subtree decode into a
@@ -697,10 +742,10 @@ static inline uint8_t nmask8(uint8x8_t ids, uint8x8_t thr)
     return vaddv_u8(vand_u8(vcgt_u8(ids, thr), vld1_u8(BW8)));
 }
 
-/* enc_init: ranks[i] = sym_to_rank[sym[i]], a 256-entry byte gather.  
+/* enc_init: ranks[i] = sym_to_rank[sym[i]], a 256-entry byte gather.
  * "simd20" version from #5 by dougallj.
  * The s2r table lives in 16 NEON regs (4x uint8x16x4_t).
- * Each 16-lane input does one vqtbl4 over the [0,63] half 
+ * Each 16-lane input does one vqtbl4 over the [0,63] half
  * + three vqtbx4 over the +64/+128/+192 halves (with offset adjusted).
  * The tbl/tbx are microcoded and leave scalar load slots idle, so
  * 4 extra symbols/iter are done with GPR gathers interleaved between them

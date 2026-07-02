@@ -657,6 +657,7 @@ int main(int argc, char **argv) {
     uint8_t  *ranks = malloc(n+64), *ranks_work = malloc(n+64), *tmp8 = malloc(n+64);
     uint8_t  *symbuf = malloc(n+64), *ref8l = malloc(n+64), *ref8r = malloc(n+64);
     uint16_t code_la_lut[256]; uint8_t sym_to_rank[256];
+    uint8_t c2s_id[256];                                     /* identity c2s (merge_flat D=8 invariant) */
     uint16_t s2r_hi[256];                                    /* enc_init_aux backing (x86 2tab) */
     srand(0xC0FFEE);
     for (int i=0;i<n+16;i++){ bm[i]=(uint8_t)rand(); la_pristine[i]=(uint16_t)rand(); }
@@ -929,7 +930,11 @@ int main(int argc, char **argv) {
             scalar_pack(ref,la_pristine,n,p->D,PART_DEPTH); memset(pack_out,0,n); p->run(&cx);
             if (memcmp(pack_out,ref,(n*p->D+7)>>3)) chk="FAIL";
         } else if (p->stage == ST_MERGE_FLAT) {
-            scalar_unpack(codes,bm,n,p->D); scalar_scatter(ref,codes,c2s,n);
+            /* D=8 flat = the full 256-symbol alphabet at equal length, whose
+               canonical c2s is the identity permutation (production relies on
+               this: merge_flat d8 is a memcpy) -- feed the invariant here. */
+            if (p->D == 8) { for (int k=0;k<256;k++) c2s_id[k]=(uint8_t)k; cx.c2s = c2s_id; }
+            scalar_unpack(codes,bm,n,p->D); scalar_scatter(ref,codes,cx.c2s,n);
             memset(out,0,n); p->run(&cx);
             if (memcmp(out,ref,n)) chk="FAIL";
         } else if (p->stage == ST_MERGE_VEC_VEC) {

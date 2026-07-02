@@ -218,6 +218,191 @@ static void prim_merge_flat_asof_d6(const ctx_t *c){
 }
 #endif /* __AVX2__ */
 
+
+#if defined(USE_NEON_KERNELS)
+/* ============================================================================
+ * asof-e96529e merge_flat_dN — the production NEON flat decode before the
+ * issue-#5 (dougallj, gist cf33841) kernels replaced it: separate flat_dN
+ * unpack + vqtblN c2s scatter per 8/16 codes (d8: 256-entry vqtbl4+3x vqtbx4).
+ * ========================================================================== */
+static void pv_mf_e96529e_d2(uint8_t *symbols, int n,
+                                                const uint8_t *bm,
+                                                const uint8_t *c2s)
+{
+    uint8x16_t c2s_vec = vld1q_u8(c2s);
+    int i = 0;
+    for (; i + 16 <= n; i += 16) {
+        uint8x16_t codes = flat_d2_unpack(bm + (i >> 2));
+        uint8x16_t syms  = vqtbl1q_u8(c2s_vec, codes);
+        vst1q_u8(symbols + i, syms);
+    }
+    for (; i + 4 <= n; i += 4) {
+        uint8_t b = bm[i >> 2];
+        symbols[i    ] = c2s[(b     ) & 3];
+        symbols[i + 1] = c2s[(b >> 2) & 3];
+        symbols[i + 2] = c2s[(b >> 4) & 3];
+        symbols[i + 3] = c2s[(b >> 6) & 3];
+    }
+    for (; i < n; i++) {
+        uint32_t code = extract_D_bits_neon(bm, i * 2, 2);
+        symbols[i] = c2s[code];
+    }
+}
+
+static void pv_mf_e96529e_d3(uint8_t *symbols, int n,
+                                                const uint8_t *bm,
+                                                const uint8_t *c2s)
+{
+    uint8x16_t c2s_vec = vld1q_u8(c2s);
+    int i = 0;
+    int fast_end = n >= 16 ? n - 16 : 0;
+    for (; i + 16 <= fast_end; i += 16) {
+        uint8x8_t codes_lo = flat_d3_unpack_fast(bm + ((i      * 3) >> 3));
+        uint8x8_t codes_hi = flat_d3_unpack_fast(bm + (((i + 8) * 3) >> 3));
+        uint8x16_t codes = vcombine_u8(codes_lo, codes_hi);
+        uint8x16_t syms  = vqtbl1q_u8(c2s_vec, codes);
+        vst1q_u8(symbols + i, syms);
+    }
+    for (; i + 8 <= fast_end; i += 8) {
+        uint8x8_t codes = flat_d3_unpack_fast(bm + ((i * 3) >> 3));
+        uint8x8_t syms  = vqtbl1_u8(c2s_vec, codes);
+        vst1_u8(symbols + i, syms);
+    }
+    for (; i + 8 <= n; i += 8) {
+        uint8x8_t codes = flat_d3_unpack_safe(bm + ((i * 3) >> 3));
+        uint8x8_t syms  = vqtbl1_u8(c2s_vec, codes);
+        vst1_u8(symbols + i, syms);
+    }
+    for (; i < n; i++) {
+        uint32_t code = extract_D_bits_neon(bm, i * 3, 3);
+        symbols[i] = c2s[code];
+    }
+}
+
+static void pv_mf_e96529e_d4(uint8_t *symbols, int n,
+                                                const uint8_t *bm,
+                                                const uint8_t *c2s)
+{
+    uint8x16_t c2s_vec = vld1q_u8(c2s);
+    int i = 0;
+    for (; i + 16 <= n; i += 16) {
+        uint8x16_t codes = flat_d4_unpack(bm + (i >> 1));
+        uint8x16_t syms  = vqtbl1q_u8(c2s_vec, codes);
+        vst1q_u8(symbols + i, syms);
+    }
+    for (; i + 2 <= n; i += 2) {
+        uint8_t b = bm[i >> 1];
+        symbols[i    ] = c2s[b & 0x0F];
+        symbols[i + 1] = c2s[b >> 4];
+    }
+    for (; i < n; i++) {
+        uint32_t code = extract_D_bits_neon(bm, i * 4, 4);
+        symbols[i] = c2s[code];
+    }
+}
+
+static void pv_mf_e96529e_d5(uint8_t *symbols, int n,
+                                                const uint8_t *bm,
+                                                const uint8_t *c2s)
+{
+    uint8x16x2_t c2s_vec;
+    c2s_vec.val[0] = vld1q_u8(c2s);
+    c2s_vec.val[1] = vld1q_u8(c2s + 16);
+    int i = 0;
+    int fast_end = n >= 24 ? n - 24 : 0;
+    for (; i + 16 <= fast_end; i += 16) {
+        uint8x8_t codes_lo = flat_d5_unpack_fast(bm + ((i      * 5) >> 3));
+        uint8x8_t codes_hi = flat_d5_unpack_fast(bm + (((i + 8) * 5) >> 3));
+        uint8x16_t codes = vcombine_u8(codes_lo, codes_hi);
+        uint8x16_t syms  = vqtbl2q_u8(c2s_vec, codes);
+        vst1q_u8(symbols + i, syms);
+    }
+    for (; i + 8 <= fast_end; i += 8) {
+        uint8x8_t codes = flat_d5_unpack_fast(bm + ((i * 5) >> 3));
+        uint8x8_t syms  = vqtbl2_u8(c2s_vec, codes);
+        vst1_u8(symbols + i, syms);
+    }
+    for (; i + 8 <= n; i += 8) {
+        uint8x8_t codes = flat_d5_unpack_safe(bm + ((i * 5) >> 3));
+        uint8x8_t syms  = vqtbl2_u8(c2s_vec, codes);
+        vst1_u8(symbols + i, syms);
+    }
+    for (; i < n; i++) {
+        uint32_t code = extract_D_bits_neon(bm, i * 5, 5);
+        symbols[i] = c2s[code];
+    }
+}
+
+static void pv_mf_e96529e_d6(uint8_t *symbols, int n,
+                                                const uint8_t *bm,
+                                                const uint8_t *c2s)
+{
+    uint8x16x4_t c2s_vec;
+    c2s_vec.val[0] = vld1q_u8(c2s);
+    c2s_vec.val[1] = vld1q_u8(c2s + 16);
+    c2s_vec.val[2] = vld1q_u8(c2s + 32);
+    c2s_vec.val[3] = vld1q_u8(c2s + 48);
+    int i = 0;
+    int fast_end = n >= 24 ? n - 24 : 0;
+    for (; i + 16 <= fast_end; i += 16) {
+        uint8x8_t codes_lo = flat_d6_unpack_fast(bm + ((i      * 6) >> 3));
+        uint8x8_t codes_hi = flat_d6_unpack_fast(bm + (((i + 8) * 6) >> 3));
+        uint8x16_t codes = vcombine_u8(codes_lo, codes_hi);
+        uint8x16_t syms  = vqtbl4q_u8(c2s_vec, codes);
+        vst1q_u8(symbols + i, syms);
+    }
+    for (; i + 8 <= fast_end; i += 8) {
+        uint8x8_t codes = flat_d6_unpack_fast(bm + ((i * 6) >> 3));
+        uint8x8_t syms  = vqtbl4_u8(c2s_vec, codes);
+        vst1_u8(symbols + i, syms);
+    }
+    for (; i + 8 <= n; i += 8) {
+        uint8x8_t codes = flat_d6_unpack_safe(bm + ((i * 6) >> 3));
+        uint8x8_t syms  = vqtbl4_u8(c2s_vec, codes);
+        vst1_u8(symbols + i, syms);
+    }
+    for (; i < n; i++) {
+        uint32_t code = extract_D_bits_neon(bm, i * 6, 6);
+        symbols[i] = c2s[code];
+    }
+}
+
+static void pv_mf_e96529e_d8(uint8_t *symbols, int n,
+                                                const uint8_t *bm,
+                                                const uint8_t *c2s)
+{
+    uint8x16x4_t t0, t1, t2, t3;
+    t0.val[0]=vld1q_u8(c2s     ); t0.val[1]=vld1q_u8(c2s + 16);
+    t0.val[2]=vld1q_u8(c2s + 32); t0.val[3]=vld1q_u8(c2s + 48);
+    t1.val[0]=vld1q_u8(c2s + 64); t1.val[1]=vld1q_u8(c2s + 80);
+    t1.val[2]=vld1q_u8(c2s + 96); t1.val[3]=vld1q_u8(c2s +112);
+    t2.val[0]=vld1q_u8(c2s +128); t2.val[1]=vld1q_u8(c2s +144);
+    t2.val[2]=vld1q_u8(c2s +160); t2.val[3]=vld1q_u8(c2s +176);
+    t3.val[0]=vld1q_u8(c2s +192); t3.val[1]=vld1q_u8(c2s +208);
+    t3.val[2]=vld1q_u8(c2s +224); t3.val[3]=vld1q_u8(c2s +240);
+    uint8x16_t s64  = vdupq_n_u8(64);
+    uint8x16_t s128 = vdupq_n_u8(128);
+    uint8x16_t s192 = vdupq_n_u8(192);
+    int i = 0;
+    for (; i + 16 <= n; i += 16) {
+        uint8x16_t codes = vld1q_u8(bm + i);
+        uint8x16_t s = vqtbl4q_u8(t0, codes);
+        s = vqtbx4q_u8(s, t1, vsubq_u8(codes, s64));
+        s = vqtbx4q_u8(s, t2, vsubq_u8(codes, s128));
+        s = vqtbx4q_u8(s, t3, vsubq_u8(codes, s192));
+        vst1q_u8(symbols + i, s);
+    }
+    for (; i < n; i++) symbols[i] = c2s[bm[i]];
+}
+
+static void prim_mf_e96529e_d2(const ctx_t *c){ pv_mf_e96529e_d2(c->out, c->n, c->bm, c->c2s); }
+static void prim_mf_e96529e_d3(const ctx_t *c){ pv_mf_e96529e_d3(c->out, c->n, c->bm, c->c2s); }
+static void prim_mf_e96529e_d4(const ctx_t *c){ pv_mf_e96529e_d4(c->out, c->n, c->bm, c->c2s); }
+static void prim_mf_e96529e_d5(const ctx_t *c){ pv_mf_e96529e_d5(c->out, c->n, c->bm, c->c2s); }
+static void prim_mf_e96529e_d6(const ctx_t *c){ pv_mf_e96529e_d6(c->out, c->n, c->bm, c->c2s); }
+static void prim_mf_e96529e_d8(const ctx_t *c){ pv_mf_e96529e_d8(c->out, c->n, c->bm, c->c2s); }
+#endif /* USE_NEON_KERNELS */
+
 /* ============================================================================
  * Registry — flat family (no-op where the ISA is unavailable)
  * ========================================================================== */
@@ -228,6 +413,18 @@ static void pv_register_flat(void) {
                  "row-major shift+mask + vst2q deinterleave (D|8 only)", 0, PV_FN_NEON(prim_flat_unpack_fl_natural_d4));
     PV_VARIANT_D(ST_MERGE_FLAT, "asof-6dc5632", 5, PV_ISA_NEON, "6dc5632",
                  "first-shipped D=5 flat decode: memcpy(5)+vsetq_lane_u64 unpack + vqtbl2 c2s", 0, PV_FN_NEON(prim_merge_flat_asof_6dc5632_d5));
+    PV_VARIANT_D(ST_MERGE_FLAT, "asof-e96529e", 2, PV_ISA_NEON, "e96529e (prior production)",
+                 "unpack+vqtbl1, 16/iter", 0, PV_FN_NEON(prim_mf_e96529e_d2));
+    PV_VARIANT_D(ST_MERGE_FLAT, "asof-e96529e", 3, PV_ISA_NEON, "e96529e (prior production)",
+                 "2x flat_d3_unpack_fast + vqtbl1q, 16/iter", 0, PV_FN_NEON(prim_mf_e96529e_d3));
+    PV_VARIANT_D(ST_MERGE_FLAT, "asof-e96529e", 4, PV_ISA_NEON, "e96529e (prior production)",
+                 "flat_d4_unpack + vqtbl1q, 16/iter", 0, PV_FN_NEON(prim_mf_e96529e_d4));
+    PV_VARIANT_D(ST_MERGE_FLAT, "asof-e96529e", 5, PV_ISA_NEON, "e96529e (prior production)",
+                 "2x flat_d5_unpack_fast + vqtbl2q, 16/iter", 0, PV_FN_NEON(prim_mf_e96529e_d5));
+    PV_VARIANT_D(ST_MERGE_FLAT, "asof-e96529e", 6, PV_ISA_NEON, "e96529e (prior production)",
+                 "2x flat_d6_unpack_fast + vqtbl4q, 16/iter", 0, PV_FN_NEON(prim_mf_e96529e_d6));
+    PV_VARIANT_D(ST_MERGE_FLAT, "asof-e96529e", 8, PV_ISA_NEON, "e96529e (prior production)",
+                 "256-entry c2s: vqtbl4 + 3x vqtbx4 per 16 (new prod is memcpy: d8 flat = full alphabet = identity c2s)", 0, PV_FN_NEON(prim_mf_e96529e_d8));
     PV_VARIANT_D(ST_MERGE_FLAT, "asof-d580b16", 2, PV_ISA_AVX2, "d580b16~1:pivco_huffman_x86_flat.h",
                  "pre-ryg vpsrlvd AVX2 flat unpack + scalar c2s gather", 0, PV_FN_AVX2(prim_merge_flat_asof_d2));
     PV_VARIANT_D(ST_MERGE_FLAT, "asof-d580b16", 3, PV_ISA_AVX2, "d580b16~1:pivco_huffman_x86_flat.h",
