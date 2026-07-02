@@ -386,18 +386,45 @@ int CODEC_ENCODE_ENTRY(const uint8_t *symbols, size_t n,
  *     next boundary when it would (waste = distance to the boundary,
  *     < size + MERGE_OVERREAD);
  *   - page-crossing slice: interior straddles are unavoidable (and its
- *     cursor moves fast anyway); bump to the boundary only when the
- *     slice would START inside the START_GUARD straddle window.
+ *     cursor moves fast anyway); keep just the START (a cursor lingers
+ *     near offset 0) and the END (an exhausted side reloads from
+ *     exactly `size` until the merge finishes) straddle-free with
+ *     small nudges — the end lands ON a boundary, so the end-position
+ *     load reads the next page without straddling.
  *
- * A bump wastes < size + MERGE_OVERREAD bytes, so the arena is sized 2x
- * content plus slack (see CODEC_DECODE_ENTRY). */
+ * ALL padding draws from a per-block budget (g_scratch_pad_left, reset
+ * in CODEC_DECODE_ENTRY): when it runs out, slices are placed unpadded —
+ * a perf hazard reachable only by adversarial page phases, never a
+ * safety issue.  The budget caps total padding, which is what lets the
+ * arena shrink to 2N + budget (see CODEC_DECODE_ENTRY). */
+/* Absolute (not per-page) so the 2N + budget arena bound is identical
+ * on every platform; 16 KB regardless of SCRATCH_PAGE. */
+#define PIVCO_SCRATCH_PAD_BUDGET ((size_t)16384)
+static __thread size_t g_scratch_pad_left;
+
 static inline uint8_t *scratch_carve(uint8_t **top, int size)
 {
     uintptr_t p   = (uintptr_t)*top;
     uintptr_t rem = SCRATCH_PAGE - (p & (SCRATCH_PAGE - 1));      /* 1..PAGE */
-    if ((uintptr_t)size + MERGE_OVERREAD > rem &&
-        ((uintptr_t)size + MERGE_OVERREAD <= SCRATCH_PAGE || rem < START_GUARD))
-        p += rem;   /* start the slice on the next page boundary */
+    uintptr_t pad = 0;
+    if ((uintptr_t)size + MERGE_OVERREAD <= SCRATCH_PAGE) {
+        if ((uintptr_t)size + MERGE_OVERREAD > rem)
+            pad = rem;                                  /* sub-page: never cross */
+    } else {
+        if (rem < START_GUARD) pad = rem;               /* clean start */
+        uintptr_t end  = p + pad + (uintptr_t)size;
+        uintptr_t erem = SCRATCH_PAGE - (end & (SCRATCH_PAGE - 1));
+        if (erem < MERGE_OVERREAD) {
+            pad += erem;                                /* end onto boundary */
+            uintptr_t srem = SCRATCH_PAGE - ((p + pad) & (SCRATCH_PAGE - 1));
+            if (srem < START_GUARD) pad += srem;        /* re-clean start; end
+                                                           stays clean (moves to
+                                                           < START_GUARD past
+                                                           the boundary) */
+        }
+    }
+    if (pad <= g_scratch_pad_left) g_scratch_pad_left -= pad; else pad = 0;
+    p += pad;
     *top = (uint8_t *)(p + (uintptr_t)size);
     return (uint8_t *)p;
 }
@@ -420,18 +447,33 @@ static inline uint8_t *scratch_carve(uint8_t **top, int size)
  * peak scratch content drops from ~K to ~K/2 per level and the merge
  * working set shrinks accordingly.
  *
- * Two exclusions: the root call (out_buf is the caller's buffer, which
+ * One exclusion: the root call (out_buf is the caller's buffer, which
  * is only guaranteed N bytes — the kernels' trailing over-read must
- * stay inside our arena), and hazard-prone placements (same page test
- * as scratch_carve; falls back to a carve).  See #9. */
+ * stay inside our arena).  See #9.
+ *
+ * A tail's position is fixed by the invariant (exactly out_buf +
+ * K_other), so it cannot be nudged.  Its END coincides with its nearest
+ * carved ancestor's end, which scratch_carve keeps straddle-free, and a
+ * page-crossing tail's start-zone risk (~63/SCRATCH_PAGE per node) is
+ * accepted like any large slice's.  The one dangerous case is a
+ * SUB-PAGE tail that would cross a boundary — a small slice's cursor is
+ * parked everywhere in it (e.g. the 128-byte side of a 32K merge dwells
+ * ~256 iterations per position) — that one falls back to a no-cross
+ * carve, charging the extra scratch content to the SAME pad budget so
+ * the 2N + budget arena bound stays intact (an unbudgeted fallback
+ * chain would break the S(K) <= K induction; see CODEC_DECODE_ENTRY). */
 static inline uint8_t *place_tail(uint8_t *out_buf, int offset, int size,
                                   uint8_t **top)
 {
     uint8_t *p = out_buf + offset;
-    uintptr_t rem = SCRATCH_PAGE - ((uintptr_t)p & (SCRATCH_PAGE - 1));
-    if ((uintptr_t)size + MERGE_OVERREAD > rem &&
-        ((uintptr_t)size + MERGE_OVERREAD <= SCRATCH_PAGE || rem < START_GUARD))
-        return scratch_carve(top, size);
+    if ((uintptr_t)size + MERGE_OVERREAD <= SCRATCH_PAGE) {
+        uintptr_t rem = SCRATCH_PAGE - ((uintptr_t)p & (SCRATCH_PAGE - 1));
+        if ((uintptr_t)size + MERGE_OVERREAD > rem &&
+            (size_t)size <= g_scratch_pad_left) {
+            g_scratch_pad_left -= (size_t)size;   /* charge the content... */
+            return scratch_carve(top, size);      /* ...the carve pads itself */
+        }
+    }
     return p;
 }
 
@@ -644,16 +686,31 @@ int CODEC_DECODE_ENTRY(const uint8_t *in, size_t in_len,
         return PIVCO_OK;
     }
 
-    /* Scratch arena.  Worst case at a heavily-skewed node, the
-     * partition is one-sided so a single recursion can consume up to
-     * N bytes.  Bounded by (MAX_CODE_LEN+2) * N.  Grown on demand from a
-     * thread-local heap buffer so block size is a runtime parameter. */
-    /* Doubled for scratch_carve's page bumps: a level's two carves waste
-     * < K_left + K_right + 2*MERGE_OVERREAD <= N + 128 extra. */
-    uint8_t *scratch =
-        decode_scratch_ensure((2 * (size_t)N + 128) * (PIVCO_MAX_CODE_LEN + 2));
+    /* Scratch arena: 2N content + pad budget + trailing over-read.
+     *
+     * Content bound: let S(K) = peak scratch while decoding a subtree
+     * whose out_buf is arena-backed.  Leaves and both-leaf merges
+     * consume 0; a half/cst-side child lives in out_buf's tail, so
+     * S(K) = S(K_c) with K_c < K; a full node carves only its shorter
+     * child m and tail-places the longer M, so S(K) = m + max(S(m),
+     * S(M)).  By induction S(K) <= m + max(m, M) = K.  The root is the
+     * exception (tail_ok = 0): it carves both children, adding
+     * K_l + K_r = N, so the peak is N + max(S(K_l), S(K_r)) <= 2N.
+     * (place_tail must never fall back outside the pad budget — that
+     * would break the induction.)
+     *
+     * Slack: every page-hazard action — no-cross bumps and start/end
+     * nudges in scratch_carve, and small-tail fallback carves in
+     * place_tail — draws from the per-block PIVCO_SCRATCH_PAD_BUDGET,
+     * so their total is capped by construction; the topmost slice's
+     * trailing over-read needs MERGE_OVERREAD in-arena.  Grown on
+     * demand from a thread-local heap buffer so block size is a
+     * runtime parameter. */
+    uint8_t *scratch = decode_scratch_ensure(
+        2 * (size_t)N + PIVCO_SCRATCH_PAD_BUDGET + MERGE_OVERREAD);
     if (!scratch) return PIVCO_ERR_NULL;
 
+    g_scratch_pad_left = PIVCO_SCRATCH_PAD_BUDGET;
     codec_decode_subtree(table, table->tree_root, N,
                           symbols, &ptr, scratch, /*tail_ok=*/0);
 
