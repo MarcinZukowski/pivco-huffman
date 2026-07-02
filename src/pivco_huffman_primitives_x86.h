@@ -370,265 +370,223 @@ static inline uint32_t extract_D_bits_x86(const uint8_t *in,
     return (val >> bit_off) & ((1u << D) - 1);
 }
 
-/* Per-D switch for D=2/3/5/6/7/8 (and any D > 8).  `DST(k)` is the
- * destination expression for output element k. */
-#define X86_FLAT_UNPACK_SWITCH(DST)                                            \
-    int i = 0;                                                                 \
-    switch (D) {                                                               \
-    case 2:                                                                    \
-        for (; i + 4 <= n; i += 4) {                                           \
-            uint8_t b = bm[i >> 2];                                            \
-            DST(i    ) = c2s[(b     ) & 3];                                    \
-            DST(i + 1) = c2s[(b >> 2) & 3];                                    \
-            DST(i + 2) = c2s[(b >> 4) & 3];                                    \
-            DST(i + 3) = c2s[(b >> 6) & 3];                                    \
-        } break;                                                               \
-    case 3:                                                                    \
-        for (; i + 8 <= n; i += 8) {                                           \
-            const uint8_t *p = bm + ((i * 3) >> 3);                            \
-            uint32_t w = (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16); \
-            DST(i    ) = c2s[(w      ) & 7];                                   \
-            DST(i + 1) = c2s[(w >>  3) & 7];                                   \
-            DST(i + 2) = c2s[(w >>  6) & 7];                                   \
-            DST(i + 3) = c2s[(w >>  9) & 7];                                   \
-            DST(i + 4) = c2s[(w >> 12) & 7];                                   \
-            DST(i + 5) = c2s[(w >> 15) & 7];                                   \
-            DST(i + 6) = c2s[(w >> 18) & 7];                                   \
-            DST(i + 7) = c2s[(w >> 21) & 7];                                   \
-        } break;                                                               \
-    case 4:                                                                    \
-        for (; i + 2 <= n; i += 2) {                                           \
-            uint8_t b = bm[i >> 1];                                            \
-            DST(i    ) = c2s[b & 0x0F];                                        \
-            DST(i + 1) = c2s[b >> 4];                                          \
-        } break;                                                               \
-    case 5:                                                                    \
-        for (; i + 8 <= n; i += 8) {                                           \
-            const uint8_t *p = bm + ((i * 5) >> 3);                            \
-            uint64_t w = (uint64_t)p[0] | ((uint64_t)p[1] << 8)                \
-                       | ((uint64_t)p[2] << 16) | ((uint64_t)p[3] << 24)       \
-                       | ((uint64_t)p[4] << 32);                               \
-            DST(i    ) = c2s[(w      ) & 0x1F];                                \
-            DST(i + 1) = c2s[(w >>  5) & 0x1F];                                \
-            DST(i + 2) = c2s[(w >> 10) & 0x1F];                                \
-            DST(i + 3) = c2s[(w >> 15) & 0x1F];                                \
-            DST(i + 4) = c2s[(w >> 20) & 0x1F];                                \
-            DST(i + 5) = c2s[(w >> 25) & 0x1F];                                \
-            DST(i + 6) = c2s[(w >> 30) & 0x1F];                                \
-            DST(i + 7) = c2s[(w >> 35) & 0x1F];                                \
-        } break;                                                               \
-    case 6:                                                                    \
-        for (; i + 4 <= n; i += 4) {                                           \
-            const uint8_t *p = bm + ((i * 6) >> 3);                            \
-            uint32_t w = (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16); \
-            DST(i    ) = c2s[(w      ) & 0x3F];                                \
-            DST(i + 1) = c2s[(w >>  6) & 0x3F];                                \
-            DST(i + 2) = c2s[(w >> 12) & 0x3F];                                \
-            DST(i + 3) = c2s[(w >> 18) & 0x3F];                                \
-        } break;                                                               \
-    case 7:                                                                    \
-        for (; i + 8 <= n; i += 8) {                                           \
-            const uint8_t *p = bm + ((i * 7) >> 3);                            \
-            uint64_t w = (uint64_t)p[0] | ((uint64_t)p[1] << 8)                \
-                       | ((uint64_t)p[2] << 16) | ((uint64_t)p[3] << 24)       \
-                       | ((uint64_t)p[4] << 32) | ((uint64_t)p[5] << 40)       \
-                       | ((uint64_t)p[6] << 48);                               \
-            DST(i    ) = c2s[(w      ) & 0x7F];                                \
-            DST(i + 1) = c2s[(w >>  7) & 0x7F];                                \
-            DST(i + 2) = c2s[(w >> 14) & 0x7F];                                \
-            DST(i + 3) = c2s[(w >> 21) & 0x7F];                                \
-            DST(i + 4) = c2s[(w >> 28) & 0x7F];                                \
-            DST(i + 5) = c2s[(w >> 35) & 0x7F];                                \
-            DST(i + 6) = c2s[(w >> 42) & 0x7F];                                \
-            DST(i + 7) = c2s[(w >> 49) & 0x7F];                                \
-        } break;                                                               \
-    case 8:                                                                    \
-        for (; i < n; i++) DST(i) = c2s[bm[i]];                                \
-        break;                                                                 \
-    }                                                                          \
-    for (; i < n; i++) {                                                       \
-        uint32_t code = extract_D_bits_x86(bm, i * D, D);                      \
-        DST(i) = c2s[code];                                                    \
-    }
-
-/* merge_flat_x86_impl — write n D-bit symbols contiguously to
- * out[].  D=4 SIMD specialisation, scalar unrolled tail for everything
- * else. */
-static inline void merge_flat_x86_impl(uint8_t *symbols, int n,
-                                                  const uint8_t *bm, int D,
-                                                  const uint8_t *c2s)
+/* Generic scalar mop-up shared by every merge_flat_dN_x86: decode codes
+ * [i, n) one at a time.  D is always a literal at the call sites, so it
+ * constant-folds. */
+static inline void merge_flat_tail_x86(uint8_t *symbols, int i, int n,
+                                       const uint8_t *bm, int D,
+                                       const uint8_t *c2s)
 {
-    if (D == 4) {
-#ifdef PIVCO_HAS_AVX2
-        /* AVX2 32-byte fast path: D=4 means c2s has 16 entries → fits
-         * in a 128-bit lane, broadcast to both 256-bit lanes. */
-        __m128i c2s_lo = _mm_loadu_si128((const __m128i *)c2s);
-        __m256i c2s_v  = _mm256_broadcastsi128_si256(c2s_lo);
-        __m128i lo_mask128 = _mm_set1_epi8(0x0F);
-        int i = 0;
-        for (; i + 32 <= n; i += 32) {
-            __m128i raw   = _mm_loadu_si128((const __m128i *)(bm + (i >> 1)));
-            __m128i lo    = _mm_and_si128(raw, lo_mask128);
-            __m128i hi    = _mm_and_si128(_mm_srli_epi16(raw, 4), lo_mask128);
-            __m128i codes_lo = _mm_unpacklo_epi8(lo, hi);  /* codes 0..15  */
-            __m128i codes_hi = _mm_unpackhi_epi8(lo, hi);  /* codes 16..31 */
-            __m256i codes = _mm256_set_m128i(codes_hi, codes_lo);
-            __m256i syms = _mm256_shuffle_epi8(c2s_v, codes);
-            _mm256_storeu_si256((__m256i *)(symbols + i), syms);
-        }
-        /* 16-byte SSE fallback for the trailing < 32 elements. */
-        __m128i c2s_vec = _mm_loadu_si128((const __m128i *)c2s);
-        for (; i + 16 <= n; i += 16) {
-            __m128i codes = flat_d4_unpack_x86(bm + (i >> 1));
-            __m128i syms  = _mm_shuffle_epi8(c2s_vec, codes);
-            _mm_storeu_si128((__m128i *)(symbols + i), syms);
-        }
-#else
-        __m128i c2s_vec = _mm_loadu_si128((const __m128i *)c2s);
-        int i = 0;
-        for (; i + 16 <= n; i += 16) {
-            __m128i codes = flat_d4_unpack_x86(bm + (i >> 1));
-            __m128i syms  = _mm_shuffle_epi8(c2s_vec, codes);
-            _mm_storeu_si128((__m128i *)(symbols + i), syms);
-        }
-#endif
-        for (; i + 2 <= n; i += 2) {
-            uint8_t b = bm[i >> 1];
-            symbols[i    ] = c2s[b & 0x0F];
-            symbols[i + 1] = c2s[b >> 4];
-        }
-        for (; i < n; i++) {
-            uint32_t code = extract_D_bits_x86(bm, i * D, D);
-            symbols[i] = c2s[code];
-        }
-        return;
-    }
-    /* D=2/3/5/6 SIMD paths via ryg's PSHUFB+PMULLO unpack (SSE4.1+, no AVX2
-     * needed).  Replaced the previous AVX2 vpsrlvd-based unpack: ryg's path
-     * measured uniformly faster on c3 (Ivy Bridge, no AVX2 — gains full SIMD
-     * coverage instead of scalar), c4/c5 (Haswell/Cascade Lake, -21%),
-     * c5a (Zen 2, -43% to -54%), c6a (Zen 3, -25%). */
-    if (D == 2) {
-        /* 16 codes/iter: D=2 unpack + 4-entry pshufb scatter. */
-        __m128i c2s_vec = _mm_loadl_epi64((const __m128i *)c2s);  /* 4 entries */
-        int i = 0;
-#if defined(PIVCO_HAS_AVX2)
-        /* AVX2: one vpsrlvd transpose unpack per 16 codes (terrelln PR #1),
-         * ~1.3-1.9x faster than two ryg calls.  Reads exactly 4 bytes/iter, so
-         * no over-read slop is needed beyond the last group. */
-        for (; i + 16 <= n; i += 16) {
-            __m128i codes = flat_d2_unpack_avx2(bm + ((i * 2) >> 3));
-            __m128i syms  = _mm_shuffle_epi8(c2s_vec, codes);
-            _mm_storeu_si128((__m128i *)(symbols + i), syms);
-        }
-#else
-        /* SSE4.1 fallback: 2x ryg D=2 unpack.  Each reads a 16-byte window
-         * (slop), so stop the fast loop a few groups early. */
-        int fast_end = n >= 16 ? n - 16 : 0;
-        for (; i + 16 <= fast_end; i += 16) {
-            __m128i lo_codes = flat_d2_unpack_x86(bm + ((i      * 2) >> 3));
-            __m128i hi_codes = flat_d2_unpack_x86(bm + (((i + 8) * 2) >> 3));
-            __m128i codes    = _mm_unpacklo_epi64(lo_codes, hi_codes);
-            __m128i syms     = _mm_shuffle_epi8(c2s_vec, codes);
-            _mm_storeu_si128((__m128i *)(symbols + i), syms);
-        }
-#endif
-        for (; i < n; i++) {
-            uint32_t code = extract_D_bits_x86(bm, i * 2, 2);
-            symbols[i] = c2s[code];
-        }
-        return;
-    }
-    if (D == 3) {
-        /* 8 codes/iter: ryg D=3 unpack + 8-entry pshufb scatter.  The unpack
-         * reads a 16-byte window — keep a generous scalar tail. */
-        __m128i c2s_vec = _mm_loadl_epi64((const __m128i *)c2s);  /* 8 entries */
-        int i = 0;
-        int fast_end = n >= 16 ? n - 16 : 0;
-        for (; i + 8 <= fast_end; i += 8) {
-            __m128i codes = flat_d3_unpack_x86(bm + ((i * 3) >> 3));
-            __m128i syms  = _mm_shuffle_epi8(c2s_vec, codes);
-            _mm_storel_epi64((__m128i *)(symbols + i), syms);
-        }
-        for (; i < n; i++) {
-            uint32_t code = extract_D_bits_x86(bm, i * 3, 3);
-            symbols[i] = c2s[code];
-        }
-        return;
-    }
-    if (D == 5) {
-        /* 8 codes/iter: ryg D=5 unpack + 2-table pshufb scatter (codes 0-31).
-         * pshufb on either table uses code&15; blend by bit 4. */
-        __m128i lo = _mm_loadu_si128((const __m128i *)c2s);        /* c2s[0..15]  */
-        __m128i hi = _mm_loadu_si128((const __m128i *)(c2s + 16)); /* c2s[16..31] */
-        const __m128i b4 = _mm_set1_epi8(0x10);
-        int i = 0;
-        int fast_end = n >= 24 ? n - 24 : 0;
-        for (; i + 8 <= fast_end; i += 8) {
-            __m128i codes = flat_d5_unpack_x86(bm + ((i * 5) >> 3));
-            __m128i rlo = _mm_shuffle_epi8(lo, codes);
-            __m128i rhi = _mm_shuffle_epi8(hi, codes);
-            __m128i sel = _mm_cmpeq_epi8(_mm_and_si128(codes, b4), b4);
-            __m128i syms = _mm_blendv_epi8(rlo, rhi, sel);
-            _mm_storel_epi64((__m128i *)(symbols + i), syms);
-        }
-        for (; i < n; i++) {
-            uint32_t code = extract_D_bits_x86(bm, i * 5, 5);
-            symbols[i] = c2s[code];
-        }
-        return;
-    }
-    if (D == 6) {
-        /* 8 codes/iter: ryg D=6 unpack + 4-table pshufb scatter (codes 0-63).
-         * Four pshufb (code&15 into each quarter) then a 2-level blend by
-         * bits 5,4 selects the right quarter. */
-        __m128i t0 = _mm_loadu_si128((const __m128i *)c2s);
-        __m128i t1 = _mm_loadu_si128((const __m128i *)(c2s + 16));
-        __m128i t2 = _mm_loadu_si128((const __m128i *)(c2s + 32));
-        __m128i t3 = _mm_loadu_si128((const __m128i *)(c2s + 48));
-        const __m128i b4 = _mm_set1_epi8(0x10);
-        const __m128i b5 = _mm_set1_epi8(0x20);
-        int i = 0;
-        int fast_end = n >= 24 ? n - 24 : 0;
-        for (; i + 8 <= fast_end; i += 8) {
-            __m128i codes = flat_d6_unpack_x86(bm + ((i * 6) >> 3));
-            __m128i r0 = _mm_shuffle_epi8(t0, codes);
-            __m128i r1 = _mm_shuffle_epi8(t1, codes);
-            __m128i r2 = _mm_shuffle_epi8(t2, codes);
-            __m128i r3 = _mm_shuffle_epi8(t3, codes);
-            __m128i s4 = _mm_cmpeq_epi8(_mm_and_si128(codes, b4), b4);
-            __m128i s5 = _mm_cmpeq_epi8(_mm_and_si128(codes, b5), b5);
-            __m128i a = _mm_blendv_epi8(r0, r1, s4);  /* bit5=0: t0/t1 */
-            __m128i b = _mm_blendv_epi8(r2, r3, s4);  /* bit5=1: t2/t3 */
-            __m128i syms = _mm_blendv_epi8(a, b, s5);
-            _mm_storel_epi64((__m128i *)(symbols + i), syms);
-        }
-        for (; i < n; i++) {
-            uint32_t code = extract_D_bits_x86(bm, i * 6, 6);
-            symbols[i] = c2s[code];
-        }
-        return;
-    }
-    /* D=7 has no x86 SIMD path: pshufb is only 16-wide, so the 128-entry
-     * scatter needs 8 sub-tables + a 3-level blend tree that measures no
-     * faster than the scalar-unrolled inner (~0.38 ns/elem on Zen 3).  Unlike
-     * NEON (vqtbl4) and AVX-512 (vpermi2b), x86 has no cheap wide table lookup.
-     * Falls through to the scalar X86_FLAT_UNPACK_SWITCH below. */
-#define DST_DIRECT(k) symbols[k]
-    X86_FLAT_UNPACK_SWITCH(DST_DIRECT)
-#undef DST_DIRECT
+    for (; i < n; i++)
+        symbols[i] = c2s[extract_D_bits_x86(bm, i * D, D)];
 }
 
-/* merge_flat_x86 — D-bit flat-subtree decode into a
- * contiguous output buffer.  AVX2 D=4 32-byte path or SSE D=4 16-byte
- * path; scalar unrolled tail for other D.  AVX-512 D=5/D=6 fast paths
- * live in primitives_avx512.h. */
+/* merge_flat_dN_x86 — one static inline per supported D (mirrors the NEON
+ * file's structure); merge_flat_x86 below dispatches.  Each writes n D-bit
+ * symbols contiguously to symbols[]. */
+
+/* D=2: 16 codes/iter, unpack + 4-entry pshufb scatter. */
+static inline void merge_flat_d2_x86(uint8_t *symbols, int n,
+                                                const uint8_t *bm,
+                                                const uint8_t *c2s)
+{
+    __m128i c2s_vec = _mm_loadl_epi64((const __m128i *)c2s);  /* 4 entries */
+    int i = 0;
+#if defined(PIVCO_HAS_AVX2)
+    /* AVX2: one vpsrlvd transpose unpack per 16 codes (terrelln PR #1),
+     * ~1.3-1.9x faster than two ryg calls.  Reads exactly 4 bytes/iter, so
+     * no over-read slop is needed beyond the last group. */
+    for (; i + 16 <= n; i += 16) {
+        __m128i codes = flat_d2_unpack_avx2(bm + ((i * 2) >> 3));
+        __m128i syms  = _mm_shuffle_epi8(c2s_vec, codes);
+        _mm_storeu_si128((__m128i *)(symbols + i), syms);
+    }
+#else
+    /* SSE4.1 fallback: 2x ryg D=2 unpack.  Each reads a 16-byte window
+     * (slop), so stop the fast loop a few groups early. */
+    int fast_end = n >= 16 ? n - 16 : 0;
+    for (; i + 16 <= fast_end; i += 16) {
+        __m128i lo_codes = flat_d2_unpack_x86(bm + ((i      * 2) >> 3));
+        __m128i hi_codes = flat_d2_unpack_x86(bm + (((i + 8) * 2) >> 3));
+        __m128i codes    = _mm_unpacklo_epi64(lo_codes, hi_codes);
+        __m128i syms     = _mm_shuffle_epi8(c2s_vec, codes);
+        _mm_storeu_si128((__m128i *)(symbols + i), syms);
+    }
+#endif
+    merge_flat_tail_x86(symbols, i, n, bm, 2, c2s);
+}
+
+/* D=3: 8 codes/iter, ryg unpack + 8-entry pshufb scatter. */
+static inline void merge_flat_d3_x86(uint8_t *symbols, int n,
+                                                const uint8_t *bm,
+                                                const uint8_t *c2s)
+{
+    /* the unpack reads a 16-byte window — keep a generous scalar tail. */
+    __m128i c2s_vec = _mm_loadl_epi64((const __m128i *)c2s);  /* 8 entries */
+    int i = 0;
+    int fast_end = n >= 16 ? n - 16 : 0;
+    for (; i + 8 <= fast_end; i += 8) {
+        __m128i codes = flat_d3_unpack_x86(bm + ((i * 3) >> 3));
+        __m128i syms  = _mm_shuffle_epi8(c2s_vec, codes);
+        _mm_storel_epi64((__m128i *)(symbols + i), syms);
+    }
+    merge_flat_tail_x86(symbols, i, n, bm, 3, c2s);
+}
+
+/* D=4: nibble codes, 32/iter (AVX2) or 16/iter (SSE). */
+static inline void merge_flat_d4_x86(uint8_t *symbols, int n,
+                                                const uint8_t *bm,
+                                                const uint8_t *c2s)
+{
+#ifdef PIVCO_HAS_AVX2
+    /* AVX2 32-byte fast path: D=4 means c2s has 16 entries → fits
+     * in a 128-bit lane, broadcast to both 256-bit lanes. */
+    __m128i c2s_lo = _mm_loadu_si128((const __m128i *)c2s);
+    __m256i c2s_v  = _mm256_broadcastsi128_si256(c2s_lo);
+    __m128i lo_mask128 = _mm_set1_epi8(0x0F);
+    int i = 0;
+    for (; i + 32 <= n; i += 32) {
+        __m128i raw   = _mm_loadu_si128((const __m128i *)(bm + (i >> 1)));
+        __m128i lo    = _mm_and_si128(raw, lo_mask128);
+        __m128i hi    = _mm_and_si128(_mm_srli_epi16(raw, 4), lo_mask128);
+        __m128i codes_lo = _mm_unpacklo_epi8(lo, hi);  /* codes 0..15  */
+        __m128i codes_hi = _mm_unpackhi_epi8(lo, hi);  /* codes 16..31 */
+        __m256i codes = _mm256_set_m128i(codes_hi, codes_lo);
+        __m256i syms = _mm256_shuffle_epi8(c2s_v, codes);
+        _mm256_storeu_si256((__m256i *)(symbols + i), syms);
+    }
+    /* 16-byte SSE fallback for the trailing < 32 elements. */
+    __m128i c2s_vec = _mm_loadu_si128((const __m128i *)c2s);
+    for (; i + 16 <= n; i += 16) {
+        __m128i codes = flat_d4_unpack_x86(bm + (i >> 1));
+        __m128i syms  = _mm_shuffle_epi8(c2s_vec, codes);
+        _mm_storeu_si128((__m128i *)(symbols + i), syms);
+    }
+#else
+    __m128i c2s_vec = _mm_loadu_si128((const __m128i *)c2s);
+    int i = 0;
+    for (; i + 16 <= n; i += 16) {
+        __m128i codes = flat_d4_unpack_x86(bm + (i >> 1));
+        __m128i syms  = _mm_shuffle_epi8(c2s_vec, codes);
+        _mm_storeu_si128((__m128i *)(symbols + i), syms);
+    }
+#endif
+    for (; i + 2 <= n; i += 2) {
+        uint8_t b = bm[i >> 1];
+        symbols[i    ] = c2s[b & 0x0F];
+        symbols[i + 1] = c2s[b >> 4];
+    }
+    merge_flat_tail_x86(symbols, i, n, bm, 4, c2s);
+}
+
+/* D=5: 8 codes/iter, ryg unpack + 2-table pshufb scatter. */
+static inline void merge_flat_d5_x86(uint8_t *symbols, int n,
+                                                const uint8_t *bm,
+                                                const uint8_t *c2s)
+{
+    /* pshufb on either table uses code&15; blend by bit 4. */
+    __m128i lo = _mm_loadu_si128((const __m128i *)c2s);        /* c2s[0..15]  */
+    __m128i hi = _mm_loadu_si128((const __m128i *)(c2s + 16)); /* c2s[16..31] */
+    const __m128i b4 = _mm_set1_epi8(0x10);
+    int i = 0;
+    int fast_end = n >= 24 ? n - 24 : 0;
+    for (; i + 8 <= fast_end; i += 8) {
+        __m128i codes = flat_d5_unpack_x86(bm + ((i * 5) >> 3));
+        __m128i rlo = _mm_shuffle_epi8(lo, codes);
+        __m128i rhi = _mm_shuffle_epi8(hi, codes);
+        __m128i sel = _mm_cmpeq_epi8(_mm_and_si128(codes, b4), b4);
+        __m128i syms = _mm_blendv_epi8(rlo, rhi, sel);
+        _mm_storel_epi64((__m128i *)(symbols + i), syms);
+    }
+    merge_flat_tail_x86(symbols, i, n, bm, 5, c2s);
+}
+
+/* D=6: 8 codes/iter, ryg unpack + 4-table pshufb scatter. */
+static inline void merge_flat_d6_x86(uint8_t *symbols, int n,
+                                                const uint8_t *bm,
+                                                const uint8_t *c2s)
+{
+    /* four pshufb (code&15 into each quarter) then a 2-level blend by
+     * bits 5,4 selects the right quarter. */
+    __m128i t0 = _mm_loadu_si128((const __m128i *)c2s);
+    __m128i t1 = _mm_loadu_si128((const __m128i *)(c2s + 16));
+    __m128i t2 = _mm_loadu_si128((const __m128i *)(c2s + 32));
+    __m128i t3 = _mm_loadu_si128((const __m128i *)(c2s + 48));
+    const __m128i b4 = _mm_set1_epi8(0x10);
+    const __m128i b5 = _mm_set1_epi8(0x20);
+    int i = 0;
+    int fast_end = n >= 24 ? n - 24 : 0;
+    for (; i + 8 <= fast_end; i += 8) {
+        __m128i codes = flat_d6_unpack_x86(bm + ((i * 6) >> 3));
+        __m128i r0 = _mm_shuffle_epi8(t0, codes);
+        __m128i r1 = _mm_shuffle_epi8(t1, codes);
+        __m128i r2 = _mm_shuffle_epi8(t2, codes);
+        __m128i r3 = _mm_shuffle_epi8(t3, codes);
+        __m128i s4 = _mm_cmpeq_epi8(_mm_and_si128(codes, b4), b4);
+        __m128i s5 = _mm_cmpeq_epi8(_mm_and_si128(codes, b5), b5);
+        __m128i a = _mm_blendv_epi8(r0, r1, s4);  /* bit5=0: t0/t1 */
+        __m128i b = _mm_blendv_epi8(r2, r3, s4);  /* bit5=1: t2/t3 */
+        __m128i syms = _mm_blendv_epi8(a, b, s5);
+        _mm_storel_epi64((__m128i *)(symbols + i), syms);
+    }
+    merge_flat_tail_x86(symbols, i, n, bm, 6, c2s);
+}
+
+/* D=7: no x86 SIMD path: pshufb is only 16-wide, so the 128-entry scatter
+ * needs 8 sub-tables + a 3-level blend tree that measures no faster than this
+ * scalar-unrolled inner (~0.38 ns/elem on Zen 3).  Unlike NEON (vqtbl4) and
+ * AVX-512 (vpermi2b), x86 has no cheap wide table lookup. */
+static inline void merge_flat_d7_x86(uint8_t *symbols, int n,
+                                                const uint8_t *bm,
+                                                const uint8_t *c2s)
+{
+    int i = 0;
+    for (; i + 8 <= n; i += 8) {
+        const uint8_t *p = bm + ((i * 7) >> 3);
+        uint64_t w = (uint64_t)p[0] | ((uint64_t)p[1] << 8)
+                   | ((uint64_t)p[2] << 16) | ((uint64_t)p[3] << 24)
+                   | ((uint64_t)p[4] << 32) | ((uint64_t)p[5] << 40)
+                   | ((uint64_t)p[6] << 48);
+        symbols[i    ] = c2s[(w      ) & 0x7F];
+        symbols[i + 1] = c2s[(w >>  7) & 0x7F];
+        symbols[i + 2] = c2s[(w >> 14) & 0x7F];
+        symbols[i + 3] = c2s[(w >> 21) & 0x7F];
+        symbols[i + 4] = c2s[(w >> 28) & 0x7F];
+        symbols[i + 5] = c2s[(w >> 35) & 0x7F];
+        symbols[i + 6] = c2s[(w >> 42) & 0x7F];
+        symbols[i + 7] = c2s[(w >> 49) & 0x7F];
+    }
+    merge_flat_tail_x86(symbols, i, n, bm, 7, c2s);
+}
+
+/* D=8: byte-aligned codes, straight c2s byte gather. */
+static inline void merge_flat_d8_x86(uint8_t *symbols, int n,
+                                                const uint8_t *bm,
+                                                const uint8_t *c2s)
+{
+    for (int i = 0; i < n; i++) symbols[i] = c2s[bm[i]];
+}
+
+/* merge_flat_x86 — D-bit flat-subtree decode into a contiguous output
+ * buffer.  Per-D SIMD paths above; scalar unrolled for the rest.  AVX-512
+ * D=5/D=6 fast paths live in primitives_avx512.h. */
 static inline void merge_flat_x86(uint8_t *out, int n,
                                                const uint8_t *bm, int D,
                                                const uint8_t *c2s)
 {
     PROF_TIC();
-    merge_flat_x86_impl(out, n, bm, D, c2s);
+    switch (D) {
+    case 2: merge_flat_d2_x86(out, n, bm, c2s); break;
+    case 3: merge_flat_d3_x86(out, n, bm, c2s); break;
+    case 4: merge_flat_d4_x86(out, n, bm, c2s); break;
+    case 5: merge_flat_d5_x86(out, n, bm, c2s); break;
+    case 6: merge_flat_d6_x86(out, n, bm, c2s); break;
+    case 7: merge_flat_d7_x86(out, n, bm, c2s); break;
+    case 8: merge_flat_d8_x86(out, n, bm, c2s); break;
+    default:
+        assert(!"merge_flat_x86: D out of range (flat_depth is 2..8)");
+        break;
+    }
     PROF_TOC(PROF_BU_MERGE_FLAT, n);
 }
 
