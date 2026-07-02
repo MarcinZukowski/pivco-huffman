@@ -645,12 +645,17 @@ static uint8_t ctab8[256][16]  __attribute__((aligned(16)));
  * 16 lanes so the OR of two disjoint-support tables is exact.
  *   p16rev_tabA[m0]       low-byte (positions 0..7): left -> front [0,8-pc0),
  *                       right -> back lanes 15,14,... (reversed)
- *   p16rev_tabB[pc0][m1]  high-byte (positions 8..15) given pc0=popcount(m0):
- *                       continues both runs after the low byte
+ *   p16rev_tabB0[m1]     high-byte (positions 8..15): continues both runs after
+ *                       the low byte, for pc0=0.  The pc0>0 layout is just this
+ *                       one shifted left by pc0 lanes, so tabB[pc0][m1] is
+ *                       recovered as a byte-offset load `tabB0[m1] + pc0` (no
+ *                       separate per-pc0 table).  Padded to 32 B/entry so the
+ *                       offset-16 load (pc0<=8) stays inside one cache line;
+ *                       8 KB total vs the former 36 KB (fits L1 alongside tabA).
  * The right side is recovered with a single loop-invariant full-reverse
  * constant in part_full_neon. */
-static uint8_t p16rev_tabA[256][16]    __attribute__((aligned(16)));
-static uint8_t p16rev_tabB[9][256][16] __attribute__((aligned(16)));
+static uint8_t p16rev_tabA[256][16]  __attribute__((aligned(16)));
+static uint8_t p16rev_tabB0[256][32] __attribute__((aligned(32)));
 static int     tabs_ready = 0;
 
 static void build_tabs(void)
@@ -673,15 +678,14 @@ static void build_tabs(void)
             else               p16rev_tabA[m0][lp++] = (uint8_t)k;
         }
     }
-    for (int pc0 = 0; pc0 <= 8; pc0++)
-        for (int m1 = 0; m1 < 256; m1++) {
-            memset(p16rev_tabB[pc0][m1], 0, 16);
-            int lp = 8 - pc0, rp = 15 - pc0;
-            for (int k = 0; k < 8; k++) {
-                if ((m1 >> k) & 1) p16rev_tabB[pc0][m1][rp--] = (uint8_t)(8 + k);
-                else               p16rev_tabB[pc0][m1][lp++] = (uint8_t)(8 + k);
-            }
+    for (int m1 = 0; m1 < 256; m1++) {
+        memset(p16rev_tabB0[m1], 0, 32);
+        int lp = 8, rp = 15;   /* pc0 = 0 layout; pc0 > 0 handled by the load offset */
+        for (int k = 0; k < 8; k++) {
+            if ((m1 >> k) & 1) p16rev_tabB0[m1][rp--] = (uint8_t)(8 + k);
+            else               p16rev_tabB0[m1][lp++] = (uint8_t)(8 + k);
         }
+    }
     tabs_ready = 1;
 }
 
@@ -802,22 +806,31 @@ static inline int part_full_neon(uint8_t *ranks, int n, uint8_t thr,
         memcpy(bm + (j >> 3), &mask_word, 8);
         uint64_t pcw = vget_lane_u64(vreinterpret_u64_u8(
                            vcnt_u8(vcreate_u8(mask_word))), 0);
+        /* Prefix-sum the per-chunk popcounts (byte k of pfx = sum pc[0..k]) so
+         * each group's store offsets (cr rights / 16g-cr lefts before it) are
+         * known up front -- no serial n_left/n_right chain across the 4 groups;
+         * the cursors advance once per 64.  Overlap safety is unchanged: group
+         * g+1's store still starts exactly at group g's valid end, and all 4
+         * input loads precede every store in program order.  (issue #5) */
+        uint64_t pfx = pcw * 0x0101010101010101ULL;
         uint8x16_t vg[4] = { v0, v1, v2, v3 };
 #define _PART(g) do {                                                       \
         uint8_t  m0 = (uint8_t)(mask_word >> (16*(g)));                     \
         uint8_t  m1 = (uint8_t)(mask_word >> (16*(g) + 8));                 \
         uint32_t pc0 = (uint32_t)((pcw >> (16*(g)))     & 0xFF);            \
-        uint32_t pc1 = (uint32_t)((pcw >> (16*(g) + 8)) & 0xFF);            \
-        uint32_t pc  = pc0 + pc1;                                           \
+        uint32_t cr  = (g) == 0 ? 0u                                        \
+                     : (uint32_t)((pfx >> (8*(2*(g) - 1))) & 0xFF);         \
         uint8x16_t ri = vorrq_u8(vld1q_u8(p16rev_tabA[m0]),                   \
-                                 vld1q_u8(p16rev_tabB[pc0][m1]));             \
+                                 vld1q_u8(&p16rev_tabB0[m1][pc0]));           \
         uint8x16_t comb = vqtbl1q_u8(vg[g], ri);                           \
-        vst1q_u8(ranks + n_left, comb);                                    \
-        vst1q_u8(tmp + n_right, vqtbl1q_u8(comb, rev16));                   \
-        n_right += pc; n_left += 16 - pc;                                   \
+        vst1q_u8(ranks + n_left + (16*(g) - cr), comb);                     \
+        vst1q_u8(tmp + n_right + cr, vqtbl1q_u8(comb, rev16));              \
     } while (0)
         _PART(0); _PART(1); _PART(2); _PART(3);
 #undef _PART
+        uint32_t total_r = (uint32_t)(pfx >> 56);
+        n_right += (int)total_r;
+        n_left  += 64 - (int)total_r;
     }
     for (; j < n; j++) {
         if ((j & 7) == 0) bm[j >> 3] = 0;

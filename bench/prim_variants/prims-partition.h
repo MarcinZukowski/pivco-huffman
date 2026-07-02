@@ -681,7 +681,7 @@ static int prim_part_p16revback_neon(uint8_t *ranks, int n, uint8_t thr, uint8_t
         uint32_t pc1 = (uint32_t)((pcw >> (16*(g) + 8)) & 0xFF);                \
         uint32_t pc  = pc0 + pc1;                                               \
         uint8x16_t ri = vorrq_u8(vld1q_u8(p16rev_tabA[m0]),                       \
-                                 vld1q_u8(p16rev_tabB[pc0][m1]));                 \
+                                 vld1q_u8(&p16rev_tabB0[m1][pc0]));               \
         uint8x16_t comb = vqtbl1q_u8(vg[g], ri);                               \
         vst1q_u8(ranks + n_left, comb);                                        \
         vst1q_u8(rb + w - 16, comb);                                           \
@@ -714,6 +714,60 @@ static int prim_part_p16revback_neon(uint8_t *ranks, int n, uint8_t thr, uint8_t
     return n_right;
 }
 static void prim_part_p16revback(const ctx_t *c){ prim_part_p16revback_neon(c->ranks_work, c->n, c->rank_thr, c->bm, c->tmp8); }
+
+/* p16rev — the classic p16rev cursor scheme: serial per-group n_left/n_right
+ * chain (each group's store addresses wait on the previous group's popcount),
+ * kept benchable as the baseline for the issue-#5 pfx-sum cursors that replaced
+ * it in production.  Serial cursors were production from the p16rev promotion
+ * (3a138a6) through 4d93965.  Uses the current 8 KB tabB0 offset load (that
+ * span's production paired these cursors with the 36 KB tabB), so a same-binary
+ * A/B vs production isolates the CURSOR scheme alone. */
+static int prim_part_p16rev_neon(uint8_t *ranks, int n, uint8_t thr,
+                                 uint8_t *bm, uint8_t *tmp)
+{
+    build_tabs();
+    int n_left = 0, n_right = 0;
+    int j = 0;
+    uint8x16_t vt = vdupq_n_u8(thr);
+    static const uint8_t bw_a[16] = {1,2,4,8,16,32,64,128, 1,2,4,8,16,32,64,128};
+    uint8x16_t bw = vld1q_u8(bw_a);
+    static const uint8_t rev16_a[16] = {15,14,13,12,11,10,9,8,7,6,5,4,3,2,1,0};
+    uint8x16_t rev16 = vld1q_u8(rev16_a);
+    for (; j + 64 <= n; j += 64) {
+        uint8x16_t v0 = vld1q_u8(ranks + j);
+        uint8x16_t v1 = vld1q_u8(ranks + j + 16);
+        uint8x16_t v2 = vld1q_u8(ranks + j + 32);
+        uint8x16_t v3 = vld1q_u8(ranks + j + 48);
+        uint64_t mask_word = masks64_neon(v0, v1, v2, v3, vt, bw);
+        memcpy(bm + (j >> 3), &mask_word, 8);
+        uint64_t pcw = vget_lane_u64(vreinterpret_u64_u8(
+                           vcnt_u8(vcreate_u8(mask_word))), 0);
+        uint8x16_t vg[4] = { v0, v1, v2, v3 };
+#define _PARTSER(g) do {                                                     \
+        uint8_t  m0 = (uint8_t)(mask_word >> (16*(g)));                     \
+        uint8_t  m1 = (uint8_t)(mask_word >> (16*(g) + 8));                 \
+        uint32_t pc0 = (uint32_t)((pcw >> (16*(g)))     & 0xFF);            \
+        uint32_t pc1 = (uint32_t)((pcw >> (16*(g) + 8)) & 0xFF);            \
+        uint32_t pc  = pc0 + pc1;                                           \
+        uint8x16_t ri = vorrq_u8(vld1q_u8(p16rev_tabA[m0]),                   \
+                                 vld1q_u8(&p16rev_tabB0[m1][pc0]));           \
+        uint8x16_t comb = vqtbl1q_u8(vg[g], ri);                           \
+        vst1q_u8(ranks + n_left, comb);                                    \
+        vst1q_u8(tmp + n_right, vqtbl1q_u8(comb, rev16));                   \
+        n_right += pc; n_left += 16 - pc;                                   \
+    } while (0)
+        _PARTSER(0); _PARTSER(1); _PARTSER(2); _PARTSER(3);
+#undef _PARTSER
+    }
+    for (; j < n; j++) {
+        if ((j & 7) == 0) bm[j >> 3] = 0;
+        uint8_t r = ranks[j];
+        if (r > thr) { bm[j >> 3] |= (uint8_t)(1u << (j & 7)); tmp[n_right++] = r; }
+        else         { ranks[n_left++] = r; }
+    }
+    return n_right;
+}
+static void prim_part_p16rev(const ctx_t *c){ prim_part_p16rev_neon(c->ranks_work, c->n, c->rank_thr, c->bm, c->tmp8); }
 
 /* right16 — 16-wide one-sided (right) rank compaction for part_core.  Production
  * part_core_neon compacts per-8-chunk: 2 vtbl1_u8 + 2 eight-byte stores per 16
@@ -1472,6 +1526,9 @@ static void pv_register_partition(void) {
     PV_VARIANT(ST_PART, "p16revback", PV_ISA_NEON, "p16rev, right stored backward + one final reverse pass",
                "drops p16rev's per-group rev shuffle: store comb backward into scratch (keep top pc), one 16-wide reverse pass after the stride loop. wins only N1/Graviton2 +7.5%; loses M4 -4% V1/G3 -5% V2/G4 -5% V3 -2% (extra reverse-pass store traffic > saved shuffle on wide cores); not promoted", 1,
                PV_FN_NEON(prim_part_p16revback));
+    PV_VARIANT(ST_PART, "p16rev", PV_ISA_NEON, "classic p16rev (serial cursors)",
+               "the cursor scheme production used before the issue-#5 pfx-sum cursors (production as of 3a138a6..4d93965): serial per-group n_left/n_right chain (each group's store addresses wait on the previous group's popcount); same shuffle + current 8KB tabB0 (that prod had the 36KB tabB), so the delta vs production isolates the cursors. pfx beats it ~1.5-1.7% c7g/c8g, 4.2% m9g, 4.3% M4 micro", 1,
+               PV_FN_NEON(prim_part_p16rev));
     PV_VARIANT(ST_PART_RIGHT, "right16", PV_ISA_NEON, "16-wide one-sided right compaction",
                "1 vqtbl1q + 1 16-byte store per 16 lanes (p16 right-pack two-table index) vs the per-8-chunk production 2 vtbl1 + 2 8-byte stores; halves shuffle+store count, pays the 36 KB tab2 latency", 1,
                PV_FN_NEON(prim_part_right16));
