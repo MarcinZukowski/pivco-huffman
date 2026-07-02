@@ -46,6 +46,11 @@
 #include <string.h>
 #include <assert.h>
 
+/* Widest load the SSE/AVX2 merge kernels issue at a child-buffer
+ * cursor: 16 bytes (loadu_si128; the AVX2 loops load two 16-byte
+ * halves).  The cursor can rest AT `size`, so reads reach size+15. */
+#define PIVCO_PRIM_MERGE_OVERREAD 16
+
 /* Backend lifecycle.  Lazily build the compress_tab + expand_tab pre-
  * bake tables that the x86 partition / merge primitives index
  * into.  Idempotent and cheap after the first call. */

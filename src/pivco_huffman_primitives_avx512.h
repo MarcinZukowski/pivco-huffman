@@ -58,6 +58,12 @@
 #include "pivco_huffman_x86_tables.h"      /* expand_tab for BU tail */
 #include "pivco_huffman_avx512_flat.h"     /* flat_d{2,3,4,5,6}_unpack_avx512* */
 #include "pivco_huffman_avx512_pack.h"     /* pack_d{2..7}_avx512 — vpmultishiftqb */
+
+/* Widest load the AVX-512 merge kernels issue at a child-buffer
+ * cursor: the 64-byte main loops use maskz_expandloadu (reads exactly
+ * the consumed byte count — no over-read at all); the stride-16/8
+ * tails use 8-byte loadl_epi64, and the cursor can rest AT `size`. */
+#define PIVCO_PRIM_MERGE_OVERREAD 8
 #include "pivco_prof.h"
 
 #include <immintrin.h>

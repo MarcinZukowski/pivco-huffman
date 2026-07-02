@@ -17,6 +17,12 @@
 #include <stdint.h>
 #include <string.h>
 
+/* Widest load the scalar kernels issue at a child-buffer cursor: none —
+ * the byte loops read an element only when consumed < size, and 1-byte
+ * loads cannot straddle a page anyway.  1 keeps the codec's carve math
+ * degenerate-but-valid (empty straddle zones, minimal arena slack). */
+#define PIVCO_PRIM_MERGE_OVERREAD 1
+
 /* Backend lifecycle.  Scalar has no runtime tables to lazy-init. */
 static inline void codec_init_scalar(void) { /* no-op */ }
 

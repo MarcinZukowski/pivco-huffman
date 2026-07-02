@@ -29,6 +29,11 @@
 #include <stdint.h>
 #include <string.h>
 
+/* Widest load the NEON merge kernels issue at a child-buffer cursor:
+ * one 16-byte vld1q.  The cursor can rest AT `size` (exhausted side of
+ * a merge keeps reloading there), so kernels read up to size+15. */
+#define PIVCO_PRIM_MERGE_OVERREAD 16
+
 /* Backend lifecycle.  Lazily build the compress_tab + expand_tab pre-
  * bake tables that the NEON partition / merge primitives index
  * into.  Idempotent and cheap after the first call. */
