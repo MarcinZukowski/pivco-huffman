@@ -402,11 +402,47 @@ static inline uint8_t *scratch_carve(uint8_t **top, int size)
     return (uint8_t *)p;
 }
 
+/* ---------- In-place merge: child buffers in out_buf's tail ----------
+ *
+ * A merge's writes sweep out_buf from the start while each input cursor
+ * advances by its side's popcount, so a child placed at out_buf's TAIL
+ * is never overtaken: with the child at out_buf + K_other, its read
+ * position K_other + c stays >= the write position c_left + c_right
+ * because the OTHER side's consumed count can't exceed K_other.  Every
+ * backend's merge kernel loads its vector(s) before the chunk's store
+ * and advances monotonically, so reads never touch stored bytes (and no
+ * kernel over-stores its out_buf — all store loops are strictly
+ * bounded, which matters because a tail's end abuts the parent's data).
+ * This holds for either child of a vec_vec merge and for the single vec
+ * child of a cst_vec / vec_cst merge — one child per node can live in
+ * out_buf for free, and nested tails collapse a spine of such nodes
+ * onto the same memory.  Only the shorter vec_vec child needs scratch:
+ * peak scratch content drops from ~K to ~K/2 per level and the merge
+ * working set shrinks accordingly.
+ *
+ * Two exclusions: the root call (out_buf is the caller's buffer, which
+ * is only guaranteed N bytes — the kernels' trailing over-read must
+ * stay inside our arena), and hazard-prone placements (same page test
+ * as scratch_carve; falls back to a carve).  See #9. */
+static inline uint8_t *place_tail(uint8_t *out_buf, int offset, int size,
+                                  uint8_t **top)
+{
+    uint8_t *p = out_buf + offset;
+    uintptr_t rem = SCRATCH_PAGE - ((uintptr_t)p & (SCRATCH_PAGE - 1));
+    if ((uintptr_t)size + MERGE_OVERREAD > rem &&
+        ((uintptr_t)size + MERGE_OVERREAD <= SCRATCH_PAGE || rem < START_GUARD))
+        return scratch_carve(top, size);
+    return p;
+}
+
+/* `tail_ok` — nonzero when out_buf is arena-backed (a carve or a nested
+ * tail), i.e. a child may be placed in its tail (see place_tail).  The
+ * root call passes 0: the caller's output buffer has no over-read slack. */
 static void codec_decode_subtree(const pivco_huffman_table_t *table,
                                    int16_t node_id, int K,
                                    uint8_t *out_buf,
                                    const uint8_t **in_ptr,
-                                   uint8_t *scratch_top)
+                                   uint8_t *scratch_top, int tail_ok)
 {
     if (K == 0) return;
 
@@ -458,9 +494,11 @@ static void codec_decode_subtree(const pivco_huffman_table_t *table,
                                    out_buf);
             return;
         }
-        uint8_t *right_buf = scratch_carve(&scratch_top, K_right);
+        uint8_t *right_buf = tail_ok
+            ? place_tail(out_buf, K - K_right, K_right, &scratch_top)
+            : scratch_carve(&scratch_top, K_right);
         codec_decode_subtree(table, node->right, K_right,
-                              right_buf, in_ptr, scratch_top);
+                              right_buf, in_ptr, scratch_top, 1);
         prim_merge_cst_vec(bm, K, table->prefill_sym,
                                     right_buf, out_buf);
         return;
@@ -478,9 +516,11 @@ static void codec_decode_subtree(const pivco_huffman_table_t *table,
             return;
         }
         int K_left = K - K_right;
-        uint8_t *left_buf = scratch_carve(&scratch_top, K_left);
+        uint8_t *left_buf = tail_ok
+            ? place_tail(out_buf, K_right, K_left, &scratch_top)
+            : scratch_carve(&scratch_top, K_left);
         codec_decode_subtree(table, node->left, K_left,
-                              left_buf, in_ptr, scratch_top);
+                              left_buf, in_ptr, scratch_top, 1);
         prim_merge_vec_cst(bm, K, left_buf,
                                      table->prefill_sym, out_buf);
         return;
@@ -504,9 +544,11 @@ static void codec_decode_subtree(const pivco_huffman_table_t *table,
             return;
         }
         if (left_kind == (uint8_t)PIVCO_NODE_LEAF) {
-            uint8_t *right_buf = scratch_carve(&scratch_top, K_right);
+            uint8_t *right_buf = tail_ok
+                ? place_tail(out_buf, K - K_right, K_right, &scratch_top)
+                : scratch_carve(&scratch_top, K_right);
             codec_decode_subtree(table, node->right, K_right,
-                                  right_buf, in_ptr, scratch_top);
+                                  right_buf, in_ptr, scratch_top, 1);
             prim_merge_cst_vec(bm, K,
                                         (uint8_t)table->tree[node->left].symbol,
                                         right_buf, out_buf);
@@ -514,25 +556,41 @@ static void codec_decode_subtree(const pivco_huffman_table_t *table,
         }
         if (right_kind == (uint8_t)PIVCO_NODE_LEAF) {
             int K_left = K - K_right;
-            uint8_t *left_buf = scratch_carve(&scratch_top, K_left);
+            uint8_t *left_buf = tail_ok
+                ? place_tail(out_buf, K_right, K_left, &scratch_top)
+                : scratch_carve(&scratch_top, K_left);
             codec_decode_subtree(table, node->left, K_left,
-                                  left_buf, in_ptr, scratch_top);
+                                  left_buf, in_ptr, scratch_top, 1);
             prim_merge_vec_cst(bm, K, left_buf,
                                          (uint8_t)table->tree[node->right].symbol,
                                          out_buf);
             return;
         }
 
-        /* General case: both children non-leaf.  Recurse into both
-         * with disjoint scratch slices, then merge. */
+        /* General case: both children non-leaf.  The longer child
+         * decodes into out_buf's tail (free — see place_tail), the
+         * shorter into a scratch carve; then merge.  Decode order stays
+         * left-then-right (the wire is pre-order) — only buffer
+         * placement differs.  Both recursions get the same scratch_top:
+         * they run sequentially and a child's deep scratch is dead once
+         * it returns. */
         int K_left = K - K_right;
-        uint8_t *left_buf  = scratch_carve(&scratch_top, K_left);
-        uint8_t *right_buf = scratch_carve(&scratch_top, K_right);
+        uint8_t *left_buf, *right_buf;
+        if (tail_ok && K_left >= K_right) {
+            left_buf  = place_tail(out_buf, K_right, K_left, &scratch_top);
+            right_buf = scratch_carve(&scratch_top, K_right);
+        } else if (tail_ok) {
+            right_buf = place_tail(out_buf, K_left, K_right, &scratch_top);
+            left_buf  = scratch_carve(&scratch_top, K_left);
+        } else {
+            left_buf  = scratch_carve(&scratch_top, K_left);
+            right_buf = scratch_carve(&scratch_top, K_right);
+        }
 
         codec_decode_subtree(table, node->left,  K_left,
-                              left_buf,  in_ptr, scratch_top);
+                              left_buf,  in_ptr, scratch_top, 1);
         codec_decode_subtree(table, node->right, K_right,
-                              right_buf, in_ptr, scratch_top);
+                              right_buf, in_ptr, scratch_top, 1);
         prim_merge_vec_vec(bm, K, left_buf, right_buf, out_buf);
         return;
     }
@@ -597,7 +655,7 @@ int CODEC_DECODE_ENTRY(const uint8_t *in, size_t in_len,
     if (!scratch) return PIVCO_ERR_NULL;
 
     codec_decode_subtree(table, table->tree_root, N,
-                          symbols, &ptr, scratch);
+                          symbols, &ptr, scratch, /*tail_ok=*/0);
 
     *consumed = (size_t)(ptr - in);
     return PIVCO_OK;
