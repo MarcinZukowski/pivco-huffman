@@ -1146,6 +1146,67 @@ static void prim_merge_flat_e5a199a(const ctx_t *c) {
 }
 #endif /* __AVX512VBMI2__ && __AVX512VBMI__ */
 
+#if defined(USE_NEON_KERNELS)
+/* skewfuse — fused per-word fast paths (no pre-pass, no lists): the production
+ * linear loop grows two per-word fast paths, mask==0 (all-left: 64 B constant
+ * fill, r_list unchanged) and mask==~0 (all-right: 64 B straight copy).  The
+ * worst-case tax is one predictable branch pair per word; the risk is
+ * mispredicts at run boundaries on run-structured bitmaps. */
+static void prim_merge_cst_vec_skewfuse(const ctx_t *c)
+{
+    const uint8_t *bm = c->bm, *right = c->merge_right;
+    uint8_t *out = c->out; int K = c->n;
+    const uint8_t left_sym = MERGE_LEFT_SYM;
+    uint8x16_t Lb = vdupq_n_u8(left_sym);
+    const uint8_t *r_list = right;
+    intptr_t i = 0;
+    for (; i + 64 <= K; i += 64) {
+        uint64_t mask; memcpy(&mask, bm + (i >> 3), 8);
+        if (mask == 0) {                       /* all-left: constant fill */
+            vst1q_u8(out + i,      Lb); vst1q_u8(out + i + 16, Lb);
+            vst1q_u8(out + i + 32, Lb); vst1q_u8(out + i + 48, Lb);
+            continue;
+        }
+        if (mask == ~0ull) {                   /* all-right: straight copy */
+            vst1q_u8(out + i,      vld1q_u8(r_list));
+            vst1q_u8(out + i + 16, vld1q_u8(r_list + 16));
+            vst1q_u8(out + i + 32, vld1q_u8(r_list + 32));
+            vst1q_u8(out + i + 48, vld1q_u8(r_list + 48));
+            r_list += 64;
+            continue;
+        }
+        uint8x8_t pop8 = vcnt_u8(vcreate_u8(mask));
+        uint64_t pfx = vget_lane_u64(vreinterpret_u64_u8(pop8), 0) * 0x0101010101010101ull;
+        intptr_t p0 = (pfx >> 8) & 0xff, p1 = (pfx >> 24) & 0xff, p2 = (pfx >> 40) & 0xff, p3 = pfx >> 56;
+#define _MCVF(off, rd, mk) do {                                                  \
+        int8x16_t s0 = vld1q_s8(&g_merge_shuf0[(((intptr_t)(mk)) << 4) & 0xff0]); \
+        int8x16_t s1 = vld1q_s8(&g_merge_shuf1[(((intptr_t)(mk)) >> 4) & 0xff0]); \
+        uint8x16_t sh = vreinterpretq_u8_s8(vabdq_s8(s0, s1));                    \
+        uint8x16x2_t src; src.val[0] = vld1q_u8(rd); src.val[1] = Lb;            \
+        vst1q_u8(out + i + (off), vqtbl2q_u8(src, sh));                          \
+    } while (0)
+        _MCVF(0,  r_list,      mask);
+        _MCVF(16, r_list + p0, mask >> 16);
+        _MCVF(32, r_list + p1, mask >> 32);
+        _MCVF(48, r_list + p2, mask >> 48);
+#undef _MCVF
+        r_list += p3;
+    }
+    int j = (int)i;
+    for (; j + 16 <= K; j += 16) {
+        uint16_t m16; memcpy(&m16, bm + (j >> 3), 2);
+        int8x16_t s0 = vld1q_s8(&g_merge_shuf0[((intptr_t)m16 << 4) & 0xff0]);
+        int8x16_t s1 = vld1q_s8(&g_merge_shuf1[((intptr_t)m16 >> 4) & 0xff0]);
+        uint8x16_t sh = vreinterpretq_u8_s8(vabdq_s8(s0, s1));
+        uint8x16x2_t src; src.val[0] = vld1q_u8(r_list); src.val[1] = Lb;
+        vst1q_u8(out + j, vqtbl2q_u8(src, sh));
+        r_list += __builtin_popcount(m16);
+    }
+    int rc = (int)(r_list - right);
+    for (; j < K; j++) { int mb = (bm[j >> 3] >> (j & 7)) & 1; out[j] = mb ? right[rc++] : left_sym; }
+}
+#endif /* USE_NEON_KERNELS */
+
 /* ============================================================================
  * Registry — merge family (no-op where the ISA is unavailable)
  * ========================================================================== */
@@ -1192,6 +1253,9 @@ static void pv_register_merge(void) {
                "D=1 flat-decode shape (vshl + vqtbl1q)", 0, PV_FN_NEON(prim_merge_cc_d1flat));
     PV_VARIANT(ST_MERGE_CST_VEC, "com64",     PV_ISA_NEON, "asof-d24c0eb (prior production)",
                "V5 COM cst_vec, broadcast L; production before the two-table merge", 0, PV_FN_NEON(prim_merge_cv_com64));
+    PV_VARIANT(ST_MERGE_CST_VEC, "skewfuse",  PV_ISA_NEON, "fused per-word fast paths (no pre-pass)",
+               "production linear loop + two per-word branches: mask==0 -> 64B constant fill, mask==~0 -> 64B straight copy; worst-case tax is a predictable branch pair per word, risk is mispredicts at run boundaries (bench with --bm=runs)", 0,
+               PV_FN_NEON(prim_merge_cst_vec_skewfuse));
     PV_VARIANT(ST_MERGE_VEC_CST, "com64",     PV_ISA_NEON, "asof-d24c0eb (prior production)",
                "V5 COM vec_cst, broadcast R; production before the two-table merge", 0, PV_FN_NEON(prim_merge_vc_com64));
     PV_VARIANT(ST_MERGE_CST_VEC, "unroll16",  PV_ISA_SSE4, "asof-d24c0eb (prior production)",

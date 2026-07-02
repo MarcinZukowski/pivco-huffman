@@ -184,6 +184,12 @@ add_executable(pivco_huffman_profile_english
 )
 target_link_libraries(pivco_huffman_profile_english pivco_huffman m)
 
+add_executable(pivco_node_bitmap_stats
+    bench_node_bitmap_stats.c
+    ${BENCH_DIST}
+)
+target_link_libraries(pivco_node_bitmap_stats pivco_huffman m)
+
 add_executable(pivco_one_leaf_stats
     bench_one_leaf_stats.c
     ${BENCH_DIST}

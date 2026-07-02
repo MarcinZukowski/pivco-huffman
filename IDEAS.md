@@ -17,6 +17,7 @@
 - [Tree-walk node-size histogram → tiny-node fast paths](#tree-walk-node-size-histogram--tiny-node-fast-paths)
 - [FastLanes-style transposed bitpacking](#fastlanes-style-transposed-bitpacking-2026-04-27)
 - [LSB-first canonical codes](#lsb-first-canonical-codes-2026-05-12)
+- [Skew-specialized merge: per-word easy paths](#skew-specialized-merge-per-word-easy-paths-all-zero--all-ones-2026-07-01-parked)
 
 **NEON**
 - [16-wide one-sided part_core (right16)](#16-wide-one-sided-part_core-right16-2026-06-28-parked)
@@ -151,6 +152,21 @@ Microbench (`bench_unpack_fl_layout.c`) shows FL-layout 2–22× faster than cur
 
 ### LSB-first canonical codes, 2026-05-12
 Bit-reversing canonical codes (root at bit 0) would let `code` replace `code_la` (-512 B table) but does NOT improve any hot operation: u8 subtree repack and partition kernels are symmetric.  Multi-day rewrite of every SIMD partition kernel for a marginal cleanup — not justified.  Logged so the question doesn't get re-derived.
+
+### Skew-specialized merge: per-word easy paths (all-zero / all-ones), 2026-07-01, parked
+Merge fast path for data with constant-bit runs in per-node bitmaps (calgary-pic-like: long all-white runs, some all-black).
+Prototyped on `merge_cst_vec` (NEON), a few flavors tested:
+- **skewpre** - DROPPED - branch-free easy/hard index lists, hard-only main loop; worst case (random bm) +20–31%; runs W=400,B=16 −34…−39%.  Dominated by fused — dead end.
+- **skewcnt** - DROPPED - count easy words only, no lists: **+2–7%** — the minimal peek-first tax; vectorizable if it matters.
+- **skewfuse** - KEPT - no pre-pass; two full-0/full-1 per-64b branches in the production loop: worst case +3% c7g/m9g but **+16% c8g**; runs **−55…−60%**, long-black runs (W=2000,B=200, 87% zero + 5.5% one-words) **−68…−72%**.  Mispredicts at run boundaries are real but ~30x outweighed by skipped shuffle work.
+
+**Fused's true worst case is NOT random** (branch never taken → perfectly predicted) but ~50% easy words in random order (`--bm=mix[:P]`, added for this).
+**Possible shape if revived: the zero-delta-gated hybrid** — instead of counting "easy" 64-bit values, consider counting "delta-0" values, so `s += (v[w] == v[w-1])`.
+**Real-data applicability** (`extras/bench/bench_node_bitmap_stats.c` — per-node bitmap chunk stats at u16/u32/u64 over every dist): **calgary_pic is the only meaningful target** — the rest is marginal.
+
+It also addresses a pathological "cursor stuck at a page boundary" case from #8.
+
+Probably not worth pursuing due to marginal applicability.
 
 **NEON**
 

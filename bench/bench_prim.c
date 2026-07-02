@@ -585,6 +585,11 @@ static void usage(FILE *f) {
         "  --reps=N         inner reps per timed run (default 2000)\n"
         "  --canary=X       env-stability probe (compute/bw/lat); 0=off,\n"
         "                   1=start+end (default), 2=+between families, 3=+between each primitive\n"
+        "  --bm=MODE        bitmap content for the merge stages: random (default),\n"
+        "                   runs[:W,B] -- alternating 0-runs (mean W, default 400) and\n"
+        "                   1-runs (mean B, default 16), calgary-pic-like run structure,\n"
+        "                   or mix[:P] -- P%% of u64 words all-zero in random order\n"
+        "                   (default 50 = max entropy for a per-word easy/hard branch)\n"
         "  --D=d,d,...      restrict to these flat depths D (2..%d; default all)\n"
         "  --variants       also run the prim_variants/ graveyard (frozen non-shipping\n"
         "                   kernels) next to production + scalar reference\n"
@@ -601,10 +606,23 @@ int main(int argc, char **argv) {
     int n = 8192, reps = 2000, want[MAXD+1] = {0}, any = 0;
     int variants = 0, do_list = 0; const char *vfilter = NULL;
     int canary = 1;
+    int bm_runs_w = 0, bm_runs_b = 0;   /* --bm=runs: run-structured bitmap */
+    int bm_mix_p = -1;                  /* --bm=mix: P% of u64 words all-zero, random order */
     for (int i=1;i<argc;i++) {
         if      (!strncmp(argv[i],"--n=",4))    n = atoi(argv[i]+4);
         else if (!strncmp(argv[i],"--reps=",7)) reps = atoi(argv[i]+7);
         else if (!strncmp(argv[i],"--canary=",9)) canary = atoi(argv[i]+9);
+        else if (!strncmp(argv[i],"--bm=",5)) {
+            if (!strncmp(argv[i]+5,"runs",4)) {
+                bm_runs_w = 400; bm_runs_b = 16;             /* calgary-pic-ish defaults */
+                if (argv[i][9] == ':') sscanf(argv[i]+10, "%d,%d", &bm_runs_w, &bm_runs_b);
+            } else if (!strncmp(argv[i]+5,"mix",3)) {
+                bm_mix_p = 50;                               /* max branch entropy default */
+                if (argv[i][8] == ':') bm_mix_p = atoi(argv[i]+9);
+            } else if (strcmp(argv[i]+5,"random")) {
+                fprintf(stderr, "bench_prim: --bm= expects random, runs[:W,B] or mix[:P]\n"); return 2;
+            }
+        }
         else if (!strcmp(argv[i],"--variants") || !strncmp(argv[i],"--variants=",11)) {
             variants = 1;
             if (argv[i][10] == '=') vfilter = argv[i] + 11;  /* e.g. enc_partition_full */
@@ -647,6 +665,41 @@ int main(int argc, char **argv) {
     for (int i=0;i<n+64;i++){ ranks[i]=(uint8_t)rand(); symbuf[i]=(uint8_t)rand(); }
     for (int i=0;i<256;i++){ code_la_lut[i]=(uint16_t)rand(); sym_to_rank[i]=(uint8_t)rand(); }
     for (int i=0;i<256;i++) s2r_hi[i]=(uint16_t)((unsigned)sym_to_rank[i]<<8);
+    if (bm_runs_w > 0) {
+        /* --bm=runs: overwrite the random bitmap with alternating 0-runs (mean W)
+           and 1-runs (mean B), uniform lengths in [1, 2*mean) -- a calgary-pic-like
+           run structure so the merge stages see realistic long-run bitmaps. */
+        long bits = (long)(n + 16) * 8, b = 0; int bit = 0;
+        memset(bm, 0, (size_t)(n + 16));
+        while (b < bits) {
+            int mean = bit ? bm_runs_b : bm_runs_w;
+            long len = 1 + rand() % (2 * mean);
+            if (bit)
+                for (long t = b; t < b + len && t < bits; t++)
+                    bm[t >> 3] |= (uint8_t)(1u << (t & 7));
+            b += len; bit ^= 1;
+        }
+        long ones = 0, zw = 0, ow = 0, nw = n >> 6;
+        for (long t = 0; t < n; t++) ones += (bm[t >> 3] >> (t & 7)) & 1;
+        for (long w = 0; w < nw; w++) {
+            uint64_t v; memcpy(&v, bm + w * 8, 8);
+            zw += (v == 0); ow += (v == ~0ull);
+        }
+        printf("bm=runs W=%d B=%d: ones=%.1f%%  zero-words=%.1f%%  one-words=%.1f%%  (of %ld u64 words)\n",
+               bm_runs_w, bm_runs_b, 100.0 * ones / n, 100.0 * zw / nw, 100.0 * ow / nw, nw);
+    }
+    if (bm_mix_p >= 0) {
+        /* --bm=mix: each u64 word independently all-zero with probability P%,
+           else random -- word-granularity randomness, i.e. maximum entropy for a
+           per-word easy/hard branch (P=50 is the adversarial case for fused). */
+        long nwb = (long)(n + 16) >> 3, zw = 0;
+        for (long w = 0; w < nwb; w++) {
+            if (rand() % 100 < bm_mix_p) { memset(bm + w * 8, 0, 8); zw += (w < (n >> 6)); }
+            else for (int t = 0; t < 8; t++) bm[w * 8 + t] = (uint8_t)rand();
+        }
+        printf("bm=mix P=%d: zero-words=%.1f%% in random order (of %d u64 words)\n",
+               bm_mix_p, 100.0 * zw / (n >> 6), n >> 6);
+    }
     uint8_t rank_thr = 127, rank_base = 0;
 
     for (int d=2; d<=MAXD; d++) {
