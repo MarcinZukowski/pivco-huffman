@@ -559,12 +559,16 @@ static inline void merge_flat_d7_x86(uint8_t *symbols, int n,
     merge_flat_tail_x86(symbols, i, n, bm, 7, c2s);
 }
 
-/* D=8: byte-aligned codes, straight c2s byte gather. */
+/* D=8: a depth-8 flat region is the full 256-symbol alphabet at equal code
+ * length, whose canonical c2s is the identity permutation -- the byte-aligned
+ * codes ARE the symbols, so the whole decode is a memcpy.  See the derivation
+ * at merge_flat_d8_neon in pivco_huffman_primitives_neon.h. */
 static inline void merge_flat_d8_x86(uint8_t *symbols, int n,
                                                 const uint8_t *bm,
                                                 const uint8_t *c2s)
 {
-    for (int i = 0; i < n; i++) symbols[i] = c2s[bm[i]];
+    (void)c2s;
+    memcpy(symbols, bm, (size_t)n);
 }
 
 /* merge_flat_x86 — D-bit flat-subtree decode into a contiguous output

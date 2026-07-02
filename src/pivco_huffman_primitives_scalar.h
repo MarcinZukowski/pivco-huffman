@@ -85,6 +85,11 @@ static inline void merge_flat_scalar(uint8_t *out, int n,
                                                   const uint8_t *bm, int D,
                                                   const uint8_t *c2s)
 {
+    if (D == 8) {           /* full-alphabet flat: c2s is the identity, codes
+                             * ARE the symbols (see merge_flat_d8_neon) */
+        memcpy(out, bm, (size_t)n);
+        return;
+    }
     for (int i = 0; i < n; i++) {
         uint32_t code = extract_D_bits_scalar(bm, i * D, D);
         out[i] = c2s[code];

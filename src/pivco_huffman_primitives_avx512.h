@@ -569,28 +569,16 @@ static inline void merge_flat_d7_avx512(uint8_t *symbols, int n,
     }
 }
 
-/* D=8: c2s = 256 entries spans four zmm tables.  bm is byte-per-code
- * so 64 codes load in a single zmm.  Two vpermi2b lookups (one for the
- * lower 128-byte half, one for the upper) + one mask_blend on bit 7 of
- * each code (which half to take).  Produces 64 symbols per iter. */
+/* D=8: a depth-8 flat region is the full 256-symbol alphabet at equal code
+ * length, whose canonical c2s is the identity permutation -- the byte-aligned
+ * codes ARE the symbols, so the whole decode is a memcpy.  See the derivation
+ * at merge_flat_d8_neon in pivco_huffman_primitives_neon.h. */
 static inline void merge_flat_d8_avx512(uint8_t *symbols, int n,
                                                   const uint8_t *bm,
                                                   const uint8_t *c2s)
 {
-    __m512i t_0_64    = _mm512_loadu_si512((const __m512i *)(c2s      ));
-    __m512i t_64_128  = _mm512_loadu_si512((const __m512i *)(c2s +  64));
-    __m512i t_128_192 = _mm512_loadu_si512((const __m512i *)(c2s + 128));
-    __m512i t_192_256 = _mm512_loadu_si512((const __m512i *)(c2s + 192));
-    int i = 0;
-    for (; i + 64 <= n; i += 64) {
-        __m512i codes = _mm512_loadu_si512((const __m512i *)(bm + i));
-        __m512i lo = _mm512_permutex2var_epi8(t_0_64,    codes, t_64_128);
-        __m512i hi = _mm512_permutex2var_epi8(t_128_192, codes, t_192_256);
-        __mmask64 m = _mm512_movepi8_mask(codes);  /* bit 7 of each byte */
-        __m512i syms = _mm512_mask_blend_epi8(m, lo, hi);
-        _mm512_storeu_si512((__m512i *)(symbols + i), syms);
-    }
-    for (; i < n; i++) symbols[i] = c2s[bm[i]];
+    (void)c2s;
+    memcpy(symbols, bm, (size_t)n);
 }
 
 /* merge_flat_avx512 — D-bit flat-subtree decode into a
