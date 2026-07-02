@@ -1127,6 +1127,60 @@ static void prim_part_p16revback_x86(const ctx_t *c) {
     for (; i < T; i++) tmp[T - 1 - i] = src[i];
 }
 
+/* p16rev (x86) — the classic p16rev cursor scheme: serial per-group
+ * n_left/n_right chain (group 1's store addresses wait on group 0's popcount),
+ * kept benchable as the baseline for the issue-#5 pfx-style per-group offsets
+ * that replaced it in production.  Serial cursors were production from the
+ * x86 p16rev promotion through 45147c8.  Uses the current 8 KB
+ * x86_p16rev_tabB0 offset load (that span's production paired these cursors
+ * with the 36 KB tabB), so a same-binary A/B vs production isolates the
+ * CURSOR scheme alone. */
+static void prim_part_p16rev_x86(const ctx_t *c) {
+    uint8_t *ranks = c->ranks_work, *bm = c->bm, *tmp = c->tmp8;
+    int n = c->n; uint8_t thr = c->rank_thr;
+    x86_build_tabs();
+    int n_left = 0, n_right = 0, j = 0;
+    __m128i thr1 = _mm_set1_epi8((char)(thr + 1));
+    static const uint8_t rev16_a[16] = {15,14,13,12,11,10,9,8,7,6,5,4,3,2,1,0};
+    const __m128i rev16 = _mm_loadu_si128((const __m128i *)rev16_a);
+#define _P16REVSER(v, mlo_, mhi_) do {                                          \
+        uint32_t pc0_ = (uint32_t)__builtin_popcount((unsigned)(mlo_));         \
+        uint32_t pc_  = pc0_ + (uint32_t)__builtin_popcount((unsigned)(mhi_));  \
+        __m128i cidx_ = _mm_or_si128(                                           \
+            _mm_load_si128((const __m128i *)x86_p16rev_tabA[(mlo_)]),           \
+            _mm_loadu_si128((const __m128i *)&x86_p16rev_tabB0[(mhi_)][pc0_])); \
+        __m128i comb_ = _mm_shuffle_epi8((v), cidx_);                          \
+        _mm_storeu_si128((__m128i *)(ranks + n_left), comb_);                  \
+        _mm_storeu_si128((__m128i *)(tmp + n_right),                            \
+            _mm_shuffle_epi8(comb_, rev16));                                    \
+        n_right += pc_; n_left += 16 - pc_;                                     \
+    } while (0)
+    for (; j + 32 <= n; j += 32) {
+        __m128i v0 = _mm_loadu_si128((const __m128i *)(ranks + j));
+        __m128i v1 = _mm_loadu_si128((const __m128i *)(ranks + j + 16));
+        uint32_t mlo = (uint16_t)_mm_movemask_epi8(_mm_cmpeq_epi8(_mm_min_epu8(v0, thr1), thr1));
+        uint32_t mhi = (uint16_t)_mm_movemask_epi8(_mm_cmpeq_epi8(_mm_min_epu8(v1, thr1), thr1));
+        uint32_t mm = mlo | (mhi << 16);
+        memcpy(bm + (j >> 3), &mm, 4);
+        _P16REVSER(v0, (uint8_t)mlo, (uint8_t)(mlo >> 8));
+        _P16REVSER(v1, (uint8_t)mhi, (uint8_t)(mhi >> 8));
+    }
+    for (; j + 16 <= n; j += 16) {
+        __m128i v = _mm_loadu_si128((const __m128i *)(ranks + j));
+        uint16_t mm = (uint16_t)_mm_movemask_epi8(_mm_cmpeq_epi8(_mm_min_epu8(v, thr1), thr1));
+        memcpy(bm + (j >> 3), &mm, 2);
+        _P16REVSER(v, (uint8_t)mm, (uint8_t)(mm >> 8));
+    }
+#undef _P16REVSER
+    for (; j < n; j++) {
+        if ((j & 7) == 0) bm[j >> 3] = 0;
+        uint8_t r = ranks[j];
+        if (r > thr) { bm[j >> 3] |= (uint8_t)(1u << (j & 7)); tmp[n_right++] = r; }
+        else         { ranks[n_left++] = r; }
+    }
+    (void)n_right;
+}
+
 /* asof-ae49fe1 — the stride-8 ctab8 one-sided (right) compaction that was
  * production part_core_x86 before the 16-wide right16 path was promoted
  * (ae49fe1 = last commit with it as production).  Frozen as the baseline;
@@ -1513,6 +1567,9 @@ static void pv_register_partition(void) {
     PV_VARIANT(ST_PART, "p16revback", PV_ISA_SSE4, "p16rev, right stored backward + one reverse pass",
                "drops p16rev's per-group right pshufb: store comb backward into scratch (keep top pc), one 4x-unrolled pshufb reverse pass after the stride loop. loses to p16rev on all x86 (Zen2/3 Skylake Haswell IvyB) -- the extra reverse-pass stores hurt the store-bound SSE loop; not promoted", 1,
                PV_FN_SSE(prim_part_p16revback_x86));
+    PV_VARIANT(ST_PART, "p16rev", PV_ISA_SSE4, "classic p16rev (serial cursors)",
+               "the cursor scheme production used before the issue-#5 per-group store offsets (production through 45147c8): serial n_left/n_right chain across the 2 groups; same shuffle + current 8KB tabB0 (that prod had the 36KB tabB), so the delta vs production isolates the cursors", 1,
+               PV_FN_SSE(prim_part_p16rev_x86));
     PV_VARIANT(ST_PART, "avx32", PV_ISA_AVX2,
                "32 ranks/iter, 1x ymm movemask + 2x X86_COMPACT16",
                "32/iter; single 32-bit mask build vs 2x SSE", 1,
