@@ -36,6 +36,7 @@
 ### DONE — shipped
 
 **General**
+- [In-place merge + page-hazard carving; Apple 32K default](#in-place-merge--page-hazard-carving-apple-32k-default-2026-07-02)
 - [Fast Huffman builder (two-queue + radix, no min-heap)](#fast-huffman-builder-drop-the-index-indirected-min-heap-2026-06-21)
 - [Cross-port post-June-5 x86 optimizations to NEON](#cross-port-post-june-5-x86-optimizations-to-neon-2026-06-13)
 - [Unify-framework refactor (5 phases)](#unify-framework-refactor-2026-05-14)
@@ -221,6 +222,9 @@ RVV maps well: `vcompress` = partition, `vrgather` = TBL, **`vsuxei8` = native i
 ## DONE
 
 **General**
+
+### In-place merge + page-hazard carving; Apple 32K default, 2026-07-02
+Two decode-walk memory changes (concurrent-work findings #8/#9), then the block-size flip they unlock.  (1) `scratch_carve`: the merge kernels reload from each child cursor every iteration and a cursor parked on a page-boundary-straddling load pays 28-40 cycles/iter on Apple Silicon's 16 KB pages (~40% worst case on calgary_pic from placement alone) — child slices that would start within a cache line below a boundary, or sub-page slices that would cross one, get bumped to the next boundary; granularity = platform page size (16 KB Apple, 4 KB elsewhere), per-backend cursor-load widths (16 NEON/SSE/AVX2, 8 AVX-512, 1 scalar).  (2) In-place merge: a child at `out_buf + K_other` is never overtaken by the merge's writes (its read position stays ≥ the write position since the other side's consumed count ≤ K_other), and every backend's kernel loads before the chunk's store with monotone cursors — so one child per node decodes into out_buf's tail for free (either vec_vec child; the vec child of cst_vec/vec_cst spines, whose nested tails collapse onto the same memory).  Halves per-level scratch content and the merge working set; excluded at the root (no over-read slack in the caller's buffer).  That working-set cut removes the reason Apple defaulted to 16K blocks, so the `__APPLE__` gate was dropped — 32K everywhere.  M1 Max 32K+in-place vs old 16K default: +2..11% on 8/9 MAIN dists (slow dists +6..8%, dna −1.4%); M4: calgary_pic +8.8%, image_jpeg +8.1%, proba80 +4.1%, english/html/dna −1..−3% (within its 3-9% run spread).  In-place at 16K alone is ~−1% (old 16K files pay that on new decoders).  Apple-only measurements; EC2 fleet not re-swept.  See docs/BLOCK_SIZE.md.
 
 ### Fast Huffman builder (drop the index-indirected min-heap), 2026-06-21
 Replaced the freq→lengths min-heap (60–77% of `build_table`, all pointer-chasing) with LSD-radix sort + van Leeuwen two-queue + parent-walk depths (`build_lengths_twoqueue`, `4e0f288`) — ~2.5× uniform/zipf on the phase, roughly halving the table build.  Byte-identical: the `<=` tie-break reproduces the old heap's lengths (3M-case cross-check fuzz on M4/x86/NEON).  Same algorithm as zstd `HUF_buildTree`; its hybrid bucket sort was a wash-to-loss on x86, not adopted.  E2e weight ~1.5–2% under the per-128 KB re-table model (`bench_fair`), ~0.07% for one-global-table files.

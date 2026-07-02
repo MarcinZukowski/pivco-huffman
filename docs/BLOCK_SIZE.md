@@ -1,6 +1,6 @@
 # Block Size
 
-> **Last content review:** 2026-06-16 (full-fleet sweep, dynamic-block codec)
+> **Last content review:** 2026-07-02 (Apple exception retired — 32K everywhere)
 
 `PIVCO_BLOCK_SIZE` is the per-block symbol count. As of the dynamic-block
 work it is a **runtime** knob, not a compile-time limit:
@@ -10,9 +10,9 @@ work it is a **runtime** knob, not a compile-time limit:
   `[1, PIVCO_WIRE_MAX_N]` (`= 65535`, the uint16 wire-N cap) works with no
   recompile.
 - `PIVCO_BLOCK_SIZE` is now only the *default* chosen by the file codec,
-  CLI, and benchmarks. It defaults to **32768** on every architecture
-  except **Apple Silicon (macOS/arm64), which defaults to 16384** — see the
-  M4 exception below. An explicit `-DPIVCO_BLOCK_SIZE` overrides either.
+  CLI, and benchmarks. It defaults to **32768** on every architecture.
+  (Apple Silicon defaulted to 16384 from 2026-06-16 to 2026-07-02 — see the
+  retired exception below.) An explicit `-DPIVCO_BLOCK_SIZE` overrides it.
 - Streams are self-describing: the block size is written into the
   `.ph` header, and `pivcohuf_decompress` reads it back. A file made at one
   block size decodes on any build.
@@ -72,7 +72,7 @@ Geomean decode speedup vs an 8K block, across the `main` distribution set
 | c7g  | Graviton3 (NEON)         | −13% |   —  |  +8% | +12% | +13% | 64K  |
 | c8g  | Graviton4 (NEON)         | −12% |   —  |  +6% |  +8% |  +6% | 32K  |
 | m9g  | Graviton4+ (NEON)        | −10% |   —  |  +4% |  +5% |  +4% | 32K  |
-| M4   | Apple M4 (NEON)          |   *  |   —  | +3..16% per-dist | mixed (text regresses) | — | 16K |
+| M4   | Apple M4 (NEON)          |   *  |   —  | +3..16% per-dist | mixed pre-2026-07-02, now a win (see below) | — | 32K |
 
 Findings:
 
@@ -97,30 +97,38 @@ The lone regression is Sapphire Rapids (−3% at 32K; it peaks at 16K). 4K is
 worse for encode too (−5…−21%). So 32K is the right call on both axes: a win
 or wash everywhere for encode, with one −3% outlier.
 
-### The Apple Silicon exception (default 16K)
+### The Apple Silicon exception (16K, 2026-06-16 → 2026-07-02, retired)
 
-M4 is the one part that prefers **16K**: 32K regresses its text/medium-entropy
-distributions (and occasionally drops below 8K) because its very wide L1/L2
-already absorbs the per-block cost at 16K, after which the larger working set
-only hurts. So the default is gated: **macOS/arm64 → 16K, everything else →
-32K** (the cloud targets, including Graviton, want 32K).
+M4 used to prefer **16K**: 32K regressed its text/medium-entropy
+distributions because the per-block *scratch working set* of the BU decode
+walk grew with the block and spilled what its L1 absorbed at 16K.  The
+default was gated `#if defined(__APPLE__) && defined(__aarch64__)` → 16K.
 
-The gate is compile-time (`#if defined(__APPLE__) && defined(__aarch64__)` in
-`include/pivco_huffman.h`). That is exact, not a heuristic: a macOS arm64
-binary only ever runs on Apple Silicon, and a macOS binary's ISA is fixed at
-build time — so there is nothing a runtime probe could learn that the build
-doesn't already know. (CPU-ID asm doesn't help either: `MIDR_EL1` is EL1-only
-and faults at userspace on macOS; `sysctl hw.optional.arm64` is the only
-supported probe, and it still has to be `#ifdef __APPLE__`-guarded, collapsing
-back to the compile-time check.)
+The 2026-07-02 decode changes removed the cause rather than the symptom:
 
-Caveats / future work:
+- **In-place merge** (one child per node decodes into `out_buf`'s tail)
+  roughly halves the per-level scratch working set, and
+- **page-hazard-aware carving** keeps slow-moving merge cursors off
+  repeated 16 KB page-boundary splits (28-40 cycle penalty per load on
+  Apple Silicon; measured ~40% worst-case on calgary_pic from placement
+  alone).
 
-- Only **M4** was measured; M1–M3 are assumed to share the wide-L1 behaviour
-  and inherit the 16K default.
-- The *real* cause is cache size, not vendor. A principled **runtime gate
-  keyed on L1/L2 size** (`sysctl hw.l1dcachesize` on macOS,
-  `sysconf(_SC_LEVEL1_DCACHE_SIZE)` / sysfs on Linux) would generalise — e.g.
-  a future wide-L1 Graviton could also opt into 16K — and could supersede the
-  `__APPLE__` gate.
-- An explicit `-DPIVCO_BLOCK_SIZE=N` overrides the gate entirely.
+With those in, 32K beats the old 16K default on Apple Silicon and the
+gate was dropped — 32K everywhere.  Measured MAIN-set decode, 32K+in-place
+vs the prior 16K default (5 interleaved 20-rep rounds):
+
+- **M1 Max**: +2..11% on 8/9 dists; the slow dists gain most
+  (calgary_pic +8.4%, html_wiki +6.3%, chinese_text +7.4%, json_api
+  +7.5%, image_jpeg +11.4%); dna_fasta −1.4%.
+- **M4**: floor-raising — calgary_pic +8.8%, image_jpeg +8.1%, proba80
+  +4.1%, prose_pride/json_api +2.7%; english/html_wiki/dna −1..−3%
+  (M4 run-to-run spread was 3-9%, so the small negatives are at the
+  noise edge; the big positives are consistent across every run).
+- Ratio improves slightly at 32K (fewer per-block headers), as on the
+  rest of the fleet.
+
+Caveat: the in-place + carving numbers above are Apple-only measurements
+(M1 Max + M4).  The mechanism (fewer touched lines, hazard avoidance)
+should be neutral-to-positive on the smaller-L1 x86 parts, but the EC2
+fleet hasn't been re-swept with them — worth a re-run of this sweep next
+time the fleet is up.
