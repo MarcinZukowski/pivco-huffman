@@ -1507,6 +1507,61 @@ static int pv_part_coal_macro_avx512(uint16_t *codes_la, int n, int depth,
 static void prim_part_coal_macro(const ctx_t *c) {
     pv_part_coal_macro_avx512(c->la_work, c->n, c->depth, c->bm, c->tmp16);
 }
+
+/* ============================================================================
+ * enc_partition_full / enc_partition_right : asof-10e19a1 -- the zero-masked
+ * (maskz) compress forms, production until the issue-#11 merge-masking fix
+ * (part_left_avx512 had the same one-line pattern; it has no bench stage).
+ * Zen 4/5 false-dep on the maskz destination; c8a micro: full 0.0344 vs
+ * 0.0159, right 0.0175 vs 0.0095.  NB: partition micro is bimodal on
+ * c7a/c8i from per-run buffer-address (4K-aliasing) luck -- compare like
+ * modes or min-of-several.
+ * ========================================================================== */
+static int pv_part_full_avx512_maskz(uint8_t *ranks, int n, uint8_t thr,
+                                     uint8_t *bm, uint8_t *tmp)
+{
+    int n_left = 0, n_right = 0;
+    int j = 0;
+    __m512i vt = _mm512_set1_epi8((char)thr);
+    for (; j + 64 <= n; j += 64) {
+        __m512i v = _mm512_loadu_si512((const void *)(ranks + j));
+        __mmask64 k = _mm512_cmpgt_epu8_mask(v, vt);
+        int p = __builtin_popcountll(k);
+        memcpy(bm + (j >> 3), &k, 8);
+        _mm512_storeu_si512((void *)(tmp + n_right),   _mm512_maskz_compress_epi8(k, v));
+        _mm512_storeu_si512((void *)(ranks + n_left), _mm512_maskz_compress_epi8(~k, v));
+        n_right += p;
+        n_left += 64 - p;
+    }
+    for (; j < n; j++) {
+        if ((j & 7) == 0) bm[j >> 3] = 0;
+        uint8_t r = ranks[j];
+        if (r > thr) { bm[j >> 3] |= (uint8_t)(1u << (j & 7)); tmp[n_right++] = r; }
+        else         { ranks[n_left++] = r; }
+    }
+    return n_right;
+}
+static int pv_part_right_avx512_maskz(uint8_t *ranks, int n, uint8_t thr,
+                                      uint8_t *bm, uint8_t *tmp)
+{
+    int n_right = 0, j = 0;
+    __m512i vt = _mm512_set1_epi8((char)thr);
+    for (; j + 64 <= n; j += 64) {
+        __m512i v = _mm512_loadu_si512((const void *)(ranks + j));
+        __mmask64 k = _mm512_cmpgt_epu8_mask(v, vt);
+        memcpy(bm + (j >> 3), &k, 8);
+        _mm512_storeu_si512((void *)(tmp + n_right), _mm512_maskz_compress_epi8(k, v));
+        n_right += __builtin_popcountll(k);
+    }
+    for (; j < n; j++) {
+        if ((j & 7) == 0) bm[j >> 3] = 0;
+        uint8_t r = ranks[j];
+        if (r > thr) { bm[j >> 3] |= (uint8_t)(1u << (j & 7)); tmp[n_right++] = r; }
+    }
+    return n_right;
+}
+static void prim_part_maskz(const ctx_t *c){ pv_part_full_avx512_maskz(c->ranks_work, c->n, c->rank_thr, c->bm, c->tmp8); }
+static void prim_part_right_maskz(const ctx_t *c){ pv_part_right_avx512_maskz(c->ranks_work, c->n, c->rank_thr, c->bm, c->tmp8); }
 #endif /* __AVX512VBMI2__ && __AVX512VBMI__ */
 
 /* ============================================================================
@@ -1553,6 +1608,10 @@ static void pv_register_partition(void) {
                "per-iter coalesce, runtime vqtbl1q shuffle; LOSER", 1, PV_FN_NEON(prim_part_coal_tbl));
     /* x86 enc_partition_full (u8 rank): the per-8-chunk u16-like port vs the
        shipped 16-wide + single-movemask part_full_x86. */
+    PV_VARIANT(ST_PART, "asof-10e19a1", PV_ISA_AVX512, "10e19a1 (prior production)",
+               "maskz compress x2; merge-masked form (issue #11) wins -54% c8a / ~-20% c7a (Zen false dep), ~0 c7i/c8i", 0, PV_FN_VBMI2(prim_part_maskz));
+    PV_VARIANT(ST_PART_RIGHT, "asof-10e19a1", PV_ISA_AVX512, "10e19a1 (prior production)",
+               "maskz compress; merge-masked form (issue #11) wins -46% c8a / ~-9% c7a, ~0 c7i/c8i", 0, PV_FN_VBMI2(prim_part_right_maskz));
     PV_VARIANT(ST_PART, "u16-like", PV_ISA_SSE4,
                "30f42a5 per-8-chunk port",
                "per-8-chunk u8 port (mirrors u16 shape); vs shipped 16-wide", 1,

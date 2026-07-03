@@ -659,8 +659,11 @@ static inline int part_full_avx512(uint8_t *ranks, int n, uint8_t thr,
         __mmask64 k = _mm512_cmpgt_epu8_mask(v, vt);
         int p = __builtin_popcountll(k);
         memcpy(bm + (j >> 3), &k, 8);
-        _mm512_storeu_si512((void *)(tmp + n_right),   _mm512_maskz_compress_epi8(k, v));
-        _mm512_storeu_si512((void *)(ranks + n_left), _mm512_maskz_compress_epi8(~k, v));
+        /* mask_compress with v as pass-through, not maskz: Zen 4/5 false-dep
+         * on the maskz destination (issue #11, as in the merges); the lanes
+         * past popcount are dead either way -- the next store overwrites. */
+        _mm512_storeu_si512((void *)(tmp + n_right),   _mm512_mask_compress_epi8(v, k, v));
+        _mm512_storeu_si512((void *)(ranks + n_left), _mm512_mask_compress_epi8(v, ~k, v));
         n_right += p;
         n_left += 64 - p;
     }
@@ -683,7 +686,8 @@ static inline int part_right_avx512(uint8_t *ranks, int n, uint8_t thr,
         __m512i v = _mm512_loadu_si512((const void *)(ranks + j));
         __mmask64 k = _mm512_cmpgt_epu8_mask(v, vt);
         memcpy(bm + (j >> 3), &k, 8);
-        _mm512_storeu_si512((void *)(tmp + n_right), _mm512_maskz_compress_epi8(k, v));
+        /* mask_compress into v: see part_full (issue #11 false dep) */
+        _mm512_storeu_si512((void *)(tmp + n_right), _mm512_mask_compress_epi8(v, k, v));
         n_right += __builtin_popcountll(k);
     }
     for (; j < n; j++) {
@@ -705,7 +709,8 @@ static inline int part_left_avx512(uint8_t *ranks, int n, uint8_t thr, uint8_t *
         __mmask64 k = _mm512_cmpgt_epu8_mask(v, vt);
         int p = __builtin_popcountll(k);
         memcpy(bm + (j >> 3), &k, 8);
-        _mm512_storeu_si512((void *)(ranks + n_left), _mm512_maskz_compress_epi8(~k, v));
+        /* mask_compress into v: see part_full (issue #11 false dep) */
+        _mm512_storeu_si512((void *)(ranks + n_left), _mm512_mask_compress_epi8(v, ~k, v));
         n_left += 64 - p;
         n_right += p;
     }
