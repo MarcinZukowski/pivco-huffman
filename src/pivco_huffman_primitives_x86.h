@@ -402,8 +402,36 @@ static inline void merge_flat_d2_x86(uint8_t *symbols, int n,
         _mm_storeu_si128((__m128i *)(symbols + i), syms);
     }
 #else
-    /* SSE4.1 fallback: 2x ryg D=2 unpack.  Each reads a 16-byte window
-     * (slop), so stop the fast loop a few groups early. */
+    /* SSE4.1: TL/TH prepped nibble tables (issue #5, dougallj x86 port):
+     * TL[nib]=c2s[nib&3], TH[nib]=c2s[(nib>>2)&3] map input nibbles straight
+     * to symbol pairs -- no unpack pass; 64 codes/iter, the 4-way interleave
+     * is a 2-level punpck tree.  (On AVX2 builds the vpsrlvd unpack above is
+     * faster on Intel; this form wins on AMD too -- vendor-dispatch note in
+     * IDEAS "enc_init 4tab / bc2".) */
+    if (n >= 64) {
+        uint32_t w; memcpy(&w, c2s, 4);
+        const __m128i TL = _mm_set1_epi32((int)w);                       /* c2s[nib&3] */
+        const __m128i TH = _mm_shuffle_epi8(TL,
+            _mm_setr_epi8(0,0,0,0,1,1,1,1,2,2,2,2,3,3,3,3));            /* c2s[(nib>>2)&3] */
+        const __m128i m  = _mm_set1_epi8(0x0F);
+        for (; i + 64 <= n; i += 64) {
+            __m128i v  = _mm_loadu_si128((const __m128i *)(bm + (i >> 2)));
+            __m128i lo = _mm_and_si128(v, m);
+            __m128i hi = _mm_and_si128(_mm_srli_epi16(v, 4), m);
+            __m128i a = _mm_shuffle_epi8(TL, lo);   /* code0 of each byte */
+            __m128i b = _mm_shuffle_epi8(TH, lo);   /* code1 */
+            __m128i c = _mm_shuffle_epi8(TL, hi);   /* code2 */
+            __m128i d = _mm_shuffle_epi8(TH, hi);   /* code3 */
+            __m128i ab_lo = _mm_unpacklo_epi8(a, b), ab_hi = _mm_unpackhi_epi8(a, b);
+            __m128i cd_lo = _mm_unpacklo_epi8(c, d), cd_hi = _mm_unpackhi_epi8(c, d);
+            _mm_storeu_si128((__m128i *)(symbols + i),      _mm_unpacklo_epi16(ab_lo, cd_lo));
+            _mm_storeu_si128((__m128i *)(symbols + i + 16), _mm_unpackhi_epi16(ab_lo, cd_lo));
+            _mm_storeu_si128((__m128i *)(symbols + i + 32), _mm_unpacklo_epi16(ab_hi, cd_hi));
+            _mm_storeu_si128((__m128i *)(symbols + i + 48), _mm_unpackhi_epi16(ab_hi, cd_hi));
+        }
+    }
+    /* 2x ryg D=2 unpack remainder.  Each reads a 16-byte window (slop), so
+     * stop the fast loop a few groups early. */
     int fast_end = n >= 16 ? n - 16 : 0;
     for (; i + 16 <= fast_end; i += 16) {
         __m128i lo_codes = flat_d2_unpack_x86(bm + ((i      * 2) >> 3));
@@ -416,15 +444,43 @@ static inline void merge_flat_d2_x86(uint8_t *symbols, int n,
     merge_flat_tail_x86(symbols, i, n, bm, 2, c2s);
 }
 
-/* D=3: 8 codes/iter, ryg unpack + 8-entry pshufb scatter. */
+/* D=3: 32 codes/iter 6-bit pair-gather (issue #5, dougallj; x86 port of the
+ * NEON kernel): one pshufb positions two adjacent 3-bit codes per byte, the
+ * bidirectional u16 shift is pmullw-as-shift + one uniform psrlw, and the
+ * 8-entry c2s is duplicated so any 4-bit index works.  Falls through to the
+ * stock 8-wide ryg path + scalar tail for the remainder. */
 static inline void merge_flat_d3_x86(uint8_t *symbols, int n,
                                                 const uint8_t *bm,
                                                 const uint8_t *c2s)
 {
-    /* the unpack reads a 16-byte window — keep a generous scalar tail. */
-    __m128i c2s_vec = _mm_loadl_epi64((const __m128i *)c2s);  /* 8 entries */
     int i = 0;
     int fast_end = n >= 16 ? n - 16 : 0;
+    if (n >= 48) {
+        const uint8_t *bp = bm;
+        __m128i c2s8  = _mm_loadl_epi64((const __m128i *)c2s);
+        __m128i c2s16 = _mm_unpacklo_epi64(c2s8, c2s8);                  /* 8 entries x2 */
+        const __m128i pair6_shuf = _mm_setr_epi8(0,1, 1,2, 3,4, 4,5, 6,7, 7,8, 9,10, 10,11);
+        const __m128i mul6     = _mm_setr_epi16(16,1, 16,1, 16,1, 16,1); /* <<(4-o) */
+        const __m128i m3f_even = _mm_set1_epi16(0x003F);
+        const __m128i m3f_odd  = _mm_set1_epi16(0x3F00);
+        const __m128i m7       = _mm_set1_epi8(7);
+        for (; i + 32 <= fast_end; i += 32, bp += 12) {
+            __m128i packed = _mm_loadu_si128((const __m128i *)bp);
+            __m128i x = _mm_mullo_epi16(_mm_shuffle_epi8(packed, pair6_shuf), mul6);
+            /* 12-bit group at bits 4..15: even 6-bit half at 4..9, odd at 10..15 */
+            __m128i pair6 = _mm_or_si128(
+                _mm_and_si128(_mm_srli_epi16(x, 4), m3f_even),
+                _mm_and_si128(_mm_srli_epi16(x, 2), m3f_odd));
+            __m128i lo3 = _mm_and_si128(pair6, m7);
+            __m128i hi3 = _mm_and_si128(_mm_srli_epi16(pair6, 3), m7);
+            __m128i s_lo = _mm_shuffle_epi8(c2s16, lo3);
+            __m128i s_hi = _mm_shuffle_epi8(c2s16, hi3);
+            _mm_storeu_si128((__m128i *)(symbols + i),      _mm_unpacklo_epi8(s_lo, s_hi));
+            _mm_storeu_si128((__m128i *)(symbols + i + 16), _mm_unpackhi_epi8(s_lo, s_hi));
+        }
+    }
+    /* stock 8-wide ryg path + scalar tail */
+    __m128i c2s_vec = _mm_loadl_epi64((const __m128i *)c2s);  /* 8 entries */
     for (; i + 8 <= fast_end; i += 8) {
         __m128i codes = flat_d3_unpack_x86(bm + ((i * 3) >> 3));
         __m128i syms  = _mm_shuffle_epi8(c2s_vec, codes);
@@ -479,7 +535,13 @@ static inline void merge_flat_d4_x86(uint8_t *symbols, int n,
     merge_flat_tail_x86(symbols, i, n, bm, 4, c2s);
 }
 
-/* D=5: 8 codes/iter, ryg unpack + 2-table pshufb scatter. */
+/* D=5: 16 codes/iter pair-gather (issue #5, dougallj; x86 port of the NEON
+ * kernel): one pshufb gathers two adjacent 5-bit codes into each u16 lane,
+ * pmullw-as-shift aligns the 10-bit pair to the lane top, and two shift+mask
+ * place code0/code1 in the even/odd byte -- the interleave is free.  The
+ * 32-entry scatter is 2 pshufb + blendv, with bit 4 moved to the sign bit by
+ * one psllw (idx bytes are pre-masked, so the cross-byte spill is clean).
+ * Falls through to the stock 8-wide ryg path + scalar tail. */
 static inline void merge_flat_d5_x86(uint8_t *symbols, int n,
                                                 const uint8_t *bm,
                                                 const uint8_t *c2s)
@@ -487,8 +549,29 @@ static inline void merge_flat_d5_x86(uint8_t *symbols, int n,
     /* pshufb on either table uses code&15; blend by bit 4. */
     __m128i lo = _mm_loadu_si128((const __m128i *)c2s);        /* c2s[0..15]  */
     __m128i hi = _mm_loadu_si128((const __m128i *)(c2s + 16)); /* c2s[16..31] */
-    const __m128i b4 = _mm_set1_epi8(0x10);
     int i = 0;
+    if (n >= 25) {
+        const __m128i pair5_shuf = _mm_setr_epi8(0,1, 1,2, 2,3, 3,4, 5,6, 6,7, 7,8, 8,9);
+        const __m128i mul5       = _mm_setr_epi16(64,16,4,1, 64,16,4,1);  /* <<(6-o) */
+        const __m128i m1f_even   = _mm_set1_epi16(0x001F);
+        const __m128i m1f_odd    = _mm_set1_epi16(0x1F00);
+        int blocks = (n - 9) >> 4;
+        for (int b = 0; b < blocks; ++b) {
+            __m128i packed = _mm_loadu_si128((const __m128i *)(bm + b * 10));
+            __m128i x = _mm_mullo_epi16(_mm_shuffle_epi8(packed, pair5_shuf), mul5);
+            /* code0 at bits 6..10, code1 at bits 11..15 of each u16 */
+            __m128i idx = _mm_or_si128(
+                _mm_and_si128(_mm_srli_epi16(x, 6), m1f_even),
+                _mm_and_si128(_mm_srli_epi16(x, 3), m1f_odd));
+            __m128i rlo = _mm_shuffle_epi8(lo, idx);
+            __m128i rhi = _mm_shuffle_epi8(hi, idx);
+            __m128i sel = _mm_slli_epi16(idx, 3);   /* bit4 -> sign bit */
+            _mm_storeu_si128((__m128i *)(symbols + (b << 4)),
+                             _mm_blendv_epi8(rlo, rhi, sel));
+        }
+        i = blocks << 4;
+    }
+    const __m128i b4 = _mm_set1_epi8(0x10);
     int fast_end = n >= 24 ? n - 24 : 0;
     for (; i + 8 <= fast_end; i += 8) {
         __m128i codes = flat_d5_unpack_x86(bm + ((i * 5) >> 3));
@@ -501,7 +584,11 @@ static inline void merge_flat_d5_x86(uint8_t *symbols, int n,
     merge_flat_tail_x86(symbols, i, n, bm, 5, c2s);
 }
 
-/* D=6: 8 codes/iter, ryg unpack + 4-table pshufb scatter. */
+/* D=6: 16 codes/iter pair-gather (issue #5, dougallj; x86 port of the NEON
+ * kernel): same gather as D=5 but on 12-bit pairs (the shuffle/mul constants
+ * match the D=3 pair-gather, which works the same 6-bit grid).  The 64-entry
+ * scatter is 4 pshufb + a 2-level blend with bits 4/5 psllw'd to the sign
+ * bit.  Falls through to the stock 8-wide ryg path + scalar tail. */
 static inline void merge_flat_d6_x86(uint8_t *symbols, int n,
                                                 const uint8_t *bm,
                                                 const uint8_t *c2s)
@@ -512,9 +599,35 @@ static inline void merge_flat_d6_x86(uint8_t *symbols, int n,
     __m128i t1 = _mm_loadu_si128((const __m128i *)(c2s + 16));
     __m128i t2 = _mm_loadu_si128((const __m128i *)(c2s + 32));
     __m128i t3 = _mm_loadu_si128((const __m128i *)(c2s + 48));
+    int i = 0;
+    if (n >= 24) {
+        const __m128i pair6_shuf = _mm_setr_epi8(0,1, 1,2, 3,4, 4,5, 6,7, 7,8, 9,10, 10,11);
+        const __m128i mul6       = _mm_setr_epi16(16,1, 16,1, 16,1, 16,1);  /* <<(4-o) */
+        const __m128i m3f_even   = _mm_set1_epi16(0x003F);
+        const __m128i m3f_odd    = _mm_set1_epi16(0x3F00);
+        int blocks = (n - 8) >> 4;
+        for (int b = 0; b < blocks; ++b) {
+            __m128i packed = _mm_loadu_si128((const __m128i *)(bm + b * 12));
+            __m128i x = _mm_mullo_epi16(_mm_shuffle_epi8(packed, pair6_shuf), mul6);
+            /* code0 at bits 4..9, code1 at bits 10..15 of each u16 */
+            __m128i idx = _mm_or_si128(
+                _mm_and_si128(_mm_srli_epi16(x, 4), m3f_even),
+                _mm_and_si128(_mm_srli_epi16(x, 2), m3f_odd));
+            __m128i r0 = _mm_shuffle_epi8(t0, idx);
+            __m128i r1 = _mm_shuffle_epi8(t1, idx);
+            __m128i r2 = _mm_shuffle_epi8(t2, idx);
+            __m128i r3 = _mm_shuffle_epi8(t3, idx);
+            __m128i s4 = _mm_slli_epi16(idx, 3);   /* bit4 -> sign bit */
+            __m128i s5 = _mm_slli_epi16(idx, 2);   /* bit5 -> sign bit */
+            __m128i a  = _mm_blendv_epi8(r0, r1, s4);
+            __m128i b2 = _mm_blendv_epi8(r2, r3, s4);
+            _mm_storeu_si128((__m128i *)(symbols + (b << 4)),
+                             _mm_blendv_epi8(a, b2, s5));
+        }
+        i = blocks << 4;
+    }
     const __m128i b4 = _mm_set1_epi8(0x10);
     const __m128i b5 = _mm_set1_epi8(0x20);
-    int i = 0;
     int fast_end = n >= 24 ? n - 24 : 0;
     for (; i + 8 <= fast_end; i += 8) {
         __m128i codes = flat_d6_unpack_x86(bm + ((i * 6) >> 3));

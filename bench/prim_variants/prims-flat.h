@@ -404,6 +404,126 @@ static void prim_mf_e96529e_d8(const ctx_t *c){ pv_mf_e96529e_d8(c->out, c->n, c
 #endif /* USE_NEON_KERNELS */
 
 /* ============================================================================
+ * dougallj merge_flat d2/d3 — x86 ports (issue #5; NEON originals promoted in
+ * 917614a).  Mechanical translation: vqtbl1 -> pshufb; the bidirectional
+ * per-lane u16 shifts -> pmullw by 2^(s-min) + one uniform psrlw; per-byte
+ * shifts -> psrlw + byte-mask cleanup; vst4q/vst2q -> punpck interleave trees.
+ * Tails delegate to the production merge_flat_dN_x86.
+ * ========================================================================== */
+#if defined(__SSE4_1__) && !defined(__AVX512VBMI2__)
+
+/* d2: two prepped nibble tables (TL[nib]=c2s[nib&3], TH[nib]=c2s[(nib>>2)&3])
+ * map input nibbles straight to symbol pairs; 64 codes/iter, the 4-way
+ * interleave is a 2-level punpck tree (vst4q equivalent). */
+static void pv_mf_dj_d2_x86k(uint8_t *symbols, int n, const uint8_t *bm, const uint8_t *c2s)
+{
+    int i = 0;
+    if (n >= 64) {
+        uint32_t w; memcpy(&w, c2s, 4);
+        const __m128i TL = _mm_set1_epi32((int)w);                       /* c2s[nib&3] */
+        const __m128i TH = _mm_shuffle_epi8(TL,
+            _mm_setr_epi8(0,0,0,0,1,1,1,1,2,2,2,2,3,3,3,3));            /* c2s[(nib>>2)&3] */
+        const __m128i m  = _mm_set1_epi8(0x0F);
+        for (; i + 64 <= n; i += 64) {
+            __m128i v  = _mm_loadu_si128((const __m128i *)(bm + (i >> 2)));
+            __m128i lo = _mm_and_si128(v, m);
+            __m128i hi = _mm_and_si128(_mm_srli_epi16(v, 4), m);
+            __m128i a = _mm_shuffle_epi8(TL, lo);   /* code0 of each byte */
+            __m128i b = _mm_shuffle_epi8(TH, lo);   /* code1 */
+            __m128i c = _mm_shuffle_epi8(TL, hi);   /* code2 */
+            __m128i d = _mm_shuffle_epi8(TH, hi);   /* code3 */
+            __m128i ab_lo = _mm_unpacklo_epi8(a, b), ab_hi = _mm_unpackhi_epi8(a, b);
+            __m128i cd_lo = _mm_unpacklo_epi8(c, d), cd_hi = _mm_unpackhi_epi8(c, d);
+            _mm_storeu_si128((__m128i *)(symbols + i),      _mm_unpacklo_epi16(ab_lo, cd_lo));
+            _mm_storeu_si128((__m128i *)(symbols + i + 16), _mm_unpackhi_epi16(ab_lo, cd_lo));
+            _mm_storeu_si128((__m128i *)(symbols + i + 32), _mm_unpacklo_epi16(ab_hi, cd_hi));
+            _mm_storeu_si128((__m128i *)(symbols + i + 48), _mm_unpackhi_epi16(ab_hi, cd_hi));
+        }
+    }
+    merge_flat_d2_x86(symbols + i, n - i, bm + (i >> 2), c2s);
+}
+static void prim_mf_dj_d2_x86(const ctx_t *c){ pv_mf_dj_d2_x86k(c->out, c->n, c->bm, c->c2s); }
+
+/* asof-149ecb0: the pre-pair-gather production d3 (ryg unpack + 8-entry
+ * pshufb, 8 codes/iter), kept benchable as the baseline. */
+/* D=3: 8 codes/iter, ryg unpack + 8-entry pshufb scatter. */
+static void pv_mf_149ecb0_d3_x86k(uint8_t *symbols, int n,
+                                                const uint8_t *bm,
+                                                const uint8_t *c2s)
+{
+    /* the unpack reads a 16-byte window — keep a generous scalar tail. */
+    __m128i c2s_vec = _mm_loadl_epi64((const __m128i *)c2s);  /* 8 entries */
+    int i = 0;
+    int fast_end = n >= 16 ? n - 16 : 0;
+    for (; i + 8 <= fast_end; i += 8) {
+        __m128i codes = flat_d3_unpack_x86(bm + ((i * 3) >> 3));
+        __m128i syms  = _mm_shuffle_epi8(c2s_vec, codes);
+        _mm_storel_epi64((__m128i *)(symbols + i), syms);
+    }
+    merge_flat_tail_x86(symbols, i, n, bm, 3, c2s);
+}
+static void prim_mf_149ecb0_d3_x86(const ctx_t *c){ pv_mf_149ecb0_d3_x86k(c->out, c->n, c->bm, c->c2s); }
+
+/* asof-149ecb0: the pre-pair-gather production d5 (ryg unpack + 2-pshufb/
+ * blendv scatter, 8 codes/iter). */
+static void pv_mf_149ecb0_d5_x86k(uint8_t *symbols, int n,
+                                                const uint8_t *bm,
+                                                const uint8_t *c2s)
+{
+    /* pshufb on either table uses code&15; blend by bit 4. */
+    __m128i lo = _mm_loadu_si128((const __m128i *)c2s);        /* c2s[0..15]  */
+    __m128i hi = _mm_loadu_si128((const __m128i *)(c2s + 16)); /* c2s[16..31] */
+    const __m128i b4 = _mm_set1_epi8(0x10);
+    int i = 0;
+    int fast_end = n >= 24 ? n - 24 : 0;
+    for (; i + 8 <= fast_end; i += 8) {
+        __m128i codes = flat_d5_unpack_x86(bm + ((i * 5) >> 3));
+        __m128i rlo = _mm_shuffle_epi8(lo, codes);
+        __m128i rhi = _mm_shuffle_epi8(hi, codes);
+        __m128i sel = _mm_cmpeq_epi8(_mm_and_si128(codes, b4), b4);
+        __m128i syms = _mm_blendv_epi8(rlo, rhi, sel);
+        _mm_storel_epi64((__m128i *)(symbols + i), syms);
+    }
+    merge_flat_tail_x86(symbols, i, n, bm, 5, c2s);
+}
+static void prim_mf_149ecb0_d5_x86(const ctx_t *c){ pv_mf_149ecb0_d5_x86k(c->out, c->n, c->bm, c->c2s); }
+
+/* asof-149ecb0: the pre-pair-gather production d6 (ryg unpack + 4-pshufb/
+ * 2-level-blend scatter, 8 codes/iter). */
+static void pv_mf_149ecb0_d6_x86k(uint8_t *symbols, int n,
+                                                const uint8_t *bm,
+                                                const uint8_t *c2s)
+{
+    /* four pshufb (code&15 into each quarter) then a 2-level blend by
+     * bits 5,4 selects the right quarter. */
+    __m128i t0 = _mm_loadu_si128((const __m128i *)c2s);
+    __m128i t1 = _mm_loadu_si128((const __m128i *)(c2s + 16));
+    __m128i t2 = _mm_loadu_si128((const __m128i *)(c2s + 32));
+    __m128i t3 = _mm_loadu_si128((const __m128i *)(c2s + 48));
+    const __m128i b4 = _mm_set1_epi8(0x10);
+    const __m128i b5 = _mm_set1_epi8(0x20);
+    int i = 0;
+    int fast_end = n >= 24 ? n - 24 : 0;
+    for (; i + 8 <= fast_end; i += 8) {
+        __m128i codes = flat_d6_unpack_x86(bm + ((i * 6) >> 3));
+        __m128i r0 = _mm_shuffle_epi8(t0, codes);
+        __m128i r1 = _mm_shuffle_epi8(t1, codes);
+        __m128i r2 = _mm_shuffle_epi8(t2, codes);
+        __m128i r3 = _mm_shuffle_epi8(t3, codes);
+        __m128i s4 = _mm_cmpeq_epi8(_mm_and_si128(codes, b4), b4);
+        __m128i s5 = _mm_cmpeq_epi8(_mm_and_si128(codes, b5), b5);
+        __m128i a = _mm_blendv_epi8(r0, r1, s4);  /* bit5=0: t0/t1 */
+        __m128i b = _mm_blendv_epi8(r2, r3, s4);  /* bit5=1: t2/t3 */
+        __m128i syms = _mm_blendv_epi8(a, b, s5);
+        _mm_storel_epi64((__m128i *)(symbols + i), syms);
+    }
+    merge_flat_tail_x86(symbols, i, n, bm, 6, c2s);
+}
+static void prim_mf_149ecb0_d6_x86(const ctx_t *c){ pv_mf_149ecb0_d6_x86k(c->out, c->n, c->bm, c->c2s); }
+
+#endif /* __SSE4_1__ && !__AVX512VBMI2__ */
+
+/* ============================================================================
  * Registry — flat family (no-op where the ISA is unavailable)
  * ========================================================================== */
 static void pv_register_flat(void) {
@@ -433,6 +553,14 @@ static void pv_register_flat(void) {
                  "pre-ryg vpsrlvd AVX2 flat unpack + scalar c2s gather", 0, PV_FN_AVX2(prim_merge_flat_asof_d5));
     PV_VARIANT_D(ST_MERGE_FLAT, "asof-d580b16", 6, PV_ISA_AVX2, "d580b16~1:pivco_huffman_x86_flat.h",
                  "pre-ryg vpsrlvd AVX2 flat unpack + scalar c2s gather", 0, PV_FN_AVX2(prim_merge_flat_asof_d6));
+    PV_VARIANT_D(ST_MERGE_FLAT, "dougallj", 2, PV_ISA_SSE4, "issue #5 gist cf33841 (x86 port)",
+                 "TL/TH prepped nibble tables + 2-level punpck interleave, 64 codes/iter; production on SSE-only builds -- on AVX2 builds prod keeps the vpsrlvd unpack (Intel: dougallj +7% c4 / +31% c5; AMD: -32% c5a / -17% c6a -- vendor-dispatch material)", 0, PV_FN_SSE(prim_mf_dj_d2_x86));
+    PV_VARIANT_D(ST_MERGE_FLAT, "asof-149ecb0", 3, PV_ISA_SSE4, "149ecb0 (prior production)",
+                 "ryg unpack + 8-entry pshufb, 8 codes/iter; the pair-gather that replaced it wins -38..-54% across c3/c4/c5/c5a/c6a", 0, PV_FN_SSE(prim_mf_149ecb0_d3_x86));
+    PV_VARIANT_D(ST_MERGE_FLAT, "asof-149ecb0", 5, PV_ISA_SSE4, "149ecb0 (prior production)",
+                 "ryg unpack + 2-pshufb/blendv, 8 codes/iter; the pair-gather that replaced it wins -42..-51% across c3/c4/c5/c5a/c6a", 0, PV_FN_SSE(prim_mf_149ecb0_d5_x86));
+    PV_VARIANT_D(ST_MERGE_FLAT, "asof-149ecb0", 6, PV_ISA_SSE4, "149ecb0 (prior production)",
+                 "ryg unpack + 4-pshufb/2-level-blend, 8 codes/iter; the pair-gather that replaced it wins -39..-52% across c3/c4/c5/c5a/c6a", 0, PV_FN_SSE(prim_mf_149ecb0_d6_x86));
 }
 
 #endif /* PIVCO_PRIM_VARIANTS_FLAT_H */
