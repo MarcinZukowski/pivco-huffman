@@ -853,6 +853,12 @@ int main(int argc, char **argv) {
         pv_register_flat();
         pv_register_pack();
         pv_register_init();
+        /* --D also filters the graveyard: pv_register_* is unconditional, so
+           drop per-D variants whose D wasn't requested. */
+        int nk = 0;
+        for (int k=0;k<NPRIMS;k++)
+            if (!PRIMS[k].D || want[PRIMS[k].D]) PRIMS[nk++] = PRIMS[k];
+        NPRIMS = nk;
         /* Regroup so each logical family (stage) runs as one contiguous block,
            sub-grouped by D — scalar, then production backend, then its variants
            — instead of all variants trailing at the very end.  Stable within
