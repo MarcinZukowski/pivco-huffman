@@ -1144,6 +1144,175 @@ static void prim_merge_flat_e5a199a(const ctx_t *c) {
     default: break;
     }
 }
+
+/* ============================================================================
+ * merge_vec_vec / merge_cst_vec / merge_vec_cst : asof-76dec21 -- the
+ * zero-masked (maskz) expand forms, production until the issue-#11
+ * merge-masking fix.  Zen 4/5 have a false dependency on the maskz
+ * destination that serializes the 64-wide loop at expand latency.
+ * ========================================================================== */
+static void pv_merge_vec_vec_avx512_maskz(const uint8_t *bm, int K,
+                                       const uint8_t *left,
+                                       const uint8_t *right,
+                                       uint8_t *out)
+{
+    int lc = 0, rc = 0;
+    int j = 0;
+    for (; j + 64 <= K; j += 64) {
+        uint64_t mask;
+        memcpy(&mask, bm + (j >> 3), 8);
+        __mmask64 m  = (__mmask64)mask;
+        __mmask64 nm = ~m;
+        __m512i L = _mm512_maskz_expandloadu_epi8(nm, left + lc);
+        __m512i R = _mm512_maskz_expandloadu_epi8(m,  right + rc);
+        __m512i o = _mm512_or_si512(L, R);
+        _mm512_storeu_si512((__m512i *)(out + j), o);
+        int nr = __builtin_popcountll(mask);
+        rc += nr; lc += (64 - nr);
+    }
+    /* 2x-unrolled SSE stride-16: see primitives_x86.h. */
+    for (; j + 16 <= K; j += 16) {
+        uint8_t m0 = bm[j >> 3];
+        __m128i L0 = _mm_loadl_epi64((const __m128i *)(left + lc));
+        __m128i R0 = _mm_loadl_epi64((const __m128i *)(right + rc));
+        __m128i both0 = _mm_unpacklo_epi64(L0, R0);
+        __m128i shuf0 = _mm_loadl_epi64((const __m128i *)expand_tab[m0]);
+        __m128i o0    = _mm_shuffle_epi8(both0, shuf0);
+        _mm_storel_epi64((__m128i *)(out + j), o0);
+        int nr0 = expand_popcnt[m0];
+        rc += nr0; lc += (8 - nr0);
+
+        uint8_t m1 = bm[(j >> 3) + 1];
+        __m128i L1 = _mm_loadl_epi64((const __m128i *)(left + lc));
+        __m128i R1 = _mm_loadl_epi64((const __m128i *)(right + rc));
+        __m128i both1 = _mm_unpacklo_epi64(L1, R1);
+        __m128i shuf1 = _mm_loadl_epi64((const __m128i *)expand_tab[m1]);
+        __m128i o1    = _mm_shuffle_epi8(both1, shuf1);
+        _mm_storel_epi64((__m128i *)(out + j + 8), o1);
+        int nr1 = expand_popcnt[m1];
+        rc += nr1; lc += (8 - nr1);
+    }
+    for (; j + 8 <= K; j += 8) {
+        uint8_t m = bm[j >> 3];
+        __m128i L = _mm_loadl_epi64((const __m128i *)(left + lc));
+        __m128i R = _mm_loadl_epi64((const __m128i *)(right + rc));
+        __m128i both = _mm_unpacklo_epi64(L, R);
+        __m128i shuf = _mm_loadl_epi64((const __m128i *)expand_tab[m]);
+        __m128i o    = _mm_shuffle_epi8(both, shuf);
+        _mm_storel_epi64((__m128i *)(out + j), o);
+        int nr = expand_popcnt[m];
+        rc += nr; lc += (8 - nr);
+    }
+    for (; j < K; j++) {
+        int mb = (bm[j >> 3] >> (j & 7)) & 1;
+        out[j] = mb ? right[rc++] : left[lc++];
+    }
+}
+
+static void pv_merge_cst_vec_avx512_maskz(const uint8_t *bm, int K,
+                                                  uint8_t left_sym,
+                                                  const uint8_t *right,
+                                                  uint8_t *out)
+{
+    int rc = 0;
+    int j = 0;
+    __m128i Lbcast8 = _mm_set1_epi8((char)left_sym);
+    __m512i Lbcast64 = _mm512_set1_epi8((char)left_sym);
+    for (; j + 64 <= K; j += 64) {
+        uint64_t mask;
+        memcpy(&mask, bm + (j >> 3), 8);
+        __mmask64 m  = (__mmask64)mask;
+        __m512i R = _mm512_maskz_expandloadu_epi8(m, right + rc);
+        __m512i o = _mm512_mask_mov_epi8(Lbcast64, m, R);
+        _mm512_storeu_si512((__m512i *)(out + j), o);
+        rc += __builtin_popcountll(mask);
+    }
+    for (; j + 16 <= K; j += 16) {
+        uint8_t m0 = bm[j >> 3];
+        __m128i R0 = _mm_loadl_epi64((const __m128i *)(right + rc));
+        __m128i both0 = _mm_unpacklo_epi64(Lbcast8, R0);
+        __m128i shuf0 = _mm_loadl_epi64((const __m128i *)expand_tab[m0]);
+        __m128i o0    = _mm_shuffle_epi8(both0, shuf0);
+        _mm_storel_epi64((__m128i *)(out + j), o0);
+        rc += expand_popcnt[m0];
+
+        uint8_t m1 = bm[(j >> 3) + 1];
+        __m128i R1 = _mm_loadl_epi64((const __m128i *)(right + rc));
+        __m128i both1 = _mm_unpacklo_epi64(Lbcast8, R1);
+        __m128i shuf1 = _mm_loadl_epi64((const __m128i *)expand_tab[m1]);
+        __m128i o1    = _mm_shuffle_epi8(both1, shuf1);
+        _mm_storel_epi64((__m128i *)(out + j + 8), o1);
+        rc += expand_popcnt[m1];
+    }
+    for (; j + 8 <= K; j += 8) {
+        uint8_t m = bm[j >> 3];
+        __m128i R = _mm_loadl_epi64((const __m128i *)(right + rc));
+        __m128i both = _mm_unpacklo_epi64(Lbcast8, R);
+        __m128i shuf = _mm_loadl_epi64((const __m128i *)expand_tab[m]);
+        __m128i o    = _mm_shuffle_epi8(both, shuf);
+        _mm_storel_epi64((__m128i *)(out + j), o);
+        rc += expand_popcnt[m];
+    }
+    for (; j < K; j++) {
+        int mb = (bm[j >> 3] >> (j & 7)) & 1;
+        out[j] = mb ? right[rc++] : left_sym;
+    }
+}
+
+static void pv_merge_vec_cst_avx512_maskz(const uint8_t *bm, int K,
+                                                   const uint8_t *left,
+                                                   uint8_t right_sym,
+                                                   uint8_t *out)
+{
+    int lc = 0;
+    int j = 0;
+    __m128i Rbcast8 = _mm_set1_epi8((char)right_sym);
+    __m512i Rbcast64 = _mm512_set1_epi8((char)right_sym);
+    for (; j + 64 <= K; j += 64) {
+        uint64_t mask;
+        memcpy(&mask, bm + (j >> 3), 8);
+        __mmask64 m  = (__mmask64)mask;
+        __mmask64 nm = ~m;
+        __m512i L = _mm512_maskz_expandloadu_epi8(nm, left + lc);
+        __m512i o = _mm512_mask_mov_epi8(L, m, Rbcast64);
+        _mm512_storeu_si512((__m512i *)(out + j), o);
+        lc += 64 - __builtin_popcountll(mask);
+    }
+    for (; j + 16 <= K; j += 16) {
+        uint8_t m0 = bm[j >> 3];
+        __m128i L0 = _mm_loadl_epi64((const __m128i *)(left + lc));
+        __m128i both0 = _mm_unpacklo_epi64(L0, Rbcast8);
+        __m128i shuf0 = _mm_loadl_epi64((const __m128i *)expand_tab[m0]);
+        __m128i o0    = _mm_shuffle_epi8(both0, shuf0);
+        _mm_storel_epi64((__m128i *)(out + j), o0);
+        lc += (8 - expand_popcnt[m0]);
+
+        uint8_t m1 = bm[(j >> 3) + 1];
+        __m128i L1 = _mm_loadl_epi64((const __m128i *)(left + lc));
+        __m128i both1 = _mm_unpacklo_epi64(L1, Rbcast8);
+        __m128i shuf1 = _mm_loadl_epi64((const __m128i *)expand_tab[m1]);
+        __m128i o1    = _mm_shuffle_epi8(both1, shuf1);
+        _mm_storel_epi64((__m128i *)(out + j + 8), o1);
+        lc += (8 - expand_popcnt[m1]);
+    }
+    for (; j + 8 <= K; j += 8) {
+        uint8_t m = bm[j >> 3];
+        __m128i L = _mm_loadl_epi64((const __m128i *)(left + lc));
+        __m128i both = _mm_unpacklo_epi64(L, Rbcast8);
+        __m128i shuf = _mm_loadl_epi64((const __m128i *)expand_tab[m]);
+        __m128i o    = _mm_shuffle_epi8(both, shuf);
+        _mm_storel_epi64((__m128i *)(out + j), o);
+        lc += (8 - expand_popcnt[m]);
+    }
+    for (; j < K; j++) {
+        int mb = (bm[j >> 3] >> (j & 7)) & 1;
+        out[j] = mb ? right_sym : left[lc++];
+    }
+}
+
+static void prim_merge_vv_maskz(const ctx_t *c){ pv_merge_vec_vec_avx512_maskz(c->bm, c->n, c->merge_left, c->merge_right, c->out); }
+static void prim_merge_cv_maskz(const ctx_t *c){ pv_merge_cst_vec_avx512_maskz(c->bm, c->n, MERGE_LEFT_SYM, c->merge_right, c->out); }
+static void prim_merge_vc_maskz(const ctx_t *c){ pv_merge_vec_cst_avx512_maskz(c->bm, c->n, c->merge_left, MERGE_RIGHT_SYM, c->out); }
 #endif /* __AVX512VBMI2__ && __AVX512VBMI__ */
 
 #if defined(USE_NEON_KERNELS)
@@ -1219,6 +1388,13 @@ static void pv_register_merge(void) {
         PV_VARIANT_D(ST_MERGE_FLAT, "asof-e5a199a", d, PV_ISA_AVX512,
                      "e5a199a~1 merge_flat_dN_avx512",
                      "pre-widening 16 codes/iter", 0, PV_FN_VBMI2(prim_merge_flat_e5a199a));
+    /* merge_vec_vec / cst_vec / vec_cst — AVX-512 (asof-76dec21, pre issue-#11) */
+    PV_VARIANT(ST_MERGE_VEC_VEC, "asof-76dec21", PV_ISA_AVX512, "76dec21 (prior production)",
+               "maskz expands + OR; the issue-#11 merge-masked form wins -33% c7a / -27% c8a (Zen false dep), ~0 c7i/c8i", 0, PV_FN_VBMI2(prim_merge_vv_maskz));
+    PV_VARIANT(ST_MERGE_CST_VEC, "asof-76dec21", PV_ISA_AVX512, "76dec21 (prior production)",
+               "maskz expand + blend; merge-masked form wins -54% c7a / -51% c8a, -1% c7i / -10% c8i", 0, PV_FN_VBMI2(prim_merge_cv_maskz));
+    PV_VARIANT(ST_MERGE_VEC_CST, "asof-76dec21", PV_ISA_AVX512, "76dec21 (prior production)",
+               "maskz expand + blend; merge-masked form wins -52% c7a / -46% c8a, -22% c7i / -15% c8i", 0, PV_FN_VBMI2(prim_merge_vc_maskz));
     /* merge_vec_vec — NEON */
     PV_VARIANT(ST_MERGE_VEC_VEC, "com64",     PV_ISA_NEON, "asof-d24c0eb (prior production)",
                "V5 stride-64 COM, 4 chunks, byte prefix-sum cursors; production before the two-table merge", 0, PV_FN_NEON(prim_merge_vv_com64));

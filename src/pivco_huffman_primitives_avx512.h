@@ -128,9 +128,14 @@ static inline void merge_vec_vec_avx512(const uint8_t *bm, int K,
         memcpy(&mask, bm + (j >> 3), 8);
         __mmask64 m  = (__mmask64)mask;
         __mmask64 nm = ~m;
-        __m512i L = _mm512_maskz_expandloadu_epi8(nm, left + lc);
-        __m512i R = _mm512_maskz_expandloadu_epi8(m,  right + rc);
-        __m512i o = _mm512_or_si512(L, R);
+        /* Merge-masked expands, not maskz: Zen 4/5 have a false dependency on
+         * the output register of zero-masked compress/expand (issue #11,
+         * aadaa-fgtaa), which serializes iterations at expand latency.  The
+         * asm barrier keeps the compiler from folding the zero back into a
+         * maskz form.  Expanding R into L also replaces the OR. */
+        __m512i zero = _mm512_setzero_si512(); asm("":"+v"(zero));
+        __m512i L = _mm512_mask_expandloadu_epi8(zero, nm, left + lc);
+        __m512i o = _mm512_mask_expandloadu_epi8(L, m,  right + rc);
         _mm512_storeu_si512((__m512i *)(out + j), o);
         int nr = __builtin_popcountll(mask);
         rc += nr; lc += (64 - nr);
@@ -190,8 +195,9 @@ static inline void merge_cst_vec_avx512(const uint8_t *bm, int K,
         uint64_t mask;
         memcpy(&mask, bm + (j >> 3), 8);
         __mmask64 m  = (__mmask64)mask;
-        __m512i R = _mm512_maskz_expandloadu_epi8(m, right + rc);
-        __m512i o = _mm512_mask_mov_epi8(Lbcast64, m, R);
+        /* expand straight into the broadcast (issue #11: avoids the Zen 4/5
+         * maskz false dep and drops the blend) */
+        __m512i o = _mm512_mask_expandloadu_epi8(Lbcast64, m, right + rc);
         _mm512_storeu_si512((__m512i *)(out + j), o);
         rc += __builtin_popcountll(mask);
     }
@@ -244,8 +250,8 @@ static inline void merge_vec_cst_avx512(const uint8_t *bm, int K,
         memcpy(&mask, bm + (j >> 3), 8);
         __mmask64 m  = (__mmask64)mask;
         __mmask64 nm = ~m;
-        __m512i L = _mm512_maskz_expandloadu_epi8(nm, left + lc);
-        __m512i o = _mm512_mask_mov_epi8(L, m, Rbcast64);
+        /* expand straight into the broadcast (issue #11, see merge_cst_vec) */
+        __m512i o = _mm512_mask_expandloadu_epi8(Rbcast64, nm, left + lc);
         _mm512_storeu_si512((__m512i *)(out + j), o);
         lc += 64 - __builtin_popcountll(mask);
     }
