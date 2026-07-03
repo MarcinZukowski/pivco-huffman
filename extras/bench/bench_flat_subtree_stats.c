@@ -104,25 +104,14 @@ static void analyze_distribution(int d)
     printf("| %5.1f%% elems in maximal flat subtrees (D>=2): ",
            total_freq ? 100.0 * (double)w_total_flat / (double)total_freq : 0.0);
 
-    /* Bucketed columns: D=2, 3, 4, 5, 6, 7+ */
-    int d_list[] = {2, 3, 4, 5, 6};
+    /* Bucketed columns: D=2..8 (a 256-symbol alphabet caps flat depth at 8) */
+    int d_list[] = {2, 3, 4, 5, 6, 7, 8};
     for (size_t i = 0; i < sizeof(d_list) / sizeof(d_list[0]); i++) {
         int D = d_list[i];
         double pct = total_freq ?
             100.0 * (double)w_by_depth[D] / (double)total_freq : 0.0;
         printf("D=%d(%d,%5.2f%%) ", D, c_by_depth[D], pct);
     }
-    /* Tail: D >= 7 */
-    uint64_t w_tail = 0;
-    int      c_tail = 0;
-    for (int D = 7; D < 16; D++) {
-        w_tail += w_by_depth[D];
-        c_tail += c_by_depth[D];
-    }
-    double pct_tail = total_freq ?
-        100.0 * (double)w_tail / (double)total_freq : 0.0;
-    printf("D>=7(%d,%5.2f%%)", c_tail, pct_tail);
-
     printf("\n");
     free(t);
 }
@@ -139,7 +128,7 @@ int main(void)
     printf("%-14s | %s | %s\n",
            "distribution",
            "len-span     ",
-           "coverage: total, D=2(4 lvs), D=3(8), D=4(16), D=5(32), D=6(64), D>=7");
+           "coverage: total, D=2(4 lvs), D=3(8), D=4(16), D=5(32), D=6(64), D=7(128), D=8(256)");
     for (int d = 0; d < n; d++) analyze_distribution(d);
     return 0;
 }

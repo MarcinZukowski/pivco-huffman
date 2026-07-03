@@ -395,6 +395,50 @@ static void pv_mf_e96529e_d8(uint8_t *symbols, int n,
     for (; i < n; i++) symbols[i] = c2s[bm[i]];
 }
 
+/* d7 pair32: u32-lane pair-gather probe (x86's winning d7 form, ported back
+ * to NEON for comparison).  One 16-byte load feeds two vqtbl1 gathers (a
+ * 14-bit pair per u32 lane), vshlq_u32 normalizes, shift+mask split
+ * code0/code1 into the low bytes, vuzp1 compacts; the vqtbl4+vqtbx4 scatter
+ * matches production.  vs production: 1 load instead of 2, but +3 ops of
+ * two-field extraction over the one-code-per-u16 vmovn form. */
+static void pv_mf_pair32_d7_neonk(uint8_t *symbols, int n, const uint8_t *bm, const uint8_t *c2s)
+{
+    int i = 0;
+    if (n >= 19) {
+        uint8x16x4_t lo, hi;
+        lo.val[0] = vld1q_u8(c2s);       lo.val[1] = vld1q_u8(c2s + 16);
+        lo.val[2] = vld1q_u8(c2s + 32);  lo.val[3] = vld1q_u8(c2s + 48);
+        hi.val[0] = vld1q_u8(c2s + 64);  hi.val[1] = vld1q_u8(c2s + 80);
+        hi.val[2] = vld1q_u8(c2s + 96);  hi.val[3] = vld1q_u8(c2s + 112);
+        static const uint8_t g_lo_t[16] = {0,1,2,3, 1,2,3,4, 3,4,5,6, 5,6,7,8};
+        static const uint8_t g_hi_t[16] = {7,8,9,10, 8,9,10,11, 10,11,12,13, 12,13,14,15};
+        static const int32_t sh_t[4]    = {0,-6,-4,-2};   /* >>o, o={0,6,4,2} */
+        const uint8x16_t g_lo = vld1q_u8(g_lo_t), g_hi = vld1q_u8(g_hi_t);
+        const int32x4_t  sh   = vld1q_s32(sh_t);
+        const uint32x4_t m7f = vdupq_n_u32(0x7F), m7f00 = vdupq_n_u32(0x7F00);
+        const uint8x16_t sub64q = vdupq_n_u8(64);
+        int blocks = (n - 3) >> 4;
+        for (int b = 0; b < blocks; ++b) {
+            uint8x16_t packed = vld1q_u8(bm + b * 14);
+            uint32x4_t xl = vshlq_u32(vreinterpretq_u32_u8(vqtbl1q_u8(packed, g_lo)), sh);
+            uint32x4_t xh = vshlq_u32(vreinterpretq_u32_u8(vqtbl1q_u8(packed, g_hi)), sh);
+            /* code0 at bits 0..6, code1 at bits 7..13 of each u32 */
+            uint32x4_t cl = vorrq_u32(vandq_u32(xl, m7f),
+                                      vandq_u32(vshlq_n_u32(xl, 1), m7f00));
+            uint32x4_t ch = vorrq_u32(vandq_u32(xh, m7f),
+                                      vandq_u32(vshlq_n_u32(xh, 1), m7f00));
+            uint8x16_t codes = vreinterpretq_u8_u16(
+                vuzp1q_u16(vreinterpretq_u16_u32(cl), vreinterpretq_u16_u32(ch)));
+            uint8x16_t s = vqtbl4q_u8(lo, codes);
+            s = vqtbx4q_u8(s, hi, vsubq_u8(codes, sub64q));
+            vst1q_u8(symbols + (b << 4), s);
+        }
+        i = blocks << 4;
+    }
+    merge_flat_d7_neon(symbols + i, n - i, bm + ((i * 7) >> 3), c2s);
+}
+static void prim_mf_pair32_d7_neon(const ctx_t *c){ pv_mf_pair32_d7_neonk(c->out, c->n, c->bm, c->c2s); }
+
 static void prim_mf_e96529e_d2(const ctx_t *c){ pv_mf_e96529e_d2(c->out, c->n, c->bm, c->c2s); }
 static void prim_mf_e96529e_d3(const ctx_t *c){ pv_mf_e96529e_d3(c->out, c->n, c->bm, c->c2s); }
 static void prim_mf_e96529e_d4(const ctx_t *c){ pv_mf_e96529e_d4(c->out, c->n, c->bm, c->c2s); }
@@ -521,6 +565,32 @@ static void pv_mf_149ecb0_d6_x86k(uint8_t *symbols, int n,
 }
 static void prim_mf_149ecb0_d6_x86(const ctx_t *c){ pv_mf_149ecb0_d6_x86k(c->out, c->n, c->bm, c->c2s); }
 
+/* asof-695c36e: the pre-pair-gather production d7 (scalar-unrolled u64
+ * gather, 8 codes/iter; production kept it as the remainder path). */
+static void pv_mf_695c36e_d7_x86k(uint8_t *symbols, int n,
+                                                const uint8_t *bm,
+                                                const uint8_t *c2s)
+{
+    int i = 0;
+    for (; i + 8 <= n; i += 8) {
+        const uint8_t *p = bm + ((i * 7) >> 3);
+        uint64_t w = (uint64_t)p[0] | ((uint64_t)p[1] << 8)
+                   | ((uint64_t)p[2] << 16) | ((uint64_t)p[3] << 24)
+                   | ((uint64_t)p[4] << 32) | ((uint64_t)p[5] << 40)
+                   | ((uint64_t)p[6] << 48);
+        symbols[i    ] = c2s[(w      ) & 0x7F];
+        symbols[i + 1] = c2s[(w >>  7) & 0x7F];
+        symbols[i + 2] = c2s[(w >> 14) & 0x7F];
+        symbols[i + 3] = c2s[(w >> 21) & 0x7F];
+        symbols[i + 4] = c2s[(w >> 28) & 0x7F];
+        symbols[i + 5] = c2s[(w >> 35) & 0x7F];
+        symbols[i + 6] = c2s[(w >> 42) & 0x7F];
+        symbols[i + 7] = c2s[(w >> 49) & 0x7F];
+    }
+    merge_flat_tail_x86(symbols, i, n, bm, 7, c2s);
+}
+static void prim_mf_695c36e_d7_x86(const ctx_t *c){ pv_mf_695c36e_d7_x86k(c->out, c->n, c->bm, c->c2s); }
+
 #endif /* __SSE4_1__ && !__AVX512VBMI2__ */
 
 /* ============================================================================
@@ -561,6 +631,10 @@ static void pv_register_flat(void) {
                  "ryg unpack + 2-pshufb/blendv, 8 codes/iter; the pair-gather that replaced it wins -42..-51% across c3/c4/c5/c5a/c6a", 0, PV_FN_SSE(prim_mf_149ecb0_d5_x86));
     PV_VARIANT_D(ST_MERGE_FLAT, "asof-149ecb0", 6, PV_ISA_SSE4, "149ecb0 (prior production)",
                  "ryg unpack + 4-pshufb/2-level-blend, 8 codes/iter; the pair-gather that replaced it wins -39..-52% across c3/c4/c5/c5a/c6a", 0, PV_FN_SSE(prim_mf_149ecb0_d6_x86));
+    PV_VARIANT_D(ST_MERGE_FLAT, "asof-695c36e", 7, PV_ISA_SSE4, "695c36e (prior production)",
+                 "scalar-unrolled u64 gather, 8 codes/iter; the u32-lane pair-gather that replaced it wins -17% c3 / -36% c4/c5 / -42% c5a / -47% c6a", 0, PV_FN_SSE(prim_mf_695c36e_d7_x86));
+    PV_VARIANT_D(ST_MERGE_FLAT, "pair32", 7, PV_ISA_NEON, "x86 d7 pair-gather ported back for comparison",
+                 "2 vqtbl1 u32-lane gathers + vshlq_u32 + vuzp1 compact; production vqtbl4/vqtbx4 scatter; LOSES +46% M4 / +28% c8g -- prod's one-code-per-u16 unpack + vmovn is cheaper than the pair split; x86 won only because it escaped a scalar loop", 0, PV_FN_NEON(prim_mf_pair32_d7_neon));
 }
 
 #endif /* PIVCO_PRIM_VARIANTS_FLAT_H */

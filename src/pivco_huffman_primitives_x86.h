@@ -645,15 +645,81 @@ static inline void merge_flat_d6_x86(uint8_t *symbols, int n,
     merge_flat_tail_x86(symbols, i, n, bm, 6, c2s);
 }
 
-/* D=7: no x86 SIMD path: pshufb is only 16-wide, so the 128-entry scatter
- * needs 8 sub-tables + a 3-level blend tree that measures no faster than this
- * scalar-unrolled inner (~0.38 ns/elem on Zen 3).  Unlike NEON (vqtbl4) and
- * AVX-512 (vpermi2b), x86 has no cheap wide table lookup. */
+/* D=7: 16 codes/iter u32-lane pair-gather.  14-bit pairs at offsets {0,6,4,2}
+ * don't fit the u16 windows the D<=6 kernels use (up to 20 bits), so each
+ * pair gets a 4-byte window in a u32 lane (2 pshufb gathers x 4 pairs),
+ * pmulld by 2^(6-o) normalizes to bits 6..19, shift+mask place code0/code1
+ * in the lane's low bytes, and packus_epi32 compacts to 16 in-order codes.
+ * The 128-entry scatter is 8 pshufb quarters + a 3-level blend on bits 4/5/6
+ * (psllw into blendv's sign bit).
+ *
+ * Kept as its own function: the first cut, written directly inside
+ * merge_flat_d7_x86, cost c3 (IvyBridge) ~12% E2E on every flat-using dist
+ * via codegen/layout; as a named function the codegen is fine whether or
+ * not the compiler inlines it (inline policy revisits with dynamic
+ * dispatch).  Decodes the largest 16-multiple prefix that gating allows;
+ * returns the count of codes written. */
+static inline int merge_flat_d7_pair_x86(uint8_t *symbols,
+                                                int n,
+                                                const uint8_t *bm,
+                                                const uint8_t *c2s)
+{
+    __m128i t0 = _mm_loadu_si128((const __m128i *)c2s);
+    __m128i t1 = _mm_loadu_si128((const __m128i *)(c2s + 16));
+    __m128i t2 = _mm_loadu_si128((const __m128i *)(c2s + 32));
+    __m128i t3 = _mm_loadu_si128((const __m128i *)(c2s + 48));
+    __m128i t4 = _mm_loadu_si128((const __m128i *)(c2s + 64));
+    __m128i t5 = _mm_loadu_si128((const __m128i *)(c2s + 80));
+    __m128i t6 = _mm_loadu_si128((const __m128i *)(c2s + 96));
+    __m128i t7 = _mm_loadu_si128((const __m128i *)(c2s + 112));
+    const __m128i g_lo = _mm_setr_epi8(0,1,2,3, 1,2,3,4, 3,4,5,6, 5,6,7,8);
+    const __m128i g_hi = _mm_setr_epi8(7,8,9,10, 8,9,10,11, 10,11,12,13, 12,13,14,15);
+    const __m128i mul7 = _mm_setr_epi32(64,1,4,16);   /* <<(6-o), o={0,6,4,2} */
+    const __m128i m7f_even = _mm_set1_epi32(0x0000007F);
+    const __m128i m7f_odd  = _mm_set1_epi32(0x00007F00);
+    int blocks = (n - 3) >> 4;
+    for (int b = 0; b < blocks; ++b) {
+        __m128i packed = _mm_loadu_si128((const __m128i *)(bm + b * 14));
+        __m128i xl = _mm_mullo_epi32(_mm_shuffle_epi8(packed, g_lo), mul7);
+        __m128i xh = _mm_mullo_epi32(_mm_shuffle_epi8(packed, g_hi), mul7);
+        /* code0 at bits 6..12, code1 at bits 13..19 of each u32 */
+        __m128i cl = _mm_or_si128(
+            _mm_and_si128(_mm_srli_epi32(xl, 6), m7f_even),
+            _mm_and_si128(_mm_srli_epi32(xl, 5), m7f_odd));
+        __m128i ch = _mm_or_si128(
+            _mm_and_si128(_mm_srli_epi32(xh, 6), m7f_even),
+            _mm_and_si128(_mm_srli_epi32(xh, 5), m7f_odd));
+        __m128i idx = _mm_packus_epi32(cl, ch);   /* 16 codes, in order */
+        __m128i r0 = _mm_shuffle_epi8(t0, idx);
+        __m128i r1 = _mm_shuffle_epi8(t1, idx);
+        __m128i r2 = _mm_shuffle_epi8(t2, idx);
+        __m128i r3 = _mm_shuffle_epi8(t3, idx);
+        __m128i r4 = _mm_shuffle_epi8(t4, idx);
+        __m128i r5 = _mm_shuffle_epi8(t5, idx);
+        __m128i r6 = _mm_shuffle_epi8(t6, idx);
+        __m128i r7 = _mm_shuffle_epi8(t7, idx);
+        __m128i s4 = _mm_slli_epi16(idx, 3);   /* bit4 -> sign bit */
+        __m128i s5 = _mm_slli_epi16(idx, 2);   /* bit5 -> sign bit */
+        __m128i s6 = _mm_slli_epi16(idx, 1);   /* bit6 -> sign bit */
+        __m128i a0 = _mm_blendv_epi8(r0, r1, s4);
+        __m128i a1 = _mm_blendv_epi8(r2, r3, s4);
+        __m128i a2 = _mm_blendv_epi8(r4, r5, s4);
+        __m128i a3 = _mm_blendv_epi8(r6, r7, s4);
+        __m128i b0 = _mm_blendv_epi8(a0, a1, s5);
+        __m128i b1 = _mm_blendv_epi8(a2, a3, s5);
+        _mm_storeu_si128((__m128i *)(symbols + (b << 4)),
+                         _mm_blendv_epi8(b0, b1, s6));
+    }
+    return blocks << 4;
+}
+
 static inline void merge_flat_d7_x86(uint8_t *symbols, int n,
                                                 const uint8_t *bm,
                                                 const uint8_t *c2s)
 {
     int i = 0;
+    if (n >= 19)
+        i = merge_flat_d7_pair_x86(symbols, n, bm, c2s);
     for (; i + 8 <= n; i += 8) {
         const uint8_t *p = bm + ((i * 7) >> 3);
         uint64_t w = (uint64_t)p[0] | ((uint64_t)p[1] << 8)
