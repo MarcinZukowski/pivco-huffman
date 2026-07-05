@@ -2,6 +2,18 @@
 
 #include <string.h>
 
+/* PIVCO_CHECK failure path (see pivco_check.h): print and crash --
+ * internal invariants must fail loudly in every build type. */
+#include "pivco_check.h"
+#include <stdio.h>
+#include <stdlib.h>
+void pivco_check_fail(const char *expr, const char *file, int line)
+{
+    fprintf(stderr, "PIVCO_CHECK failed: %s (%s:%d)\n", expr, file, line);
+    fflush(NULL);
+    abort();
+}
+
 static pivco_impl_t g_impl = PIVCO_IMPL_AUTO;
 
 /* ---------- FSE per-table-id stats storage ----------

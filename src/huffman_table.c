@@ -2,7 +2,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stddef.h>
-#include <assert.h>
+#include "pivco_check.h"
 
 /* ---------- Code lengths via van Leeuwen's two-queue method ----------
  * Replaces the index-indirected binary min-heap.  The heap spent ~⅔ of the
@@ -659,8 +659,8 @@ static int build_table_finish(const uint8_t lengths[PIVCO_MAX_SYMBOLS],
                    Leaf i of the chunk has in-subtree code i (low D bits of
                    its canonical code), so flat_code_to_sym[base+i] is its
                    i-th symbol. */
-                assert(table->tree[cur].left == -1 &&
-                       table->tree[cur].right == -1);
+                PIVCO_CHECK(table->tree[cur].left == -1 &&
+                            table->tree[cur].right == -1);
                 table->flat_depth[cur]  = (uint8_t)D;
                 table->flat_offset[cur] = pool;
                 int n = 1 << D;
@@ -711,8 +711,7 @@ static int build_table_finish(const uint8_t lengths[PIVCO_MAX_SYMBOLS],
         } else if (left_leaf) {
             table->node_type[i] = (uint8_t)PIVCO_NODE_LEAF_LEFT;
         } else {
-            assert(!right_leaf);
-            (void)right_leaf;
+            PIVCO_CHECK(!right_leaf);
             table->node_type[i] = (uint8_t)PIVCO_NODE_INTERNAL_FULL;
         }
     }

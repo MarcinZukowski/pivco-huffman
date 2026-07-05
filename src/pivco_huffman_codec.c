@@ -29,7 +29,7 @@
 
 #include <stdlib.h>
 #include <string.h>
-#include <assert.h>
+#include "pivco_check.h"
 
 /* Thread-local growable decode scratch arena.  Replaces the former fixed
  * `static __thread` array sized at PIVCO_BLOCK_SIZE so the block size is a
@@ -156,7 +156,7 @@ static inline void codec_maybe_fse_attempt(uint8_t *marker_slot,
 
     int t_id = pivco_fse_select_table(p_major);
     if (t_id < 1) return;
-    assert(t_id < PIVCO_FSE_STATS_SLOTS);  /* guards the g_pivco_fse_* indexing */
+    PIVCO_CHECK(t_id < PIVCO_FSE_STATS_SLOTS);  /* guards the g_pivco_fse_* indexing */
 
     int xor_flag = (n_right > n_left);
     uint8_t scratch[(size_t)nbytes + 16];
@@ -353,8 +353,8 @@ static void codec_decode_subtree(const pivco_huffman_table_t *table,
     case PIVCO_NODE_LEAF:
         /* Unreachable: every parent consumes a leaf child via its
          * cst_* merge instead of recursing into it. */
-        assert(!"codec_decode_subtree dispatched on a leaf");
-        return;
+        pivco_check_fail("codec_decode_subtree dispatched on a leaf",
+                         __FILE__, __LINE__);
 
     case PIVCO_NODE_INTERNAL_FLAT: {
         int D = table->flat_depth[node_id];

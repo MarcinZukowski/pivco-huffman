@@ -44,7 +44,7 @@
                                          * on SSE-only builds. */
 #include <stdint.h>
 #include <string.h>
-#include <assert.h>
+#include "pivco_check.h"
 
 /* Backend lifecycle.  Lazily build the compress_tab + expand_tab pre-
  * bake tables that the x86 partition / merge primitives index
@@ -718,7 +718,8 @@ static inline void merge_flat_x86(uint8_t *out, int n,
     case 7: merge_flat_d7_x86(out, n, bm, c2s); break;
     case 8: merge_flat_d8_x86(out, n, bm, c2s); break;
     default:
-        assert(!"merge_flat_x86: D out of range (flat_depth is 2..8)");
+        pivco_check_fail("merge_flat_x86: D out of range (flat_depth is 2..8)",
+                         __FILE__, __LINE__);
         break;
     }
     PROF_TOC(PROF_BU_MERGE_FLAT, n);
@@ -1101,7 +1102,7 @@ PIVCO_PRIM_ALWAYS_INLINE void prim_enc_init(uint8_t *restrict ranks, int n,
                                               const uint8_t *sym_to_rank,
                                               const pivco_huffman_enc_init_aux_t *aux)
 {
-    assert(aux && aux->s2r_hi);
+    PIVCO_CHECK(aux && aux->s2r_hi);
     const uint16_t *restrict hi = aux->s2r_hi;
 #define PIVCO_LO(x) ((uint16_t)sym_to_rank[(uint8_t)(x)])
 #define PIVCO_HI(x) hi[(uint8_t)(x)]
