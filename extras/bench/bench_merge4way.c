@@ -176,6 +176,15 @@ static void merge_vvvv(const uint8_t *quad,int N,
 #define HAVE_NEON 1
 #endif
 
+/* The whole bench is ISA-specific (merge2 and all 4-way kernels exist
+ * only for AVX-512 / NEON); on anything else there is nothing to bench. */
+#if !defined(HAVE_AVX512) && !defined(HAVE_NEON)
+int main(void){
+    printf("bench_merge4way: needs AVX-512 or NEON; nothing to bench on this ISA.\n");
+    return 0;
+}
+#else
+
 static double bench(void(*run)(void),int reps){
     double best=1e30;
     for(int s=0;s<9;s++){ double t0=now_ns(); for(int r=0;r<reps;r++) run(); double e=now_ns()-t0; if(e<best)best=e; }
@@ -252,3 +261,5 @@ int main(int argc,char**argv){
 #endif
     return 0;
 }
+
+#endif /* HAVE_AVX512 || HAVE_NEON */
