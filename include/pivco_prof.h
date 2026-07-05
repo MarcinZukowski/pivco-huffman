@@ -50,7 +50,6 @@ typedef enum {
      * timings.  Elements = bytes processed at this call. */
     PROF_BU_MERGE_VEC_VEC,             /* general 2-buffer merge */
     PROF_BU_MERGE_CST_VEC,  /* left side broadcast constant */
-    PROF_BU_MERGE_VEC_CST, /* right side broadcast constant */
     PROF_BU_MERGE_CST_CST,       /* BOTH_LEAVES / both-leaf collapse */
     PROF_BU_MERGE_FLAT,            /* INTERNAL_FLAT direct-to-buffer */
     PROF_BU_POPCOUNT_K,             /* compute K_right from bitmap */

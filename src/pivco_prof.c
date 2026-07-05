@@ -27,7 +27,6 @@ static const char *prof_names[PROF_COUNT] = {
     [PROF_FLAT_DECODE_DIRECT]  = "flat_decode_direct",
     [PROF_BU_MERGE_VEC_VEC]            = "bu_merge_vec_vec",
     [PROF_BU_MERGE_CST_VEC] = "bu_merge_cst_vec",
-    [PROF_BU_MERGE_VEC_CST]= "bu_merge_vec_cst",
     [PROF_BU_MERGE_CST_CST]      = "bu_merge_cst_cst",
     [PROF_BU_MERGE_FLAT]           = "bu_merge_flat",
     [PROF_BU_POPCOUNT_K]            = "bu_popcount_K",

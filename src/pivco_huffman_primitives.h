@@ -81,7 +81,6 @@
  *      INTERNAL_FULL    prim_enc_partition_full        both       left in place,
  *                                                                 right->right_out
  *      LEAF_LEFT        prim_enc_partition_right       right only right->right_out
- *      LEAF_RIGHT       prim_enc_partition_left        left only  left in place
  *      BOTH_LEAVES      prim_enc_partition_none        neither    (bitmap only)
  *
  *    SUFFIX CONVENTION: the suffix names the NON-TRIVIAL child subtree —
@@ -102,16 +101,12 @@
  *      int  prim_enc_partition_right(uint8_t *ranks, int n, uint8_t thr,
  *                                    uint8_t *bm, uint8_t *right_out);
  *           // emits right_out[0..n_right); left side not produced
- *      int  prim_enc_partition_left (uint8_t *ranks, int n, uint8_t thr,
- *                                    uint8_t *bm);
- *           // left compacted IN PLACE into ranks[0..n_left); right not produced
  *      int  prim_enc_partition_none (uint8_t *ranks, int n, uint8_t thr,
  *                                    uint8_t *bm);
  *           // bitmap only (no scatter)
- *    All four return n_right (caller derives n_left = n - n_right).  _left
- *    keeps its ranks in place in ranks[0..n_left), matching _full, so the
- *    codec's left child recurses on ranks either way; _right emits to
- *    right_out (ranks untouched); _none emits no ranks.
+ *    All three return n_right (caller derives n_left = n - n_right).
+ *    _full keeps the left ranks in place in ranks[0..n_left); _right
+ *    emits to right_out (ranks untouched); _none emits no ranks.
  *
  *    SHARED SCATTER CORE: the compress-table scatter used here is the
  *    same operation the top-down decoder needs (read bitmap + scatter vs.
@@ -129,15 +124,16 @@
  *                                       // adjust *out_ptr on commit
  *        wire_commit_kr_header(kr_slot, n_right);
  *
- *    IMPLEMENTATION (2026-05-26): all four members live in every backend.
- *    _right/_left/_none share one parameterized core (part_core_<backend>,
- *    EMIT_RIGHT/EMIT_LEFT compile-time flags).  _full stays HAND-WRITTEN
- *    (part_full_<backend>) because the generic core's 1,1 specialization
- *    scheduled ~8% slower on the hot common path (measured on M4 for the former
- *    code_la partition).  bench_prim numbers that motivated the split (M4/NEON):
- *    _none (bitmap only) ~-54% vs _full, fused build+half (_right/_left) ~-26%
+ *    IMPLEMENTATION: _right/_none share one parameterized core
+ *    (part_core_<backend>, EMIT_RIGHT compile-time flag; the scalar core
+ *    additionally carries EMIT_LEFT because scalar _full rides it too).
+ *    On NEON/x86, _full stays HAND-WRITTEN (part_full_<backend>) because
+ *    the generic core's both-sides specialization scheduled ~8% slower on
+ *    the hot common path (measured on M4 for the former code_la
+ *    partition).  bench_prim numbers that motivated the split (M4/NEON):
+ *    _none (bitmap only) ~-54% vs _full, fused build+half (_right) ~-26%
  *    vs _full — the *unfused* "build then partition-half" route is a wash
- *    (the re-read eats the one-sided-scatter saving), so _right/_left are
+ *    (the re-read eats the one-sided-scatter saving), so _right is
  *    fused build+scatter.  End-to-end encode gain lands on skewed dists
  *    (AVX-512 calgary/proba80 +16-18%, dna +8%; smaller on NEON/SSE); balanced
  *    inputs (english) are flat.
@@ -179,13 +175,6 @@
  *
  *    Half-leaf merge, constant LEFT: out[j] = (bit_j ? right_buf[r++]
  *    : left_sym).  Used by LEAF_LEFT (the left child is a leaf).
- *
- *  void prim_merge_vec_cst(const uint8_t *bm, int K,
- *                                    const uint8_t *left_buf,
- *                                    uint8_t right_sym,
- *                                    uint8_t *out);
- *
- *    Mirror of the above: out[j] = (bit_j ? right_sym : left_buf[l++]).
  *
  *  void prim_merge_vec_vec(const uint8_t *bm, int K,
  *                        const uint8_t *left_buf,

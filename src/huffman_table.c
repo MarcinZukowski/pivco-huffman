@@ -685,11 +685,10 @@ static int build_table_finish(const uint8_t lengths[PIVCO_MAX_SYMBOLS],
 
 
     /* Classify each node for decode-dispatch, by children's leafness:
-     *   FLAT (subtree, D>=2)  >  BOTH_LEAVES  >  LEAF_LEFT/RIGHT  >  FULL.
+     *   FLAT (subtree, D>=2)  >  BOTH_LEAVES  >  LEAF_LEFT  >  FULL.
      * Canonical code assignment always puts a lone leaf child on the
-     * 0/left side (shorter code = smaller left-aligned value), so
-     * LEAF_RIGHT never occurs from any of our builders — asserted, and
-     * kept as a dispatchable type for safety. */
+     * 0/left side (shorter code = smaller left-aligned value), so a
+     * right-leaf-only node cannot occur — asserted. */
     for (int16_t i = 0; i < table->tree_node_count; i++) {
         const pivco_tree_node_t *node = &table->tree[i];
 
@@ -711,10 +710,9 @@ static int build_table_finish(const uint8_t lengths[PIVCO_MAX_SYMBOLS],
             table->node_type[i] = (uint8_t)PIVCO_NODE_BOTH_LEAVES;
         } else if (left_leaf) {
             table->node_type[i] = (uint8_t)PIVCO_NODE_LEAF_LEFT;
-        } else if (right_leaf) {
-            assert(!"canonical codes put a lone leaf child on the left");
-            table->node_type[i] = (uint8_t)PIVCO_NODE_LEAF_RIGHT;
         } else {
+            assert(!right_leaf);
+            (void)right_leaf;
             table->node_type[i] = (uint8_t)PIVCO_NODE_INTERNAL_FULL;
         }
     }

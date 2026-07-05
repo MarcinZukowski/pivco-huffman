@@ -138,7 +138,7 @@ int main(int argc, char **argv)
         int    n_leaves;            /* unique symbols */
         int    n_internal_full;     /* PIVCO_NODE_INTERNAL_FULL */
         int    n_internal_flat;     /* PIVCO_NODE_INTERNAL_FLAT */
-        int    n_half;              /* PIVCO_NODE_LEAF_LEFT + _RIGHT (one-leaf nodes) */
+        int    n_half;              /* PIVCO_NODE_LEAF_LEFT (one-leaf nodes) */
         int    n_both_leaves;       /* PIVCO_NODE_BOTH_LEAVES */
         /* Flat-aware counts: subtract internals/leaves buried inside
          * maximal flat subtrees, since they don't need separate
@@ -511,8 +511,7 @@ int main(int argc, char **argv)
             switch ((pivco_node_type_t)table->node_type[i]) {
                 case PIVCO_NODE_INTERNAL_FULL: comp_stats[d].n_internal_full++; break;
                 case PIVCO_NODE_INTERNAL_FLAT: comp_stats[d].n_internal_flat++; break;
-                case PIVCO_NODE_LEAF_LEFT:
-                case PIVCO_NODE_LEAF_RIGHT:    comp_stats[d].n_half++; break;
+                case PIVCO_NODE_LEAF_LEFT:     comp_stats[d].n_half++; break;
                 case PIVCO_NODE_BOTH_LEAVES:   comp_stats[d].n_both_leaves++; break;
                 default: break; /* LEAF / SKIP */
             }

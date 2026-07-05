@@ -251,7 +251,7 @@ static void codec_encode_node(const pivco_huffman_table_t *table,
      * variants; only the encode-internal scatter work differs — a leaf child
      * never reads its scattered side, so that side's scatter is skipped:
      * BOTH_LEAVES stores nothing, LEAF_LEFT only the right (compacted into
-     * tmp), LEAF_RIGHT only the left, FULL both. */
+     * tmp), FULL both. */
     uint8_t thr = table->split_rank[node_id];
     int n_right;
     PROF_TIC();
@@ -260,8 +260,6 @@ static void codec_encode_node(const pivco_huffman_table_t *table,
         n_right = prim_enc_partition_none(ranks, n, thr, bm);        break;
     case PIVCO_NODE_LEAF_LEFT:
         n_right = prim_enc_partition_right(ranks, n, thr, bm, tmp);  break;
-    case PIVCO_NODE_LEAF_RIGHT:
-        n_right = prim_enc_partition_left(ranks, n, thr, bm);        break;
     default:
         n_right = prim_enc_partition_full(ranks, n, thr, bm, tmp);   break;
     }
@@ -335,7 +333,6 @@ int CODEC_ENCODE_ENTRY(const uint8_t *symbols, size_t n,
  *   INTERNAL_FLAT   — packed-bits flat decode into out_buf
  *   BOTH_LEAVES     — both children leaves, merge_cst_cst directly
  *   LEAF_LEFT       — left child leaf, recurse right, merge_cst_vec
- *   LEAF_RIGHT      — mirror (structurally absent under canonical codes)
  *   INTERNAL_FULL   — both children internal: recurse both, merge_vec_vec
  *
  * `scratch_top` is the arena pointer for child output buffers; each
@@ -392,23 +389,6 @@ static void codec_decode_subtree(const pivco_huffman_table_t *table,
         prim_merge_cst_vec(bm, K,
                            (uint8_t)table->tree[node->left].symbol,
                            right_buf, out_buf);
-        return;
-    }
-
-    case PIVCO_NODE_LEAF_RIGHT: {
-        /* Structurally absent under canonical codes (leaf sorts left);
-         * kept dispatchable for safety. */
-        int K_right = wire_read_kr_header(table, node_id, in_ptr);
-        uint8_t bm_scratch[(size_t)bitmap_bytes(K) + 16];
-        const uint8_t *bm = wire_read_bitmap(in_ptr, K, bm_scratch);
-
-        int K_left = K - K_right;
-        uint8_t *left_buf = scratch_top;
-        codec_decode_subtree(table, node->left, K_left,
-                              left_buf, in_ptr, scratch_top + K_left);
-        prim_merge_vec_cst(bm, K, left_buf,
-                           (uint8_t)table->tree[node->right].symbol,
-                           out_buf);
         return;
     }
 

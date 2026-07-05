@@ -102,9 +102,6 @@ typedef enum {
     PIVCO_NODE_INTERNAL_FLAT,      /* flat_depth[i] >= 2 — flat-subtree fast path */
     PIVCO_NODE_BOTH_LEAVES,        /* both children leaves — merge_cst_cst, partition_none */
     PIVCO_NODE_LEAF_LEFT,          /* left child leaf, right internal — merge_cst_vec, partition_right */
-    PIVCO_NODE_LEAF_RIGHT,         /* right child leaf, left internal — merge_vec_cst, partition_left.
-                                      Structurally absent under canonical codes (a lone leaf
-                                      child always sorts to the 0/left side); kept for safety. */
     PIVCO_NODE_LEAF,               /* leaf — consumed by the parent merge, never dispatched */
 } pivco_node_type_t;
 

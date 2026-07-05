@@ -141,15 +141,6 @@ static void scalar_merge_cst_vec(uint8_t *out, const uint8_t *bm, int n,
         out[i] = b ? R[rc++] : l;
     }
 }
-static void scalar_merge_vec_cst(uint8_t *out, const uint8_t *bm, int n,
-                                  const uint8_t *L, uint8_t r) {
-    int lc=0;
-    for (int i=0; i<n; i++) {
-        int b = (bm[i>>3] >> (i&7)) & 1;
-        out[i] = b ? r : L[lc++];
-    }
-}
-
 /* MERGE_CONST_SYMBOLS are baked-in constants used by every merge_two /
  * merge_constant_* variant (scalar refs and SIMD wrappers) so the
  * correctness check across implementations agrees on which two symbols
@@ -213,7 +204,6 @@ static void scalar_rank_pack(uint8_t *out, const uint8_t *ranks, int n, int D, u
 static void p_merge_vec_vec_scalar     (const ctx_t *c){ scalar_merge_vec_vec(c->out, c->bm, c->n, c->merge_left, c->merge_right); }
 static void p_merge_cst_cst_scalar     (const ctx_t *c){ scalar_merge_cst_cst(c->out, c->bm, c->n, MERGE_LEFT_SYM, MERGE_RIGHT_SYM); }
 static void p_merge_cst_vec_scalar (const ctx_t *c){ scalar_merge_cst_vec(c->out, c->bm, c->n, MERGE_LEFT_SYM, c->merge_right); }
-static void p_merge_vec_cst_scalar (const ctx_t *c){ scalar_merge_vec_cst(c->out, c->bm, c->n, c->merge_left, MERGE_RIGHT_SYM); }
 /* Synthetic memory-bandwidth comparison points. */
 static void scalar_xor(uint8_t *out, const uint8_t *a, const uint8_t *b, int n) {
     for (int i = 0; i < n; i++) out[i] = a[i] ^ b[i];
@@ -297,7 +287,6 @@ static void p_part_right_rank_scalar(const ctx_t *c){
 static void simd_merge_vec_vec     (const ctx_t *c){ prim_merge_vec_vec(c->bm, c->n, c->merge_left, c->merge_right, c->out); }
 static void simd_merge_cst_cst     (const ctx_t *c){ prim_merge_cst_cst(c->bm, c->n, MERGE_LEFT_SYM, MERGE_RIGHT_SYM, c->out); }
 static void simd_merge_cst_vec (const ctx_t *c){ prim_merge_cst_vec(c->bm, c->n, MERGE_LEFT_SYM, c->merge_right, c->out); }
-static void simd_merge_vec_cst (const ctx_t *c){ prim_merge_vec_cst(c->bm, c->n, c->merge_left, MERGE_RIGHT_SYM, c->out); }
 /* Synthetic byte-XOR: explicit SIMD reference for memory-bandwidth comparison.
    16 bytes per iter via NEON veorq_u8 / 64 bytes via AVX-512 _mm512_xor_si512
    / 16 bytes via SSE _mm_xor_si128.  Scalar tail covers the unaligned end. */
@@ -421,7 +410,7 @@ typedef enum {
     ST_PARTHALF,      /* scatter one side from a prebuilt bitmap                   */
 
     /* ---- binary merge (decode, one per internal node) ---- */
-    ST_MERGE_VEC_VEC, ST_MERGE_CST_CST, ST_MERGE_CST_VEC, ST_MERGE_VEC_CST,
+    ST_MERGE_VEC_VEC, ST_MERGE_CST_CST, ST_MERGE_CST_VEC,
 
     /* ---- misc primitives ---- */
     ST_XOR, ST_XOR_ACCUM, ST_PLUS_ONE,
@@ -467,7 +456,6 @@ static const char *stage_name(stage_t s){
     case ST_MERGE_VEC_VEC:  return "merge_vec_vec";
     case ST_MERGE_CST_CST:  return "merge_cst_cst";
     case ST_MERGE_CST_VEC:   return "merge_cst_vec";
-    case ST_MERGE_VEC_CST:   return "merge_vec_cst";
     case ST_XOR:        return "xor";
     case ST_XOR_ACCUM:  return "xor_accum";
     case ST_PLUS_ONE:   return "plus_one";
@@ -489,7 +477,7 @@ static const char *stage_name(stage_t s){
  * effective data-path pressure.
  *
  * Sources for the numbers:
- *   merge / merge_constant_*  -- merge_vec_vec_neon / merge_cst_vec_neon / merge_vec_cst_neon
+ *   merge / merge_constant_*  -- merge_vec_vec_neon / merge_cst_vec_neon
  *     load expand_tab[mask] (1 byte/output) + expand_popcnt[mask]
  *     (0.125 byte/output) + 1 source byte/output + 1 bm bit/output.
  *   merge_two -- merge_cst_cst_neon: only consumes 1 bm bit/output;
@@ -563,7 +551,6 @@ static void stage_bits(stage_t s, int D, double *in, double *out, double *lut) {
     case ST_MERGE_VEC_VEC:  *in=8+8+1;    *out=8;        *lut=8+1;     break;
     case ST_MERGE_CST_CST:  *in=1;        *out=8;        *lut=0;       break;
     case ST_MERGE_CST_VEC:   *in=8+1;      *out=8;        *lut=8+1;     break;
-    case ST_MERGE_VEC_CST:   *in=8+1;      *out=8;        *lut=8+1;     break;
     case ST_XOR:        *in=16;       *out=8;        *lut=0;       break;
     case ST_XOR_ACCUM:  *in=8;        *out=0;        *lut=0;       break;
     case ST_PLUS_ONE:   *in=0;        *out=8;        *lut=0;       break;
@@ -763,12 +750,10 @@ int main(int argc, char **argv) {
     reg("scalar", ST_MERGE_VEC_VEC, 0, 0, p_merge_vec_vec_scalar);
     reg("scalar", ST_MERGE_CST_CST, 0, 0, p_merge_cst_cst_scalar);
     reg("scalar", ST_MERGE_CST_VEC,  0, 0, p_merge_cst_vec_scalar);
-    reg("scalar", ST_MERGE_VEC_CST,  0, 0, p_merge_vec_cst_scalar);
 #if defined(HAVE_SIMD)
     reg(BK,       ST_MERGE_VEC_VEC, 0, 0, simd_merge_vec_vec);
     reg(BK,       ST_MERGE_CST_CST, 0, 0, simd_merge_cst_cst);
     reg(BK,       ST_MERGE_CST_VEC,  0, 0, simd_merge_cst_vec);
-    reg(BK,       ST_MERGE_VEC_CST,  0, 0, simd_merge_vec_cst);
 #endif
     /* merge_vec_vec / merge_cst_cst experimental variants (neon_pcpc,
        unroll8, tbl/blendtab/vtbl/vtblq/d1flat) now live in
@@ -959,10 +944,6 @@ int main(int argc, char **argv) {
             if (memcmp(out,ref,n)) chk="FAIL";
         } else if (p->stage == ST_MERGE_CST_VEC) {
             scalar_merge_cst_vec(ref, bm, n, MERGE_LEFT_SYM, merge_right);
-            memset(out,0,n); p->run(&cx);
-            if (memcmp(out,ref,n)) chk="FAIL";
-        } else if (p->stage == ST_MERGE_VEC_CST) {
-            scalar_merge_vec_cst(ref, bm, n, merge_left, MERGE_RIGHT_SYM);
             memset(out,0,n); p->run(&cx);
             if (memcmp(out,ref,n)) chk="FAIL";
         } else if (p->stage == ST_XOR) {

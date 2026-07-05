@@ -29,7 +29,7 @@ uarch-dependent result worth re-checking."
 
 ```
 prims.h              registry: gv_status_t + GV_VARIANT macro + the contract
-prims-merge.h        merge_vec_vec / cst_vec / vec_cst / cst_cst / flat variants
+prims-merge.h        merge_vec_vec / cst_vec / cst_cst / flat variants
 prims-partition.h    enc_partition_full / none / right variants
 prims-pack.h         enc_pack_dN variants            (todo)
 prims-flat.h         flat_dN_unpack variants         (todo)

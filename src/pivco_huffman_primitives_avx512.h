@@ -234,60 +234,6 @@ static inline void merge_cst_vec_avx512(const uint8_t *bm, int K,
     PROF_TOC(PROF_BU_MERGE_CST_VEC, K);
 }
 
-/* merge_vec_cst_avx512 — mirror of the bcast_left variant. */
-static inline void merge_vec_cst_avx512(const uint8_t *bm, int K,
-                                                   const uint8_t *left,
-                                                   uint8_t right_sym,
-                                                   uint8_t *out)
-{
-    PROF_TIC();
-    int lc = 0;
-    int j = 0;
-    __m128i Rbcast8 = _mm_set1_epi8((char)right_sym);
-    __m512i Rbcast64 = _mm512_set1_epi8((char)right_sym);
-    for (; j + 64 <= K; j += 64) {
-        uint64_t mask;
-        memcpy(&mask, bm + (j >> 3), 8);
-        __mmask64 m  = (__mmask64)mask;
-        __mmask64 nm = ~m;
-        /* expand straight into the broadcast (issue #11, see merge_cst_vec) */
-        __m512i o = _mm512_mask_expandloadu_epi8(Rbcast64, nm, left + lc);
-        _mm512_storeu_si512((__m512i *)(out + j), o);
-        lc += 64 - __builtin_popcountll(mask);
-    }
-    for (; j + 16 <= K; j += 16) {
-        uint8_t m0 = bm[j >> 3];
-        __m128i L0 = _mm_loadl_epi64((const __m128i *)(left + lc));
-        __m128i both0 = _mm_unpacklo_epi64(L0, Rbcast8);
-        __m128i shuf0 = _mm_loadl_epi64((const __m128i *)expand_tab[m0]);
-        __m128i o0    = _mm_shuffle_epi8(both0, shuf0);
-        _mm_storel_epi64((__m128i *)(out + j), o0);
-        lc += (8 - expand_popcnt[m0]);
-
-        uint8_t m1 = bm[(j >> 3) + 1];
-        __m128i L1 = _mm_loadl_epi64((const __m128i *)(left + lc));
-        __m128i both1 = _mm_unpacklo_epi64(L1, Rbcast8);
-        __m128i shuf1 = _mm_loadl_epi64((const __m128i *)expand_tab[m1]);
-        __m128i o1    = _mm_shuffle_epi8(both1, shuf1);
-        _mm_storel_epi64((__m128i *)(out + j + 8), o1);
-        lc += (8 - expand_popcnt[m1]);
-    }
-    for (; j + 8 <= K; j += 8) {
-        uint8_t m = bm[j >> 3];
-        __m128i L = _mm_loadl_epi64((const __m128i *)(left + lc));
-        __m128i both = _mm_unpacklo_epi64(L, Rbcast8);
-        __m128i shuf = _mm_loadl_epi64((const __m128i *)expand_tab[m]);
-        __m128i o    = _mm_shuffle_epi8(both, shuf);
-        _mm_storel_epi64((__m128i *)(out + j), o);
-        lc += (8 - expand_popcnt[m]);
-    }
-    for (; j < K; j++) {
-        int mb = (bm[j >> 3] >> (j & 7)) & 1;
-        out[j] = mb ? right_sym : left[lc++];
-    }
-    PROF_TOC(PROF_BU_MERGE_VEC_CST, K);
-}
-
 /* merge_cst_cst_avx512 — both inputs are constants.  Native AVX-512
  * stride-64: read 64 bm bits as a kmask, single mask_blend_epi8 of two
  * broadcast registers, one 64-byte store.  SSE 16-byte and scalar tails. */
@@ -698,31 +644,6 @@ static inline int part_right_avx512(uint8_t *ranks, int n, uint8_t thr,
     return n_right;
 }
 
-/* left (LEAF_RIGHT): compact the left side only, in place into ranks. */
-static inline int part_left_avx512(uint8_t *ranks, int n, uint8_t thr, uint8_t *bm)
-{
-    int n_left = 0, n_right = 0;
-    int j = 0;
-    __m512i vt = _mm512_set1_epi8((char)thr);
-    for (; j + 64 <= n; j += 64) {
-        __m512i v = _mm512_loadu_si512((const void *)(ranks + j));
-        __mmask64 k = _mm512_cmpgt_epu8_mask(v, vt);
-        int p = __builtin_popcountll(k);
-        memcpy(bm + (j >> 3), &k, 8);
-        /* mask_compress into v: see part_full (issue #11 false dep) */
-        _mm512_storeu_si512((void *)(ranks + n_left), _mm512_mask_compress_epi8(v, ~k, v));
-        n_left += 64 - p;
-        n_right += p;
-    }
-    for (; j < n; j++) {
-        if ((j & 7) == 0) bm[j >> 3] = 0;
-        uint8_t r = ranks[j];
-        if (r > thr) { bm[j >> 3] |= (uint8_t)(1u << (j & 7)); n_right++; }
-        else         { ranks[n_left++] = r; }
-    }
-    return n_right;
-}
-
 /* none (BOTH_LEAVES): bitmap + right count only, no compaction. */
 static inline int part_none_avx512(uint8_t *ranks, int n, uint8_t thr, uint8_t *bm)
 {
@@ -804,11 +725,6 @@ PIVCO_PRIM_ALWAYS_INLINE int prim_enc_partition_right(uint8_t *ranks,
                                                       uint8_t *right_out)
 { return part_right_avx512(ranks, n, thr, bm, right_out); }
 
-PIVCO_PRIM_ALWAYS_INLINE int prim_enc_partition_left(uint8_t *ranks,
-                                                     int n, uint8_t thr,
-                                                     uint8_t *bm)
-{ return part_left_avx512(ranks, n, thr, bm); }
-
 PIVCO_PRIM_ALWAYS_INLINE int prim_enc_partition_none(uint8_t *ranks,
                                                      int n, uint8_t thr,
                                                      uint8_t *bm)
@@ -836,12 +752,6 @@ PIVCO_PRIM_ALWAYS_INLINE void prim_merge_cst_vec(const uint8_t *bm, int K,
                                                           const uint8_t *right_buf,
                                                           uint8_t *out)
 { merge_cst_vec_avx512(bm, K, left_sym, right_buf, out); }
-
-PIVCO_PRIM_ALWAYS_INLINE void prim_merge_vec_cst(const uint8_t *bm, int K,
-                                                           const uint8_t *left_buf,
-                                                           uint8_t right_sym,
-                                                           uint8_t *out)
-{ merge_vec_cst_avx512(bm, K, left_buf, right_sym, out); }
 
 PIVCO_PRIM_ALWAYS_INLINE void prim_merge_vec_vec(const uint8_t *bm, int K,
                                                const uint8_t *left_buf,

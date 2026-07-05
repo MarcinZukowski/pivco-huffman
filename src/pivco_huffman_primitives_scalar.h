@@ -121,19 +121,6 @@ static inline void merge_cst_vec_scalar(const uint8_t *bm, int K,
     }
 }
 
-/* Half-leaf merge, constant right: out[j] = (bit_j ? right_sym : left_buf[l++]). */
-static inline void merge_vec_cst_scalar(const uint8_t *bm, int K,
-                                                   const uint8_t *left_buf,
-                                                   uint8_t right_sym,
-                                                   uint8_t *out)
-{
-    int l = 0;
-    for (int j = 0; j < K; j++) {
-        int bit = (bm[j >> 3] >> (j & 7)) & 1;
-        out[j] = bit ? right_sym : left_buf[l++];
-    }
-}
-
 /* Full BU merge: out[j] = (bit_j ? right_buf[r++] : left_buf[l++]). */
 static inline void merge_vec_vec_scalar(const uint8_t *bm, int K,
                                        const uint8_t *left_buf,
@@ -165,9 +152,6 @@ PIVCO_PRIM_ALWAYS_INLINE int prim_enc_partition_full(uint8_t *ranks, int n,
 PIVCO_PRIM_ALWAYS_INLINE int prim_enc_partition_right(uint8_t *ranks, int n,
                                              uint8_t thr, uint8_t *bm, uint8_t *right_out)
 { return part_core_scalar(ranks, n, thr, bm, right_out, 1, 0); }
-PIVCO_PRIM_ALWAYS_INLINE int prim_enc_partition_left(uint8_t *ranks, int n,
-                                             uint8_t thr, uint8_t *bm)
-{ return part_core_scalar(ranks, n, thr, bm, NULL, 0, 1); }
 PIVCO_PRIM_ALWAYS_INLINE int prim_enc_partition_none(uint8_t *ranks, int n,
                                              uint8_t thr, uint8_t *bm)
 { return part_core_scalar(ranks, n, thr, bm, NULL, 0, 0); }
@@ -191,12 +175,6 @@ PIVCO_PRIM_ALWAYS_INLINE void prim_merge_cst_vec(const uint8_t *bm, int K,
                                                            const uint8_t *right_buf,
                                                            uint8_t *out)
 { merge_cst_vec_scalar(bm, K, left_sym, right_buf, out); }
-
-PIVCO_PRIM_ALWAYS_INLINE void prim_merge_vec_cst(const uint8_t *bm, int K,
-                                                            const uint8_t *left_buf,
-                                                            uint8_t right_sym,
-                                                            uint8_t *out)
-{ merge_vec_cst_scalar(bm, K, left_buf, right_sym, out); }
 
 PIVCO_PRIM_ALWAYS_INLINE void prim_merge_vec_vec(const uint8_t *bm, int K,
                                                 const uint8_t *left_buf,

@@ -252,55 +252,6 @@ static inline void merge_cst_vec_x86(const uint8_t *bm, int K,
     PROF_TOC(PROF_BU_MERGE_CST_VEC, K);
 }
 
-/* merge_vec_cst_x86 — mirror: R = broadcast const, only L advances. */
-static inline void merge_vec_cst_x86(const uint8_t *bm, int K,
-                                     const uint8_t *left,
-                                     uint8_t right_sym,
-                                     uint8_t *out)
-{
-    PROF_TIC();
-    int lc = 0, j = 0;
-#if defined(__AVX2__)
-    {
-        const __m256i ones = _mm256_set1_epi8(-1), zeros = _mm256_setzero_si256();
-        const __m256i vRb = _mm256_set1_epi8((char)right_sym);
-        for (; j + 32 <= K; j += 32) {
-            uint32_t mask; memcpy(&mask, bm + (j >> 3), 4);
-            unsigned m0=mask&0xff, m1=(mask>>8)&0xff, m2=(mask>>16)&0xff, m3=(mask>>24)&0xff;
-            __m256i vShuf02 = x86_merge_load_halves(g_x86_merge_shuf0[m0], g_x86_merge_shuf0[m2]);
-            __m256i vShuf1  = x86_merge_bcastq(g_x86_merge_shuf1[m1]);
-            __m256i vShuf3  = x86_merge_bcastq(g_x86_merge_shuf1[m3]);
-            __asm__("" : "+x"(vShuf1)); __asm__("" : "+x"(vShuf3));
-            __m256i vShuf13  = _mm256_blend_epi32(vShuf1, vShuf3, 0xf0);
-            __m256i vShuf13M = _mm256_blend_epi32(zeros, vShuf13, 0xcc);
-            __m256i vShuf    = _mm256_add_epi8(vShuf02, vShuf13M);
-            int lo_pop = _mm_popcnt_u32(mask & 0xffff);
-            __m256i vL = x86_merge_load_halves(left + lc, left + lc + 16 - lo_pop);
-            __m256i rr = _mm256_shuffle_epi8(vRb, vShuf);
-            __m256i rl = _mm256_shuffle_epi8(vL,  _mm256_xor_si256(vShuf, ones));
-            _mm256_storeu_si256((__m256i *)(out + j), _mm256_or_si256(rl, rr));
-            lc += 32 - _mm_popcnt_u32(mask);
-        }
-    }
-#endif
-    {
-        const __m128i ones = _mm_set1_epi8(-1), Rb = _mm_set1_epi8((char)right_sym);
-        for (; j + 16 <= K; j += 16) {
-            unsigned lo = bm[j >> 3], hi = bm[(j >> 3) + 1];
-            __m128i shuf0 = _mm_load_si128((const __m128i *)g_x86_merge_shuf0[lo]);
-            __m128i shuf1 = _mm_slli_si128(_mm_loadl_epi64((const __m128i *)g_x86_merge_shuf1[hi]), 8);
-            __m128i merged = _mm_add_epi8(shuf0, shuf1);
-            __m128i L16 = _mm_loadu_si128((const __m128i *)(left + lc));
-            __m128i rr = _mm_shuffle_epi8(Rb, merged);
-            __m128i rl = _mm_shuffle_epi8(L16, _mm_xor_si128(merged, ones));
-            _mm_storeu_si128((__m128i *)(out + j), _mm_or_si128(rr, rl));
-            lc += 16 - (__builtin_popcount(lo) + __builtin_popcount(hi));
-        }
-    }
-    for (; j < K; j++) { int mb = (bm[j >> 3] >> (j & 7)) & 1; out[j] = mb ? right_sym : left[lc++]; }
-    PROF_TOC(PROF_BU_MERGE_VEC_CST, K);
-}
-
 /* merge_cst_cst_x86 — both inputs are constants.  vpblendvb-style:
  * for each bit in mask, output is right_sym or left_sym.  AVX2 widens
  * to 32 bytes per iter; SSE4.1 floor handles 16. */
@@ -952,18 +903,19 @@ static inline int part_full_x86(uint8_t *ranks, int n, uint8_t thr,
     return n_right;
 }
 
-/* right/left/none: 16-wide one-sided compaction, 32 ranks/iter.  Per 16-lane
+/* right/none: 16-wide one-sided compaction, 32 ranks/iter.  Per 16-lane
  * group, the emitted side's index is the matching half of X86_COMPACT16 (RIGHT:
  * min(ctab_r[m0], pre_r[pc0][m1]); LEFT: min(ctab_l[m0], pre_l[8-pc0][m1])), one
  * pshufb + one 16-byte store — vs the prior stride-8 form's pshufb + 8-byte store
- * every 8 lanes.  Reuses the production ctab/pre tables.  EMIT_RIGHT/EMIT_LEFT
- * compile-time so the unused side folds away; EMIT none just builds the bitmap. */
+ * every 8 lanes.  Reuses the production ctab/pre tables.  EMIT_RIGHT is
+ * compile-time, so the none form folds to a pure bitmap build; the left
+ * side is never scattered (a leaf child's ranks are dead). */
 __attribute__((always_inline)) static inline
 int part_core_x86(uint8_t *ranks, int n, uint8_t thr,
-                     uint8_t *bm, uint8_t *tmp, int EMIT_RIGHT, int EMIT_LEFT)
+                     uint8_t *bm, uint8_t *tmp, int EMIT_RIGHT)
 {
     x86_build_tabs();
-    int n_left = 0, n_right = 0;
+    int n_right = 0;
     int j = 0;
     __m128i thr1 = _mm_set1_epi8((char)(thr + 1));
 #define _PC16(v, mlo_, mhi_) do {                                             \
@@ -973,11 +925,7 @@ int part_core_x86(uint8_t *ranks, int n, uint8_t thr,
             _mm_shuffle_epi8((v), _mm_min_epu8(                               \
                 _mm_load_si128((const __m128i *)x86_ctab_r[(mlo_)]),          \
                 _mm_load_si128((const __m128i *)x86_pre_r[pc0_][(mhi_)]))));  \
-        if (EMIT_LEFT)  _mm_storeu_si128((__m128i *)(ranks + n_left),         \
-            _mm_shuffle_epi8((v), _mm_min_epu8(                               \
-                _mm_load_si128((const __m128i *)x86_ctab_l[(mlo_)]),          \
-                _mm_load_si128((const __m128i *)x86_pre_l[8 - pc0_][(mhi_)])))); \
-        n_right += pc_; n_left += 16 - pc_;                                   \
+        n_right += pc_;                                                       \
     } while (0)
     for (; j + 32 <= n; j += 32) {
         __m128i v0 = _mm_loadu_si128((const __m128i *)(ranks + j));
@@ -1001,7 +949,6 @@ int part_core_x86(uint8_t *ranks, int n, uint8_t thr,
         uint8_t r = ranks[j];
         if (r > thr) { bm[j >> 3] |= (uint8_t)(1u << (j & 7));
                        if (EMIT_RIGHT) tmp[n_right] = r; n_right++; }
-        else         { if (EMIT_LEFT) ranks[n_left] = r; n_left++; }
     }
     return n_right;
 }
@@ -1191,17 +1138,12 @@ PIVCO_PRIM_ALWAYS_INLINE int prim_enc_partition_right(uint8_t *ranks,
                                                       int n, uint8_t thr,
                                                       uint8_t *bm,
                                                       uint8_t *right_out)
-{ return part_core_x86(ranks, n, thr, bm, right_out, 1, 0); }
-
-PIVCO_PRIM_ALWAYS_INLINE int prim_enc_partition_left(uint8_t *ranks,
-                                                     int n, uint8_t thr,
-                                                     uint8_t *bm)
-{ return part_core_x86(ranks, n, thr, bm, NULL, 0, 1); }
+{ return part_core_x86(ranks, n, thr, bm, right_out, 1); }
 
 PIVCO_PRIM_ALWAYS_INLINE int prim_enc_partition_none(uint8_t *ranks,
                                                      int n, uint8_t thr,
                                                      uint8_t *bm)
-{ return part_core_x86(ranks, n, thr, bm, NULL, 0, 0); }
+{ return part_core_x86(ranks, n, thr, bm, NULL, 0); }
 
 PIVCO_PRIM_ALWAYS_INLINE void prim_enc_pack_dN(const uint8_t *ranks,
                                              int n, int D, uint8_t base,
@@ -1224,12 +1166,6 @@ PIVCO_PRIM_ALWAYS_INLINE void prim_merge_cst_vec(const uint8_t *bm, int K,
                                                           const uint8_t *right_buf,
                                                           uint8_t *out)
 { merge_cst_vec_x86(bm, K, left_sym, right_buf, out); }
-
-PIVCO_PRIM_ALWAYS_INLINE void prim_merge_vec_cst(const uint8_t *bm, int K,
-                                                           const uint8_t *left_buf,
-                                                           uint8_t right_sym,
-                                                           uint8_t *out)
-{ merge_vec_cst_x86(bm, K, left_buf, right_sym, out); }
 
 PIVCO_PRIM_ALWAYS_INLINE void prim_merge_vec_vec(const uint8_t *bm, int K,
                                                const uint8_t *left_buf,
