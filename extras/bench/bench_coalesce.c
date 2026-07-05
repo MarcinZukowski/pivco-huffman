@@ -294,7 +294,7 @@ static void bench_coalesce_macro(const uint16_t *src, const uint8_t *bitmap,
 /* ---------- Half-partition baseline & coalesce ---------------------
  *
  * The OTHER question: production has a half-partition kernel
- * `partition_8_right` (used when the LEFT child is a prefilled leaf
+ * `partition_8_right` (used when the LEFT child is a leaf
  * via memset).  That kernel issues 1 store/iter, store-port-bound at
  * ~22 GB/s on M4.  Could coalescing it (saving half the stores) win?
  *

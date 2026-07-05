@@ -13,7 +13,7 @@
  * Per-call-site partition loops in decode_node_neon /
  * decode_node_avx512 are extracted as named static functions that
  * each have their own counter, so the dump can attribute time per
- * exact call site (general partition vs half-prefilled vs root etc.)
+ * exact call site (general partition vs one-leaf vs root etc.)
  * without conflating them.
  */
 #pragma once

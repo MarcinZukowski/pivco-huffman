@@ -218,8 +218,6 @@ static void limit_code_lengths(uint8_t *lengths, int n_symbols, int max_len)
 static int build_table_finish(const uint8_t lengths[PIVCO_MAX_SYMBOLS],
                               pivco_huffman_table_t *table);
 
-/* Single-symbol degenerate tree: root -> two leaves of the same symbol, with
- * the left leaf prefilled.  Assumes `table` is zeroed. */
 /* Fill enc_init_aux from sym_to_rank: on x86 the 2tab merge hi table (rank<<8)
  * and point the aux at it; elsewhere leave the aux NULL.  Called by every build
  * path that finalizes sym_to_rank (build_table_finish and the single-symbol fast
@@ -235,6 +233,8 @@ static void fill_enc_init_aux(pivco_huffman_table_t *table)
 #endif
 }
 
+/* Single-symbol degenerate tree: root -> two leaves of the same symbol.
+ * Assumes `table` is zeroed. */
 static void build_single_symbol_table(int sym, pivco_huffman_table_t *table)
 {
     table->code[sym] = 0;
@@ -256,12 +256,10 @@ static void build_single_symbol_table(int sym, pivco_huffman_table_t *table)
     table->tree[2].right = -1;
     table->tree_root = 0;
     table->tree_node_count = 3;
-    table->prefill_sym = (uint8_t)sym;
-    table->prefill_node = 1;
-    /* node 0 (root): both children leaves, left=skip -> HALF_RIGHT;
-     * node 1 (left leaf, prefilled): SKIP; node 2 (right, same sym): LEAF. */
-    table->node_type[0] = PIVCO_NODE_HALF_RIGHT;
-    table->node_type[1] = PIVCO_NODE_SKIP;
+    /* node 0 (root): both children leaves -> BOTH_LEAVES (the decode
+     * entry's root fast path handles it); nodes 1, 2: LEAF. */
+    table->node_type[0] = PIVCO_NODE_BOTH_LEAVES;
+    table->node_type[1] = PIVCO_NODE_LEAF;
     table->node_type[2] = PIVCO_NODE_LEAF;
     fill_enc_init_aux(table);   /* sym_to_rank is all-zero (rank 0) here; aux must not stay NULL */
 }
@@ -686,36 +684,17 @@ static int build_table_finish(const uint8_t lengths[PIVCO_MAX_SYMBOLS],
     }
 
 
-    /* Find the most frequent symbol (shortest code) for prefill.
-       Walk the tree to find its node ID. */
-    {
-        /* Most-frequent symbol = shortest code = smallest-index symbol at
-           min_len, which is the first entry of min_len's symbol-order run. */
-        uint8_t best_sym = flat_items[per_len_start[min_len]].sym;
-        table->prefill_sym = best_sym;
-        /* Find the tree node for this symbol */
-        table->prefill_node = -1;
-        for (int16_t i = 0; i < table->tree_node_count; i++) {
-            if (table->tree[i].symbol == (int16_t)best_sym) {
-                table->prefill_node = i;
-                break;
-            }
-        }
-    }
-
-
-    /* Classify each node for decode-dispatch.  Mirrors the existing
-     * conditional priority in decode_node_neon:
-     *   FLAT (subtree, D>=2)  >  HALF_RIGHT/LEFT  >  BOTH_LEAVES  >  FULL.
-     * Leaves are SKIP if prefilled, LEAF otherwise. */
+    /* Classify each node for decode-dispatch, by children's leafness:
+     *   FLAT (subtree, D>=2)  >  BOTH_LEAVES  >  LEAF_LEFT/RIGHT  >  FULL.
+     * Canonical code assignment always puts a lone leaf child on the
+     * 0/left side (shorter code = smaller left-aligned value), so
+     * LEAF_RIGHT never occurs from any of our builders — asserted, and
+     * kept as a dispatchable type for safety. */
     for (int16_t i = 0; i < table->tree_node_count; i++) {
         const pivco_tree_node_t *node = &table->tree[i];
 
         if (node->symbol >= 0) {
-            /* Leaf */
-            table->node_type[i] = (i == table->prefill_node)
-                                ? (uint8_t)PIVCO_NODE_SKIP
-                                : (uint8_t)PIVCO_NODE_LEAF;
+            table->node_type[i] = (uint8_t)PIVCO_NODE_LEAF;
             continue;
         }
 
@@ -725,19 +704,16 @@ static int build_table_finish(const uint8_t lengths[PIVCO_MAX_SYMBOLS],
             continue;
         }
 
-        int16_t left_id  = node->left;
-        int16_t right_id = node->right;
-        int left_leaf  = (table->tree[left_id].symbol  >= 0);
-        int right_leaf = (table->tree[right_id].symbol >= 0);
-        int left_skip  = (left_id  == table->prefill_node);
-        int right_skip = (right_id == table->prefill_node);
+        int left_leaf  = (table->tree[node->left].symbol  >= 0);
+        int right_leaf = (table->tree[node->right].symbol >= 0);
 
-        if (left_leaf && left_skip) {
-            table->node_type[i] = (uint8_t)PIVCO_NODE_HALF_RIGHT;
-        } else if (right_leaf && right_skip) {
-            table->node_type[i] = (uint8_t)PIVCO_NODE_HALF_LEFT;
-        } else if (left_leaf && right_leaf) {
+        if (left_leaf && right_leaf) {
             table->node_type[i] = (uint8_t)PIVCO_NODE_BOTH_LEAVES;
+        } else if (left_leaf) {
+            table->node_type[i] = (uint8_t)PIVCO_NODE_LEAF_LEFT;
+        } else if (right_leaf) {
+            assert(!"canonical codes put a lone leaf child on the left");
+            table->node_type[i] = (uint8_t)PIVCO_NODE_LEAF_RIGHT;
         } else {
             table->node_type[i] = (uint8_t)PIVCO_NODE_INTERNAL_FULL;
         }
@@ -840,8 +816,9 @@ int pivco_huffman_build_table_from_code_lens(
 void pivco_huffman_build_traditional_table(pivco_huffman_table_t *table)
 {
     if (!table) return;
-    /* Defensive base fill covers any gap for incomplete codes (single sym). */
-    memset(table->decode_sym, table->prefill_sym, sizeof(table->decode_sym));
+    /* Defensive base fill covers any gap for incomplete codes (single sym);
+     * sorted_symbols[0] = shortest-code (most frequent) symbol. */
+    memset(table->decode_sym, table->sorted_symbols[0], sizeof(table->decode_sym));
     memset(table->decode_len, 1, sizeof(table->decode_len));
     for (int s = 0; s < PIVCO_MAX_SYMBOLS; s++) {
         int len = table->code_len[s];

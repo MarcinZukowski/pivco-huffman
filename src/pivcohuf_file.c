@@ -199,10 +199,10 @@ static int pivcohuf_compress_impl(const uint8_t *in, size_t in_len,
           return PIVCOHUF_ERR_INTERNAL;
       PROF_TOC(PROF_FILE_BUILD_TABLE_SYN, 1); TOC(tm, build_ns, _t); }
 
-    /* Pad with prefill_sym (the most-frequent symbol -- always has the
-     * shortest code).  Padding with arbitrary bytes can hit pathological
+    /* Pad with the most-frequent symbol (sorted_symbols[0] -- always has
+     * the shortest code).  Padding with arbitrary bytes can hit pathological
      * deep-recursion paths in the encoder when blk_in << B. */
-    const uint8_t pad_byte = table.prefill_sym;
+    const uint8_t pad_byte = table.sorted_symbols[0];
 
     uint8_t *p = out;
     /* === Reserve HEADER bytes; fill at end. === */

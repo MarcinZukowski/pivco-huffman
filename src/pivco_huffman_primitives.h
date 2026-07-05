@@ -80,16 +80,16 @@
  *      node_type        primitive                     scatters   outputs
  *      INTERNAL_FULL    prim_enc_partition_full        both       left in place,
  *                                                                 right->right_out
- *      HALF_RIGHT       prim_enc_partition_right       right only right->right_out
- *      HALF_LEFT        prim_enc_partition_left        left only  left in place
+ *      LEAF_LEFT        prim_enc_partition_right       right only right->right_out
+ *      LEAF_RIGHT       prim_enc_partition_left        left only  left in place
  *      BOTH_LEAVES      prim_enc_partition_none        neither    (bitmap only)
  *
  *    SUFFIX CONVENTION: the suffix names the NON-TRIVIAL child subtree —
- *    the side whose ranks are emitted for further recursion — identical
- *    to the HALF_* node_type meaning (HALF_RIGHT's right child is the
- *    subtree, left is a leaf, so prim_enc_partition_right emits the right
- *    ranks).  `_none` = zero outputs (both children leaves); it still
- *    writes the bitmap, so it is exactly the bitmap-build step.
+ *    the side whose ranks are emitted for further recursion (LEAF_LEFT's
+ *    right child is the subtree, left is a leaf, so
+ *    prim_enc_partition_right emits the right ranks).  `_none` = zero
+ *    outputs (both children leaves); it still writes the bitmap, so it
+ *    is exactly the bitmap-build step.
  *
  *    Common contract (all four):
  *      Writes ceil(n/8) bytes into bm.  Bit j (j in [0..n)) is
@@ -178,8 +178,7 @@
  *                                   uint8_t *out);
  *
  *    Half-leaf merge, constant LEFT: out[j] = (bit_j ? right_buf[r++]
- *    : left_sym).  Used by HALF_RIGHT when the left child is a leaf
- *    (or prefilled).
+ *    : left_sym).  Used by LEAF_LEFT (the left child is a leaf).
  *
  *  void prim_merge_vec_cst(const uint8_t *bm, int K,
  *                                    const uint8_t *left_buf,

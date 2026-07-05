@@ -190,12 +190,6 @@ add_executable(pivco_node_bitmap_stats
 )
 target_link_libraries(pivco_node_bitmap_stats pivco_huffman m)
 
-add_executable(pivco_one_leaf_stats
-    bench_one_leaf_stats.c
-    ${BENCH_DIST}
-)
-target_link_libraries(pivco_one_leaf_stats pivco_huffman m)
-
 add_executable(pivco_multi_stage_stats
     bench_multi_stage_stats.c
     ${BENCH_DIST}

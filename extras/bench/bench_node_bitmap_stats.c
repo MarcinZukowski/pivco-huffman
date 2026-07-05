@@ -44,7 +44,7 @@ static void walk(const pivco_huffman_table_t *t, int node,
                  uint8_t *ranks, int n, uint8_t *tmp, stats_t *s)
 {
     pivco_node_type_t nt = (pivco_node_type_t)t->node_type[node];
-    if (nt == PIVCO_NODE_LEAF || nt == PIVCO_NODE_SKIP) return;
+    if (nt == PIVCO_NODE_LEAF) return;
     if (nt == PIVCO_NODE_INTERNAL_FLAT) return;          /* packed codes, no bitmap */
     if (n <= 0) return;
 

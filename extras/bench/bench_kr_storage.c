@@ -66,21 +66,18 @@ static void walk_kr(const pivco_huffman_table_t *t, int16_t node_id, int K,
     const pivco_tree_node_t *n = &t->tree[node_id];
     pivco_node_type_t type = (pivco_node_type_t)t->node_type[node_id];
     switch (type) {
-    case PIVCO_NODE_SKIP:
     case PIVCO_NODE_LEAF:
     case PIVCO_NODE_INTERNAL_FLAT:
     case PIVCO_NODE_BOTH_LEAVES:
         return;  /* no K_right write site */
-    case PIVCO_NODE_HALF_RIGHT: {
-        if (t->node_type[n->right] == (uint8_t)PIVCO_NODE_LEAF) return;
+    case PIVCO_NODE_LEAF_LEFT: {
         int K_right = subtree_hist_sum(t, n->right, hist);
         s->kr_bytes_fixed2 += 2;
         s->kr_bytes_varint += (K_right < 128) ? 1 : 2;
         walk_kr(t, n->right, K_right, hist, s);
         return;
     }
-    case PIVCO_NODE_HALF_LEFT: {
-        if (t->node_type[n->left] == (uint8_t)PIVCO_NODE_LEAF) return;
+    case PIVCO_NODE_LEAF_RIGHT: {
         int K_right = subtree_hist_sum(t, n->right, hist);
         int K_left  = subtree_hist_sum(t, n->left,  hist);
         s->kr_bytes_fixed2 += 2;
@@ -90,16 +87,12 @@ static void walk_kr(const pivco_huffman_table_t *t, int16_t node_id, int K,
     }
     case PIVCO_NODE_INTERNAL_FULL:
     default: {
-        int lk = t->node_type[n->left];
-        int rk = t->node_type[n->right];
-        if (lk == (uint8_t)PIVCO_NODE_LEAF && rk == (uint8_t)PIVCO_NODE_LEAF)
-            return;
         int K_right = subtree_hist_sum(t, n->right, hist);
         int K_left  = subtree_hist_sum(t, n->left,  hist);
         s->kr_bytes_fixed2 += 2;
         s->kr_bytes_varint += (K_right < 128) ? 1 : 2;
-        if (lk != (uint8_t)PIVCO_NODE_LEAF) walk_kr(t, n->left,  K_left,  hist, s);
-        if (rk != (uint8_t)PIVCO_NODE_LEAF) walk_kr(t, n->right, K_right, hist, s);
+        walk_kr(t, n->left,  K_left,  hist, s);
+        walk_kr(t, n->right, K_right, hist, s);
         return;
     }
     }
@@ -113,9 +106,8 @@ static void walk_kleaf(const pivco_huffman_table_t *t, int16_t node_id,
     const pivco_tree_node_t *n = &t->tree[node_id];
     pivco_node_type_t type = (pivco_node_type_t)t->node_type[node_id];
     switch (type) {
-    case PIVCO_NODE_LEAF:
-    case PIVCO_NODE_SKIP: {
-        int K = hist[n->symbol];   /* SKIP has symbol = prefill sym */
+    case PIVCO_NODE_LEAF: {
+        int K = hist[n->symbol];
         s->kleaf_bytes_fixed2 += 2;
         s->kleaf_bytes_varint += (K < 128) ? 1 : 2;
         return;
@@ -127,8 +119,8 @@ static void walk_kleaf(const pivco_huffman_table_t *t, int16_t node_id,
         return;
     }
     case PIVCO_NODE_BOTH_LEAVES:
-    case PIVCO_NODE_HALF_RIGHT:
-    case PIVCO_NODE_HALF_LEFT:
+    case PIVCO_NODE_LEAF_LEFT:
+    case PIVCO_NODE_LEAF_RIGHT:
     case PIVCO_NODE_INTERNAL_FULL:
     default:
         walk_kleaf(t, n->left,  hist, s);
@@ -143,26 +135,16 @@ static int count_kr_slots(const pivco_huffman_table_t *t, int16_t node_id)
     const pivco_tree_node_t *n = &t->tree[node_id];
     pivco_node_type_t type = (pivco_node_type_t)t->node_type[node_id];
     switch (type) {
-    case PIVCO_NODE_SKIP:
     case PIVCO_NODE_LEAF:
     case PIVCO_NODE_INTERNAL_FLAT:
     case PIVCO_NODE_BOTH_LEAVES: return 0;
-    case PIVCO_NODE_HALF_RIGHT:
-        return (t->node_type[n->right] == (uint8_t)PIVCO_NODE_LEAF)
-            ? 0 : 1 + count_kr_slots(t, n->right);
-    case PIVCO_NODE_HALF_LEFT:
-        return (t->node_type[n->left] == (uint8_t)PIVCO_NODE_LEAF)
-            ? 0 : 1 + count_kr_slots(t, n->left);
+    case PIVCO_NODE_LEAF_LEFT:
+        return 1 + count_kr_slots(t, n->right);
+    case PIVCO_NODE_LEAF_RIGHT:
+        return 1 + count_kr_slots(t, n->left);
     case PIVCO_NODE_INTERNAL_FULL:
-    default: {
-        int lk = t->node_type[n->left];
-        int rk = t->node_type[n->right];
-        if (lk == (uint8_t)PIVCO_NODE_LEAF && rk == (uint8_t)PIVCO_NODE_LEAF) return 0;
-        int sum = 1;
-        if (lk != (uint8_t)PIVCO_NODE_LEAF) sum += count_kr_slots(t, n->left);
-        if (rk != (uint8_t)PIVCO_NODE_LEAF) sum += count_kr_slots(t, n->right);
-        return sum;
-    }
+    default:
+        return 1 + count_kr_slots(t, n->left) + count_kr_slots(t, n->right);
     }
 }
 
@@ -172,7 +154,6 @@ static int count_kleaf_slots(const pivco_huffman_table_t *t, int16_t node_id)
     pivco_node_type_t type = (pivco_node_type_t)t->node_type[node_id];
     switch (type) {
     case PIVCO_NODE_LEAF:
-    case PIVCO_NODE_SKIP:
     case PIVCO_NODE_INTERNAL_FLAT:
         return 1;
     default:

@@ -7,7 +7,7 @@
 //   sse             : 8-byte chunks, pshufb on combined left+right
 //   sse_x2          : 16-byte chunks (two 8-byte unrolled)
 //   avx512          : 64-byte chunks via 2x vpexpandb + OR (VBMI2 only)
-//   sse_broadcast_L : prefill / leaf optimisation, no left buffer
+//   sse_broadcast_L : constant-left-leaf optimisation, no left buffer
 
 #include "counters/bench.h"
 #include <immintrin.h>

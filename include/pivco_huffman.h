@@ -89,21 +89,23 @@ typedef struct {
  *
  * Classifies each tree node at build_table time so the decoder can
  * dispatch via a single switch on table->node_type[node_id] instead of
- * the chain of conditional checks (skip_node? leaf? flat? both-leaves?
- * half-prefilled?) that decode_node_neon used to do per call.
+ * per-call conditional chains.  Classification is by "leafness" of the
+ * children alone: bottom-up merges consume a leaf child's symbol
+ * directly, so a leaf node itself is never dispatched — the parent's
+ * merge materializes it.
  *
  * Same classification applies to all backends (scalar, NEON, AVX-512,
- * SSE).  Priority order matches decode_node_neon's existing logic:
- * HALF_RIGHT/LEFT > BOTH_LEAVES > FULL_PARTITION.
+ * SSE).
  */
 typedef enum {
-    PIVCO_NODE_INTERNAL_FULL = 0,  /* general partition path (default) */
+    PIVCO_NODE_INTERNAL_FULL = 0,  /* both children internal — general partition/merge */
     PIVCO_NODE_INTERNAL_FLAT,      /* flat_depth[i] >= 2 — flat-subtree fast path */
-    PIVCO_NODE_BOTH_LEAVES,        /* both children are leaves, NEITHER prefilled */
-    PIVCO_NODE_HALF_RIGHT,         /* left child IS the prefilled leaf — half-partition right + recurse right */
-    PIVCO_NODE_HALF_LEFT,          /* right child IS the prefilled leaf — half-partition left + recurse left */
-    PIVCO_NODE_LEAF,               /* leaf, not the prefilled symbol — scatter_sym */
-    PIVCO_NODE_SKIP,               /* prefilled leaf — early return (memset already wrote it) */
+    PIVCO_NODE_BOTH_LEAVES,        /* both children leaves — merge_cst_cst, partition_none */
+    PIVCO_NODE_LEAF_LEFT,          /* left child leaf, right internal — merge_cst_vec, partition_right */
+    PIVCO_NODE_LEAF_RIGHT,         /* right child leaf, left internal — merge_vec_cst, partition_left.
+                                      Structurally absent under canonical codes (a lone leaf
+                                      child always sorts to the 0/left side); kept for safety. */
+    PIVCO_NODE_LEAF,               /* leaf — consumed by the parent merge, never dispatched */
 } pivco_node_type_t;
 
 /* ---------- Huffman table ---------- */
@@ -159,11 +161,6 @@ typedef struct {
     uint8_t  min_len;
     uint16_t num_symbols;
 
-    /* Most frequent symbol (shortest code). PIVCO decode prefills the
-       output with this symbol via memset and skips its leaf scatter. */
-    uint8_t  prefill_sym;
-    int16_t  prefill_node;      /* tree node ID of the prefill leaf */
-
     /* Flat-subtree fast path: per-node, if flat_depth[i] >= 2 then node i
        is the root of a MAXIMAL flat subtree of depth D = flat_depth[i]
        (all 2^D leaves at the same relative depth).  Encoder emits N*D
@@ -182,9 +179,8 @@ typedef struct {
     uint8_t  max_leaf_depth[PIVCO_MAX_TREE_NODES];
 
     /* Decode dispatch type per node — see pivco_node_type_t.  Set by
-     * build_table after tree, prefill_node, and flat_depth are all
-     * finalized.  Decoders switch on this instead of running a chain
-     * of conditional checks. */
+     * build_table after tree and flat_depth are finalized.  Decoders
+     * switch on this instead of running per-call conditional chains. */
     uint8_t  node_type[PIVCO_MAX_TREE_NODES];
 } pivco_huffman_table_t;
 

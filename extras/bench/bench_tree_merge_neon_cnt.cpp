@@ -20,7 +20,7 @@
 //   neon            : 8-byte chunks, single TBL per chunk
 //   neon_x2         : 2-byte chunks unrolled (better ILP)
 //   broadcast_left  : left side is a single sym broadcast register
-//                     (models the prefill / leaf case — no left buffer)
+//                     (models the constant-left-leaf case — no left buffer)
 
 #include "counters/bench.h"
 #include <arm_neon.h>
@@ -147,7 +147,7 @@ static inline void merge_neon_x2(const uint8_t *bm, int n,
 
 /* ---------- neon broadcast-left: left side is a constant symbol ----
  * Models the merge-with-leaf-child case where one child is the
- * prefill symbol and we don't materialize a left buffer at all. */
+ * left-leaf symbol and we don't materialize a left buffer at all. */
 static inline void merge_neon_broadcast_left(const uint8_t *bm, int n,
                                               uint8_t left_sym,
                                               const uint8_t *right,

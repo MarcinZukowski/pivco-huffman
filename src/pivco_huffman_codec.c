@@ -249,16 +249,18 @@ static void codec_encode_node(const pivco_huffman_table_t *table,
     /* Pick the partition variant by node_type, mirroring the decode-side
      * dispatch.  The bitmap (and thus the wire bytes) is identical across
      * variants; only the encode-internal scatter work differs — a leaf child
-     * never reads its scattered side, so HALF/BOTH_LEAVES skip that scatter. */
+     * never reads its scattered side, so that side's scatter is skipped:
+     * BOTH_LEAVES stores nothing, LEAF_LEFT only the right (compacted into
+     * tmp), LEAF_RIGHT only the left, FULL both. */
     uint8_t thr = table->split_rank[node_id];
     int n_right;
     PROF_TIC();
     switch ((pivco_node_type_t)table->node_type[node_id]) {
     case PIVCO_NODE_BOTH_LEAVES:
         n_right = prim_enc_partition_none(ranks, n, thr, bm);        break;
-    case PIVCO_NODE_HALF_RIGHT:
+    case PIVCO_NODE_LEAF_LEFT:
         n_right = prim_enc_partition_right(ranks, n, thr, bm, tmp);  break;
-    case PIVCO_NODE_HALF_LEFT:
+    case PIVCO_NODE_LEAF_RIGHT:
         n_right = prim_enc_partition_left(ranks, n, thr, bm);        break;
     default:
         n_right = prim_enc_partition_full(ranks, n, thr, bm, tmp);   break;
@@ -326,15 +328,15 @@ int CODEC_ENCODE_ENTRY(const uint8_t *symbols, size_t n,
  * write to scratch arenas), then merge per the bitmap.  The flat-
  * subtree fast path bypasses recursion entirely.
  *
- * Dispatch on node_type, computed at build-table time:
+ * Dispatch on node_type, computed at build-table time (by children's
+ * leafness — a leaf child's symbol goes straight into the parent's
+ * merge, so the walk never recurses into a leaf):
  *
- *   SKIP            — prefilled leaf, memset prefill_sym
- *   LEAF            — non-prefill leaf, memset node->symbol
  *   INTERNAL_FLAT   — packed-bits flat decode into out_buf
  *   BOTH_LEAVES     — both children leaves, merge_cst_cst directly
- *   HALF_RIGHT      — left child is the prefilled leaf, recurse right
- *   HALF_LEFT       — right child is the prefilled leaf, recurse left
- *   INTERNAL_FULL   — general merge: recurse both, merge
+ *   LEAF_LEFT       — left child leaf, recurse right, merge_cst_vec
+ *   LEAF_RIGHT      — mirror (structurally absent under canonical codes)
+ *   INTERNAL_FULL   — both children internal: recurse both, merge_vec_vec
  *
  * `scratch_top` is the arena pointer for child output buffers; each
  * caller bumps it past its own K bytes when calling further down. */
@@ -351,12 +353,10 @@ static void codec_decode_subtree(const pivco_huffman_table_t *table,
 
     switch ((pivco_node_type_t)table->node_type[node_id]) {
 
-    case PIVCO_NODE_SKIP:
-        memset(out_buf, table->prefill_sym, (size_t)K);
-        return;
-
     case PIVCO_NODE_LEAF:
-        memset(out_buf, (uint8_t)node->symbol, (size_t)K);
+        /* Unreachable: every parent consumes a leaf child via its
+         * cst_* merge instead of recursing into it. */
+        assert(!"codec_decode_subtree dispatched on a leaf");
         return;
 
     case PIVCO_NODE_INTERNAL_FLAT: {
@@ -375,93 +375,51 @@ static void codec_decode_subtree(const pivco_huffman_table_t *table,
         uint8_t bm_scratch[(size_t)bitmap_bytes(K) + 16];
         const uint8_t *bm = wire_read_bitmap(in_ptr, K, bm_scratch);
         prim_merge_cst_cst(bm, K,
-                               (uint8_t)table->tree[node->left].symbol,
-                               (uint8_t)table->tree[node->right].symbol,
-                               out_buf);
+                           (uint8_t)table->tree[node->left].symbol,
+                           (uint8_t)table->tree[node->right].symbol,
+                           out_buf);
         return;
     }
 
-    case PIVCO_NODE_HALF_RIGHT: {
+    case PIVCO_NODE_LEAF_LEFT: {
         int K_right = wire_read_kr_header(table, node_id, in_ptr);
         uint8_t bm_scratch[(size_t)bitmap_bytes(K) + 16];
         const uint8_t *bm = wire_read_bitmap(in_ptr, K, bm_scratch);
 
-        /* If the right child is also a leaf, no recursion needed:
-         * merge_cst_cst with prefill_sym on the left and the
-         * right child's symbol on the right. */
-        if (table->node_type[node->right] == (uint8_t)PIVCO_NODE_LEAF) {
-            prim_merge_cst_cst(bm, K, table->prefill_sym,
-                                   (uint8_t)table->tree[node->right].symbol,
-                                   out_buf);
-            return;
-        }
         uint8_t *right_buf = scratch_top;
         codec_decode_subtree(table, node->right, K_right,
                               right_buf, in_ptr, scratch_top + K_right);
-        prim_merge_cst_vec(bm, K, table->prefill_sym,
-                                    right_buf, out_buf);
+        prim_merge_cst_vec(bm, K,
+                           (uint8_t)table->tree[node->left].symbol,
+                           right_buf, out_buf);
         return;
     }
 
-    case PIVCO_NODE_HALF_LEFT: {
+    case PIVCO_NODE_LEAF_RIGHT: {
+        /* Structurally absent under canonical codes (leaf sorts left);
+         * kept dispatchable for safety. */
         int K_right = wire_read_kr_header(table, node_id, in_ptr);
         uint8_t bm_scratch[(size_t)bitmap_bytes(K) + 16];
         const uint8_t *bm = wire_read_bitmap(in_ptr, K, bm_scratch);
 
-        if (table->node_type[node->left] == (uint8_t)PIVCO_NODE_LEAF) {
-            prim_merge_cst_cst(bm, K,
-                                   (uint8_t)table->tree[node->left].symbol,
-                                   table->prefill_sym, out_buf);
-            return;
-        }
         int K_left = K - K_right;
         uint8_t *left_buf = scratch_top;
         codec_decode_subtree(table, node->left, K_left,
                               left_buf, in_ptr, scratch_top + K_left);
         prim_merge_vec_cst(bm, K, left_buf,
-                                     table->prefill_sym, out_buf);
+                           (uint8_t)table->tree[node->right].symbol,
+                           out_buf);
         return;
     }
 
     case PIVCO_NODE_INTERNAL_FULL:
     default: {
+        /* Both children internal.  Recurse into both with disjoint
+         * scratch slices, then merge. */
         int K_right = wire_read_kr_header(table, node_id, in_ptr);
         uint8_t bm_scratch[(size_t)bitmap_bytes(K) + 16];
         const uint8_t *bm = wire_read_bitmap(in_ptr, K, bm_scratch);
 
-        int left_kind  = table->node_type[node->left];
-        int right_kind = table->node_type[node->right];
-
-        if (left_kind == (uint8_t)PIVCO_NODE_LEAF
-            && right_kind == (uint8_t)PIVCO_NODE_LEAF) {
-            prim_merge_cst_cst(bm, K,
-                                   (uint8_t)table->tree[node->left].symbol,
-                                   (uint8_t)table->tree[node->right].symbol,
-                                   out_buf);
-            return;
-        }
-        if (left_kind == (uint8_t)PIVCO_NODE_LEAF) {
-            uint8_t *right_buf = scratch_top;
-            codec_decode_subtree(table, node->right, K_right,
-                                  right_buf, in_ptr, scratch_top + K_right);
-            prim_merge_cst_vec(bm, K,
-                                        (uint8_t)table->tree[node->left].symbol,
-                                        right_buf, out_buf);
-            return;
-        }
-        if (right_kind == (uint8_t)PIVCO_NODE_LEAF) {
-            int K_left = K - K_right;
-            uint8_t *left_buf = scratch_top;
-            codec_decode_subtree(table, node->left, K_left,
-                                  left_buf, in_ptr, scratch_top + K_left);
-            prim_merge_vec_cst(bm, K, left_buf,
-                                         (uint8_t)table->tree[node->right].symbol,
-                                         out_buf);
-            return;
-        }
-
-        /* General case: both children non-leaf.  Recurse into both
-         * with disjoint scratch slices, then merge. */
         int K_left = K - K_right;
         uint8_t *left_buf  = scratch_top;
         uint8_t *right_buf = scratch_top + K_left;
@@ -498,18 +456,14 @@ int CODEC_DECODE_ENTRY(const uint8_t *in, size_t in_len,
         return PIVCO_OK;
     }
 
-    /* Fast path: BOTH_LEAVES at root.  Common on heavily-skewed
-     * distributions (proba80, two_sym_eq, calgary_pic) where one
-     * symbol dominates and its tree has just a 1-bit code: hot blocks
-     * collapse to "read the K-bit partition, blend two symbols".  The
-     * legacy bu_neon / bu_x86 entries kept this fast path and it
-     * accounted for the proba80 win: skipping the recursive
+    /* Fast path: BOTH_LEAVES at root — a 2-symbol (or single-symbol)
+     * tree, where the whole block collapses to "read the K-bit
+     * partition, blend two symbols".  Skips the recursive
      * codec_decode_subtree machinery (switch dispatch + bm_scratch
-     * stack frame + scratch TLS reference) saves ~1.5 us per block on
-     * Apple M4 and Xeon Granite Rapids, where the actual merge is
-     * only ~200 ns.  Lost during the unify-framework refactor;
-     * restored 2026-05-14 after a ~3-4x regression on proba80 across
-     * all hosts. */
+     * stack frame + scratch TLS reference / arena ensure).  Worth −26%
+     * on two_sym decode on older narrow x86 (IvyBridge), noise on
+     * modern hosts.  TODO: consider removing this extreme-case
+     * optimization. */
     if ((pivco_node_type_t)table->node_type[table->tree_root]
         == PIVCO_NODE_BOTH_LEAVES) {
         uint8_t bm_scratch[(size_t)bitmap_bytes(N) + 16];

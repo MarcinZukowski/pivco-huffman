@@ -676,7 +676,7 @@ static inline int part_full_avx512(uint8_t *ranks, int n, uint8_t thr,
     return n_right;
 }
 
-/* right (HALF_RIGHT): compact the right side only, to tmp. */
+/* right (LEAF_LEFT): compact the right side only, to tmp. */
 static inline int part_right_avx512(uint8_t *ranks, int n, uint8_t thr,
                                        uint8_t *bm, uint8_t *tmp)
 {
@@ -698,7 +698,7 @@ static inline int part_right_avx512(uint8_t *ranks, int n, uint8_t thr,
     return n_right;
 }
 
-/* left (HALF_LEFT): compact the left side only, in place into ranks. */
+/* left (LEAF_RIGHT): compact the left side only, in place into ranks. */
 static inline int part_left_avx512(uint8_t *ranks, int n, uint8_t thr, uint8_t *bm)
 {
     int n_left = 0, n_right = 0;
