@@ -138,6 +138,12 @@ static inline void merge_vec_vec_scalar(const uint8_t *bm, int K,
 
 #define PIVCO_PRIM_ALWAYS_INLINE __attribute__((always_inline)) static inline
 
+/* Widest load a merge kernel issues at a child-buffer cursor (byte loads);
+ * the cursor can rest AT `size` on the exhausted side, so buffers a
+ * merge reads need this much trailing slack.  Consumed by the decode
+ * placement logic (scratch_carve / place_tail). */
+#define PIVCO_PRIM_MERGE_OVERREAD 1
+
 PIVCO_PRIM_ALWAYS_INLINE void prim_codec_init(void)
 { codec_init_scalar(); }
 

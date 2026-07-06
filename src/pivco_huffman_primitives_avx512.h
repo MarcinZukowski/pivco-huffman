@@ -704,6 +704,12 @@ static inline void pack_dN_avx512(uint8_t *out, const uint8_t *ranks,
 
 #define PIVCO_PRIM_ALWAYS_INLINE __attribute__((always_inline)) static inline
 
+/* Widest load a merge kernel issues at a child-buffer cursor (8B expandloadu tail window);
+ * the cursor can rest AT `size` on the exhausted side, so buffers a
+ * merge reads need this much trailing slack.  Consumed by the decode
+ * placement logic (scratch_carve / place_tail). */
+#define PIVCO_PRIM_MERGE_OVERREAD 8
+
 PIVCO_PRIM_ALWAYS_INLINE void prim_codec_init(void)
 { codec_init_avx512(); }
 

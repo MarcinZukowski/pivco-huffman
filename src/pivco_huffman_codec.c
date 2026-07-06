@@ -50,6 +50,110 @@ static uint8_t *decode_scratch_ensure(size_t need)
     return g_decode_scratch;
 }
 
+/* ---------- Runtime placement flags (issue #10 integration) ----------
+ *
+ * PIVCO_DEC_CARVE=1    page-hazard-aware scratch carving: child slices
+ *                      are nudged off page boundaries (issue #8's
+ *                      split-load penalty on a parked merge cursor).
+ * PIVCO_DEC_INPLACE=1  in-place merge: an internal node's longer child
+ *                      decodes into out_buf's tail instead of scratch,
+ *                      halving the merge working set.
+ *
+ * Both default OFF: placement is then byte-identical to the plain bump
+ * allocator.  Read once per process (per backend TU). */
+static int g_dec_carve   = -1;
+static int g_dec_inplace = -1;
+static inline int dec_flag(const char *name, int *cache)
+{
+    int v = *cache;
+    if (v < 0) {
+        const char *e = getenv(name);
+        v = (e && e[0] == '1');
+        *cache = v;
+    }
+    return v;
+}
+
+/* SCRATCH_PAGE is the page-split-load hazard granularity used by
+ * scratch_carve below: the hardware page size (16 KB Apple Silicon,
+ * 4 KB elsewhere in the fleet; a 64 KB-page Linux arm64 kernel gets
+ * needless-but-harmless 4 KB padding). */
+#if defined(__APPLE__) && defined(__aarch64__)
+#define SCRATCH_PAGE   ((uintptr_t)16384)
+#else
+#define SCRATCH_PAGE   ((uintptr_t)4096)
+#endif
+#define MERGE_OVERREAD ((uintptr_t)PIVCO_PRIM_MERGE_OVERREAD)
+/* Keep the first ~cache line of every slice straddle-free: a merge
+ * cursor lingers NEAR offset 0 (not just at it) while the other side
+ * drains. */
+#define START_GUARD    ((uintptr_t)64)
+
+/* ALL padding draws from a per-block budget (reset in the decode
+ * entry): when it runs out, slices are placed unpadded -- a perf
+ * hazard reachable only by adversarial page phases, never a safety
+ * issue.  Absolute (not per-page) so the arena bound is identical on
+ * every platform. */
+#define PIVCO_SCRATCH_PAD_BUDGET ((size_t)16384)
+static __thread size_t g_scratch_pad_left;
+
+/* Carve a child slice off the arena.  With PIVCO_DEC_CARVE off this is
+ * a plain bump.  With it on, page-hazard-aware placement (issue #8):
+ *   - sub-page slice: never crosses a page boundary (its cursor dwells
+ *     everywhere inside it, so a mid-slice straddle is the hammer);
+ *   - page-crossing slice: interior straddles are unavoidable (and its
+ *     cursor moves fast anyway); small nudges keep the START zone and
+ *     the exhausted-cursor END position straddle-free (the end lands ON
+ *     a boundary, so the end-position load reads the next page without
+ *     straddling). */
+static inline uint8_t *scratch_carve(uint8_t **top, int size)
+{
+    uintptr_t p = (uintptr_t)*top;
+    if (g_dec_carve) {
+        uintptr_t rem = SCRATCH_PAGE - (p & (SCRATCH_PAGE - 1));  /* 1..PAGE */
+        uintptr_t pad = 0;
+        if ((uintptr_t)size + MERGE_OVERREAD <= SCRATCH_PAGE) {
+            if ((uintptr_t)size + MERGE_OVERREAD > rem)
+                pad = rem;                              /* sub-page: never cross */
+        } else {
+            if (rem < START_GUARD) pad = rem;           /* clean start */
+            uintptr_t end  = p + pad + (uintptr_t)size;
+            uintptr_t erem = SCRATCH_PAGE - (end & (SCRATCH_PAGE - 1));
+            if (erem < MERGE_OVERREAD) {
+                pad += erem;                            /* end onto boundary */
+                uintptr_t srem = SCRATCH_PAGE - ((p + pad) & (SCRATCH_PAGE - 1));
+                if (srem < START_GUARD) pad += srem;    /* re-clean start */
+            }
+        }
+        if (pad <= g_scratch_pad_left) g_scratch_pad_left -= pad; else pad = 0;
+        p += pad;
+    }
+    *top = (uint8_t *)(p + (uintptr_t)size);
+    return (uint8_t *)p;
+}
+
+/* Place an internal node's tail child at out_buf + offset (in-place
+ * merge; only called when tail_ok && PIVCO_DEC_INPLACE).  A tail's
+ * position is fixed by the merge invariant, so it cannot be nudged;
+ * the one dangerous placement is a SUB-PAGE tail that would cross a
+ * page boundary (a small slice's cursor is parked everywhere in it) --
+ * that one falls back to a no-cross carve, charging the extra scratch
+ * content to the same pad budget. */
+static inline uint8_t *place_tail(uint8_t *out_buf, int offset, int size,
+                                  uint8_t **top)
+{
+    uint8_t *p = out_buf + offset;
+    if (g_dec_carve && (uintptr_t)size + MERGE_OVERREAD <= SCRATCH_PAGE) {
+        uintptr_t rem = SCRATCH_PAGE - ((uintptr_t)p & (SCRATCH_PAGE - 1));
+        if ((uintptr_t)size + MERGE_OVERREAD > rem &&
+            (size_t)size <= g_scratch_pad_left) {
+            g_scratch_pad_left -= (size_t)size;   /* charge the content... */
+            return scratch_carve(top, size);      /* ...the carve pads itself */
+        }
+    }
+    return p;
+}
+
 /* Thread-local growable encode scratch arena.  Mirrors the decode arena
  * above: holds the per-block ranks buffer + the tree-walk's right-half
  * recursion scratch, grown on demand and reused across blocks (never shrinks),
@@ -336,13 +440,20 @@ int CODEC_ENCODE_ENTRY(const uint8_t *symbols, size_t n,
  *   INTERNAL_FULL   — both children internal: recurse both, merge_vec_vec
  *
  * `scratch_top` is the arena pointer for child output buffers; each
- * caller bumps it past its own K bytes when calling further down. */
+ * caller carves its children's slices off it (see scratch_carve) when
+ * calling further down.
+ *
+ * `tail_ok` is nonzero when out_buf is arena-backed (a carve or a
+ * nested tail) and so has MERGE_OVERREAD trailing slack: a child may
+ * then be placed in its tail (see place_tail) when PIVCO_DEC_INPLACE
+ * is on.  The root call passes 0 -- the caller's output buffer has no
+ * over-read slack. */
 
 static void codec_decode_subtree(const pivco_huffman_table_t *table,
                                    int16_t node_id, int K,
                                    uint8_t *out_buf,
                                    const uint8_t **in_ptr,
-                                   uint8_t *scratch_top)
+                                   uint8_t *scratch_top, int tail_ok)
 {
     if (K == 0) return;
 
@@ -383,9 +494,11 @@ static void codec_decode_subtree(const pivco_huffman_table_t *table,
         uint8_t bm_scratch[(size_t)bitmap_bytes(K) + 16];
         const uint8_t *bm = wire_read_bitmap(in_ptr, K, bm_scratch);
 
-        uint8_t *right_buf = scratch_top;
+        uint8_t *right_buf = tail_ok
+            ? place_tail(out_buf, K - K_right, K_right, &scratch_top)
+            : scratch_carve(&scratch_top, K_right);
         codec_decode_subtree(table, node->right, K_right,
-                              right_buf, in_ptr, scratch_top + K_right);
+                              right_buf, in_ptr, scratch_top, g_dec_inplace);
         prim_merge_cst_vec(bm, K,
                            (uint8_t)table->tree[node->left].symbol,
                            right_buf, out_buf);
@@ -401,14 +514,26 @@ static void codec_decode_subtree(const pivco_huffman_table_t *table,
         const uint8_t *bm = wire_read_bitmap(in_ptr, K, bm_scratch);
 
         int K_left = K - K_right;
-        uint8_t *left_buf  = scratch_top;
-        uint8_t *right_buf = scratch_top + K_left;
-        uint8_t *new_scratch_top = scratch_top + K;
+        uint8_t *left_buf, *right_buf;
+        if (tail_ok && K_left >= K_right) {
+            /* Longer child decodes into out_buf's tail (free -- see
+             * place_tail), the shorter into a scratch carve.  Decode
+             * order stays left-then-right (the wire is pre-order) --
+             * only buffer placement differs. */
+            left_buf  = place_tail(out_buf, K_right, K_left, &scratch_top);
+            right_buf = scratch_carve(&scratch_top, K_right);
+        } else if (tail_ok) {
+            right_buf = place_tail(out_buf, K_left, K_right, &scratch_top);
+            left_buf  = scratch_carve(&scratch_top, K_left);
+        } else {
+            left_buf  = scratch_carve(&scratch_top, K_left);
+            right_buf = scratch_carve(&scratch_top, K_right);
+        }
 
         codec_decode_subtree(table, node->left,  K_left,
-                              left_buf,  in_ptr, new_scratch_top);
+                              left_buf,  in_ptr, scratch_top, g_dec_inplace);
         codec_decode_subtree(table, node->right, K_right,
-                              right_buf, in_ptr, new_scratch_top);
+                              right_buf, in_ptr, scratch_top, g_dec_inplace);
         prim_merge_vec_vec(bm, K, left_buf, right_buf, out_buf);
         return;
     }
@@ -461,13 +586,21 @@ int CODEC_DECODE_ENTRY(const uint8_t *in, size_t in_len,
     /* Scratch arena.  Worst case at a heavily-skewed node, the
      * partition is one-sided so a single recursion can consume up to
      * N bytes.  Bounded by (MAX_CODE_LEN+2) * N.  Grown on demand from a
-     * thread-local heap buffer so block size is a runtime parameter. */
-    uint8_t *scratch =
-        decode_scratch_ensure((size_t)N * (PIVCO_MAX_CODE_LEN + 2));
+     * thread-local heap buffer so block size is a runtime parameter.
+     * With carve or in-place placement on, double it for carve-bump
+     * waste and add page + over-read slack (the exact 2N + budget
+     * bound comes with the arena-shrink step). */
+    dec_flag("PIVCO_DEC_CARVE",   &g_dec_carve);
+    dec_flag("PIVCO_DEC_INPLACE", &g_dec_inplace);
+    size_t need = (size_t)N * (PIVCO_MAX_CODE_LEN + 2);
+    if (g_dec_carve || g_dec_inplace)
+        need = 2 * need + SCRATCH_PAGE + MERGE_OVERREAD;
+    uint8_t *scratch = decode_scratch_ensure(need);
     if (!scratch) return PIVCO_ERR_NULL;
+    g_scratch_pad_left = PIVCO_SCRATCH_PAD_BUDGET;
 
     codec_decode_subtree(table, table->tree_root, N,
-                          symbols, &ptr, scratch);
+                          symbols, &ptr, scratch, /*tail_ok=*/0);
 
     *consumed = (size_t)(ptr - in);
     return PIVCO_OK;
