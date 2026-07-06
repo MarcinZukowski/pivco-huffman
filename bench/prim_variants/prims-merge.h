@@ -715,6 +715,136 @@ static void prim_merge_vv_sse_com128(const ctx_t *c){
     prim_merge_vv_sse_com128_x86(c->bm, c->n, c->merge_left, c->merge_right, c->out);
 }
 
+/* ---- IVB loop-top phase pair (2026-07) ----
+ *
+ * The c3 (Ivy Bridge) "binary lottery": the production two-table pshufb
+ * cst_vec loop (113 bytes) runs +11% slower when its loop top lands at
+ * phase 16 mod 32 (32-byte uop-cache window split; phases {0,8,24} are
+ * fast) — which phase a build gets is a link-layout roll (bench_c3jit.c
+ * placement sweep, 2026-07-06).  These two cores are the verbatim
+ * clang-20 -march=native c3 production roll with the loop top pinned to
+ * phase 0 (fast) and phase 16 (slow), so any host can measure its
+ * window-packing sensitivity.  VEX-encoded (needs AVX1 at runtime —
+ * true of the whole SSE-tier fleet, c3..c6a); references the production
+ * g_x86_merge_shuf0/1 tables via the same absolute-disp32 forms, so the
+ * loop bytes match production exactly (byte-verified on c3).
+ * Production-side cure candidate: -falign-loops=32 (fleet A/A' pending). */
+__attribute__((naked,noinline,used))
+static long pv_cv_ivb_p0_core(uint8_t *out, const uint8_t *right,
+                              const uint8_t *bm, long n, long left_sym)
+{
+    __asm__ volatile(
+        "pushq %rbx\n"
+        "movq %rdx,%rax\n"          /* bm */
+        "movq %rsi,%rdx\n"          /* right */
+        "movq %rcx,%rsi\n"          /* n */
+        "movq %rdi,%rcx\n"          /* out */
+        "leaq 0x1(%rax),%r9\n"      /* bm cursor (m1 side) */
+        "imull $0x01010101,%r8d,%r8d\n"
+        "vmovd %r8d,%xmm1\n"
+        "vpshufd $0x0,%xmm1,%xmm1\n" /* left_sym broadcast */
+        "vpcmpeqd %xmm0,%xmm0,%xmm0\n"
+        "xorl %edi,%edi\n"          /* rc */
+        "xorl %r8d,%r8d\n"          /* j */
+        ".p2align 5\n"              /* loop top at phase 0 mod 32 */
+                                    /* NO .skip HERE !!! */
+        "1:\n"                      /* ---- verbatim c3 clang-20 roll ---- */
+        "movl %edi,%r10d\n"
+        "movzbl -0x1(%r9),%r11d\n"
+        "movzbl (%r9),%edi\n"
+        "xorl %ebx,%ebx\n"
+        "popcnt %r11d,%ebx\n"
+        "shll $0x4,%r11d\n"
+        "vmovq g_x86_merge_shuf1(,%rdi,8),%xmm2\n"
+        "vpslldq $0x8,%xmm2,%xmm2\n"
+        "vpaddb g_x86_merge_shuf0(%r11),%xmm2,%xmm2\n"
+        "movq %r8,%r11\n"
+        "movl %r10d,%r8d\n"
+        "vmovdqu (%rdx,%r8,1),%xmm3\n"
+        "vpshufb %xmm2,%xmm3,%xmm3\n"
+        "vpxor %xmm0,%xmm2,%xmm2\n"
+        "vpshufb %xmm2,%xmm1,%xmm2\n"
+        "vpor %xmm3,%xmm2,%xmm2\n"
+        "vmovdqu %xmm2,(%rcx,%r11,1)\n"
+        "popcnt %edi,%edi\n"
+        "addb %bl,%dil\n"
+        "movzbl %dil,%edi\n"
+        "addl %r10d,%edi\n"
+        "leaq 0x10(%r11),%r8\n"
+        "addq $0x2,%r9\n"
+        "addq $0x20,%r11\n"
+        "cmpq %rsi,%r11\n"
+        "jbe 1b\n"
+        "movl %edi,%eax\n"          /* return rc */
+        "popq %rbx\n"
+        "ret\n");
+}
+__attribute__((naked,noinline,used))
+static long pv_cv_ivb_p16_core(uint8_t *out, const uint8_t *right,
+                               const uint8_t *bm, long n, long left_sym)
+{
+    __asm__ volatile(
+        "pushq %rbx\n"
+        "movq %rdx,%rax\n"          /* bm */
+        "movq %rsi,%rdx\n"          /* right */
+        "movq %rcx,%rsi\n"          /* n */
+        "movq %rdi,%rcx\n"          /* out */
+        "leaq 0x1(%rax),%r9\n"      /* bm cursor (m1 side) */
+        "imull $0x01010101,%r8d,%r8d\n"
+        "vmovd %r8d,%xmm1\n"
+        "vpshufd $0x0,%xmm1,%xmm1\n" /* left_sym broadcast */
+        "vpcmpeqd %xmm0,%xmm0,%xmm0\n"
+        "xorl %edi,%edi\n"          /* rc */
+        "xorl %r8d,%r8d\n"          /* j */
+        ".p2align 5\n"
+        ".skip 16,0x90\n"           /* loop top at phase 16 mod 32 (the slow IVB phase) */
+        "1:\n"                      /* ---- same bytes as p0 ---- */
+        "movl %edi,%r10d\n"
+        "movzbl -0x1(%r9),%r11d\n"
+        "movzbl (%r9),%edi\n"
+        "xorl %ebx,%ebx\n"
+        "popcnt %r11d,%ebx\n"
+        "shll $0x4,%r11d\n"
+        "vmovq g_x86_merge_shuf1(,%rdi,8),%xmm2\n"
+        "vpslldq $0x8,%xmm2,%xmm2\n"
+        "vpaddb g_x86_merge_shuf0(%r11),%xmm2,%xmm2\n"
+        "movq %r8,%r11\n"
+        "movl %r10d,%r8d\n"
+        "vmovdqu (%rdx,%r8,1),%xmm3\n"
+        "vpshufb %xmm2,%xmm3,%xmm3\n"
+        "vpxor %xmm0,%xmm2,%xmm2\n"
+        "vpshufb %xmm2,%xmm1,%xmm2\n"
+        "vpor %xmm3,%xmm2,%xmm2\n"
+        "vmovdqu %xmm2,(%rcx,%r11,1)\n"
+        "popcnt %edi,%edi\n"
+        "addb %bl,%dil\n"
+        "movzbl %dil,%edi\n"
+        "addl %r10d,%edi\n"
+        "leaq 0x10(%r11),%r8\n"
+        "addq $0x2,%r9\n"
+        "addq $0x20,%r11\n"
+        "cmpq %rsi,%r11\n"
+        "jbe 1b\n"
+        "movl %edi,%eax\n"          /* return rc */
+        "popq %rbx\n"
+        "ret\n");
+}
+static void pv_cv_phase(const uint8_t *bm, int K, uint8_t left_sym,
+                        const uint8_t *right, uint8_t *out,
+                        long (*core)(uint8_t*,const uint8_t*,const uint8_t*,long,long))
+{
+    int n16 = K >= 16 ? (K & ~15) : 0;   /* codes the asm loop consumes */
+    long rc = 0;
+    if (n16)
+        rc = core(out, right, bm, (long)K, (long)left_sym);
+    for (int j = n16; j < K; j++) {
+        int b = (bm[j >> 3] >> (j & 7)) & 1;
+        out[j] = b ? right[rc++] : left_sym;
+    }
+}
+static void prim_merge_cv_ivb_p0 (const ctx_t *c){ pv_cv_phase(c->bm, c->n, MERGE_LEFT_SYM, c->merge_right, c->out, pv_cv_ivb_p0_core); }
+static void prim_merge_cv_ivb_p16(const ctx_t *c){ pv_cv_phase(c->bm, c->n, MERGE_LEFT_SYM, c->merge_right, c->out, pv_cv_ivb_p16_core); }
+
 #if defined(__AVX2__)
 /* avx2_com: 16 codes per _mm256_shuffle_epi8 (two independent 128-bit lanes),
  * COM cursors.  bench_merge_x86.c::avx2_com_merge. */
@@ -1665,6 +1795,10 @@ static void pv_register_merge(void) {
                PV_FN_NEON(prim_merge_cst_vec_skewfuse));
     PV_VARIANT(ST_MERGE_CST_VEC, "unroll16",  PV_ISA_SSE4, "asof-d24c0eb (prior production)",
                "2x-unrolled expand_tab cst_vec; production before the two-table merge", 0, PV_FN_SSE(prim_merge_cv_unroll16));
+    PV_VARIANT(ST_MERGE_CST_VEC, "c3roll-asm-p0",  PV_ISA_SSE4, "IVB loop-top phase study (2026-07)",
+               "clang-20 c3 production two-table pshufb loop, verbatim (VEX, needs AVX1), loop top pinned to phase 0 mod 32 — a fast IVB phase", 0, PV_FN_SSE(prim_merge_cv_ivb_p0));
+    PV_VARIANT(ST_MERGE_CST_VEC, "c3roll-asm-p16", PV_ISA_SSE4, "IVB loop-top phase study (2026-07)",
+               "same bytes, loop top at phase 16 mod 32 — the slow IVB phase (32B uop-window split, +11% on c3); the phase roll is the c3 binary lottery", 0, PV_FN_SSE(prim_merge_cv_ivb_p16));
     /* merge_vec_vec — x86 COM / prefix-sum forms (IDEAS: x86 COM merge). */
     PV_VARIANT(ST_MERGE_VEC_VEC, "sse_com",        PV_ISA_SSE4, "bench_merge_x86.c",
                "64 codes/iter, 8 pshufb merges, SWAR-popcnt prefix cursors", 0,
