@@ -29,6 +29,7 @@
 - [x86 COM merge + partition (prefix-sum cursor decoupling)](#x86-com-merge--partition-prefix-sum-cursor-decoupling-2026-06-16)
 
 **AVX-512**
+- [Pin the merge vpexpandb encoding per-uarch (dynamic dispatch)](#pin-the-merge-vpexpandb-encoding-per-uarch-dynamic-dispatch-2026-07-06)
 - [AVX-512 BW tier for Cascade Lake (c5)](#avx-512-bw-tier-for-cascade-lake-c5-2026-05-12)
 
 **Other ISA**
@@ -223,6 +224,37 @@ cursor-decouple, which Intel's frontend can't absorb on the wider 8-chunk
 body.  Not shipped; same AMD-gated-retry caveat as merge.
 
 **AVX-512**
+
+### Pin the merge vpexpandb encoding per-uarch (dynamic dispatch), 2026-07-06
+The vpexpandb in the merge-masked `merge_cst_vec` / `merge_vec_vec` main loops
+has two EVEX forms — 7-byte no-disp vs 8-byte disp8 (a zero disp8 byte, forced
+by an r13/rbp-class base register) — and which one the compiler emits is a
+register-allocation roll per build.  On Zen the form is worth real money
+(op-cache entry packing → dispatch-group formation → int-scheduler-0 token
+starvation, PMU r01AF; placement-immune, NOP-control-verified): the whole
+±15-22% "binary lottery" on c8a.  Asm-pinned variants live in `bench_prim
+--variants` (`iurii-asm-exp7b/exp8b` for cst_vec, `iurii-asm-l7r7/l7r8/l8r7/
+l8r8` for vec_vec; `iurii-asm-gnr7b/gnr8b` for the schedule axis, below).
+Measured (5-host sweep, gcc14 except c6i=gcc11, ns/elem): **Zen 5 wants R=8B**
+(vec_vec l7r8/l8r8 0.0157 vs l8r7 0.0178, l7r7 0.0202; cst_vec exp8b 0.0106
+vs exp7b 0.0124, +18%), **Zen 4 wants R=7B** (l8r7/l7r7 0.0199-0.0200 vs
+l8r8 0.0207), **Intel (c6i/c7i/c8i) is indifferent between pinned encodings**
+(within ~2%), though the compiler's roll lands anywhere in the band (c8i
+vec_vec: roll 0.0251 vs pinned 0.0214, +17%).
+
+**Second axis — the SCHEDULE (2026-07-06 follow-up):** a stray
+`-march=native` in test-c8i's build cache had gcc14 emit a GNR-tuned
+schedule of the same cst_vec loop (bm-address chain first, rc accumulate
+after the store).  Transcribed as `iurii-asm-gnr7b` (byte-verified vs the
+c8i production roll) + `gnr8b` (same schedule, disp8 expand).  Fleet: the
+GNR schedule wins on **GNR (0.0132 vs 0.0142 generic, +7%)** where encoding
+is irrelevant, **composes with the disp8 win on Zen 5** (gnr8b 0.0102 — the
+new best, vs exp8b 0.0106, prod roll 0.0126: +19% total), **loses ~4% on
+Zen 4** (0.0138 vs exp7b 0.0132), and is a wash on SPR/ICL.  So encoding and
+schedule are independent axes and both are per-uarch.
+
+No universal winner → a static pin was tried and backed out.  When runtime
+uarch dispatch lands, revisit.
 
 ### AVX-512 BW tier for Cascade Lake (c5), 2026-05-12
 c5 (Xeon 8275CL) has F/BW/CD/DQ/VL but no VBMI2; today drops to AVX2 tier.  Could shim a new tier that uses vpermi2w for enc_init (BW) while keeping AVX2 partition + SSE pack.  Estimated ~10–12% wall on c5, prose_pride 691 → ~775 M/s, crosses huf0_x2 parity.  Defer unless c5 specifically becomes important.

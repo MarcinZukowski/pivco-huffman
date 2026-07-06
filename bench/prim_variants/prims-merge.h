@@ -1137,6 +1137,398 @@ static void pv_merge_cst_vec_avx512_maskz(const uint8_t *bm, int K,
 }
 
 static void prim_merge_vv_maskz(const ctx_t *c){ pv_merge_vec_vec_avx512_maskz(c->bm, c->n, c->merge_left, c->merge_right, c->out); }
+/* ---- Zen 5 vpexpandb-encoding pair (2026-07-06 investigation) ----
+ *
+ * Two byte-exact re-creations of the production merge-masked cst_vec
+ * inner loop that differ ONLY in the vpexpandb encoding: the expand's
+ * base register chooses the 7-byte no-disp EVEX form (rcx) vs the
+ * 8-byte disp8 form (r13, which architecturally requires the byte).
+ * On Zen 5 (c8a) the no-disp form measures x1.15-1.21 SLOWER: the
+ * disp8 changes op-cache entry packing -> dispatch-group formation ->
+ * integer-scheduler steering (PMU: int-sched-0 token starvation,
+ * +0.8c/iter).  A length-equalizing NOP does NOT recover it -- it is
+ * the instruction's own form, not byte positions.  Which form the
+ * compiler emits is a register-allocation roll: this pair pins both,
+ * so any host can measure its sensitivity.  Expected ~0 on Intel. */
+__attribute__((naked,noinline,used))
+static long pv_cv_exp7b_core(uint8_t *out, const uint8_t *right,
+                                  const uint8_t *bm, long n64, long left_sym)
+{
+    __asm__ volatile(
+        "pushq %rbx\n"
+        "pushq %r15\n"
+        "movq %rdx,%r15\n"          /* bm  */
+        "movq %rcx,%rdx\n"          /* n64 */
+        "movq %rsi,%rcx\n"          /* right */
+        "movq %rdi,%rbx\n"          /* out */
+        "vpbroadcastb %r8d,%zmm1\n" /* left_sym */
+        "xorl %eax,%eax\n"
+        "xorl %esi,%esi\n"
+        ".p2align 6\n"
+        "1:\n"                      /* ---- verbatim no-disp form ---- */
+        "movl %eax,%edi\n"
+        "movslq %esi,%r11\n"
+        "vmovdqa64 %zmm1,%zmm0\n"
+        "sarl $0x3,%edi\n"
+        "movslq %edi,%rdi\n"
+        "movq (%r15,%rdi,1),%rdi\n"
+        "kmovq %rdi,%k3\n"
+        "vpexpandb (%rcx,%r11,1),%zmm0{%k3}\n"   /* 7B: no disp */
+        "popcnt %rdi,%rdi\n"
+        "addl %edi,%esi\n"
+        "vmovdqu64 %zmm0,(%rbx,%rax,1)\n"
+        "addq $0x40,%rax\n"
+        "cmpq %rax,%rdx\n"
+        "jne 1b\n"
+        "movl %esi,%eax\n"          /* return rc */
+        "popq %r15\n"
+        "popq %rbx\n"
+        "ret\n");
+}
+__attribute__((naked,noinline,used))
+static long pv_cv_exp8b_core(uint8_t *out, const uint8_t *right,
+                                 const uint8_t *bm, long n64, long left_sym)
+{
+    __asm__ volatile(
+        "pushq %rbx\n"
+        "pushq %r13\n"
+        "movq %rdx,%r11\n"          /* bm  */
+        "movq %rcx,%rdx\n"          /* n64 */
+        "movq %rsi,%r13\n"          /* right */
+        "movq %rdi,%rbx\n"          /* out */
+        "vpbroadcastb %r8d,%zmm1\n"
+        "xorl %eax,%eax\n"
+        "xorl %ecx,%ecx\n"
+        ".p2align 6\n"
+        "1:\n"                      /* ---- verbatim disp8 form ---- */
+        "movl %eax,%esi\n"
+        "movslq %ecx,%r10\n"
+        "vmovdqa64 %zmm1,%zmm0\n"
+        "sarl $0x3,%esi\n"
+        "movslq %esi,%rsi\n"
+        "movq (%r11,%rsi,1),%rsi\n"
+        "kmovq %rsi,%k3\n"
+        "vpexpandb 0x0(%r13,%r10,1),%zmm0{%k3}\n" /* 8B: disp8 forced by r13 */
+        "popcnt %rsi,%rsi\n"
+        "addl %esi,%ecx\n"
+        "vmovdqu64 %zmm0,(%rbx,%rax,1)\n"
+        "addq $0x40,%rax\n"
+        "cmpq %rax,%rdx\n"
+        "jne 1b\n"
+        "movl %ecx,%eax\n"          /* return rc */
+        "popq %r13\n"
+        "popq %rbx\n"
+        "ret\n");
+}
+static void pv_merge_cst_vec_enc(const uint8_t *bm, int K, uint8_t left_sym,
+                                 const uint8_t *right, uint8_t *out, int disp8)
+{
+    int n64 = K & ~63;
+    long rc = 0;
+    if (n64)
+        rc = (disp8 ? pv_cv_exp8b_core : pv_cv_exp7b_core)
+                 (out, right, bm, (long)n64, (long)left_sym);
+    for (int j = n64; j < K; j++) {
+        int b = (bm[j >> 3] >> (j & 7)) & 1;
+        out[j] = b ? right[rc++] : left_sym;
+    }
+}
+static void prim_merge_cv_exp7b(const ctx_t *c){ pv_merge_cst_vec_enc(c->bm, c->n, MERGE_LEFT_SYM, c->merge_right, c->out, 0); }
+static void prim_merge_cv_exp8b (const ctx_t *c){ pv_merge_cst_vec_enc(c->bm, c->n, MERGE_LEFT_SYM, c->merge_right, c->out, 1); }
+
+/* ---- GNR-tuned schedule pair (2026-07) ----
+ *
+ * gcc14 -march=native on Granite Rapids (a stray flag in test-c8i's
+ * build cache) rolls a DIFFERENT schedule of the same issue-#11 loop:
+ * the bm-word address chain issues first, the zmm copy + rc extend
+ * are deferred, and the rc accumulate moves past the store.  On GNR
+ * it beats the generic schedule (exp7b/exp8b) by ~6% at the same
+ * vpexpandb encoding.  gnr7b is the verbatim byte-exact transcription
+ * (7B no-disp expand off r9); gnr8b re-encodes only the expand to the
+ * 8B disp8 form (r13 base) so Zen hosts can judge the schedule
+ * without the known 7B-encoding handicap. */
+__attribute__((naked,noinline,used))
+static long pv_cv_gnr7b_core(uint8_t *out, const uint8_t *right,
+                             const uint8_t *bm, long n64, long left_sym)
+{
+    __asm__ volatile(
+        "movq %rsi,%r9\n"           /* right */
+        "movq %rdi,%rsi\n"          /* out */
+        "movq %rdx,%rdi\n"          /* bm */
+        "movq %rcx,%r11\n"          /* n64 */
+        "vpbroadcastb %r8d,%zmm1\n" /* left_sym */
+        "xorl %eax,%eax\n"
+        "xorl %edx,%edx\n"
+        ".p2align 6\n"
+        "1:\n"                      /* ---- verbatim c8i -march=native roll ---- */
+        "movl %eax,%ecx\n"
+        "sarl $0x3,%ecx\n"
+        "movslq %ecx,%rcx\n"
+        "movq (%rdi,%rcx,1),%rcx\n"
+        "movslq %edx,%r8\n"
+        "vmovdqa64 %zmm1,%zmm0\n"
+        "kmovq %rcx,%k1\n"
+        "vpexpandb (%r9,%r8,1),%zmm0{%k1}\n"   /* 7B: no disp */
+        "popcnt %rcx,%rcx\n"
+        "vmovdqu64 %zmm0,(%rsi,%rax,1)\n"
+        "addq $0x40,%rax\n"
+        "addl %ecx,%edx\n"
+        "cmpq %rax,%r11\n"
+        "jne 1b\n"
+        "movl %edx,%eax\n"          /* return rc */
+        "ret\n");
+}
+__attribute__((naked,noinline,used))
+static long pv_cv_gnr8b_core(uint8_t *out, const uint8_t *right,
+                             const uint8_t *bm, long n64, long left_sym)
+{
+    __asm__ volatile(
+        "pushq %r13\n"
+        "movq %rsi,%r13\n"          /* right */
+        "movq %rdi,%rsi\n"          /* out */
+        "movq %rdx,%rdi\n"          /* bm */
+        "movq %rcx,%r11\n"          /* n64 */
+        "vpbroadcastb %r8d,%zmm1\n" /* left_sym */
+        "xorl %eax,%eax\n"
+        "xorl %edx,%edx\n"
+        ".p2align 6\n"
+        "1:\n"                      /* ---- same schedule, disp8 expand ---- */
+        "movl %eax,%ecx\n"
+        "sarl $0x3,%ecx\n"
+        "movslq %ecx,%rcx\n"
+        "movq (%rdi,%rcx,1),%rcx\n"
+        "movslq %edx,%r8\n"
+        "vmovdqa64 %zmm1,%zmm0\n"
+        "kmovq %rcx,%k1\n"
+        "vpexpandb 0x0(%r13,%r8,1),%zmm0{%k1}\n" /* 8B: disp8 forced by r13 */
+        "popcnt %rcx,%rcx\n"
+        "vmovdqu64 %zmm0,(%rsi,%rax,1)\n"
+        "addq $0x40,%rax\n"
+        "addl %ecx,%edx\n"
+        "cmpq %rax,%r11\n"
+        "jne 1b\n"
+        "movl %edx,%eax\n"          /* return rc */
+        "popq %r13\n"
+        "ret\n");
+}
+static void pv_cv_sched(const uint8_t *bm, int K, uint8_t left_sym,
+                        const uint8_t *right, uint8_t *out,
+                        long (*core)(uint8_t*,const uint8_t*,const uint8_t*,long,long))
+{
+    int n64 = K & ~63;
+    long rc = 0;
+    if (n64)
+        rc = core(out, right, bm, (long)n64, (long)left_sym);
+    for (int j = n64; j < K; j++) {
+        int b = (bm[j >> 3] >> (j & 7)) & 1;
+        out[j] = b ? right[rc++] : left_sym;
+    }
+}
+static void prim_merge_cv_gnr7b(const ctx_t *c){ pv_cv_sched(c->bm, c->n, MERGE_LEFT_SYM, c->merge_right, c->out, pv_cv_gnr7b_core); }
+static void prim_merge_cv_gnr8b(const ctx_t *c){ pv_cv_sched(c->bm, c->n, MERGE_LEFT_SYM, c->merge_right, c->out, pv_cv_gnr8b_core); }
+
+/* ---- vec_vec encoding matrix (L/R vpexpandb x 7B/8B forms) ---- */
+__attribute__((naked,noinline,used))
+static long pv_vv64_l7r7(uint8_t *out, const uint8_t *left,
+                           const uint8_t *right, const uint8_t *bm, long n64)
+{
+    __asm__ volatile(
+        "pushq %rbx\n"
+        "pushq %r15\n"
+        "pushq %r14\n"
+        "movq %rdi,%rbx\n"
+        "movq %rsi,%r15\n"
+        "movq %rdx,%r10\n"
+        "movq %rcx,%r11\n"
+        "movq %r8,%rdi\n"
+        "movl $0x40,%r8d\n"
+        "vpxor %xmm1,%xmm1,%xmm1\n"
+        "xorl %esi,%esi\n"
+        "xorl %eax,%eax\n"
+        "xorl %edx,%edx\n"
+        ".p2align 4\n"
+        "1:\n"
+        "movl %esi,%ecx\n"
+        "movslq %edx,%r14\n"
+        "vmovdqa64 %zmm1,%zmm0\n"
+        "sarl $0x3,%ecx\n"
+        "movslq %ecx,%rcx\n"
+        "movq (%r11,%rcx,1),%rcx\n"
+        "kmovq %rcx,%k5\n"
+        "knotq %k5,%k1\n"
+        "vpexpandb (%r15,%r14,1),%zmm0{%k1}\n"
+        "movslq %eax,%r14\n"
+        "vpexpandb (%r10,%r14,1),%zmm0{%k5}\n"
+        "movl %r8d,%r14d\n"
+        "popcnt %rcx,%rcx\n"
+        "addl %ecx,%eax\n"
+        "subl %ecx,%r14d\n"
+        "vmovdqu64 %zmm0,(%rbx,%rsi,1)\n"
+        "addq $0x40,%rsi\n"
+        "addl %r14d,%edx\n"
+        "cmpq %rsi,%rdi\n"
+        "jne 1b\n"
+        "popq %r15\n"
+        "popq %r14\n"
+        "popq %rbx\n"
+        "ret\n");
+}
+__attribute__((naked,noinline,used))
+static long pv_vv64_l7r8(uint8_t *out, const uint8_t *left,
+                           const uint8_t *right, const uint8_t *bm, long n64)
+{
+    __asm__ volatile(
+        "pushq %rbx\n"
+        "pushq %rbp\n"
+        "pushq %r15\n"
+        "pushq %r14\n"
+        "movq %rdi,%rbx\n"
+        "movq %rsi,%r15\n"
+        "movq %rdx,%rbp\n"
+        "movq %rcx,%r11\n"
+        "movq %r8,%rdi\n"
+        "movl $0x40,%r8d\n"
+        "vpxor %xmm1,%xmm1,%xmm1\n"
+        "xorl %esi,%esi\n"
+        "xorl %eax,%eax\n"
+        "xorl %edx,%edx\n"
+        ".p2align 4\n"
+        "1:\n"
+        "movl %esi,%ecx\n"
+        "movslq %edx,%r14\n"
+        "vmovdqa64 %zmm1,%zmm0\n"
+        "sarl $0x3,%ecx\n"
+        "movslq %ecx,%rcx\n"
+        "movq (%r11,%rcx,1),%rcx\n"
+        "kmovq %rcx,%k5\n"
+        "knotq %k5,%k1\n"
+        "vpexpandb (%r15,%r14,1),%zmm0{%k1}\n"
+        "movslq %eax,%r14\n"
+        "vpexpandb 0x0(%rbp,%r14,1),%zmm0{%k5}\n"
+        "movl %r8d,%r14d\n"
+        "popcnt %rcx,%rcx\n"
+        "addl %ecx,%eax\n"
+        "subl %ecx,%r14d\n"
+        "vmovdqu64 %zmm0,(%rbx,%rsi,1)\n"
+        "addq $0x40,%rsi\n"
+        "addl %r14d,%edx\n"
+        "cmpq %rsi,%rdi\n"
+        "jne 1b\n"
+        "popq %rbp\n"
+        "popq %r15\n"
+        "popq %r14\n"
+        "popq %rbx\n"
+        "ret\n");
+}
+__attribute__((naked,noinline,used))
+static long pv_vv64_l8r7(uint8_t *out, const uint8_t *left,
+                           const uint8_t *right, const uint8_t *bm, long n64)
+{
+    __asm__ volatile(
+        "pushq %rbx\n"
+        "pushq %r13\n"
+        "pushq %r14\n"
+        "movq %rdi,%rbx\n"
+        "movq %rsi,%r13\n"
+        "movq %rdx,%r10\n"
+        "movq %rcx,%r11\n"
+        "movq %r8,%rdi\n"
+        "movl $0x40,%r8d\n"
+        "vpxor %xmm1,%xmm1,%xmm1\n"
+        "xorl %esi,%esi\n"
+        "xorl %eax,%eax\n"
+        "xorl %edx,%edx\n"
+        ".p2align 4\n"
+        "1:\n"
+        "movl %esi,%ecx\n"
+        "movslq %edx,%r14\n"
+        "vmovdqa64 %zmm1,%zmm0\n"
+        "sarl $0x3,%ecx\n"
+        "movslq %ecx,%rcx\n"
+        "movq (%r11,%rcx,1),%rcx\n"
+        "kmovq %rcx,%k5\n"
+        "knotq %k5,%k1\n"
+        "vpexpandb 0x0(%r13,%r14,1),%zmm0{%k1}\n"
+        "movslq %eax,%r14\n"
+        "vpexpandb (%r10,%r14,1),%zmm0{%k5}\n"
+        "movl %r8d,%r14d\n"
+        "popcnt %rcx,%rcx\n"
+        "addl %ecx,%eax\n"
+        "subl %ecx,%r14d\n"
+        "vmovdqu64 %zmm0,(%rbx,%rsi,1)\n"
+        "addq $0x40,%rsi\n"
+        "addl %r14d,%edx\n"
+        "cmpq %rsi,%rdi\n"
+        "jne 1b\n"
+        "popq %r13\n"
+        "popq %r14\n"
+        "popq %rbx\n"
+        "ret\n");
+}
+__attribute__((naked,noinline,used))
+static long pv_vv64_l8r8(uint8_t *out, const uint8_t *left,
+                           const uint8_t *right, const uint8_t *bm, long n64)
+{
+    __asm__ volatile(
+        "pushq %rbx\n"
+        "pushq %rbp\n"
+        "pushq %r13\n"
+        "pushq %r14\n"
+        "movq %rdi,%rbx\n"
+        "movq %rsi,%r13\n"
+        "movq %rdx,%rbp\n"
+        "movq %rcx,%r11\n"
+        "movq %r8,%rdi\n"
+        "movl $0x40,%r8d\n"
+        "vpxor %xmm1,%xmm1,%xmm1\n"
+        "xorl %esi,%esi\n"
+        "xorl %eax,%eax\n"
+        "xorl %edx,%edx\n"
+        ".p2align 4\n"
+        "1:\n"
+        "movl %esi,%ecx\n"
+        "movslq %edx,%r14\n"
+        "vmovdqa64 %zmm1,%zmm0\n"
+        "sarl $0x3,%ecx\n"
+        "movslq %ecx,%rcx\n"
+        "movq (%r11,%rcx,1),%rcx\n"
+        "kmovq %rcx,%k5\n"
+        "knotq %k5,%k1\n"
+        "vpexpandb 0x0(%r13,%r14,1),%zmm0{%k1}\n"
+        "movslq %eax,%r14\n"
+        "vpexpandb 0x0(%rbp,%r14,1),%zmm0{%k5}\n"
+        "movl %r8d,%r14d\n"
+        "popcnt %rcx,%rcx\n"
+        "addl %ecx,%eax\n"
+        "subl %ecx,%r14d\n"
+        "vmovdqu64 %zmm0,(%rbx,%rsi,1)\n"
+        "addq $0x40,%rsi\n"
+        "addl %r14d,%edx\n"
+        "cmpq %rsi,%rdi\n"
+        "jne 1b\n"
+        "popq %rbp\n"
+        "popq %r13\n"
+        "popq %r14\n"
+        "popq %rbx\n"
+        "ret\n");
+}
+static void pv_vv_matrix(const uint8_t *bm, int K, const uint8_t *left,
+                         const uint8_t *right, uint8_t *out,
+                         long (*core)(uint8_t*,const uint8_t*,const uint8_t*,const uint8_t*,long))
+{
+    int n64 = K & ~63;
+    int rc = 0, lc = 0;
+    if (n64) { rc = (int)core(out, left, right, bm, (long)n64); lc = n64 - rc; }
+    for (int j = n64; j < K; j++) {
+        int mb = (bm[j >> 3] >> (j & 7)) & 1;
+        out[j] = mb ? right[rc++] : left[lc++];
+    }
+}
+static void prim_merge_vv_l7r7(const ctx_t *c){ pv_vv_matrix(c->bm, c->n, c->merge_left, c->merge_right, c->out, pv_vv64_l7r7); }
+static void prim_merge_vv_l7r8(const ctx_t *c){ pv_vv_matrix(c->bm, c->n, c->merge_left, c->merge_right, c->out, pv_vv64_l7r8); }
+static void prim_merge_vv_l8r7(const ctx_t *c){ pv_vv_matrix(c->bm, c->n, c->merge_left, c->merge_right, c->out, pv_vv64_l8r7); }
+static void prim_merge_vv_l8r8(const ctx_t *c){ pv_vv_matrix(c->bm, c->n, c->merge_left, c->merge_right, c->out, pv_vv64_l8r8); }
+
 static void prim_merge_cv_maskz(const ctx_t *c){ pv_merge_cst_vec_avx512_maskz(c->bm, c->n, MERGE_LEFT_SYM, c->merge_right, c->out); }
 #endif /* __AVX512VBMI2__ && __AVX512VBMI__ */
 
@@ -1218,6 +1610,22 @@ static void pv_register_merge(void) {
                "maskz expands + OR; the issue-#11 merge-masked form wins -33% c7a / -27% c8a (Zen false dep), ~0 c7i/c8i", 0, PV_FN_VBMI2(prim_merge_vv_maskz));
     PV_VARIANT(ST_MERGE_CST_VEC, "asof-76dec21", PV_ISA_AVX512, "76dec21 (prior production)",
                "maskz expand + blend; merge-masked form wins -54% c7a / -51% c8a, -1% c7i / -10% c8i", 0, PV_FN_VBMI2(prim_merge_cv_maskz));
+    PV_VARIANT(ST_MERGE_VEC_VEC, "iurii-asm-l7r7", PV_ISA_AVX512, "vec_vec vpexpandb encoding matrix (2026-07)",
+               "issue-#11 loop, L-expand 7B / R-expand 7B", 0, PV_FN_VBMI2(prim_merge_vv_l7r7));
+    PV_VARIANT(ST_MERGE_VEC_VEC, "iurii-asm-l7r8", PV_ISA_AVX512, "vec_vec vpexpandb encoding matrix (2026-07)",
+               "issue-#11 loop, L-expand 7B / R-expand 8B", 0, PV_FN_VBMI2(prim_merge_vv_l7r8));
+    PV_VARIANT(ST_MERGE_VEC_VEC, "iurii-asm-l8r7", PV_ISA_AVX512, "vec_vec vpexpandb encoding matrix (2026-07)",
+               "issue-#11 loop, L-expand 8B / R-expand 7B; fastest on Zen 4", 0, PV_FN_VBMI2(prim_merge_vv_l8r7));
+    PV_VARIANT(ST_MERGE_VEC_VEC, "iurii-asm-l8r8", PV_ISA_AVX512, "vec_vec vpexpandb encoding matrix (2026-07)",
+               "issue-#11 loop, L-expand 8B / R-expand 8B; fastest on Zen 5", 0, PV_FN_VBMI2(prim_merge_vv_l8r8));
+    PV_VARIANT(ST_MERGE_CST_VEC, "iurii-asm-exp7b", PV_ISA_AVX512, "vpexpandb encoding study (2026-07)",
+               "issue-#11 loop, asm-pinned to the 7-BYTE vpexpandb encoding (no displacement); x1.15-1.21 SLOWER on Zen 5 (op-cache packing -> int-sched steering), ~0 on Intel", 0, PV_FN_VBMI2(prim_merge_cv_exp7b));
+    PV_VARIANT(ST_MERGE_CST_VEC, "iurii-asm-exp8b", PV_ISA_AVX512, "vpexpandb encoding study (2026-07)",
+               "same loop, asm-pinned to the 8-BYTE vpexpandb encoding (zero disp8 byte, r13-class base); the fast packing on Zen 5, ~0 on Intel", 0, PV_FN_VBMI2(prim_merge_cv_exp8b));
+    PV_VARIANT(ST_MERGE_CST_VEC, "iurii-asm-gnr7b", PV_ISA_AVX512, "gcc14 GNR-tuned schedule (2026-07)",
+               "same loop, gcc14 -march=native-on-GNR schedule (bm chain first, rc accumulate after the store), verbatim transcription incl. the 7B no-disp expand; ~6% over the generic schedule on c8i", 0, PV_FN_VBMI2(prim_merge_cv_gnr7b));
+    PV_VARIANT(ST_MERGE_CST_VEC, "iurii-asm-gnr8b", PV_ISA_AVX512, "gcc14 GNR-tuned schedule (2026-07)",
+               "GNR schedule re-encoded with the 8B disp8 expand (r13 base) — isolates schedule from encoding on Zen", 0, PV_FN_VBMI2(prim_merge_cv_gnr8b));
     /* merge_vec_vec — NEON */
     PV_VARIANT(ST_MERGE_VEC_VEC, "com64",     PV_ISA_NEON, "asof-d24c0eb (prior production)",
                "V5 stride-64 COM, 4 chunks, byte prefix-sum cursors; production before the two-table merge", 0, PV_FN_NEON(prim_merge_vv_com64));
