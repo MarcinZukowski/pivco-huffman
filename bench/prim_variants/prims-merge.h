@@ -715,7 +715,8 @@ static void prim_merge_vv_sse_com128(const ctx_t *c){
     prim_merge_vv_sse_com128_x86(c->bm, c->n, c->merge_left, c->merge_right, c->out);
 }
 
-/* ---- IVB loop-top phase pair (2026-07) ----
+/* ============================================================================
+ * merge_cst_vec : c3roll-asm-p0/p16 — c3/IVB loop-top phase pair (2026-07)
  *
  * The c3 (Ivy Bridge) "binary lottery": the production two-table pshufb
  * cst_vec loop (113 bytes) runs +11% slower when its loop top lands at
@@ -728,7 +729,8 @@ static void prim_merge_vv_sse_com128(const ctx_t *c){
  * true of the whole SSE-tier fleet, c3..c6a); references the production
  * g_x86_merge_shuf0/1 tables via the same absolute-disp32 forms, so the
  * loop bytes match production exactly (byte-verified on c3).
- * Production-side cure candidate: -falign-loops=32 (fleet A/A' pending). */
+ * Production-side cure candidate: -falign-loops=32 (fleet A/A' pending).
+ * ========================================================================== */
 __attribute__((naked,noinline,used))
 static long pv_cv_ivb_p0_core(uint8_t *out, const uint8_t *right,
                               const uint8_t *bm, long n, long left_sym)
@@ -797,7 +799,7 @@ static long pv_cv_ivb_p16_core(uint8_t *out, const uint8_t *right,
         "xorl %edi,%edi\n"          /* rc */
         "xorl %r8d,%r8d\n"          /* j */
         ".p2align 5\n"
-        ".skip 16,0x90\n"           /* loop top at phase 16 mod 32 (the slow IVB phase) */
+        ".skip 16,0x90\n"           /* loop top at phase 16 mod 32 (the slow c3/IVB phase) */
         "1:\n"                      /* ---- same bytes as p0 ---- */
         "movl %edi,%r10d\n"
         "movzbl -0x1(%r9),%r11d\n"
@@ -1155,7 +1157,7 @@ static void prim_merge_flat_e5a199a(const ctx_t *c) {
 /* ============================================================================
  * merge_vec_vec / merge_cst_vec : asof-76dec21 -- the
  * zero-masked (maskz) expand forms, production until the issue-#11
- * merge-masking fix.  Zen 4/5 have a false dependency on the maskz
+ * merge-masking fix.  Zen 4/5 (c7a/c8a) have a false dependency on the maskz
  * destination that serializes the 64-wide loop at expand latency.
  * ========================================================================== */
 static void pv_merge_vec_vec_avx512_maskz(const uint8_t *bm, int K,
@@ -1267,7 +1269,9 @@ static void pv_merge_cst_vec_avx512_maskz(const uint8_t *bm, int K,
 }
 
 static void prim_merge_vv_maskz(const ctx_t *c){ pv_merge_vec_vec_avx512_maskz(c->bm, c->n, c->merge_left, c->merge_right, c->out); }
-/* ---- Zen 5 vpexpandb-encoding pair (2026-07-06 investigation) ----
+/* ============================================================================
+ * merge_cst_vec : iurii-asm-exp7b/exp8b — c8a/Zen 5 vpexpandb-encoding pair
+ *   (2026-07-06 investigation)
  *
  * Two byte-exact re-creations of the production merge-masked cst_vec
  * inner loop that differ ONLY in the vpexpandb encoding: the expand's
@@ -1279,7 +1283,8 @@ static void prim_merge_vv_maskz(const ctx_t *c){ pv_merge_vec_vec_avx512_maskz(c
  * +0.8c/iter).  A length-equalizing NOP does NOT recover it -- it is
  * the instruction's own form, not byte positions.  Which form the
  * compiler emits is a register-allocation roll: this pair pins both,
- * so any host can measure its sensitivity.  Expected ~0 on Intel. */
+ * so any host can measure its sensitivity.  Expected ~0 on Intel.
+ * ========================================================================== */
 __attribute__((naked,noinline,used))
 static long pv_cv_exp7b_core(uint8_t *out, const uint8_t *right,
                                   const uint8_t *bm, long n64, long left_sym)
@@ -1366,17 +1371,19 @@ static void pv_merge_cst_vec_enc(const uint8_t *bm, int K, uint8_t left_sym,
 static void prim_merge_cv_exp7b(const ctx_t *c){ pv_merge_cst_vec_enc(c->bm, c->n, MERGE_LEFT_SYM, c->merge_right, c->out, 0); }
 static void prim_merge_cv_exp8b (const ctx_t *c){ pv_merge_cst_vec_enc(c->bm, c->n, MERGE_LEFT_SYM, c->merge_right, c->out, 1); }
 
-/* ---- GNR-tuned schedule pair (2026-07) ----
+/* ============================================================================
+ * merge_cst_vec : iurii-asm-gnr7b/gnr8b — c8i/GNR-tuned schedule pair (2026-07)
  *
  * gcc14 -march=native on Granite Rapids (a stray flag in test-c8i's
  * build cache) rolls a DIFFERENT schedule of the same issue-#11 loop:
  * the bm-word address chain issues first, the zmm copy + rc extend
- * are deferred, and the rc accumulate moves past the store.  On GNR
+ * are deferred, and the rc accumulate moves past the store.  On c8i/GNR
  * it beats the generic schedule (exp7b/exp8b) by ~6% at the same
  * vpexpandb encoding.  gnr7b is the verbatim byte-exact transcription
  * (7B no-disp expand off r9); gnr8b re-encodes only the expand to the
  * 8B disp8 form (r13 base) so Zen hosts can judge the schedule
- * without the known 7B-encoding handicap. */
+ * without the known 7B-encoding handicap.
+ * ========================================================================== */
 __attribute__((naked,noinline,used))
 static long pv_cv_gnr7b_core(uint8_t *out, const uint8_t *right,
                              const uint8_t *bm, long n64, long left_sym)
@@ -1457,7 +1464,232 @@ static void pv_cv_sched(const uint8_t *bm, int K, uint8_t left_sym,
 static void prim_merge_cv_gnr7b(const ctx_t *c){ pv_cv_sched(c->bm, c->n, MERGE_LEFT_SYM, c->merge_right, c->out, pv_cv_gnr7b_core); }
 static void prim_merge_cv_gnr8b(const ctx_t *c){ pv_cv_sched(c->bm, c->n, MERGE_LEFT_SYM, c->merge_right, c->out, pv_cv_gnr8b_core); }
 
-/* ---- vec_vec encoding matrix (L/R vpexpandb x 7B/8B forms) ---- */
+/* ============================================================================
+ * merge_cst_vec / merge_vec_vec : iurii2-c-* — issue-#11 follow-ups
+ *   (Iurii, 2026-07)
+ *
+ * Full matrix benched 2026-07-07 on c6i/c7i/c8i/c7a/c8a; only the
+ * information-carrying survivors are kept below.  Dropped (results in
+ * the session log / #11): plain size_t (subsumed by vrb), my prefix-
+ * cursor u2/u4/u2szt reconstructions (dominated by vrb for cst_vec;
+ * for vec_vec only u4szt survives as the c8a/Zen 5 winner), and the
+ * bumped-pointer forms (indistinguishable from vrb everywhere).
+ *
+ * Findings: (a) cst_vec is throughput-bound -> Iurii's SERIAL cursor
+ * updates + separate bm cursor + ssize_t (vrb) win everywhere
+ * (c7a/Zen 4 -16..19%, c8a/Zen 5 -27%, c8i/GNR -13%, c6i/ICL + c7i/SPR ~0) and beat every
+ * pinned asm core; (b) vec_vec chains two expands -> latency-bound,
+ * serial cursors collapse on c8a/Zen 5 (-1%) and PREFIX cursors (u4szt)
+ * win there (-25%); (c) kld (kmovq mask from memory + popcnt from
+ * memory) is the c8i/GNR vec_vec champion (-17%) and a c8a/Zen 5 cst_vec tie,
+ * but consistently hurts c7a/Zen 4 (memory-form kmovq) and c6i/ICL.
+ * Cross-checked: Zen 4/5 splits survive binary-swap between c7a/c8a.
+ * ========================================================================== */
+/* iurii2-c-vrb -- Iurii's verbatim follow-up from the #11 comment
+ * (2026-07-06): ssize_t cursors, separate bm cursor k (no j>>3 shift in
+ * the loop), 4x unroll with SERIAL rc updates -- rc += popcount after
+ * each expand, unlike the prefix-cursor u4 above.  His Zen 5-mobile
+ * numbers: 0.0093 -> 0.0080 ns/byte (clang 22). */
+static void pv_merge_cv_vrb(const uint8_t *bm, int K_, uint8_t left_sym,
+                            const uint8_t *right, uint8_t *out)
+{
+    ssize_t K = K_, rc = 0, j = 0, k = 0;
+    __m512i Lbcast64 = _mm512_set1_epi8((char)left_sym);
+    for (; j <= K - 256; j += 256, k += 32) {
+        uint64_t mask1;
+        memcpy(&mask1, bm + k, 8);
+        __m512i o1 = _mm512_mask_expandloadu_epi8(Lbcast64, (__mmask64)mask1, right + rc);
+        _mm512_storeu_si512((__m512i *)(out + j), o1);
+        rc += __builtin_popcountll(mask1);
+
+        uint64_t mask2;
+        memcpy(&mask2, bm + k + 8, 8);
+        __m512i o2 = _mm512_mask_expandloadu_epi8(Lbcast64, (__mmask64)mask2, right + rc);
+        _mm512_storeu_si512((__m512i *)(out + j + 64), o2);
+        rc += __builtin_popcountll(mask2);
+
+        uint64_t mask3;
+        memcpy(&mask3, bm + k + 16, 8);
+        __m512i o3 = _mm512_mask_expandloadu_epi8(Lbcast64, (__mmask64)mask3, right + rc);
+        _mm512_storeu_si512((__m512i *)(out + j + 128), o3);
+        rc += __builtin_popcountll(mask3);
+
+        uint64_t mask4;
+        memcpy(&mask4, bm + k + 24, 8);
+        __m512i o4 = _mm512_mask_expandloadu_epi8(Lbcast64, (__mmask64)mask4, right + rc);
+        _mm512_storeu_si512((__m512i *)(out + j + 192), o4);
+        rc += __builtin_popcountll(mask4);
+    }
+    for (; j + 64 <= K; j += 64, k += 8) {
+        uint64_t mask; memcpy(&mask, bm + k, 8);
+        __m512i o = _mm512_mask_expandloadu_epi8(Lbcast64, (__mmask64)mask, right + rc);
+        _mm512_storeu_si512((__m512i *)(out + j), o);
+        rc += __builtin_popcountll(mask);
+    }
+    for (; j < K; j++) {
+        int b = (bm[j >> 3] >> (j & 7)) & 1;
+        out[j] = b ? right[rc++] : left_sym;
+    }
+}
+/* iurii2-c-kld -- vrb + Iurii's third suggestion: load the mask register
+ * DIRECTLY from memory (kmovq mem-form, executes in the load pipes) and
+ * re-load the same 8 bytes as popcnt's memory operand (micro-fused).
+ * Duplicates the L1-hit load but drops the GPR->k transfer uop and
+ * moves mask delivery off the crowded int schedulers.  The pointer
+ * barrier keeps the compiler from CSEing the two loads back together. */
+#define PV_KLD_BLOCK(OFF) do {                                              \
+        const uint8_t *pk_ = bm + k + (OFF);                              \
+        __mmask64 mk_ = _load_mask64((const __mmask64 *)pk_);               \
+        __m512i o_ = _mm512_mask_expandloadu_epi8(Lb, mk_, right + rc);     \
+        _mm512_storeu_si512((__m512i *)(out + j + (OFF)*8), o_);            \
+        const uint8_t *pv_ = pk_; asm("" : "+r"(pv_));                      \
+        uint64_t v_; memcpy(&v_, pv_, 8);                                   \
+        rc += __builtin_popcountll(v_);                                     \
+    } while (0)
+static void pv_merge_cv_kld(const uint8_t *bm, int K_, uint8_t left_sym,
+                            const uint8_t *right, uint8_t *out)
+{
+    ssize_t K = K_, rc = 0, j = 0, k = 0;
+    __m512i Lb = _mm512_set1_epi8((char)left_sym);
+    for (; j <= K - 256; j += 256, k += 32) {
+        PV_KLD_BLOCK(0);
+        PV_KLD_BLOCK(8);
+        PV_KLD_BLOCK(16);
+        PV_KLD_BLOCK(24);
+    }
+    for (; j + 64 <= K; j += 64, k += 8) {
+        PV_KLD_BLOCK(0);
+    }
+    for (; j < K; j++) {
+        int b = (bm[j >> 3] >> (j & 7)) & 1;
+        out[j] = b ? right[rc++] : left_sym;
+    }
+}
+#undef PV_KLD_BLOCK
+/* iurii2-c-ptr -- same structure with j/k/rc as bumped POINTERS instead
+ * of offsets (base+index addressing gone; the expand base is the moving
+ * right pointer, which also re-rolls its encoding class per build). */
+static void prim_merge_cv_c_kld  (const ctx_t *c){ pv_merge_cv_kld  (c->bm, c->n, MERGE_LEFT_SYM, c->merge_right, c->out); }
+static void prim_merge_cv_c_vrb  (const ctx_t *c){ pv_merge_cv_vrb  (c->bm, c->n, MERGE_LEFT_SYM, c->merge_right, c->out); }
+
+/* vec_vec versions of the same transforms (two-sided cursors; the
+ * merge-masked zero + asm barrier follows production merge_vec_vec_avx512). */
+static void pv_merge_vv_u4szt(const uint8_t *bm, int K, const uint8_t *left,
+                              const uint8_t *right, uint8_t *out)
+{
+    size_t lc = 0, rc = 0, j = 0, n = (size_t)K;
+    for (; j + 256 <= n; j += 256) {
+        uint64_t m0, m1, m2, m3;
+        memcpy(&m0, bm + (j >> 3),      8);
+        memcpy(&m1, bm + (j >> 3) + 8,  8);
+        memcpy(&m2, bm + (j >> 3) + 16, 8);
+        memcpy(&m3, bm + (j >> 3) + 24, 8);
+        size_t c1 = (size_t)__builtin_popcountll(m0);
+        size_t c2 = c1 + (size_t)__builtin_popcountll(m1);
+        size_t c3 = c2 + (size_t)__builtin_popcountll(m2);
+        __m512i zero = _mm512_setzero_si512(); asm("":"+v"(zero));
+        __m512i L0 = _mm512_mask_expandloadu_epi8(zero, ~(__mmask64)m0, left + lc);
+        __m512i o0 = _mm512_mask_expandloadu_epi8(L0, (__mmask64)m0, right + rc);
+        __m512i L1 = _mm512_mask_expandloadu_epi8(zero, ~(__mmask64)m1, left + lc + (64 - c1));
+        __m512i o1 = _mm512_mask_expandloadu_epi8(L1, (__mmask64)m1, right + rc + c1);
+        __m512i L2 = _mm512_mask_expandloadu_epi8(zero, ~(__mmask64)m2, left + lc + (128 - c2));
+        __m512i o2 = _mm512_mask_expandloadu_epi8(L2, (__mmask64)m2, right + rc + c2);
+        __m512i L3 = _mm512_mask_expandloadu_epi8(zero, ~(__mmask64)m3, left + lc + (192 - c3));
+        __m512i o3 = _mm512_mask_expandloadu_epi8(L3, (__mmask64)m3, right + rc + c3);
+        _mm512_storeu_si512((__m512i *)(out + j),       o0);
+        _mm512_storeu_si512((__m512i *)(out + j + 64),  o1);
+        _mm512_storeu_si512((__m512i *)(out + j + 128), o2);
+        _mm512_storeu_si512((__m512i *)(out + j + 192), o3);
+        size_t nr = c3 + (size_t)__builtin_popcountll(m3);
+        rc += nr; lc += 256 - nr;
+    }
+    for (; j + 64 <= n; j += 64) {
+        uint64_t mask; memcpy(&mask, bm + (j >> 3), 8);
+        __mmask64 m = (__mmask64)mask;
+        __m512i zero = _mm512_setzero_si512(); asm("":"+v"(zero));
+        __m512i L = _mm512_mask_expandloadu_epi8(zero, ~m, left + lc);
+        __m512i o = _mm512_mask_expandloadu_epi8(L, m, right + rc);
+        _mm512_storeu_si512((__m512i *)(out + j), o);
+        size_t nr = (size_t)__builtin_popcountll(mask);
+        rc += nr; lc += 64 - nr;
+    }
+    for (; j < n; j++) {
+        int b = (bm[j >> 3] >> (j & 7)) & 1;
+        out[j] = b ? right[rc++] : left[lc++];
+    }
+}
+/* vec_vec versions of Iurii's follow-up ideas: vrb structure (ssize_t,
+ * separate bm cursor, 4x unroll, SERIAL lc/rc updates), bumped-pointer
+ * form, and kld (kmovq mask from memory + knot for the L side + popcnt
+ * from memory). */
+#define PV_VV_VRB_BLOCK(BOFF) do {                                          \
+        uint64_t m_; memcpy(&m_, bm + k + (BOFF), 8);                       \
+        __m512i zero_ = _mm512_setzero_si512(); asm("":"+v"(zero_));        \
+        __m512i L_ = _mm512_mask_expandloadu_epi8(zero_, ~(__mmask64)m_, left + lc); \
+        __m512i o_ = _mm512_mask_expandloadu_epi8(L_, (__mmask64)m_, right + rc); \
+        _mm512_storeu_si512((__m512i *)(out + j + (BOFF)*8), o_);           \
+        ssize_t nr_ = __builtin_popcountll(m_);                             \
+        rc += nr_; lc += 64 - nr_;                                          \
+    } while (0)
+static void pv_merge_vv_vrb(const uint8_t *bm, int K_, const uint8_t *left,
+                            const uint8_t *right, uint8_t *out)
+{
+    ssize_t K = K_, lc = 0, rc = 0, j = 0, k = 0;
+    for (; j <= K - 256; j += 256, k += 32) {
+        PV_VV_VRB_BLOCK(0);
+        PV_VV_VRB_BLOCK(8);
+        PV_VV_VRB_BLOCK(16);
+        PV_VV_VRB_BLOCK(24);
+    }
+    for (; j + 64 <= K; j += 64, k += 8) {
+        PV_VV_VRB_BLOCK(0);
+    }
+    for (; j < K; j++) {
+        int b = (bm[j >> 3] >> (j & 7)) & 1;
+        out[j] = b ? right[rc++] : left[lc++];
+    }
+}
+#undef PV_VV_VRB_BLOCK
+#define PV_VV_KLD_BLOCK(BOFF) do {                                          \
+        const uint8_t *pk_ = bm + k + (BOFF);                               \
+        __mmask64 mk_ = _load_mask64((const __mmask64 *)pk_);               \
+        __mmask64 nk_ = _knot_mask64(mk_);                                  \
+        __m512i zero_ = _mm512_setzero_si512(); asm("":"+v"(zero_));        \
+        __m512i L_ = _mm512_mask_expandloadu_epi8(zero_, nk_, left + lc);   \
+        __m512i o_ = _mm512_mask_expandloadu_epi8(L_, mk_, right + rc);     \
+        _mm512_storeu_si512((__m512i *)(out + j + (BOFF)*8), o_);           \
+        const uint8_t *pv_ = pk_; asm("" : "+r"(pv_));                      \
+        uint64_t v_; memcpy(&v_, pv_, 8);                                   \
+        ssize_t nr_ = __builtin_popcountll(v_);                             \
+        rc += nr_; lc += 64 - nr_;                                          \
+    } while (0)
+static void pv_merge_vv_kld(const uint8_t *bm, int K_, const uint8_t *left,
+                            const uint8_t *right, uint8_t *out)
+{
+    ssize_t K = K_, lc = 0, rc = 0, j = 0, k = 0;
+    for (; j <= K - 256; j += 256, k += 32) {
+        PV_VV_KLD_BLOCK(0);
+        PV_VV_KLD_BLOCK(8);
+        PV_VV_KLD_BLOCK(16);
+        PV_VV_KLD_BLOCK(24);
+    }
+    for (; j + 64 <= K; j += 64, k += 8) {
+        PV_VV_KLD_BLOCK(0);
+    }
+    for (; j < K; j++) {
+        int b = (bm[j >> 3] >> (j & 7)) & 1;
+        out[j] = b ? right[rc++] : left[lc++];
+    }
+}
+#undef PV_VV_KLD_BLOCK
+static void prim_merge_vv_c_vrb  (const ctx_t *c){ pv_merge_vv_vrb  (c->bm, c->n, c->merge_left, c->merge_right, c->out); }
+static void prim_merge_vv_c_kld  (const ctx_t *c){ pv_merge_vv_kld  (c->bm, c->n, c->merge_left, c->merge_right, c->out); }
+static void prim_merge_vv_c_u4szt(const ctx_t *c){ pv_merge_vv_u4szt(c->bm, c->n, c->merge_left, c->merge_right, c->out); }
+
+/* ============================================================================
+ * merge_vec_vec : iurii-asm-l7r7/l7r8/l8r7/l8r8 — vec_vec vpexpandb encoding
+ *   matrix (L-expand x R-expand, 7B no-disp vs 8B disp8 forms).
+ * ========================================================================== */
 __attribute__((naked,noinline,used))
 static long pv_vv64_l7r7(uint8_t *out, const uint8_t *left,
                            const uint8_t *right, const uint8_t *bm, long n64)
@@ -1745,17 +1977,27 @@ static void pv_register_merge(void) {
     PV_VARIANT(ST_MERGE_VEC_VEC, "iurii-asm-l7r8", PV_ISA_AVX512, "vec_vec vpexpandb encoding matrix (2026-07)",
                "issue-#11 loop, L-expand 7B / R-expand 8B", 0, PV_FN_VBMI2(prim_merge_vv_l7r8));
     PV_VARIANT(ST_MERGE_VEC_VEC, "iurii-asm-l8r7", PV_ISA_AVX512, "vec_vec vpexpandb encoding matrix (2026-07)",
-               "issue-#11 loop, L-expand 8B / R-expand 7B; fastest on Zen 4", 0, PV_FN_VBMI2(prim_merge_vv_l8r7));
+               "issue-#11 loop, L-expand 8B / R-expand 7B; fastest on c7a/Zen 4", 0, PV_FN_VBMI2(prim_merge_vv_l8r7));
     PV_VARIANT(ST_MERGE_VEC_VEC, "iurii-asm-l8r8", PV_ISA_AVX512, "vec_vec vpexpandb encoding matrix (2026-07)",
-               "issue-#11 loop, L-expand 8B / R-expand 8B; fastest on Zen 5", 0, PV_FN_VBMI2(prim_merge_vv_l8r8));
+               "issue-#11 loop, L-expand 8B / R-expand 8B; fastest on c8a/Zen 5", 0, PV_FN_VBMI2(prim_merge_vv_l8r8));
     PV_VARIANT(ST_MERGE_CST_VEC, "iurii-asm-exp7b", PV_ISA_AVX512, "vpexpandb encoding study (2026-07)",
-               "issue-#11 loop, asm-pinned to the 7-BYTE vpexpandb encoding (no displacement); x1.15-1.21 SLOWER on Zen 5 (op-cache packing -> int-sched steering), ~0 on Intel", 0, PV_FN_VBMI2(prim_merge_cv_exp7b));
+               "issue-#11 loop, asm-pinned to the 7-BYTE vpexpandb encoding (no displacement); x1.15-1.21 SLOWER on c8a/Zen 5 (op-cache packing -> int-sched steering), ~0 on Intel (c6i/c7i/c8i)", 0, PV_FN_VBMI2(prim_merge_cv_exp7b));
     PV_VARIANT(ST_MERGE_CST_VEC, "iurii-asm-exp8b", PV_ISA_AVX512, "vpexpandb encoding study (2026-07)",
-               "same loop, asm-pinned to the 8-BYTE vpexpandb encoding (zero disp8 byte, r13-class base); the fast packing on Zen 5, ~0 on Intel", 0, PV_FN_VBMI2(prim_merge_cv_exp8b));
-    PV_VARIANT(ST_MERGE_CST_VEC, "iurii-asm-gnr7b", PV_ISA_AVX512, "gcc14 GNR-tuned schedule (2026-07)",
+               "same loop, asm-pinned to the 8-BYTE vpexpandb encoding (zero disp8 byte, r13-class base); the fast packing on c8a/Zen 5, ~0 on Intel (c6i/c7i/c8i)", 0, PV_FN_VBMI2(prim_merge_cv_exp8b));
+    PV_VARIANT(ST_MERGE_CST_VEC, "iurii-asm-gnr7b", PV_ISA_AVX512, "gcc14 c8i/GNR-tuned schedule (2026-07)",
                "same loop, gcc14 -march=native-on-GNR schedule (bm chain first, rc accumulate after the store), verbatim transcription incl. the 7B no-disp expand; ~6% over the generic schedule on c8i", 0, PV_FN_VBMI2(prim_merge_cv_gnr7b));
-    PV_VARIANT(ST_MERGE_CST_VEC, "iurii-asm-gnr8b", PV_ISA_AVX512, "gcc14 GNR-tuned schedule (2026-07)",
-               "GNR schedule re-encoded with the 8B disp8 expand (r13 base) — isolates schedule from encoding on Zen", 0, PV_FN_VBMI2(prim_merge_cv_gnr8b));
+    PV_VARIANT(ST_MERGE_CST_VEC, "iurii-asm-gnr8b", PV_ISA_AVX512, "gcc14 c8i/GNR-tuned schedule (2026-07)",
+               "GNR schedule re-encoded with the 8B disp8 expand (r13 base) — isolates schedule from encoding on c7a+c8a/Zen", 0, PV_FN_VBMI2(prim_merge_cv_gnr8b));
+    PV_VARIANT(ST_MERGE_CST_VEC, "iurii2-c-vrb",   PV_ISA_AVX512, "issue-#11 comment patch, verbatim (2026-07)",
+               "Iurii's exact follow-up: ssize_t, separate bm cursor, 4x unroll with SERIAL rc updates (vs u4's prefix cursors)", 0, PV_FN_VBMI2(prim_merge_cv_c_vrb));
+    PV_VARIANT(ST_MERGE_CST_VEC, "iurii2-c-kld",   PV_ISA_AVX512, "issue-#11 suggestion 3 (2026-07)",
+               "kld = load the k mask register straight from memory (kmovq mem-form, no GPR detour) + popcnt from memory; duplicated L1 load, one uop fewer, mask via load pipes", 0, PV_FN_VBMI2(prim_merge_cv_c_kld));
+    PV_VARIANT(ST_MERGE_VEC_VEC, "iurii2-c-u4szt", PV_ISA_AVX512, "issue-#11 follow-up (2026-07)",
+               "4x unroll + size_t cursors combined", 0, PV_FN_VBMI2(prim_merge_vv_c_u4szt));
+    PV_VARIANT(ST_MERGE_VEC_VEC, "iurii2-c-vrb",   PV_ISA_AVX512, "issue-#11 comment patch style (2026-07)",
+               "vrb structure for vec_vec: ssize_t, separate bm cursor, 4x unroll, serial lc/rc updates", 0, PV_FN_VBMI2(prim_merge_vv_c_vrb));
+    PV_VARIANT(ST_MERGE_VEC_VEC, "iurii2-c-kld",   PV_ISA_AVX512, "issue-#11 suggestion 3 (2026-07)",
+               "kld = load the k mask register straight from memory (kmovq mem-form) + knot for the L side + popcnt from memory", 0, PV_FN_VBMI2(prim_merge_vv_c_kld));
     /* merge_vec_vec — NEON */
     PV_VARIANT(ST_MERGE_VEC_VEC, "com64",     PV_ISA_NEON, "asof-d24c0eb (prior production)",
                "V5 stride-64 COM, 4 chunks, byte prefix-sum cursors; production before the two-table merge", 0, PV_FN_NEON(prim_merge_vv_com64));
@@ -1795,10 +2037,10 @@ static void pv_register_merge(void) {
                PV_FN_NEON(prim_merge_cst_vec_skewfuse));
     PV_VARIANT(ST_MERGE_CST_VEC, "unroll16",  PV_ISA_SSE4, "asof-d24c0eb (prior production)",
                "2x-unrolled expand_tab cst_vec; production before the two-table merge", 0, PV_FN_SSE(prim_merge_cv_unroll16));
-    PV_VARIANT(ST_MERGE_CST_VEC, "c3roll-asm-p0",  PV_ISA_SSE4, "IVB loop-top phase study (2026-07)",
+    PV_VARIANT(ST_MERGE_CST_VEC, "c3roll-asm-p0",  PV_ISA_SSE4, "c3/IVB loop-top phase study (2026-07)",
                "clang-20 c3 production two-table pshufb loop, verbatim (VEX, needs AVX1), loop top pinned to phase 0 mod 32 — a fast IVB phase", 0, PV_FN_SSE(prim_merge_cv_ivb_p0));
-    PV_VARIANT(ST_MERGE_CST_VEC, "c3roll-asm-p16", PV_ISA_SSE4, "IVB loop-top phase study (2026-07)",
-               "same bytes, loop top at phase 16 mod 32 — the slow IVB phase (32B uop-window split, +11% on c3); the phase roll is the c3 binary lottery", 0, PV_FN_SSE(prim_merge_cv_ivb_p16));
+    PV_VARIANT(ST_MERGE_CST_VEC, "c3roll-asm-p16", PV_ISA_SSE4, "c3/IVB loop-top phase study (2026-07)",
+               "same bytes, loop top at phase 16 mod 32 — the slow c3/IVB phase (32B uop-window split, +11% on c3); the phase roll is the c3 binary lottery", 0, PV_FN_SSE(prim_merge_cv_ivb_p16));
     /* merge_vec_vec — x86 COM / prefix-sum forms (IDEAS: x86 COM merge). */
     PV_VARIANT(ST_MERGE_VEC_VEC, "sse_com",        PV_ISA_SSE4, "bench_merge_x86.c",
                "64 codes/iter, 8 pshufb merges, SWAR-popcnt prefix cursors", 0,
