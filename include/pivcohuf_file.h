@@ -47,10 +47,10 @@ extern "C" {
 
 #define PIVCOHUF_MAGIC          "PIVCOHUF"
 #define PIVCOHUF_VERSION_MAJOR  0
-#define PIVCOHUF_VERSION_MINOR  6  /* 0.6: wire in decompression order.  Tracks
-                                      the wire version; 0.5 is skipped — the
-                                      v0.5 block-N-header wire change shipped
-                                      without a bump. */
+#define PIVCOHUF_VERSION_MINOR  7  /* 0.7: larger-K child's region first.
+                                      Tracks the wire version; 0.5 is skipped —
+                                      the v0.5 block-N-header wire change
+                                      shipped without a bump. */
 #define PIVCOHUF_HEADER_SIZE    26
 
 typedef enum {
