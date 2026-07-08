@@ -59,7 +59,7 @@ extern "C" {
 
 #define PIVCOHUF_MAGIC          "PIVCOHUF"
 #define PIVCOHUF_VERSION_MAJOR  0
-#define PIVCOHUF_VERSION_MINOR  7
+#define PIVCOHUF_VERSION_MINOR  8
 #define PIVCOHUF_HEADER_SIZE    26
 
 typedef enum {

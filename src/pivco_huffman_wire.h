@@ -6,11 +6,11 @@
  * which led to silent drift (scalar+NEON added the FSE marker byte in
  * 2026-05-13, x86+AVX-512 didn't — broke scalar↔SSE cross-decoding).
  *
- * Wire format (v0.7): file data in decompression order.  The layout
- * is an Euler walk of the tree — each node's K_right split header
- * lands at its pre-order position (on the way down), its
- * marker+bitmap record at its post-order position (on the way up,
- * after its children's regions):
+ * Wire format (v0.8): file data in decompression order, larger-K
+ * child first.  The layout is an Euler walk of the tree — each node's
+ * K_right split header lands at its pre-order position (on the way
+ * down), its marker+bitmap record at its post-order position (on the
+ * way up, after its children's regions):
  *
  * Per-block header (once, at the very start of each encoded block):
  *   [block_N: uint16 LE, 2 bytes]                  symbol count N for this
@@ -24,7 +24,11 @@
  * Per non-flat internal node:
  *   [optional K_right: uint16 LE, 2 bytes]         if kr_header_needed();
  *                                                  at node entry
- *   [left child region][right child region]        recursively, same layout
+ *   [larger-K child region][smaller child region]  recursively, same layout;
+ *                                                  larger first (strict >,
+ *                                                  ties left-first), keyed
+ *                                                  on the K_right header —
+ *                                                  no extra bits
  *   [FSE marker byte:        uint8,    1 byte]    always
  *   [bitmap body]                                  marker == 0: raw n-bit
  *                                                  bitmap, ceil(n/8) bytes
@@ -39,6 +43,14 @@
  * bitmap only at merge time, after both children are decoded.  So the
  * stream is read strictly forward, each byte touched once, and the
  * decoder's L1 working set is a moving window.
+ *
+ * The larger-K child goes first so the decoder meets each node's
+ * dominant half while the smaller sibling's buffer is still empty —
+ * the decoder can overlap the larger child's working scratch with
+ * that hole, which is what lets the scratch arena stay near N (see
+ * the decode tree walk in pivco_huffman_codec.c).  Both sides key the
+ * order on the K_right header already on the wire, so it costs no
+ * bits.
  *
  * The K_right header occupies one slot per recursion site into a
  * non-leaf child (kr_header_needed()): leaf-only nodes (BOTH_LEAVES,

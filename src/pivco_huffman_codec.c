@@ -379,10 +379,25 @@ static void codec_encode_node(const pivco_huffman_table_t *table,
      * arrive. */
     wire_write_kr_header(table, node_id, out_ptr, n_right);
 
-    codec_encode_node(table, node->left,  ranks, n_left,  depth + 1,
-                       out_ptr, tmp + n_right);
-    codec_encode_node(table, node->right, tmp,   n_right, depth + 1,
-                       out_ptr, tmp + n_right);
+    /* Emit the larger-K child's region first: the decoder can then
+     * decode it into scratch that the smaller, not-yet-decoded
+     * sibling's buffer overlaps (hole-reuse), shrinking the arena
+     * high-water.  The two rank buffers (ranks=left, tmp=right) and
+     * the shared deeper scratch tmp+n_right are mutually disjoint, so
+     * the call order is free.  A leaf child emits nothing, so this
+     * only changes the stream at INTERNAL_FULL nodes — exactly where
+     * the decoder reorders. */
+    if (n_right > n_left) {
+        codec_encode_node(table, node->right, tmp,   n_right, depth + 1,
+                           out_ptr, tmp + n_right);
+        codec_encode_node(table, node->left,  ranks, n_left,  depth + 1,
+                           out_ptr, tmp + n_right);
+    } else {
+        codec_encode_node(table, node->left,  ranks, n_left,  depth + 1,
+                           out_ptr, tmp + n_right);
+        codec_encode_node(table, node->right, tmp,   n_right, depth + 1,
+                           out_ptr, tmp + n_right);
+    }
 
     /* Emit this node's record: marker + staged bitmap.  The FSE attempt
      * may rewrite marker+bm in place with [fse_len][payload] and pull
@@ -540,9 +555,7 @@ static void codec_decode_subtree(const pivco_huffman_table_t *table,
         uint8_t *left_buf, *right_buf;
         if (tail_ok && K_left >= K_right) {
             /* Longer child decodes into out_buf's tail (free -- see
-             * place_tail), the shorter into a scratch carve.  Decode
-             * order stays left-then-right (the wire is pre-order) --
-             * only buffer placement differs. */
+             * place_tail), the shorter into a scratch carve. */
             left_buf  = place_tail(out_buf, K_right, K_left, &scratch_top);
             right_buf = scratch_carve(&scratch_top, K_right);
         } else if (tail_ok) {
@@ -553,10 +566,20 @@ static void codec_decode_subtree(const pivco_huffman_table_t *table,
             right_buf = scratch_carve(&scratch_top, K_right);
         }
 
-        codec_decode_subtree(table, node->left,  K_left,
-                              left_buf,  in_ptr, scratch_top, g_dec_inplace);
-        codec_decode_subtree(table, node->right, K_right,
-                              right_buf, in_ptr, scratch_top, g_dec_inplace);
+        /* The encoder emits the larger-K child's region first (strict
+         * >, ties left-first); decode order must match the stream.
+         * Buffer placement above is order-independent. */
+        if (K_right > K_left) {
+            codec_decode_subtree(table, node->right, K_right,
+                                  right_buf, in_ptr, scratch_top, g_dec_inplace);
+            codec_decode_subtree(table, node->left,  K_left,
+                                  left_buf,  in_ptr, scratch_top, g_dec_inplace);
+        } else {
+            codec_decode_subtree(table, node->left,  K_left,
+                                  left_buf,  in_ptr, scratch_top, g_dec_inplace);
+            codec_decode_subtree(table, node->right, K_right,
+                                  right_buf, in_ptr, scratch_top, g_dec_inplace);
+        }
 
         uint8_t bm_scratch[(size_t)bitmap_bytes(K) + 16];
         const uint8_t *bm = wire_read_bitmap(in_ptr, K, bm_scratch);
