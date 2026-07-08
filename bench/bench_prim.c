@@ -568,14 +568,16 @@ static void usage(FILE *f) {
     fprintf(f,
         "usage: pivco_bench_prim [--n=N] [--reps=N] [--D=d,d,...] [--variants[=<logical>]]\n"
         "\n"
-        "  --n=N            elements per run (default 8192; rounded down to mult of 16)\n"
+        "  --n=N            elements per run (default 32768; rounded down to mult of 16)\n"
         "  --reps=N         inner reps per timed run (default 2000)\n"
         "  --canary=X       env-stability probe (compute/bw/lat); 0=off,\n"
         "                   1=start+end (default), 2=+between families, 3=+between each primitive\n"
         "  --bm=MODE        bitmap content for the merge stages: random (default),\n"
         "                   runs[:W,B] -- alternating 0-runs (mean W, default 400) and\n"
         "                   1-runs (mean B, default 16), calgary-pic-like run structure,\n"
-        "                   or mix[:P] -- P%% of u64 words all-zero in random order\n"
+        "                   mix[:P] -- P%% of u64 words all-zero in random order\n"
+        "                   (default 50 = max entropy for a per-word easy/hard branch),\n"
+        "                   or p:P -- i.i.d. bits, P%% ones density (proba80 ~ p:20)\n"
         "                   (default 50 = max entropy for a per-word easy/hard branch)\n"
         "  --D=d,d,...      restrict to these flat depths D (2..%d; default all)\n"
         "  --variants       also run the prim_variants/ graveyard (frozen non-shipping\n"
@@ -590,11 +592,12 @@ static void usage(FILE *f) {
 }
 
 int main(int argc, char **argv) {
-    int n = 8192, reps = 2000, want[MAXD+1] = {0}, any = 0;
+    int n = 32768, reps = 2000, want[MAXD+1] = {0}, any = 0;
     int variants = 0, do_list = 0; const char *vfilter = NULL;
     int canary = 1;
     int bm_runs_w = 0, bm_runs_b = 0;   /* --bm=runs: run-structured bitmap */
     int bm_mix_p = -1;                  /* --bm=mix: P% of u64 words all-zero, random order */
+    int bm_dens_p = -1;                 /* --bm=p:P: i.i.d. bits at P% ones density */
     for (int i=1;i<argc;i++) {
         if      (!strncmp(argv[i],"--n=",4))    n = atoi(argv[i]+4);
         else if (!strncmp(argv[i],"--reps=",7)) reps = atoi(argv[i]+7);
@@ -606,8 +609,10 @@ int main(int argc, char **argv) {
             } else if (!strncmp(argv[i]+5,"mix",3)) {
                 bm_mix_p = 50;                               /* max branch entropy default */
                 if (argv[i][8] == ':') bm_mix_p = atoi(argv[i]+9);
+            } else if (!strncmp(argv[i]+5,"p:",2)) {
+                bm_dens_p = atoi(argv[i]+7);
             } else if (strcmp(argv[i]+5,"random")) {
-                fprintf(stderr, "bench_prim: --bm= expects random, runs[:W,B] or mix[:P]\n"); return 2;
+                fprintf(stderr, "bench_prim: --bm= expects random, runs[:W,B], mix[:P] or p:P\n"); return 2;
             }
         }
         else if (!strcmp(argv[i],"--variants") || !strncmp(argv[i],"--variants=",11)) {
@@ -638,7 +643,7 @@ int main(int argc, char **argv) {
     uint8_t  *merge_left = malloc(n+16), *merge_right = malloc(n+16);
     uint16_t *la_pristine = malloc((n+16)*2), *la_work = malloc((n+16)*2),
              *tmp16 = malloc((n+16)*2), *ref16l = malloc((n+16)*2), *ref16r = malloc((n+16)*2);
-    uint8_t   c2s[256], ref_bm[ (8192/8) + 64 ];   /* 2^8 entries (D up to 8) */
+    uint8_t   c2s[256], *ref_bm = malloc((size_t)(n/8) + 64);   /* 2^8 entries (D up to 8) */
     /* rank-based buffers: ranks (pristine), ranks_work (mutated), tmp8 (right),
      * symbuf (enc_init input), ref8l/r (partition ref), and the two gather LUTs. */
     uint8_t  *ranks = malloc(n+64), *ranks_work = malloc(n+64), *tmp8 = malloc(n+64);
@@ -687,6 +692,19 @@ int main(int argc, char **argv) {
         }
         printf("bm=mix P=%d: zero-words=%.1f%% in random order (of %d u64 words)\n",
                bm_mix_p, 100.0 * zw / (n >> 6), n >> 6);
+    }
+    if (bm_dens_p >= 0) {
+        /* --bm=p:P: every bit independently one with probability P% -- the
+           i.i.d. density knob (proba80-shaped masks at p:20). */
+        long ones = 0;
+        for (long i = 0; i < (long)n + 16; i++) {
+            uint8_t b = 0;
+            for (int t = 0; t < 8; t++)
+                if (rand() % 100 < bm_dens_p) b |= (uint8_t)(1u << t);
+            bm[i] = b;
+            if (i < (long)(n >> 3)) ones += __builtin_popcount(b);
+        }
+        printf("bm=p P=%d: ones=%.1f%%\n", bm_dens_p, 100.0 * ones / n);
     }
     uint8_t rank_thr = 127, rank_base = 0;
 
