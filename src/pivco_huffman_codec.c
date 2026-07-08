@@ -220,12 +220,21 @@ extern uint64_t g_pivco_fse_bytes_out[PIVCO_FSE_STATS_SLOTS];
 
 /* ---------- Encode tree walk ---------- *
  *
- * DFS, pre-order: emit the partition bitmap at this node, then recurse left,
- * then right.  At each non-flat internal node, `ranks[0..n)` holds the
- * surviving leaves' in-order ranks; partition routes each by `rank >
- * split_rank[node]`, leaving the left half in place in `ranks[0..n_left)` and
- * compacting the right half into `tmp[0..n_right)`.  The recursion descends
- * left on `ranks`, right on `tmp`. */
+ * DFS, emitting records in decompression order (an Euler walk): the
+ * partition runs at node entry (it routes the ranks the recursion
+ * needs) and the K_right header is written there too, but the node's
+ * marker+bitmap record is emitted AFTER the children's regions —
+ * exactly where the decoder's merge consumes it, so the decoder reads
+ * the stream strictly forward.  At each non-flat internal node,
+ * `ranks[0..n)` holds the surviving leaves' in-order ranks; partition
+ * routes each by `rank > split_rank[node]`, leaving the left half in
+ * place in `ranks[0..n_left)` and compacting the right half into
+ * `tmp[0..n_right)`.  The recursion descends left on `ranks`, right on
+ * `tmp`.  The bitmap is staged in a stack buffer across the recursion
+ * (its final stream position depends on the children's — FSE-variable —
+ * encoded sizes, so it can't be written in place up front);
+ * ≤ bitmap_bytes(N)+64 per level, tree height ≤ PIVCO_MAX_CODE_LEN
+ * levels. */
 
 /* Arch-agnostic FSE attempt on a freshly-built raw bitmap.
  *
@@ -334,21 +343,16 @@ static void codec_encode_node(const pivco_huffman_table_t *table,
         return;
     }
 
-    /* Non-flat internal node.  codec.c owns: K_right header reservation,
-     * FSE marker byte, optional FSE-attempt on the raw bitmap.  The
-     * arch-specific primitive does only the SIMD-bound work: build the
-     * raw bitmap and partition codes_la. */
-    uint8_t *kr_slot = wire_reserve_kr_header(table, node_id, out_ptr);
-
-    /* Reserve marker (default = 0, raw bitmap). */
-    uint8_t *marker_slot = *out_ptr;
-    *marker_slot = 0;
-    *out_ptr += 1;
-
-    /* Reserve the bitmap region; primitive fills it in. */
+    /* Non-flat internal node.  codec.c owns: K_right header, FSE marker
+     * byte, optional FSE-attempt on the raw bitmap.  The arch-specific
+     * primitive does only the SIMD-bound work: build the raw bitmap and
+     * partition the ranks.
+     *
+     * The bitmap is built into a stack staging buffer (+64 slack
+     * absorbs the SIMD partitions' over-wide tail stores) and copied
+     * into the stream after the children's regions. */
     int nbytes = bitmap_bytes(n);
-    uint8_t *bm = *out_ptr;
-    *out_ptr += nbytes;
+    uint8_t bm_stage[(size_t)nbytes + 64];
 
     /* Pick the partition variant by node_type, mirroring the decode-side
      * dispatch.  The bitmap (and thus the wire bytes) is identical across
@@ -361,28 +365,36 @@ static void codec_encode_node(const pivco_huffman_table_t *table,
     PROF_TIC();
     switch ((pivco_node_type_t)table->node_type[node_id]) {
     case PIVCO_NODE_BOTH_LEAVES:
-        n_right = prim_enc_partition_none(ranks, n, thr, bm);        break;
+        n_right = prim_enc_partition_none(ranks, n, thr, bm_stage);        break;
     case PIVCO_NODE_LEAF_LEFT:
-        n_right = prim_enc_partition_right(ranks, n, thr, bm, tmp);  break;
+        n_right = prim_enc_partition_right(ranks, n, thr, bm_stage, tmp);  break;
     default:
-        n_right = prim_enc_partition_full(ranks, n, thr, bm, tmp);   break;
+        n_right = prim_enc_partition_full(ranks, n, thr, bm_stage, tmp);   break;
     }
     PROF_TOC(PROF_ENC_NODE_FULL, n);
     int n_left  = n - n_right;
 
-    /* Optional FSE attempt on the raw bitmap.  On commit, marker_slot
-     * and bm region are rewritten in place and *out_ptr is advanced to
-     * the end of the FSE payload (which may be shorter than the raw
-     * bitmap region we already reserved).  No-op otherwise. */
-    codec_maybe_fse_attempt(marker_slot, bm, nbytes,
-                             n, n_left, n_right, depth, out_ptr);
-
-    wire_commit_kr_header(kr_slot, n_right);
+    /* One K_right header per recursion site, consumed by the decoder
+     * at node entry so it can size both children before their regions
+     * arrive. */
+    wire_write_kr_header(table, node_id, out_ptr, n_right);
 
     codec_encode_node(table, node->left,  ranks, n_left,  depth + 1,
                        out_ptr, tmp + n_right);
     codec_encode_node(table, node->right, tmp,   n_right, depth + 1,
                        out_ptr, tmp + n_right);
+
+    /* Emit this node's record: marker + staged bitmap.  The FSE attempt
+     * may rewrite marker+bm in place with [fse_len][payload] and pull
+     * *out_ptr back to the payload end.  No-op otherwise. */
+    uint8_t *marker_slot = *out_ptr;
+    *marker_slot = 0;
+    *out_ptr += 1;
+    uint8_t *bm = *out_ptr;
+    memcpy(bm, bm_stage, (size_t)nbytes);
+    *out_ptr += nbytes;
+    codec_maybe_fse_attempt(marker_slot, bm, nbytes,
+                             n, n_left, n_right, depth, out_ptr);
 }
 
 int CODEC_ENCODE_ENTRY(const uint8_t *symbols, size_t n,
@@ -429,6 +441,13 @@ int CODEC_ENCODE_ENTRY(const uint8_t *symbols, size_t n,
  * output buffer.  Internal nodes recurse into their children (which
  * write to scratch arenas), then merge per the bitmap.  The flat-
  * subtree fast path bypasses recursion entirely.
+ *
+ * The wire is in decompression order, so the input cursor is consumed
+ * strictly forward and each record is loaded exactly where it is
+ * used: the K_right header at node entry, the children's regions
+ * during their recursion, the node's bitmap right before its merge.
+ * The bm_scratch VLA for FSE-coded bitmaps is thus also allocated
+ * after the recursion, so its lifetime doesn't span the subtree.
  *
  * Dispatch on node_type, computed at build-table time (by children's
  * leafness — a leaf child's symbol goes straight into the parent's
@@ -490,15 +509,19 @@ static void codec_decode_subtree(const pivco_huffman_table_t *table,
     }
 
     case PIVCO_NODE_LEAF_LEFT: {
+        /* K_right header at entry sizes the right child; recurse right;
+         * then the [marker][bitmap] record — which the merge consumes —
+         * is read right before the merge (post-order). */
         int K_right = wire_read_kr_header(table, node_id, in_ptr);
-        uint8_t bm_scratch[(size_t)bitmap_bytes(K) + 16];
-        const uint8_t *bm = wire_read_bitmap(in_ptr, K, bm_scratch);
 
         uint8_t *right_buf = tail_ok
             ? place_tail(out_buf, K - K_right, K_right, &scratch_top)
             : scratch_carve(&scratch_top, K_right);
         codec_decode_subtree(table, node->right, K_right,
                               right_buf, in_ptr, scratch_top, g_dec_inplace);
+
+        uint8_t bm_scratch[(size_t)bitmap_bytes(K) + 16];
+        const uint8_t *bm = wire_read_bitmap(in_ptr, K, bm_scratch);
         prim_merge_cst_vec(bm, K,
                            (uint8_t)table->tree[node->left].symbol,
                            right_buf, out_buf);
@@ -507,11 +530,11 @@ static void codec_decode_subtree(const pivco_huffman_table_t *table,
 
     case PIVCO_NODE_INTERNAL_FULL:
     default: {
-        /* Both children internal.  Recurse into both with disjoint
-         * scratch slices, then merge. */
+        /* Both children internal.  The K_right header at entry sizes
+         * both children so the recursion can carve disjoint scratch
+         * slices; the bitmap is read after both children decode, right
+         * before the merge (post-order). */
         int K_right = wire_read_kr_header(table, node_id, in_ptr);
-        uint8_t bm_scratch[(size_t)bitmap_bytes(K) + 16];
-        const uint8_t *bm = wire_read_bitmap(in_ptr, K, bm_scratch);
 
         int K_left = K - K_right;
         uint8_t *left_buf, *right_buf;
@@ -534,6 +557,9 @@ static void codec_decode_subtree(const pivco_huffman_table_t *table,
                               left_buf,  in_ptr, scratch_top, g_dec_inplace);
         codec_decode_subtree(table, node->right, K_right,
                               right_buf, in_ptr, scratch_top, g_dec_inplace);
+
+        uint8_t bm_scratch[(size_t)bitmap_bytes(K) + 16];
+        const uint8_t *bm = wire_read_bitmap(in_ptr, K, bm_scratch);
         prim_merge_vec_vec(bm, K, left_buf, right_buf, out_buf);
         return;
     }

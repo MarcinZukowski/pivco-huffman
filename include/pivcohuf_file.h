@@ -1,12 +1,12 @@
-/* pivcohuf file format (v0.3) -- standalone file-level codec built on
+/* pivcohuf file format -- standalone file-level codec built on
  * top of the pivco-huffman block primitives.
  *
  *   WIRE FORMAT (little-endian throughout)
  *
  *   HEADER (26 bytes, fixed across versions)
  *      0-7   "PIVCOHUF" magic
- *      8     MAJOR_VERSION (0)
- *      9     MINOR_VERSION (3)
+ *      8     MAJOR_VERSION (PIVCOHUF_VERSION_MAJOR below)
+ *      9     MINOR_VERSION (PIVCOHUF_VERSION_MINOR below)
  *     10-17  BODY_LENGTH (uint64) -- length of BODY in bytes
  *     18-21  BODY_CHECKSUM (XXH32 of BODY bytes, seed 0)
  *     22-25  HEADER_CHECKSUM (XXH32 of bytes 0..21, seed 0)
@@ -47,7 +47,10 @@ extern "C" {
 
 #define PIVCOHUF_MAGIC          "PIVCOHUF"
 #define PIVCOHUF_VERSION_MAJOR  0
-#define PIVCOHUF_VERSION_MINOR  4  /* 0.4: dropped within-tier ordering */
+#define PIVCOHUF_VERSION_MINOR  6  /* 0.6: wire in decompression order.  Tracks
+                                      the wire version; 0.5 is skipped — the
+                                      v0.5 block-N-header wire change shipped
+                                      without a bump. */
 #define PIVCOHUF_HEADER_SIZE    26
 
 typedef enum {
