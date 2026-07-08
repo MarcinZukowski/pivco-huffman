@@ -812,6 +812,156 @@ static int prim_part_right16_neon(uint8_t *ranks, int n, uint8_t thr, uint8_t *b
 }
 static void prim_part_right16(const ctx_t *c){ prim_part_right16_neon(c->ranks_work, c->n, c->rank_thr, c->bm, c->tmp8); }
 
+
+/* ============================================================================
+ * enc_partition_full : ryg-cshuf — ryg's "second way" half-combine (2026-07)
+ *   OUR INTERPRETATION of the ryg email thread (partition ideas, licensed),
+ *   not his verbatim code.
+ *   Production p16rev combines the two per-8 halves with one unaligned 16B
+ *   load from the 32B-padded p16rev_tabB0 row at +pc0 (never line-crossing
+ *   by construction).  The B half's payload is only row bytes [8,16) (lefts
+ *   at [8,8+lc1), reversed rights at (15-pc1,15]), so this variant keeps a
+ *   256x8 table (2KB vs 8KB), loads it ALIGNED into a low half, and shifts
+ *   it into place with a computed control {i + pc0 - 8}: out-of-range
+ *   controls TBL-zero natively on NEON.  Trades the unaligned load for
+ *   dup + add + one extra tbl per group.  M4 unaligned loads measured free,
+ *   so expected ~wash here; the x86 twin is the real question.
+ * ========================================================================== */
+static uint8_t pv_rygb8n[256][8] __attribute__((aligned(64)));
+static int pv_rygb8n_built = 0;
+static void pv_build_rygb8n(void) {
+    if (pv_rygb8n_built) return;
+    build_tabs();
+    for (int m = 0; m < 256; m++) memcpy(pv_rygb8n[m], &p16rev_tabB0[m][8], 8);
+    pv_rygb8n_built = 1;
+}
+static inline int pv_part_rygcshuf_neon(uint8_t *ranks, int n, uint8_t thr,
+                                        uint8_t *bm, uint8_t *tmp)
+{
+    pv_build_rygb8n();
+    int n_left = 0, n_right = 0;
+    int j = 0;
+    uint8x16_t vt = vdupq_n_u8(thr);
+    static const uint8_t bw_a[16] = {1,2,4,8,16,32,64,128, 1,2,4,8,16,32,64,128};
+    uint8x16_t bw = vld1q_u8(bw_a);
+    static const uint8_t rev16_a[16] = {15,14,13,12,11,10,9,8,7,6,5,4,3,2,1,0};
+    uint8x16_t rev16 = vld1q_u8(rev16_a);
+    static const uint8_t iota_a[16] = {0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15};
+    uint8x16_t iota = vld1q_u8(iota_a);
+    for (; j + 64 <= n; j += 64) {
+        uint8x16_t v0 = vld1q_u8(ranks + j);
+        uint8x16_t v1 = vld1q_u8(ranks + j + 16);
+        uint8x16_t v2 = vld1q_u8(ranks + j + 32);
+        uint8x16_t v3 = vld1q_u8(ranks + j + 48);
+        uint64_t mask_word = masks64_neon(v0, v1, v2, v3, vt, bw);
+        memcpy(bm + (j >> 3), &mask_word, 8);
+        uint64_t pcw = vget_lane_u64(vreinterpret_u64_u8(
+                           vcnt_u8(vcreate_u8(mask_word))), 0);
+        uint64_t pfx = pcw * 0x0101010101010101ULL;
+        uint8x16_t vg[4] = { v0, v1, v2, v3 };
+#define _PRYGN(g) do {                                                      \
+        uint8_t  m0 = (uint8_t)(mask_word >> (16*(g)));                     \
+        uint8_t  m1 = (uint8_t)(mask_word >> (16*(g) + 8));                 \
+        uint32_t pc0 = (uint32_t)((pcw >> (16*(g)))     & 0xFF);            \
+        uint32_t cr  = (g) == 0 ? 0u                                        \
+                     : (uint32_t)((pfx >> (8*(2*(g) - 1))) & 0xFF);         \
+        uint8x16_t b8 = vcombine_u8(vld1_u8(pv_rygb8n[m1]), vdup_n_u8(0));  \
+        uint8x16_t sh = vaddq_u8(iota, vdupq_n_u8((uint8_t)(pc0 - 8)));     \
+        uint8x16_t ri = vorrq_u8(vld1q_u8(p16rev_tabA[m0]),                 \
+                                 vqtbl1q_u8(b8, sh));                       \
+        uint8x16_t comb = vqtbl1q_u8(vg[g], ri);                            \
+        vst1q_u8(ranks + n_left + (16*(g) - cr), comb);                     \
+        vst1q_u8(tmp + n_right + cr, vqtbl1q_u8(comb, rev16));              \
+    } while (0)
+        _PRYGN(0); _PRYGN(1); _PRYGN(2); _PRYGN(3);
+#undef _PRYGN
+        uint32_t total_r = (uint32_t)(pfx >> 56);
+        n_right += (int)total_r;
+        n_left  += 64 - (int)total_r;
+    }
+    for (; j < n; j++) {
+        if ((j & 7) == 0) bm[j >> 3] = 0;
+        uint8_t r = ranks[j];
+        if (r > thr) { bm[j >> 3] |= (uint8_t)(1u << (j & 7)); tmp[n_right++] = r; }
+        else         { ranks[n_left++] = r; }
+    }
+    return n_right;
+}
+static void prim_part_rygcshuf(const ctx_t *c){ pv_part_rygcshuf_neon(c->ranks_work, c->n, c->rank_thr, c->bm, c->tmp8); }
+
+
+/* ============================================================================
+ * enc_partition_full : ryg-gaptab — ryg's shared-gap B table (2026-07)
+ *   OUR INTERPRETATION of the ryg email thread (partition ideas, licensed),
+ *   not his verbatim code.
+ *   Production's combine unchanged (unaligned 16B window at +pc0, OR, one
+ *   tbl); only the table shrinks: the 8-byte payloads (row bytes [8,16) of
+ *   p16rev_tabB0) are packed at STRIDE 16 with the leading 8-zero gap of
+ *   entry m+1 doubling as the trailing zeros of entry m (window reads at
+ *   most byte m*16+23 < next payload at m*16+24).  256*16+8 bytes: 4KB vs
+ *   8KB, total partition LUT 12KB -> 8KB.  Cost: rows lose the 32B
+ *   alignment guarantee, so a fraction of B-loads cross a cache line
+ *   (~1/8 of rows on M4's 128B lines). */
+static uint8_t pv_ryggapn[256*16 + 16] __attribute__((aligned(64)));
+static int pv_ryggapn_built = 0;
+static void pv_build_ryggapn(void) {
+    if (pv_ryggapn_built) return;
+    build_tabs();
+    memset(pv_ryggapn, 0, sizeof pv_ryggapn);
+    for (int m = 0; m < 256; m++)
+        memcpy(pv_ryggapn + m*16 + 8, &p16rev_tabB0[m][8], 8);
+    pv_ryggapn_built = 1;
+}
+static inline int pv_part_ryggap_neon(uint8_t *ranks, int n, uint8_t thr,
+                                      uint8_t *bm, uint8_t *tmp)
+{
+    pv_build_ryggapn();
+    int n_left = 0, n_right = 0;
+    int j = 0;
+    uint8x16_t vt = vdupq_n_u8(thr);
+    static const uint8_t bw_a[16] = {1,2,4,8,16,32,64,128, 1,2,4,8,16,32,64,128};
+    uint8x16_t bw = vld1q_u8(bw_a);
+    static const uint8_t rev16_a[16] = {15,14,13,12,11,10,9,8,7,6,5,4,3,2,1,0};
+    uint8x16_t rev16 = vld1q_u8(rev16_a);
+    for (; j + 64 <= n; j += 64) {
+        uint8x16_t v0 = vld1q_u8(ranks + j);
+        uint8x16_t v1 = vld1q_u8(ranks + j + 16);
+        uint8x16_t v2 = vld1q_u8(ranks + j + 32);
+        uint8x16_t v3 = vld1q_u8(ranks + j + 48);
+        uint64_t mask_word = masks64_neon(v0, v1, v2, v3, vt, bw);
+        memcpy(bm + (j >> 3), &mask_word, 8);
+        uint64_t pcw = vget_lane_u64(vreinterpret_u64_u8(
+                           vcnt_u8(vcreate_u8(mask_word))), 0);
+        uint64_t pfx = pcw * 0x0101010101010101ULL;
+        uint8x16_t vg[4] = { v0, v1, v2, v3 };
+#define _PGAPN(g) do {                                                      \
+        uint8_t  m0 = (uint8_t)(mask_word >> (16*(g)));                     \
+        uint8_t  m1 = (uint8_t)(mask_word >> (16*(g) + 8));                 \
+        uint32_t pc0 = (uint32_t)((pcw >> (16*(g)))     & 0xFF);            \
+        uint32_t cr  = (g) == 0 ? 0u                                        \
+                     : (uint32_t)((pfx >> (8*(2*(g) - 1))) & 0xFF);         \
+        uint8x16_t ri = vorrq_u8(vld1q_u8(p16rev_tabA[m0]),                 \
+                                 vld1q_u8(pv_ryggapn + (uint32_t)m1*16 + pc0)); \
+        uint8x16_t comb = vqtbl1q_u8(vg[g], ri);                            \
+        vst1q_u8(ranks + n_left + (16*(g) - cr), comb);                     \
+        vst1q_u8(tmp + n_right + cr, vqtbl1q_u8(comb, rev16));              \
+    } while (0)
+        _PGAPN(0); _PGAPN(1); _PGAPN(2); _PGAPN(3);
+#undef _PGAPN
+        uint32_t total_r = (uint32_t)(pfx >> 56);
+        n_right += (int)total_r;
+        n_left  += 64 - (int)total_r;
+    }
+    for (; j < n; j++) {
+        if ((j & 7) == 0) bm[j >> 3] = 0;
+        uint8_t r = ranks[j];
+        if (r > thr) { bm[j >> 3] |= (uint8_t)(1u << (j & 7)); tmp[n_right++] = r; }
+        else         { ranks[n_left++] = r; }
+    }
+    return n_right;
+}
+static void prim_part_ryggap(const ctx_t *c){ pv_part_ryggap_neon(c->ranks_work, c->n, c->rank_thr, c->bm, c->tmp8); }
+
 #endif /* USE_NEON_KERNELS */
 
 /* ============================================================================
@@ -1205,6 +1355,162 @@ static void prim_part_right_asof_ae49fe1_x86(const ctx_t *c) {
         if (r > thr) { bm[j >> 3] |= (uint8_t)(1u << (j & 7)); tmp[n_right++] = r; }
     }
 }
+
+/* ============================================================================
+ * enc_partition_full : ryg-cshuf — ryg's "second way" half-combine (2026-07)
+ *   OUR INTERPRETATION of the ryg email thread (partition ideas, licensed),
+ *   not his verbatim code.
+ *   Same idea as the NEON twin (see there): 256x8 aligned B table (2KB vs
+ *   8KB) + computed shuffle instead of the padded-row unaligned load.  The
+ *   {i - lc0} control's -lc0 broadcast comes GPR-free from psadbw on the
+ *   INVERTED compare (sum of 0xff left lanes, low byte = -lc0 mod 256) +
+ *   pshufb-0 broadcast (ryg).  pshufb zeroes the negative lanes; controls in
+ *   [8,16) read the movq-zeroed high half.  Costs andnot+psadbw+paddb+2
+ *   pshufb per group vs one never-splitting unaligned load: expected loss on
+ *   the port-5-bound narrow Intels (c3/IVB..c5/SKX), the real question is
+ *   c5a/Zen 2 + c6a/Zen 3 with dual shuffle ports.
+ * ========================================================================== */
+static uint8_t pv_rygb8x[256][8] __attribute__((aligned(64)));
+static int pv_rygb8x_built = 0;
+static void pv_build_rygb8x(void) {
+    if (pv_rygb8x_built) return;
+    x86_build_tabs();
+    for (int m = 0; m < 256; m++) memcpy(pv_rygb8x[m], &x86_p16rev_tabB0[m][8], 8);
+    pv_rygb8x_built = 1;
+}
+static inline int pv_part_rygcshuf_x86(uint8_t *ranks, int n, uint8_t thr,
+                                       uint8_t *bm, uint8_t *tmp)
+{
+    pv_build_rygb8x();
+    int n_left = 0, n_right = 0;
+    int j = 0;
+    __m128i thr1 = _mm_set1_epi8((char)(thr + 1));
+    static const uint8_t rev16_a[16] = {15,14,13,12,11,10,9,8,7,6,5,4,3,2,1,0};
+    static const uint8_t iota_a[16]  = {0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15};
+    const __m128i rev16 = _mm_loadu_si128((const __m128i *)rev16_a);
+    const __m128i iota  = _mm_loadu_si128((const __m128i *)iota_a);
+    const __m128i ffs   = _mm_set1_epi8((char)0xff);
+    const __m128i zero  = _mm_setzero_si128();
+#define _PRYG(v, cmp_, mlo_, mhi_, cl_, cr_) do {                              \
+        __m128i sad_ = _mm_sad_epu8(_mm_andnot_si128((cmp_), ffs), zero);      \
+        __m128i sh_  = _mm_add_epi8(iota, _mm_shuffle_epi8(sad_, zero));       \
+        __m128i cb_  = _mm_shuffle_epi8(                                       \
+            _mm_loadl_epi64((const __m128i *)pv_rygb8x[(mhi_)]), sh_);         \
+        __m128i cidx_ = _mm_or_si128(                                          \
+            _mm_load_si128((const __m128i *)x86_p16rev_tabA[(mlo_)]), cb_);    \
+        __m128i comb_ = _mm_shuffle_epi8((v), cidx_);                          \
+        _mm_storeu_si128((__m128i *)(ranks + n_left + (cl_)), comb_);          \
+        _mm_storeu_si128((__m128i *)(tmp + n_right + (cr_)),                   \
+            _mm_shuffle_epi8(comb_, rev16));                                   \
+    } while (0)
+    for (; j + 32 <= n; j += 32) {
+        __m128i v0 = _mm_loadu_si128((const __m128i *)(ranks + j));
+        __m128i v1 = _mm_loadu_si128((const __m128i *)(ranks + j + 16));
+        __m128i c0 = _mm_cmpeq_epi8(_mm_min_epu8(v0, thr1), thr1);
+        __m128i c1 = _mm_cmpeq_epi8(_mm_min_epu8(v1, thr1), thr1);
+        uint32_t mlo = (uint16_t)_mm_movemask_epi8(c0);
+        uint32_t mhi = (uint16_t)_mm_movemask_epi8(c1);
+        uint32_t mm = mlo | (mhi << 16);
+        memcpy(bm + (j >> 3), &mm, 4);
+        uint32_t cr1   = (uint32_t)__builtin_popcount(mlo);
+        uint32_t total = (uint32_t)__builtin_popcount(mm);
+        _PRYG(v0, c0, (uint8_t)mlo, (uint8_t)(mlo >> 8), 0, 0);
+        _PRYG(v1, c1, (uint8_t)mhi, (uint8_t)(mhi >> 8), 16 - cr1, cr1);
+        n_right += (int)total; n_left += 32 - (int)total;
+    }
+    for (; j + 16 <= n; j += 16) {
+        __m128i v = _mm_loadu_si128((const __m128i *)(ranks + j));
+        __m128i cm = _mm_cmpeq_epi8(_mm_min_epu8(v, thr1), thr1);
+        uint16_t mm16 = (uint16_t)_mm_movemask_epi8(cm);
+        memcpy(bm + (j >> 3), &mm16, 2);
+        uint32_t pc16 = (uint32_t)__builtin_popcount((unsigned)mm16);
+        _PRYG(v, cm, (uint8_t)mm16, (uint8_t)(mm16 >> 8), 0, 0);
+        n_right += (int)pc16; n_left += 16 - (int)pc16;
+    }
+#undef _PRYG
+    for (; j < n; j++) {
+        if ((j & 7) == 0) bm[j >> 3] = 0;
+        uint8_t r = ranks[j];
+        if (r > thr) { bm[j >> 3] |= (uint8_t)(1u << (j & 7)); tmp[n_right++] = r; }
+        else         { ranks[n_left++] = r; }
+    }
+    return n_right;
+}
+static void prim_part_rygcshuf_x86w(const ctx_t *c){ pv_part_rygcshuf_x86(c->ranks_work, c->n, c->rank_thr, c->bm, c->tmp8); }
+
+/* ============================================================================
+ * enc_partition_full : ryg-gaptab — ryg's shared-gap B table (2026-07)
+ *   OUR INTERPRETATION of the ryg email thread (partition ideas, licensed),
+ *   not his verbatim code.
+ *   x86 twin of the NEON version above: production's combine unchanged,
+ *   256*16+8 shared-gap table (4KB vs 8KB, total LUT 12KB -> 8KB); the
+ *   cost is that ~1/4 of rows sit at line offset 48, so their +pc0 windows
+ *   (pc0>0) cross a 64B line — the split-load tax production's 32B-padded
+ *   rows avoid.  The bet is L1 residency > split loads on the 32KB-L1
+ *   hosts (c3/IVB, c4/HSW). */
+static uint8_t pv_ryggapx[256*16 + 16] __attribute__((aligned(64)));
+static int pv_ryggapx_built = 0;
+static void pv_build_ryggapx(void) {
+    if (pv_ryggapx_built) return;
+    x86_build_tabs();
+    memset(pv_ryggapx, 0, sizeof pv_ryggapx);
+    for (int m = 0; m < 256; m++)
+        memcpy(pv_ryggapx + m*16 + 8, &x86_p16rev_tabB0[m][8], 8);
+    pv_ryggapx_built = 1;
+}
+static inline int pv_part_ryggap_x86(uint8_t *ranks, int n, uint8_t thr,
+                                     uint8_t *bm, uint8_t *tmp)
+{
+    pv_build_ryggapx();
+    int n_left = 0, n_right = 0;
+    int j = 0;
+    __m128i thr1 = _mm_set1_epi8((char)(thr + 1));
+    static const uint8_t rev16_a[16] = {15,14,13,12,11,10,9,8,7,6,5,4,3,2,1,0};
+    const __m128i rev16 = _mm_loadu_si128((const __m128i *)rev16_a);
+#define _PGAP(v, mlo_, mhi_, cl_, cr_) do {                                    \
+        uint32_t pc0_ = (uint32_t)__builtin_popcount((unsigned)(mlo_));        \
+        __m128i cidx_ = _mm_or_si128(                                          \
+            _mm_load_si128((const __m128i *)x86_p16rev_tabA[(mlo_)]),          \
+            _mm_loadu_si128((const __m128i *)(pv_ryggapx + (uint32_t)(mhi_)*16 + pc0_))); \
+        __m128i comb_ = _mm_shuffle_epi8((v), cidx_);                          \
+        _mm_storeu_si128((__m128i *)(ranks + n_left + (cl_)), comb_);          \
+        _mm_storeu_si128((__m128i *)(tmp + n_right + (cr_)),                   \
+            _mm_shuffle_epi8(comb_, rev16));                                   \
+    } while (0)
+    for (; j + 32 <= n; j += 32) {
+        __m128i v0 = _mm_loadu_si128((const __m128i *)(ranks + j));
+        __m128i v1 = _mm_loadu_si128((const __m128i *)(ranks + j + 16));
+        uint32_t mlo = (uint16_t)_mm_movemask_epi8(
+            _mm_cmpeq_epi8(_mm_min_epu8(v0, thr1), thr1));
+        uint32_t mhi = (uint16_t)_mm_movemask_epi8(
+            _mm_cmpeq_epi8(_mm_min_epu8(v1, thr1), thr1));
+        uint32_t mm = mlo | (mhi << 16);
+        memcpy(bm + (j >> 3), &mm, 4);
+        uint32_t cr1   = (uint32_t)__builtin_popcount(mlo);
+        uint32_t total = (uint32_t)__builtin_popcount(mm);
+        _PGAP(v0, (uint8_t)mlo, (uint8_t)(mlo >> 8), 0, 0);
+        _PGAP(v1, (uint8_t)mhi, (uint8_t)(mhi >> 8), 16 - cr1, cr1);
+        n_right += (int)total; n_left += 32 - (int)total;
+    }
+    for (; j + 16 <= n; j += 16) {
+        __m128i v = _mm_loadu_si128((const __m128i *)(ranks + j));
+        uint16_t mm16 = (uint16_t)_mm_movemask_epi8(
+            _mm_cmpeq_epi8(_mm_min_epu8(v, thr1), thr1));
+        memcpy(bm + (j >> 3), &mm16, 2);
+        uint32_t pc16 = (uint32_t)__builtin_popcount((unsigned)mm16);
+        _PGAP(v, (uint8_t)mm16, (uint8_t)(mm16 >> 8), 0, 0);
+        n_right += (int)pc16; n_left += 16 - (int)pc16;
+    }
+#undef _PGAP
+    for (; j < n; j++) {
+        if ((j & 7) == 0) bm[j >> 3] = 0;
+        uint8_t r = ranks[j];
+        if (r > thr) { bm[j >> 3] |= (uint8_t)(1u << (j & 7)); tmp[n_right++] = r; }
+        else         { ranks[n_left++] = r; }
+    }
+    return n_right;
+}
+static void prim_part_ryggap_x86w(const ctx_t *c){ pv_part_ryggap_x86(c->ranks_work, c->n, c->rank_thr, c->bm, c->tmp8); }
 
 #if defined(__AVX2__)
 /* avx32: like sse32 but the 32-byte routing mask comes from a single ymm
@@ -1626,6 +1932,12 @@ static void pv_register_partition(void) {
     PV_VARIANT(ST_PART, "p16revback", PV_ISA_SSE4, "p16rev, right stored backward + one reverse pass",
                "drops p16rev's per-group right pshufb: store comb backward into scratch (keep top pc), one 4x-unrolled pshufb reverse pass after the stride loop. loses to p16rev on all x86 (Zen2/3 Skylake Haswell IvyB) -- the extra reverse-pass stores hurt the store-bound SSE loop; not promoted", 1,
                PV_FN_SSE(prim_part_p16revback_x86));
+    PV_VARIANT(ST_PART, "ryg-cshuf", PV_ISA_SSE4, "ryg 'second way' half-combine (2026-07)",
+               "256x8 aligned B table (2KB vs 8KB) + computed-shuffle combine; -lc0 broadcast GPR-free via psadbw on the inverted compare + pshufb-0 (ryg); vs production's never-line-crossing unaligned load.  Loses: +11% c5/SKX (port 5), +3% c4/HSW, wash c5a+c6a/Zen 2/3; not promoted", 1,
+               PV_FN_SSE(prim_part_rygcshuf_x86w));
+    PV_VARIANT(ST_PART, "ryg-gaptab", PV_ISA_SSE4, "ryg shared-gap B table (2026-07)",
+               "production combine, 256*16+8 shared-gap tabB0 (4KB vs 8KB, LUT total 12->8KB); ~1/4 of rows at line offset 48 -> split B-loads at pc0>0.  LOST the bet: micro wash (+2% c3/IVB..-1% c6a/Zen 3), E2E fair enc_pb NEGATIVE everywhere (c4/HSW + c5/SKX -1.4% geomean, c3/IVB ~0) -- split loads beat the 4KB L1 saving even on 32KB-L1 hosts; not promoted", 1,
+               PV_FN_SSE(prim_part_ryggap_x86w));
     PV_VARIANT(ST_PART, "p16rev", PV_ISA_SSE4, "classic p16rev (serial cursors)",
                "the cursor scheme production used before the issue-#5 per-group store offsets (production through 45147c8): serial n_left/n_right chain across the 2 groups; same shuffle + current 8KB tabB0 (that prod had the 36KB tabB), so the delta vs production isolates the cursors", 1,
                PV_FN_SSE(prim_part_p16rev_x86));
@@ -1645,6 +1957,12 @@ static void pv_register_partition(void) {
     PV_VARIANT(ST_PART, "p16rev", PV_ISA_NEON, "classic p16rev (serial cursors)",
                "the cursor scheme production used before the issue-#5 pfx-sum cursors (production as of 3a138a6..4d93965): serial per-group n_left/n_right chain (each group's store addresses wait on the previous group's popcount); same shuffle + current 8KB tabB0 (that prod had the 36KB tabB), so the delta vs production isolates the cursors. pfx beats it ~1.5-1.7% c7g/c8g, 4.2% m9g, 4.3% M4 micro", 1,
                PV_FN_NEON(prim_part_p16rev));
+    PV_VARIANT(ST_PART, "ryg-cshuf", PV_ISA_NEON, "ryg 'second way' half-combine (2026-07)",
+               "256x8 aligned B table + computed-shuffle {i+pc0-8} combine instead of the padded-row unaligned load; dup+add+extra tbl per group.  +19% on M4 (unaligned loads are free there); not promoted", 1,
+               PV_FN_NEON(prim_part_rygcshuf));
+    PV_VARIANT(ST_PART, "ryg-gaptab", PV_ISA_NEON, "ryg shared-gap B table (2026-07)",
+               "production combine, 256*16+8 shared-gap tabB0 (4KB vs 8KB, LUT total 12->8KB); some B-loads now cross cache lines.  M4 micro +1.6%; not promoted", 1,
+               PV_FN_NEON(prim_part_ryggap));
     PV_VARIANT(ST_PART_RIGHT, "right16", PV_ISA_NEON, "16-wide one-sided right compaction",
                "1 vqtbl1q + 1 16-byte store per 16 lanes (p16 right-pack two-table index) vs the per-8-chunk production 2 vtbl1 + 2 8-byte stores; halves shuffle+store count, pays the 36 KB tab2 latency", 1,
                PV_FN_NEON(prim_part_right16));
