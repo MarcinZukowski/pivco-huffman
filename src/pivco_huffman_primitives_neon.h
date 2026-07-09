@@ -88,12 +88,15 @@ static inline int popcount_K_right_neon(const uint8_t *bm, int nbytes, int K)
     return K_right;
 }
 
-/* ---- merge_vec_vec_neon: two-table SABD merge, 64 bytes/iter ----
+/* ---- merge_vec_vec_neon: two-table SABD merge, 128 bytes/iter ----
  *
  * One 2-source vqtbl2q over {R16, L16} per 16-byte chunk; the cross-half
  * cursor offset is folded into the shuffle index by SABD (|shuf0 - shuf1|),
- * so no explicit add.  Four chunks per 64-byte iter share one vcnt + 64-bit
- * multiply prefix-sum for the per-chunk cursor splits and the L/R advance.  The
+ * so no explicit add.  Eight chunks per 128-byte iter share ONE 16-byte
+ * SIMD bitmap load + vcntq; masks and popcount prefix-sums leave via
+ * SIMD->GPR lane moves (never GPR->SIMD: that fmov costs a load-port
+ * uop and the loop is load-port bound).  Per-chunk cursor splits use a
+ * 64-bit multiply prefix-sum per half.  The
  * two 256x16 index tables (g_merge_shuf0/1, 8 KiB) are built once in
  * codec_init_neon.  Tail (K mod 64) runs the same SABD merge at 16- and
  * 8-wide on the same tables (the 8-wide form stores the low half only),
@@ -161,27 +164,48 @@ static inline void merge_vec_vec_neon(const uint8_t *bm, int K,
     PROF_TIC();
     const uint8_t *l_list = left, *r_list = right;
     intptr_t i = 0;
-    for (; i + 64 <= K; i += 64) {
-        uint64_t mask; memcpy(&mask, bm + (i >> 3), 8);
-        uint8x8_t vmask = vcreate_u8(mask);
-        uint8x8_t pop8  = vcnt_u8(vmask);
-        /* Per-chunk cursor splits: move the 8 byte-popcounts to a GPR and
-         * prefix-sum them with a single 64-bit multiply (offloads to the scalar
-         * pipe; cheaper than the SIMD vpadd+vmul fold).  Byte k of the product
-         * holds sum(pop8[0..k]), so bytes 1/3/5/7 are the 16-bit chunk
-         * boundaries c0, c0+c1, c0+c1+c2, total. */
-        uint64_t all_pop = vget_lane_u64(vreinterpret_u64_u8(pop8), 0);
-        uint64_t pfx = all_pop * 0x0101010101010101ull;
-        intptr_t pop0 = (pfx >> 8)  & 0xff;
-        intptr_t pop1 = (pfx >> 24) & 0xff;
-        intptr_t pop2 = (pfx >> 40) & 0xff;
-        intptr_t pop3 =  pfx >> 56;
-        merge_neon_16B(out + i,      l_list,             r_list,        mask,       g_merge_shuf0, g_merge_shuf1);
-        merge_neon_16B(out + i + 16, l_list + 16 - pop0, r_list + pop0, mask >> 16, g_merge_shuf0, g_merge_shuf1);
-        merge_neon_16B(out + i + 32, l_list + 32 - pop1, r_list + pop1, mask >> 32, g_merge_shuf0, g_merge_shuf1);
-        merge_neon_16B(out + i + 48, l_list + 48 - pop2, r_list + pop2, mask >> 48, g_merge_shuf0, g_merge_shuf1);
-        r_list += pop3; l_list += 64 - pop3;
+    /* One 64-byte half: 4 SABD-merged chunks + cursor advance.  The
+     * per-chunk cursor splits come from a 64-bit multiply prefix-sum of
+     * the byte popcounts (byte k of the product holds sum(pop[0..k]), so
+     * bytes 1/3/5/7 are the 16-bit chunk boundaries; offloads to the
+     * scalar pipe -- cheaper than the SIMD vpadd+vmul fold). */
+#define PIVCO_MVV_HALF(mask, pfx, base) do {                              \
+        intptr_t pop0 = ((pfx) >> 8)  & 0xff;                             \
+        intptr_t pop1 = ((pfx) >> 24) & 0xff;                             \
+        intptr_t pop2 = ((pfx) >> 40) & 0xff;                             \
+        intptr_t pop3 =  (pfx) >> 56;                                     \
+        merge_neon_16B(out + (base),      l_list,             r_list,        (mask),       g_merge_shuf0, g_merge_shuf1); \
+        merge_neon_16B(out + (base) + 16, l_list + 16 - pop0, r_list + pop0, (mask) >> 16, g_merge_shuf0, g_merge_shuf1); \
+        merge_neon_16B(out + (base) + 32, l_list + 32 - pop1, r_list + pop1, (mask) >> 32, g_merge_shuf0, g_merge_shuf1); \
+        merge_neon_16B(out + (base) + 48, l_list + 48 - pop2, r_list + pop2, (mask) >> 48, g_merge_shuf0, g_merge_shuf1); \
+        r_list += pop3; l_list += 64 - pop3;                              \
+    } while (0)
+    /* 128 bytes per iter off ONE 16-byte SIMD bitmap load + one
+     * vcntq: mask and popcounts leave via SIMD->GPR lane moves only.
+     * The GPR-load + fmov-to-SIMD form costs a load-port uop for the
+     * fmov (Apple runs GPR->SIMD on the load pipes), and this loop is
+     * load-port bound: measured 7.2 -> 6.7 cyc/64B on M4. */
+    for (; i + 128 <= K; i += 128) {
+        uint8x16_t m2 = vld1q_u8(bm + (i >> 3));
+        uint8x16_t p2 = vcntq_u8(m2);
+        uint64_t maskA = vgetq_lane_u64(vreinterpretq_u64_u8(m2), 0);
+        uint64_t maskB = vgetq_lane_u64(vreinterpretq_u64_u8(m2), 1);
+        uint64_t pfxA  = vgetq_lane_u64(vreinterpretq_u64_u8(p2), 0)
+                         * 0x0101010101010101ull;
+        uint64_t pfxB  = vgetq_lane_u64(vreinterpretq_u64_u8(p2), 1)
+                         * 0x0101010101010101ull;
+        PIVCO_MVV_HALF(maskA, pfxA, i);
+        PIVCO_MVV_HALF(maskB, pfxB, i + 64);
     }
+    if (i + 64 <= K) {          /* K mod 128 half */
+        uint64_t mask; memcpy(&mask, bm + (i >> 3), 8);
+        uint8x8_t pop8 = vcnt_u8(vcreate_u8(mask));
+        uint64_t pfx = vget_lane_u64(vreinterpret_u64_u8(pop8), 0)
+                       * 0x0101010101010101ull;
+        PIVCO_MVV_HALF(mask, pfx, i);
+        i += 64;
+    }
+#undef PIVCO_MVV_HALF
     int j = (int)i;
 
     /* Residue on the main tables: 16-wide, then 8-wide (low half). */
