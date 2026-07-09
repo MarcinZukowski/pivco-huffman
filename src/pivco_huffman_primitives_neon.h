@@ -29,9 +29,12 @@
 #include <stdint.h>
 #include <string.h>
 
-/* Backend lifecycle.  Lazily build the compress_tab + expand_tab pre-
- * bake tables that the NEON partition / merge primitives index
- * into.  Idempotent and cheap after the first call. */
+/* Backend lifecycle.  Lazily build the compress_tab pre-bake the NEON
+ * partition primitives index into, plus the merge shuffle pair.
+ * Of the expand tables only expand_popcnt (256 B) is still read by the
+ * shipped kernels (merge-tail cursor advance); expand_tab/expand_tab_pre
+ * stay built for the bench prim_variants that index them.  Idempotent
+ * and cheap after the first call. */
 static void init_merge_tables(void);   /* two-table merge_vec_vec shuffles (below) */
 static inline void codec_init_neon(void)
 {
@@ -92,8 +95,12 @@ static inline int popcount_K_right_neon(const uint8_t *bm, int nbytes, int K)
  * so no explicit add.  Four chunks per 64-byte iter share one vcnt + 64-bit
  * multiply prefix-sum for the per-chunk cursor splits and the L/R advance.  The
  * two 256x16 index tables (g_merge_shuf0/1, 8 KiB) are built once in
- * codec_init_neon.  Tail (K mod 64) falls back to the expand_tab
- * stride-16/-8/scalar ladder. */
+ * codec_init_neon.  Tail (K mod 64) runs the same SABD merge at 16- and
+ * 8-wide on the same tables (the 8-wide form stores the low half only),
+ * so the whole kernel touches only g_merge_shuf0/1 plus the 256-byte
+ * expand_popcnt (tail cursor advance; aarch64 has no GPR popcount) --
+ * the old expand_tab/expand_tab_pre ladder dragged up to 20 KiB of
+ * cold table lines into L1 for at most two tail iterations per node. */
 static int8_t g_merge_shuf0[256 * 16] __attribute__((aligned(16)));
 static int8_t g_merge_shuf1[256 * 16] __attribute__((aligned(16)));
 static void init_merge_tables(void)
@@ -129,6 +136,23 @@ static inline void merge_neon_16B(uint8_t *dest, const uint8_t *l_list,
     src.val[1] = vld1q_u8(l_list);
     vst1q_u8(dest, vqtbl2q_u8(src, shuf));
 }
+/* 8-byte residue on the same tables: the 16-bit-mask path with the high
+ * mask byte zero (tab1 row 0), storing only the low 8 output lanes.
+ * Both sides consume <= 8 bytes and every lane index stays in its
+ * half's low 8 lanes, so 8-byte D-register loads suffice (they
+ * zero-extend for free) -- no over-read past cursor+8. */
+static inline void merge_neon_8B_lo(uint8_t *dest, const uint8_t *l_list,
+                                    const uint8_t *r_list, intptr_t m8,
+                                    const int8_t *tab0, const int8_t *tab1)
+{
+    int8x16_t shuf0 = vld1q_s8(&tab0[(m8 << 4) & 0xff0]);
+    int8x16_t shuf1 = vld1q_s8(&tab1[0]);
+    uint8x16_t shuf = vreinterpretq_u8_s8(vabdq_s8(shuf0, shuf1));
+    uint8x16x2_t src;
+    src.val[0] = vcombine_u8(vld1_u8(r_list), vdup_n_u8(0));
+    src.val[1] = vcombine_u8(vld1_u8(l_list), vdup_n_u8(0));
+    vst1_u8(dest, vget_low_u8(vqtbl2q_u8(src, shuf)));
+}
 static inline void merge_vec_vec_neon(const uint8_t *bm, int K,
                                      const uint8_t *left,
                                      const uint8_t *right,
@@ -158,45 +182,29 @@ static inline void merge_vec_vec_neon(const uint8_t *bm, int K,
         merge_neon_16B(out + i + 48, l_list + 48 - pop2, r_list + pop2, mask >> 48, g_merge_shuf0, g_merge_shuf1);
         r_list += pop3; l_list += 64 - pop3;
     }
-    int lc = (int)(l_list - left), rc = (int)(r_list - right);
     int j = (int)i;
 
-    /* V4 stride-16 fallback for the residual (handles K mod 128). */
+    /* Residue on the main tables: 16-wide, then 8-wide (low half). */
     for (; j + 16 <= K; j += 16) {
-        uint8x16_t L_full = vld1q_u8(left  + lc);
-        uint8x16_t R_full = vld1q_u8(right + rc);
-
-        uint8_t m0 = bm[j >> 3];
-        uint8x16_t both0 = vcombine_u8(vget_low_u8(L_full),
-                                        vget_low_u8(R_full));
-        uint8x8_t  shuf0 = vld1_u8(expand_tab[m0]);
-        uint8x8_t  o0    = vqtbl1_u8(both0, shuf0);
-        vst1_u8(out + j, o0);
-        int nr0 = expand_popcnt[m0];
-
-        uint8_t m1 = bm[(j >> 3) + 1];
-        uint8x16x2_t src = {{ L_full, R_full }};
-        uint8x8_t shuf1  = vld1_u8(expand_tab_pre[nr0][m1]);
-        uint8x8_t o1     = vqtbl2_u8(src, shuf1);
-        vst1_u8(out + j + 8, o1);
-        int nr1 = expand_popcnt[m1];
-
-        rc += nr0 + nr1;
-        lc += (16 - nr0 - nr1);
+        uint16_t m16; memcpy(&m16, bm + (j >> 3), 2);
+        merge_neon_16B(out + j, l_list, r_list, (intptr_t)m16,
+                       g_merge_shuf0, g_merge_shuf1);
+        /* expand_popcnt, not __builtin_popcount: aarch64 has no GPR
+         * popcount (fmov+cnt+addv+fmov, ~7cy) and this sits on the
+         * serial cursor chain between tail iterations. */
+        int pop = expand_popcnt[m16 & 0xff] + expand_popcnt[m16 >> 8];
+        r_list += pop; l_list += 16 - pop;
     }
-    for (; j + 8 <= K; j += 8) {
-        uint8_t m  = bm[j >> 3];
-        uint8x8_t  L    = vld1_u8(left + lc);
-        uint8x8_t  R    = vld1_u8(right + rc);
-        uint8x16_t both = vcombine_u8(L, R);
-        uint8x8_t  shuf = vld1_u8(expand_tab[m]);
-        uint8x8_t  o    = vqtbl1_u8(both, shuf);
-        vst1_u8(out + j, o);
-        int nr = expand_popcnt[m];
-        rc += nr;
-        lc += (8 - nr);
+    if (j + 8 <= K) {
+        intptr_t m8 = bm[j >> 3];
+        merge_neon_8B_lo(out + j, l_list, r_list, m8,
+                         g_merge_shuf0, g_merge_shuf1);
+        int pop = expand_popcnt[m8];
+        r_list += pop; l_list += 8 - pop;
+        j += 8;
     }
     /* Scalar tail (1..7 leftover). */
+    int lc = (int)(l_list - left), rc = (int)(r_list - right);
     for (; j < K; j++) {
         int mb = (bm[j >> 3] >> (j & 7)) & 1;
         out[j] = mb ? right[rc++] : left[lc++];
@@ -246,7 +254,21 @@ static inline void merge_cst_vec_neon(const uint8_t *bm, int K,
         uint8x16_t sh = vreinterpretq_u8_s8(vabdq_s8(s0, s1));
         uint8x16x2_t src; src.val[0] = vld1q_u8(r_list); src.val[1] = Lb;
         vst1q_u8(out + j, vqtbl2q_u8(src, sh));
-        r_list += __builtin_popcount(m16);
+        r_list += expand_popcnt[m16 & 0xff] + expand_popcnt[m16 >> 8];
+    }
+    if (j + 8 <= K) {   /* 8-wide residue: high mask byte 0, store low half.
+                         * 8B D-load on R -- consumes <= 8, no wider
+                         * over-read than the scalar loop it replaces. */
+        intptr_t m8 = bm[j >> 3];
+        int8x16_t s0 = vld1q_s8(&g_merge_shuf0[(m8 << 4) & 0xff0]);
+        int8x16_t s1 = vld1q_s8(&g_merge_shuf1[0]);
+        uint8x16_t sh = vreinterpretq_u8_s8(vabdq_s8(s0, s1));
+        uint8x16x2_t src;
+        src.val[0] = vcombine_u8(vld1_u8(r_list), vdup_n_u8(0));
+        src.val[1] = Lb;
+        vst1_u8(out + j, vget_low_u8(vqtbl2q_u8(src, sh)));
+        r_list += expand_popcnt[m8];
+        j += 8;
     }
     int rc = (int)(r_list - right);
     for (; j < K; j++) { int mb = (bm[j >> 3] >> (j & 7)) & 1; out[j] = mb ? right[rc++] : left_sym; }
