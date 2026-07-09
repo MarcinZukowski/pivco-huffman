@@ -4,6 +4,31 @@
 #include "pivco_huffman.h"
 #include <string.h>
 
+/* ---------- Merge store-alignment head-peel ----------
+ *
+ * The SIMD merge kernels stream wide unaligned stores into `out`.  When
+ * `out` is not cache-line-aligned every one of those stores splits a
+ * line, at ~2 cycles a store on big x86 cores — for a block-sized run
+ * that is a 13-16% decode tax whenever the caller's output buffer isn't
+ * 64-byte-aligned.  malloc guarantees only 16, so heap-allocated output
+ * buffers lose this coin toss 3 times out of 4 (the "allocation
+ * lottery"; ping-pong-results results/exp_alloc7-summary).
+ *
+ * Fix: the codec peels the first (-out & 63) symbols of the ROOT merge
+ * (the only merge that writes caller memory — interior merges write
+ * layout-fixed arena regions) so the kernel's stores start on a line
+ * boundary.  See the root-merge peel block in pivco_huffman_codec.c.
+ * The peel is rounded down to a multiple of 8 to keep the bitmap
+ * handoff byte-aligned; for 8-byte-aligned outputs (any real
+ * allocator) that still reaches the full 64-byte boundary.
+ *
+ * x86 backends only.  NEON's 8/16-byte stores at the >=16-byte
+ * alignment every real allocator provides never cross a line, so ARM
+ * is untouched (its separate hazard is load-side page splits —
+ * issue #8). */
+#define PIVCO_MERGE_ALIGN_PEEL(out_ptr) \
+    ((int)((0 - (uintptr_t)(out_ptr)) & 63) & ~7)
+
 /* ---------- Bitmap utilities ---------- */
 
 /* Popcount of a bitmap stored as bytes. n_bytes = ceil(count / 8). */
