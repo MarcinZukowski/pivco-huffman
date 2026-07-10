@@ -16,6 +16,9 @@
 
 #include "pivco_huffman.h"
 #include "pivcohuf_file.h"
+#ifdef PIVCO_HAS_FSE
+#include "pivco_fse.h"
+#endif
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -324,6 +327,56 @@ static int test_fse_dispatch(void)
     return total_fail;
 }
 
+#ifdef PIVCO_HAS_FSE
+/* Direct FSE roundtrip at EVERY length 8..600: crosses the wide-path
+ * minimum (64) and every mod-X residue.  The former wide gate required
+ * nbytes % PIVCO_FSE_XY_X == 0; this sweep would have caught both that
+ * restriction's silent stock-FSE fallback and any encode_x/decode
+ * disagreement in the generalized any-length form (partial final
+ * round, cursor mapping, tight streams).  Three bit-density regimes
+ * cover low/mid/high table ids. */
+static int test_fse_length_sweep(void)
+{
+    printf("[fse_length_sweep] ");
+    pivco_fse_init();
+    uint64_t rng = 0x5eedf00d12345678ULL;
+    const double biases[] = { 0.65, 0.85, 0.97 };
+    int tested = 0, fell_back = 0;
+    for (int bi = 0; bi < 3; bi++) {
+        int t = pivco_fse_select_table(biases[bi]);
+        if (t < 1) FAIL("no table for bias %.2f", biases[bi]);
+        for (size_t n = 8; n <= 600; n++) {
+            uint8_t src[600], enc[800], dec[616];
+            for (size_t i = 0; i < n; i++) {
+                uint8_t b = 0;
+                for (int j = 0; j < 8; j++) {
+                    double u = (double)(xorshift64(&rng) >> 11) / 9007199254740992.0;
+                    b |= (uint8_t)((u > biases[bi]) << j);
+                }
+                src[i] = b;
+            }
+            size_t clen = 0;
+            pivco_fse_status_t rc = pivco_fse_compress(t, src, n,
+                                                       enc, sizeof(enc), &clen);
+            if (rc == PIVCO_FSE_FALLBACK) { fell_back++; continue; }
+            if (rc != PIVCO_FSE_OK) FAIL("compress n=%zu t=%d rc=%d", n, t, rc);
+            size_t olen = 0;
+            memset(dec, 0xCB, sizeof(dec));
+            rc = pivco_fse_decompress(t, enc, clen, dec, sizeof(dec), n, &olen);
+            if (rc != PIVCO_FSE_OK) FAIL("decompress n=%zu t=%d rc=%d", n, t, rc);
+            if (olen != n) FAIL("olen %zu != n %zu (t=%d)", olen, n, t);
+            if (memcmp(src, dec, n) != 0) {
+                size_t i; for (i = 0; i < n && src[i] == dec[i]; i++) ;
+                FAIL("mismatch n=%zu t=%d at byte %zu", n, t, i);
+            }
+            tested++;
+        }
+    }
+    printf("PASS (%d lengths, %d fallbacks)\n", tested, fell_back);
+    return 0;
+}
+#endif  /* PIVCO_HAS_FSE */
+
 /* ---------- entry point ---------- */
 
 int test_edge_cases_all(void)
@@ -341,5 +394,9 @@ int test_edge_cases_all(void)
     fails += test_adversarial();
     printf("\n--- FSE dispatch (v0.2 wire format) ---\n");
     fails += test_fse_dispatch();
+#ifdef PIVCO_HAS_FSE
+    printf("\n--- FSE length sweep ---\n");
+    fails += test_fse_length_sweep();
+#endif
     return fails;
 }

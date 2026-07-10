@@ -30,6 +30,18 @@
  *   value), so nothing beyond the lengths is transmitted.  v0.3 streams are
  *   not readable by v0.4 decoders.
  *
+ *   v0.5: per-block uint16 N header for arbitrary block sizes (see
+ *   pivco_huffman_wire.h).  This wire change actually shipped on main
+ *   without a MINOR bump; it is recorded here so the version line is
+ *   honest, and 0.5 is folded into the 0.6 gate below rather than
+ *   emitted on its own.
+ *
+ *   v0.6 vs v0.4/0.5: the FSE (PHA) bitmap path now uses the wide 8-cursor
+ *   format for any bitmap length, not just multiples of 8.  Streams with
+ *   n % 8 == 0 bitmaps are byte-identical to the prior format; those with
+ *   unaligned FSE bitmaps switch format, so earlier decoders mis-decode
+ *   unaligned FSE streams -- hence the minor bump.
+ *
  *   The final block may have fewer than BLOCK_SIZE input symbols.  The
  *   encoder pads the input to BLOCK_SIZE with the file's first byte
  *   (always present in the alphabet); the decoder truncates output
@@ -47,7 +59,8 @@ extern "C" {
 
 #define PIVCOHUF_MAGIC          "PIVCOHUF"
 #define PIVCOHUF_VERSION_MAJOR  0
-#define PIVCOHUF_VERSION_MINOR  4  /* 0.4: dropped within-tier ordering */
+#define PIVCOHUF_VERSION_MINOR  6  /* 0.5: uint16 block_N header (shipped unversioned);
+                                    * 0.6: FSE wide-cursor path, any bitmap length */
 #define PIVCOHUF_HEADER_SIZE    26
 
 typedef enum {

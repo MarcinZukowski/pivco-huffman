@@ -311,6 +311,9 @@ if(BUILD_TESTS)
         test/test_edge_cases.c
     )
     target_link_libraries(pivco_huffman_tests pivco_huffman)
+    # tests reach one internal header (pivco_fse.h) for the direct FSE
+    # length-sweep roundtrip
+    target_include_directories(pivco_huffman_tests PRIVATE src)
 endif()
 
 # Benchmarks

@@ -11,8 +11,8 @@
  * To experiment with a different cursor/unroll shape, override the two
  * macros below together (must be one of the decode_x{N}_y{M} functions
  * in fse_xy_codec.h, with X == N): e.g. -DPIVCO_FSE_XY_X=16
- * -DPIVCO_FSE_XY_DECODE=decode_x16_y2.  X must divide the bitmap byte
- * count for a node to use the wide path (else it falls back to stock). */
+ * -DPIVCO_FSE_XY_DECODE=decode_x16_y2.  Any bitmap byte length >= 64
+ * works on the wide path (below that it falls back to stock FSE). */
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wunused-function"
 #include "fse_xy_codec.h"
@@ -87,11 +87,19 @@ static void do_init(void)
 }
 
 /* Should this node use the wide-cursor path?  Same deterministic decision
- * on encode + decode (toggle + table-safety + size/alignment). */
+ * on encode + decode (toggle + table-safety + minimum size).
+ *
+ * The former `(nbytes % PIVCO_FSE_XY_X) == 0` term was a bench-era
+ * restriction with an outsized cost: bitmap lengths are ceil(K/8) with
+ * data-dependent K, so ~ (X-1)/X of all FSE'd bitmaps silently fell
+ * back to stock 2-state FSE (~1.6x slower) — and WHICH ones flipped
+ * with any size change, the main source of the FSE-heavy dists'
+ * "cursed" M4 variance (proba80 oscillated ±42% with period 64 in the
+ * block size: root bitmap = N/8 bytes, divisible by 8 iff N % 64 == 0).
+ * encode_x/the decode template now handle any length >= X. */
 static inline int use_wide(int table_id, size_t nbytes)
 {
-    return g_wide_on && g_wide_safe[table_id] &&
-           nbytes >= 64 && (nbytes % PIVCO_FSE_XY_X) == 0;
+    return g_wide_on && g_wide_safe[table_id] && nbytes >= 64;
 }
 
 void pivco_fse_init(void)
