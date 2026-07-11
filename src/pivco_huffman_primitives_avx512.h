@@ -710,6 +710,141 @@ static inline void pack_dN_avx512(uint8_t *out, const uint8_t *ranks,
  * placement logic (scratch_carve / place_tail). */
 #define PIVCO_PRIM_MERGE_OVERREAD 8
 
+/* quad-node merge (quad experiment): one pass over N
+ * outputs selecting among four compacted grandchild streams by two
+ * routing bitplanes (p0 = root bit, p1 = child bit, LSB-first like all
+ * bitmaps).  Slot g = (p0<<1)|p1.  Leaf slots pass a 64-byte constant
+ * buffer with adv = 0 (cursor pinned; expandload reads <= 64 constant
+ * bytes), so ONE kernel covers all 16 leaf/vec combinations.  Four
+ * merge-masked expands into one barrier zero (issue-#11 form, no maskz
+ * false dep) + an OR tree. */
+PIVCO_PRIM_ALWAYS_INLINE void prim_merge_quad_impl(const uint8_t *restrict p0,
+    const uint8_t *restrict p1, int N,
+    const uint8_t *restrict A, const uint8_t *restrict B, const uint8_t *restrict C, const uint8_t *restrict D,
+    const int lfA, const int lfB, const int lfC, const int lfD, uint8_t *restrict out)
+{
+    size_t ca = 0, cb = 0, cc = 0, cd = 0;
+    int j = 0;
+    for (; j + 64 <= N; j += 64) {
+        uint64_t h, l;
+        memcpy(&h, p0 + (j >> 3), 8);
+        memcpy(&l, p1 + (j >> 3), 8);
+        __mmask64 H = (__mmask64)h, L = (__mmask64)l;
+        __mmask64 m0 = ~H & ~L, m1 = ~H & L, m2 = H & ~L, m3 = H & L;
+        __m512i zero = _mm512_setzero_si512(); asm("":"+v"(zero));
+        __m512i a = _mm512_mask_expandloadu_epi8(zero, m0, A + ca);
+        __m512i b = _mm512_mask_expandloadu_epi8(zero, m1, B + cb);
+        __m512i c = _mm512_mask_expandloadu_epi8(zero, m2, C + cc);
+        __m512i d = _mm512_mask_expandloadu_epi8(zero, m3, D + cd);
+        _mm512_storeu_si512((__m512i *)(out + j),
+            _mm512_or_si512(_mm512_or_si512(a, b), _mm512_or_si512(c, d)));
+        if (!lfA) ca += (size_t)__builtin_popcountll((uint64_t)m0);
+        if (!lfB) cb += (size_t)__builtin_popcountll((uint64_t)m1);
+        if (!lfC) cc += (size_t)__builtin_popcountll((uint64_t)m2);
+        if (!lfD) cd += (size_t)__builtin_popcountll((uint64_t)m3);
+    }
+    for (; j < N; j++) {
+        int h = (p0[j >> 3] >> (j & 7)) & 1;
+        int l = (p1[j >> 3] >> (j & 7)) & 1;
+        switch ((h << 1) | l) {
+        case 0:  out[j] = A[ca]; if (!lfA) ca++; break;
+        case 1:  out[j] = B[cb]; if (!lfB) cb++; break;
+        case 2:  out[j] = C[cc]; if (!lfC) cc++; break;
+        default: out[j] = D[cd]; if (!lfD) cd++; break;
+        }
+    }
+}
+/* Quad-node encode partition: one pass over ranks
+ * produces both routing planes and the four compacted rank runs.
+ * b0 = rank > thr0 (plane0), b1 = rank > (b0 ? thrR : thrL) (plane1);
+ * run g = (b0<<1)|b1.  Compress-to-register + plain 64B store per run
+ * (merge-masked into a barrier zero -- issue-#11 maskz false dep);
+ * callers give each run region 64B of tail slack for the over-store. */
+PIVCO_PRIM_ALWAYS_INLINE void prim_enc_partition_quad_impl(const uint8_t *restrict ranks,
+    int n, uint8_t thr0, uint8_t thrL, uint8_t thrR,
+    uint8_t *restrict p0, uint8_t *restrict p1, uint8_t *const q[4], int cnt[4],
+    const int lf0, const int lf1, const int lf2, const int lf3)
+{
+    const __m512i v0 = _mm512_set1_epi8((char)thr0);
+    const __m512i vL = _mm512_set1_epi8((char)thrL);
+    const __m512i vR = _mm512_set1_epi8((char)thrR);
+    size_t c0 = 0, c1 = 0, c2 = 0, c3 = 0;
+    int j = 0;
+    for (; j + 64 <= n; j += 64) {
+        __m512i v = _mm512_loadu_si512((const __m512i *)(ranks + j));
+        __mmask64 b0 = _mm512_cmp_epu8_mask(v, v0, _MM_CMPINT_NLE);
+        __m512i th = _mm512_mask_blend_epi8(b0, vL, vR);
+        __mmask64 b1 = _mm512_cmp_epu8_mask(v, th, _MM_CMPINT_NLE);
+        uint64_t w0 = (uint64_t)b0, w1 = (uint64_t)b1;
+        memcpy(p0 + (j >> 3), &w0, 8);
+        memcpy(p1 + (j >> 3), &w1, 8);
+        __mmask64 m0 = ~b0 & ~b1, m1 = ~b0 & b1, m2 = b0 & ~b1, m3 = b0 & b1;
+        __m512i zero = _mm512_setzero_si512(); asm("":"+v"(zero));
+        if (!lf0) _mm512_storeu_si512((__m512i *)(q[0] + c0),
+            _mm512_mask_compress_epi8(zero, m0, v));
+        if (!lf1) _mm512_storeu_si512((__m512i *)(q[1] + c1),
+            _mm512_mask_compress_epi8(zero, m1, v));
+        if (!lf2) _mm512_storeu_si512((__m512i *)(q[2] + c2),
+            _mm512_mask_compress_epi8(zero, m2, v));
+        if (!lf3) _mm512_storeu_si512((__m512i *)(q[3] + c3),
+            _mm512_mask_compress_epi8(zero, m3, v));
+        if (!lf0) c0 += (size_t)__builtin_popcountll((uint64_t)m0);
+        if (!lf1) c1 += (size_t)__builtin_popcountll((uint64_t)m1);
+        if (!lf2) c2 += (size_t)__builtin_popcountll((uint64_t)m2);
+        if (!lf3) c3 += (size_t)__builtin_popcountll((uint64_t)m3);
+    }
+    for (; j < n; j++) {
+        uint8_t r = ranks[j];
+        int b0 = r > thr0;
+        int b1 = r > (b0 ? thrR : thrL);
+        p0[j >> 3] |= (uint8_t)(b0 << (j & 7));
+        p1[j >> 3] |= (uint8_t)(b1 << (j & 7));
+        switch ((b0 << 1) | b1) {
+        case 0:  if (!lf0) { q[0][c0] = r; c0++; } break;
+        case 1:  if (!lf1) { q[1][c1] = r; c1++; } break;
+        case 2:  if (!lf2) { q[2][c2] = r; c2++; } break;
+        default: if (!lf3) { q[3][c3] = r; c3++; } break;
+        }
+    }
+    cnt[0] = (int)c0; cnt[1] = (int)c1; cnt[2] = (int)c2; cnt[3] = (int)c3;
+}
+/* leaf_mask bit g set = grandchild g is a leaf: its run is never read, so
+ * skip its compress + store entirely (counts still tracked). */
+PIVCO_PRIM_ALWAYS_INLINE void prim_enc_partition_quad(const uint8_t *restrict ranks,
+    int n, uint8_t thr0, uint8_t thrL, uint8_t thrR,
+    uint8_t *restrict p0, uint8_t *restrict p1, uint8_t *const q[4], int cnt[4], unsigned leaf_mask)
+{
+    switch (leaf_mask & 15u) {
+#define PIVCO_QE(S) case (S): prim_enc_partition_quad_impl(ranks, n, thr0, thrL, thrR, \
+        p0, p1, q, cnt, ((S) >> 3) & 1, ((S) >> 2) & 1, ((S) >> 1) & 1, (S) & 1); break;
+    PIVCO_QE(0)  PIVCO_QE(1)  PIVCO_QE(2)  PIVCO_QE(3)
+    PIVCO_QE(4)  PIVCO_QE(5)  PIVCO_QE(6)  PIVCO_QE(7)
+    PIVCO_QE(8)  PIVCO_QE(9)  PIVCO_QE(10) PIVCO_QE(11)
+    PIVCO_QE(12) PIVCO_QE(13) PIVCO_QE(14) PIVCO_QE(15)
+#undef PIVCO_QE
+    }
+}
+#define PIVCO_HAVE_ENC_QUAD 1
+
+/* leaf_mask bit g set = slot g is a leaf (constant buffer, cursor pinned).
+ * 16 compile-time instantiations so the leaf slots' popcount/cursor
+ * chain folds away entirely. */
+PIVCO_PRIM_ALWAYS_INLINE void prim_merge_quad(const uint8_t *restrict p0, const uint8_t *restrict p1,
+    int N, const uint8_t *restrict A, const uint8_t *restrict B, const uint8_t *restrict C, const uint8_t *restrict D,
+    unsigned leaf_mask, uint8_t *restrict out)
+{
+    switch (leaf_mask & 15u) {
+#define PIVCO_Q(S) case (S): prim_merge_quad_impl(p0, p1, N, A, B, C, D, \
+        ((S) >> 3) & 1, ((S) >> 2) & 1, ((S) >> 1) & 1, (S) & 1, out); break;
+    PIVCO_Q(0)  PIVCO_Q(1)  PIVCO_Q(2)  PIVCO_Q(3)
+    PIVCO_Q(4)  PIVCO_Q(5)  PIVCO_Q(6)  PIVCO_Q(7)
+    PIVCO_Q(8)  PIVCO_Q(9)  PIVCO_Q(10) PIVCO_Q(11)
+    PIVCO_Q(12) PIVCO_Q(13) PIVCO_Q(14) PIVCO_Q(15)
+#undef PIVCO_Q
+    }
+}
+#define PIVCO_HAVE_MERGE_QUAD 1
+
 PIVCO_PRIM_ALWAYS_INLINE void prim_codec_init(void)
 { codec_init_avx512(); }
 

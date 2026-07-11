@@ -1091,6 +1091,107 @@ static inline void pack_dN_x86(uint8_t *out, const uint8_t *ranks,
  * placement logic (scratch_carve / place_tail). */
 #define PIVCO_PRIM_MERGE_OVERREAD 16
 
+/* x86 SSE quad merge: per 8 lanes, 4 disjoint masks -> pshufb-index
+ * LUT (rank for owning lanes, 0x80 zeroes the rest), 4 pshufb over the 4
+ * stream windows, OR.  Shape-specialized: leaf slots use a const window +
+ * skip cursor advance.  One table (not per-g): each stream shuffles its own
+ * window and pshufb masks the index to 4 bits, so no g*16 offset is needed. */
+static uint8_t pv_r4_lx[256][16] __attribute__((aligned(16)));
+/* 16-wide index tables.  On x86 the [g] dimension and the g*16 offset are
+ * both unnecessary: pshufb masks the index to its low 4 bits and each stream
+ * shuffles its own window, so the index is just the intra-window rank.  One
+ * base table each: pv_q16_lo[m] = the 8 low-lane ranks (rank / 0x80);
+ * pv_q16_hi[c][m] = the 8 high-lane ranks continued from carry c
+ * (c + rank / 0x80).  A loadl(lo)+loadh(hi) assembles the 16-byte pshufb
+ * index with no ALU combine op (the x86 analog of NEON vcombine). */
+static uint8_t pv_q16_lo[256][8] __attribute__((aligned(8)));
+static uint8_t pv_q16_hi[9][256][8] __attribute__((aligned(8)));
+static int pv_r4_lx_built = 0;
+static void pv_r4_build(void){
+    if (pv_r4_lx_built) return;
+    for (int m = 0; m < 256; m++) {
+        int r = 0; for (int i = 0; i < 16; i++) pv_r4_lx[m][i] = 0x80;
+        for (int lane = 0; lane < 8; lane++) if ((m >> lane) & 1) pv_r4_lx[m][lane] = (uint8_t)r++;
+    }
+    for (int m = 0; m < 256; m++) {
+        int r = 0; for (int i = 0; i < 8; i++) pv_q16_lo[m][i] = 0x80;
+        for (int lane = 0; lane < 8; lane++) if ((m >> lane) & 1) pv_q16_lo[m][lane] = (uint8_t)r++;
+        for (int c = 0; c < 9; c++) {
+            int rr = c; for (int i = 0; i < 8; i++) pv_q16_hi[c][m][i] = 0x80;
+            for (int lane = 0; lane < 8; lane++) if ((m >> lane) & 1) pv_q16_hi[c][m][lane] = (uint8_t)(rr++);
+        }
+    }
+    pv_r4_lx_built = 1;
+}
+/* prim_merge_quad8 (8-wide) moved to bench/prim_variants/prims-quad.h */
+
+/* 16-wide variant: one storeu (16 outputs) per iter, still 4 pshufb + OR.
+ * The 16-lane index is assembled with loadl(low)+loadh(high) — bytes 0..7
+ * from pv_q16_lo[m_lo], bytes 8..15 from pv_q16_hi[carry][m_hi] — no ALU
+ * combine.  Rank stays in [0,15] (a stream owns <=16 of the 16 lanes) so the
+ * single pshufb over the 16-byte A+ca window covers all 16 outputs.
+ *
+ * loadl(lo)+loadh(hi) positions lo's 8 bytes in 0..7 and hi's in 8..15 with
+ * NO combine op — the merge happens in the high-half load itself (2 uops).
+ * A plain OR can't do this: both loadl land in the low 8 bytes and would
+ * overlap; you'd have to shift hi up first.  unpacklo_epi64 also works but is
+ * a 3rd uop (2 loads + punpcklqdq) and measured ~5% slower here.  The float
+ * casts are only because SSE's "load into high 64" (movhps) is FP-typed. */
+#define PV_Q16_IDX(lo8, hi8) \
+    _mm_castps_si128(_mm_loadh_pi(_mm_castsi128_ps(_mm_loadl_epi64((const __m128i*)(lo8))), (const __m64*)(hi8)))
+PIVCO_PRIM_ALWAYS_INLINE void prim_merge_quad_impl(const uint8_t *restrict p0,
+    const uint8_t *restrict p1, int N,
+    const uint8_t *restrict A, const uint8_t *restrict B, const uint8_t *restrict C, const uint8_t *restrict D,
+    const int lfA, const int lfB, const int lfC, const int lfD, uint8_t *restrict out)
+{
+    int ca = 0, cb = 0, cc = 0, cd = 0, j = 0;
+    for (; j + 16 <= N; j += 16) {
+        int b = j >> 3;
+        /* one 16-bit AND set for all 16 lanes; slice low/high byte per table */
+        uint16_t X0, X1; memcpy(&X0, p0+b, 2); memcpy(&X1, p1+b, 2);   /* LE: low byte = lanes 0..7 */
+        uint16_t A16=(uint16_t)(~X0&~X1),B16=(uint16_t)(~X0&X1),C16=(uint16_t)(X0&~X1),D16=(uint16_t)(X0&X1);
+        uint8_t mA=(uint8_t)A16,mB=(uint8_t)B16,mC=(uint8_t)C16,mD=(uint8_t)D16;
+        uint8_t nA=(uint8_t)(A16>>8),nB=(uint8_t)(B16>>8),nC=(uint8_t)(C16>>8),nD=(uint8_t)(D16>>8);
+        int pa=__builtin_popcount(mA),pb=__builtin_popcount(mB),pc=__builtin_popcount(mC),pd=__builtin_popcount(mD);
+        int ka=lfA?0:pa,kb=lfB?0:pb,kc=lfC?0:pc,kd=lfD?0:pd;  /* leaf: high rank restarts at 0 */
+        __m128i iA=PV_Q16_IDX(pv_q16_lo[mA], pv_q16_hi[ka][nA]);
+        __m128i iB=PV_Q16_IDX(pv_q16_lo[mB], pv_q16_hi[kb][nB]);
+        __m128i iC=PV_Q16_IDX(pv_q16_lo[mC], pv_q16_hi[kc][nC]);
+        __m128i iD=PV_Q16_IDX(pv_q16_lo[mD], pv_q16_hi[kd][nD]);
+        __m128i r = _mm_or_si128(_mm_or_si128(
+            _mm_shuffle_epi8(_mm_loadu_si128((const __m128i*)(A+ca)), iA),
+            _mm_shuffle_epi8(_mm_loadu_si128((const __m128i*)(B+cb)), iB)),
+            _mm_or_si128(
+            _mm_shuffle_epi8(_mm_loadu_si128((const __m128i*)(C+cc)), iC),
+            _mm_shuffle_epi8(_mm_loadu_si128((const __m128i*)(D+cd)), iD)));
+        _mm_storeu_si128((__m128i*)(out+j), r);
+        if (!lfA) ca += pa+__builtin_popcount(nA);
+        if (!lfB) cb += pb+__builtin_popcount(nB);
+        if (!lfC) cc += pc+__builtin_popcount(nC);
+        if (!lfD) cd += pd+__builtin_popcount(nD);
+    }
+    for (; j < N; j++) {
+        int h = (p0[j>>3]>>(j&7))&1, l = (p1[j>>3]>>(j&7))&1;
+        switch ((h<<1)|l){
+        case 0: out[j]=A[ca]; if(!lfA)ca++; break;
+        case 1: out[j]=B[cb]; if(!lfB)cb++; break;
+        case 2: out[j]=C[cc]; if(!lfC)cc++; break;
+        default:out[j]=D[cd]; if(!lfD)cd++; break; }
+    }
+}
+PIVCO_PRIM_ALWAYS_INLINE void prim_merge_quad(const uint8_t *restrict p0, const uint8_t *restrict p1,
+    int N, const uint8_t *restrict A, const uint8_t *restrict B, const uint8_t *restrict C, const uint8_t *restrict D,
+    unsigned leaf_mask, uint8_t *restrict out)
+{
+    pv_r4_build();
+    switch (leaf_mask & 15u) {
+#define PVQ(S) case (S): prim_merge_quad_impl(p0,p1,N,A,B,C,D,((S)>>3)&1,((S)>>2)&1,((S)>>1)&1,(S)&1,out); break;
+    PVQ(0)PVQ(1)PVQ(2)PVQ(3)PVQ(4)PVQ(5)PVQ(6)PVQ(7)PVQ(8)PVQ(9)PVQ(10)PVQ(11)PVQ(12)PVQ(13)PVQ(14)PVQ(15)
+#undef PVQ
+    }
+}
+#define PIVCO_HAVE_MERGE_QUAD 1
+
 PIVCO_PRIM_ALWAYS_INLINE void prim_codec_init(void)
 { codec_init_x86(); }
 

@@ -64,6 +64,10 @@
       the adapters below and by prims-partition.h.  Needs the shared header above
       first (compress_tab / *_pack.h helpers / PIVCO_PRIM_ALWAYS_INLINE). */
 #  include "pivco_huffman_u16enc.h"
+   /* quad variant kernels (quad8 / q8mt) + scalar refs.  Included
+      here (after the backend header) so the shared quad tables + intrinsics +
+      PIVCO_PRIM_ALWAYS_INLINE are in scope, and before the ctx_t runners. */
+#  include "prim_variants/prims-quad.h"
 #endif
 #ifndef BK
 #  define BK "scalar-only"
@@ -161,6 +165,13 @@ typedef struct {
     const uint8_t  *sym_to_rank;          /* sym -> u8 rank              (prim_enc gather) */
     pivco_huffman_enc_init_aux_t enc_init_aux; /* pre-shifted rank tables (x86 prim_enc 4tab) */
     uint8_t  rank_thr, rank_base;
+    /* quad buffers.  merge: read quad_bitplane0/quad_bitplane1 planes +
+     * four quad_symsA..quad_symsD streams -> out.  partition: read ranks + thr0/thrL/thrR
+     * -> quad_bitplane0/quad_bitplane1 planes + four quad_symsA..quad_symsD streams (+ quad_cnt).  leaf_mask carried
+     * in the D field. */
+    uint8_t  *quad_bitplane0, *quad_bitplane1, *quad_symsA, *quad_symsB, *quad_symsC, *quad_symsD;
+    int      *quad_cnt;
+    uint8_t   quad_thr0, quad_thrL, quad_thrR;
     int n, D, depth;
 } ctx_t;
 
@@ -271,6 +282,26 @@ static void simd_pack    (const ctx_t *c){ prim_enc_pack_dN(c->ranks, c->n, c->D
 static void simd_u16pack(const ctx_t *c){ u16enc_pack_dN(c->la_work, c->n, c->D, c->depth, c->pack_out); }
 static void simd_u16part(const ctx_t *c){ u16enc_partition_full(c->la_work, c->n, c->depth, c->bm, c->tmp16); }
 static void simd_u16enc_init(const ctx_t *c){ u16enc_init(c->la_work, c->n, c->symbuf, c->code_la_lut); }
+/* ---- quad ---- leaf_mask carried in c->D ----
+ * The quad8 / q8mt variant kernels + scalar_merge_quad / scalar_part_quad
+ * references live in prim_variants/prims-quad.h (included above).  The runners
+ * + registration below are ctx_t glue and stay here. */
+static void simd_merge_quad  (const ctx_t *c){ prim_merge_quad  (c->quad_bitplane0,c->quad_bitplane1,c->n,c->quad_symsA,c->quad_symsB,c->quad_symsC,c->quad_symsD,(unsigned)c->D,c->out); }
+#if defined(PIVCO_BACKEND_NEON) || defined(PIVCO_BACKEND_X86)
+static void simd_merge_quad8(const ctx_t *c){ prim_merge_quad8(c->quad_bitplane0,c->quad_bitplane1,c->n,c->quad_symsA,c->quad_symsB,c->quad_symsC,c->quad_symsD,(unsigned)c->D,c->out); }
+#endif
+#ifdef PIVCO_BACKEND_NEON
+static void simd_merge_quad8_mt(const ctx_t *c){ prim_merge_quad8_mt(c->quad_bitplane0,c->quad_bitplane1,c->n,c->quad_symsA,c->quad_symsB,c->quad_symsC,c->quad_symsD,(unsigned)c->D,c->out); }
+#endif
+static void simd_part_quad(const ctx_t *c){
+    uint8_t *q[4]={c->quad_symsA,c->quad_symsB,c->quad_symsC,c->quad_symsD};
+    prim_enc_partition_quad(c->ranks,c->n,c->quad_thr0,c->quad_thrL,c->quad_thrR,c->quad_bitplane0,c->quad_bitplane1,q,c->quad_cnt,(unsigned)c->D);
+}
+static void p_merge_quad_scalar(const ctx_t *c){ scalar_merge_quad(c->out,c->quad_bitplane0,c->quad_bitplane1,c->n,c->quad_symsA,c->quad_symsB,c->quad_symsC,c->quad_symsD,(unsigned)c->D); }
+static void p_part_quad_scalar (const ctx_t *c){
+    uint8_t *q[4]={c->quad_symsA,c->quad_symsB,c->quad_symsC,c->quad_symsD};
+    scalar_part_quad(c->ranks,c->n,c->quad_thr0,c->quad_thrL,c->quad_thrR,c->quad_bitplane0,c->quad_bitplane1,q,c->quad_cnt,(unsigned)c->D);
+}
 #endif
 /* scalar refs for enc_init (overwrite output each call; not inplace) */
 static void p_enc_init_scalar      (const ctx_t *c){ for(int i=0;i<c->n;i++) c->la_work[i]    = c->code_la_lut[c->symbuf[i]]; }
@@ -412,6 +443,10 @@ typedef enum {
     /* ---- binary merge (decode, one per internal node) ---- */
     ST_MERGE_VEC_VEC, ST_MERGE_CST_CST, ST_MERGE_CST_VEC,
 
+    /* ---- quad-node; D column carries leaf_mask ---- */
+    ST_MERGE_QUAD,    /* prim_merge_quad{,16}: 2 planes + 4 streams -> out    */
+    ST_PART_QUAD,     /* prim_enc_partition_quad: ranks -> 2 planes + 4 runs  */
+
     /* ---- misc primitives ---- */
     ST_XOR, ST_XOR_ACCUM, ST_PLUS_ONE,
 } stage_t;
@@ -456,6 +491,8 @@ static const char *stage_name(stage_t s){
     case ST_MERGE_VEC_VEC:  return "merge_vec_vec";
     case ST_MERGE_CST_CST:  return "merge_cst_cst";
     case ST_MERGE_CST_VEC:   return "merge_cst_vec";
+    case ST_MERGE_QUAD:  return "merge_quad";
+    case ST_PART_QUAD:   return "partition_quad";
     case ST_XOR:        return "xor";
     case ST_XOR_ACCUM:  return "xor_accum";
     case ST_PLUS_ONE:   return "plus_one";
@@ -551,6 +588,10 @@ static void stage_bits(stage_t s, int D, double *in, double *out, double *lut) {
     case ST_MERGE_VEC_VEC:  *in=8+8+1;    *out=8;        *lut=8+1;     break;
     case ST_MERGE_CST_CST:  *in=1;        *out=8;        *lut=0;       break;
     case ST_MERGE_CST_VEC:   *in=8+1;      *out=8;        *lut=8+1;     break;
+    /* quad: 2 routing-plane bits + 1 source byte in; 1 byte out; the mask
+     * LUT is ~4 index bytes/output on NEON/SSE (0 on the AVX-512 expand). */
+    case ST_MERGE_QUAD: *in=8+2;      *out=8;        *lut=32;      break;
+    case ST_PART_QUAD:  *in=8;        *out=8+2;      *lut=0;       break;
     case ST_XOR:        *in=16;       *out=8;        *lut=0;       break;
     case ST_XOR_ACCUM:  *in=8;        *out=0;        *lut=0;       break;
     case ST_PLUS_ONE:   *in=0;        *out=8;        *lut=0;       break;
@@ -592,7 +633,7 @@ static void usage(FILE *f) {
 }
 
 int main(int argc, char **argv) {
-    int n = 32768, reps = 2000, want[MAXD+1] = {0}, any = 0;
+    int n = 32768, reps = 2000, want[16] = {0}, any = 0;  /* 0..15: flat D (2..8) + quad leaf_mask (0..15) */
     int variants = 0, do_list = 0; const char *vfilter = NULL;
     int canary = 1;
     int bm_runs_w = 0, bm_runs_b = 0;   /* --bm=runs: run-structured bitmap */
@@ -623,7 +664,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i],"--listv")) do_list = 2;
         else if (!strncmp(argv[i],"--D=",4))
             for (char *t=strtok(argv[i]+4,","); t; t=strtok(NULL,",")) {
-                int d=atoi(t); if (d>=2&&d<=MAXD){want[d]=1;any=1;} }
+                int d=atoi(t); if (d>=0&&d<=15){want[d]=1;any=1;} }
         else if (!strcmp(argv[i],"-h") || !strcmp(argv[i],"--help")) {
             usage(stdout); return 0;
         }
@@ -648,6 +689,14 @@ int main(int argc, char **argv) {
      * symbuf (enc_init input), ref8l/r (partition ref), and the two gather LUTs. */
     uint8_t  *ranks = malloc(n+64), *ranks_work = malloc(n+64), *tmp8 = malloc(n+64);
     uint8_t  *symbuf = malloc(n+64), *ref8l = malloc(n+64), *ref8r = malloc(n+64);
+    /* quad buffers: two routing planes + four streams (each holds
+     * up to n codes, +64 tail slack for the 16/64-byte over-read/over-store),
+     * plus reference copies for the correctness check. */
+    uint8_t  *quad_bitplane0 = malloc((size_t)(n/8)+64), *quad_bitplane1 = malloc((size_t)(n/8)+64);
+    uint8_t  *quad_symsA = malloc(n+64), *quad_symsB = malloc(n+64), *quad_symsC = malloc(n+64), *quad_symsD = malloc(n+64);
+    uint8_t  *ref_quad_bitplane0 = malloc((size_t)(n/8)+64), *ref_quad_bitplane1 = malloc((size_t)(n/8)+64);
+    uint8_t  *ref_quad_symsA = malloc(n+64), *ref_quad_symsB = malloc(n+64), *ref_quad_symsC = malloc(n+64), *ref_quad_symsD = malloc(n+64);
+    int       quad_cnt[4], ref_quad_cnt[4];
     uint16_t code_la_lut[256]; uint8_t sym_to_rank[256];
     uint8_t c2s_id[256];                                     /* identity c2s (merge_flat D=8 invariant) */
     uint16_t s2r_hi[256];                                    /* enc_init_aux backing (x86 2tab) */
@@ -776,6 +825,32 @@ int main(int argc, char **argv) {
     /* merge_vec_vec / merge_cst_cst experimental variants (neon_pcpc,
        unroll8, tbl/blendtab/vtbl/vtblq/d1flat) now live in
        prim_variants/prims-merge.h — run with --variants. */
+#if defined(HAVE_SIMD)
+    /* quad-node.  leaf_mask rides in the D column (the
+       same mechanism the flat stages use for depth).  Default sweeps a
+       representative set {0=all-vec, 8/12=one/two-high leaves, 15=all-leaf};
+       --D=<mask,...> overrides (0..15).  merge_quad: production 8-wide (BK) +
+       16-wide (q16) where the backend has it; partition_quad: production
+       (real SIMD on AVX-512, scalar fallback on NEON/SSE). */
+    {
+        int def_lm[4] = {0, 8, 12, 15}, list[16], nl = 0;
+        if (any) { for (int m=0;m<16;m++) if (want[m]) list[nl++]=m; }
+        else     { for (int i=0;i<4;i++)  list[nl++]=def_lm[i]; }
+        for (int qi=0; qi<nl; qi++) {
+            int lm = list[qi];
+            reg("scalar", ST_MERGE_QUAD, lm, 0, p_merge_quad_scalar);
+            reg(BK,       ST_MERGE_QUAD, lm, 0, simd_merge_quad);
+#if defined(PIVCO_BACKEND_NEON) || defined(PIVCO_BACKEND_X86)
+            reg("quad8",    ST_MERGE_QUAD, lm, 0, simd_merge_quad8);
+#endif
+#ifdef PIVCO_BACKEND_NEON
+            reg("q8mt",  ST_MERGE_QUAD, lm, 0, simd_merge_quad8_mt);
+#endif
+            reg("scalar", ST_PART_QUAD,  lm, 0, p_part_quad_scalar);
+            reg(BK,       ST_PART_QUAD,  lm, 0, simd_part_quad);
+        }
+    }
+#endif
     /* Synthetic byte-XOR — memory-bandwidth comparison point. */
     reg("scalar", ST_XOR, 0, 0, p_xor_scalar);
 #if defined(HAVE_SIMD)
@@ -923,6 +998,8 @@ int main(int argc, char **argv) {
                      .code_la_lut=code_la_lut, .sym_to_rank=sym_to_rank,
                      .enc_init_aux={ .s2r_hi=s2r_hi },
                      .rank_thr=rank_thr, .rank_base=rank_base,
+                     .quad_bitplane0=quad_bitplane0, .quad_bitplane1=quad_bitplane1, .quad_symsA=quad_symsA, .quad_symsB=quad_symsB, .quad_symsC=quad_symsC, .quad_symsD=quad_symsD, .quad_cnt=quad_cnt,
+                     .quad_thr0=127, .quad_thrL=63, .quad_thrR=191,   /* rank quartiles -> balanced 4-way */
                      .n=n, .D=p->D, .depth=PART_DEPTH };
         const char *chk = "ok";
 
@@ -964,6 +1041,30 @@ int main(int argc, char **argv) {
             scalar_merge_cst_vec(ref, bm, n, MERGE_LEFT_SYM, merge_right);
             memset(out,0,n); p->run(&cx);
             if (memcmp(out,ref,n)) chk="FAIL";
+        } else if (p->stage == ST_MERGE_QUAD) {
+            unsigned lm=(unsigned)p->D;
+            for (int i=0;i<(n/8)+16;i++){ quad_bitplane0[i]=(uint8_t)rand(); quad_bitplane1[i]=(uint8_t)rand(); }
+            for (int i=0;i<n+64;i++){ quad_symsA[i]=(uint8_t)rand(); quad_symsB[i]=(uint8_t)rand();
+                                      quad_symsC[i]=(uint8_t)rand(); quad_symsD[i]=(uint8_t)rand(); }
+            /* production contract: leaf slots read a constant buffer */
+            if (lm&8) memset(quad_symsA,0xA1,(size_t)n+64);
+            if (lm&4) memset(quad_symsB,0xB2,(size_t)n+64);
+            if (lm&2) memset(quad_symsC,0xC3,(size_t)n+64);
+            if (lm&1) memset(quad_symsD,0xD4,(size_t)n+64);
+            scalar_merge_quad(ref,quad_bitplane0,quad_bitplane1,n,quad_symsA,quad_symsB,quad_symsC,quad_symsD,lm);
+            memset(out,0,n); p->run(&cx);
+            if (memcmp(out,ref,n)) chk="FAIL";
+        } else if (p->stage == ST_PART_QUAD) {
+            unsigned lm=(unsigned)p->D;
+            uint8_t *rq[4]={ref_quad_symsA,ref_quad_symsB,ref_quad_symsC,ref_quad_symsD}, *wq[4]={quad_symsA,quad_symsB,quad_symsC,quad_symsD};
+            scalar_part_quad(ranks,n,cx.quad_thr0,cx.quad_thrL,cx.quad_thrR,ref_quad_bitplane0,ref_quad_bitplane1,rq,ref_quad_cnt,lm);
+            memset(quad_bitplane0,0,(size_t)((n+7)>>3)); memset(quad_bitplane1,0,(size_t)((n+7)>>3));
+            p->run(&cx);
+            int bad = (memcmp(quad_bitplane0,ref_quad_bitplane0,(n+7)>>3)!=0) || (memcmp(quad_bitplane1,ref_quad_bitplane1,(n+7)>>3)!=0);
+            for (int g=0; g<4 && !bad; g++) if (quad_cnt[g]!=ref_quad_cnt[g]) bad=1;
+            for (int g=0; g<4 && !bad; g++)   /* leaf runs (bit 3-g) aren't written */
+                if (((lm>>(3-g))&1)==0 && memcmp(wq[g], rq[g], (size_t)ref_quad_cnt[g])) bad=1;
+            if (bad) chk="FAIL";
         } else if (p->stage == ST_XOR) {
             scalar_xor(ref, merge_left, merge_right, n);
             memset(out,0,n); p->run(&cx);
@@ -1058,7 +1159,9 @@ int main(int argc, char **argv) {
 
         if (p->D!=prevD || p->stage!=prevS) printf("\n");
         prevD=p->D; prevS=p->stage;
-        char dbuf[8]; if (p->D==0) strcpy(dbuf,"-"); else snprintf(dbuf,8,"%d",p->D);
+        /* quad stages carry leaf_mask in D (0 is meaningful); others use '-' for 0 */
+        int quad_stage = (p->stage==ST_MERGE_QUAD || p->stage==ST_PART_QUAD);
+        char dbuf[8]; if (p->D==0 && !quad_stage) strcpy(dbuf,"-"); else snprintf(dbuf,8,"%d",p->D);
         double in_b=0, out_b=0, lut_b=0;
         stage_bits(p->stage, p->D, &in_b, &out_b, &lut_b);
         /* MB/s = bits/elem * 125 / ns/elem.  Derivation: bytes/sec =

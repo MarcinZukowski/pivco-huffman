@@ -47,6 +47,20 @@
 
 #define PIVCO_BLOCK_N_BYTES 2  /* per-block N header: uint16 little-endian */
 
+/* Per-block flags byte (always present).  bits 0-1 = the quad fusion mode
+ * used for this block: 0 none, 1 root-only, 2 all (deep).  Decode dispatches
+ * on THIS, never on re-derived eligibility.  Quad fusion is off by default
+ * and chosen at runtime (env PIVCO_QUAD_MODE=0|1|2); the byte is emitted
+ * regardless so the wire is uniform. */
+#define PIVCO_BLOCK_QUAD_MASK   0x03u
+#define PIVCO_BLOCK_FLAGS_BYTES 1
+#define PIVCO_BLOCK_HDR_BYTES (PIVCO_BLOCK_N_BYTES + PIVCO_BLOCK_FLAGS_BYTES)
+
+static inline void wire_write_block_flags(uint8_t *out_ptr, uint8_t flags)
+{ out_ptr[PIVCO_BLOCK_N_BYTES] = flags; }
+static inline uint8_t wire_read_block_flags(const uint8_t *in_ptr)
+{ return in_ptr[PIVCO_BLOCK_N_BYTES]; }
+
 /* ---------- Per-block N header ---------- */
 
 /* Encode: write the block's symbol count N as the first 2 bytes of the

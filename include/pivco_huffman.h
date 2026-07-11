@@ -103,6 +103,9 @@ typedef enum {
     PIVCO_NODE_BOTH_LEAVES,        /* both children leaves — merge_cst_cst, partition_none */
     PIVCO_NODE_LEAF_LEFT,          /* left child leaf, right internal — merge_cst_vec, partition_right */
     PIVCO_NODE_LEAF,               /* leaf — consumed by the parent merge, never dispatched */
+    PIVCO_NODE_QUAD,              /* quad node: INTERNAL_FULL with both children non-flat
+                                    * internal.  Marked by build_table; fused per-block per
+                                    * the wire mode PIVCO_BLOCK_QUAD_MASK, not re-derived. */
 } pivco_node_type_t;
 
 /* ---------- Huffman table ---------- */

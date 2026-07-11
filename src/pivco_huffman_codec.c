@@ -310,6 +310,37 @@ static inline void codec_maybe_fse_attempt(uint8_t *marker_slot,
 #endif
 }
 
+/* Encoder's runtime 4-way fusion mode (env PIVCO_QUAD_MODE): 0 none, 1
+ * root-only, 2 all (deep).  Quad capability is structural
+ * (node_type[node]==PIVCO_NODE_QUAD, set by build_table); the mode chooses
+ * which capable nodes are actually emitted fused.  The per-block wire carries
+ * the mode used (2 bits); the decoder dispatches on THAT, never re-deriving. */
+static int g_quad_mode = -1;
+
+/* Read an int-valued env var once, clamped to [0,hi]; -1 cache = unread. */
+static inline int dec_mode(const char *name, int *cache, int hi)
+{
+    int v = *cache;
+    if (v < 0) {
+        const char *e = getenv(name);
+        v = e ? atoi(e) : 0;
+        PIVCO_CHECK(v >= 0 && v <= hi);   /* out-of-range env is a hard error */
+        *cache = v;
+    }
+    return v;
+}
+
+/* Fuse this node as a quad under the given mode?  1 = root only, 2 = all. */
+static inline int quad_fuse_node(int mode, int16_t node_id, int16_t root)
+{ return mode >= 2 || (mode == 1 && node_id == root); }
+
+/* The decoding block's quad mode (from the wire), read once at the decode
+ * entry; the recursive QUAD case consults it to fuse-or-decode-as-FULL. */
+static __thread int g_block_qmode = 0;
+static void codec_decode_quad(const pivco_huffman_table_t *table, int16_t node_id,
+                              int K, uint8_t *out_buf, const uint8_t **in_ptr,
+                              uint8_t *scratch_top);
+
 static void codec_encode_node(const pivco_huffman_table_t *table,
                                int16_t node_id,
                                uint8_t *ranks, int n,
@@ -334,6 +365,65 @@ static void codec_encode_node(const pivco_huffman_table_t *table,
         return;
     }
 
+    if ((pivco_node_type_t)table->node_type[node_id] == PIVCO_NODE_QUAD &&
+        quad_fuse_node(g_quad_mode, node_id, table->tree_root)) {
+        /* quad root: [KR u16][K01 u16][K11 u16][plane0][plane1]
+         * then the four grandchild subtrees (leaf grandchildren emit
+         * nothing).  Slow scalar routing pass -- encode speed is not
+         * this experiment's target. */
+        const pivco_tree_node_t *ln = &table->tree[node->left];
+        const pivco_tree_node_t *hn = &table->tree[node->right];
+        uint8_t thr0 = table->split_rank[node_id];
+        uint8_t thrL = table->split_rank[node->left];
+        uint8_t thrR = table->split_rank[node->right];
+        int16_t gc[4];
+        gc[0] = ln->left; gc[1] = ln->right; gc[2] = hn->left; gc[3] = hn->right;
+        unsigned leaf_mask = 0;
+        for (int g = 0; g < 4; g++)
+            if (table->tree[gc[g]].symbol >= 0) leaf_mask |= 8u >> g;
+        /* All four grandchildren leaves == 4 leaves at depth 2 == a flat D=2
+         * subtree, which the flat path claims before quad classification; a
+         * quad node can never legitimately be all-leaf. */
+        PIVCO_CHECK(leaf_mask != 15u);  /* all-leaf == flat D=2, not quad */
+        /* Shape-aware header: carry only the INTERNAL grandchildren's sizes
+         * (a leaf slot is const-filled from the planes at decode, so its
+         * count is needed nowhere).  I<4 -> one u16 per internal slot in
+         * slot order; I==4 -> 3 u16 + the 4th derived from sum==N (no leaf
+         * unknowns then).  dna (I=1) shrinks the header 6B -> 2B. */
+        int I = 4 - __builtin_popcount(leaf_mask);
+        int hdr_bytes = (I == 4) ? 6 : 2 * I;
+        int qnb = bitmap_bytes(n);
+        uint8_t *hdr = *out_ptr; *out_ptr += hdr_bytes;
+        uint8_t *p0 = *out_ptr; *out_ptr += qnb;
+        uint8_t *p1 = *out_ptr; *out_ptr += qnb;
+        memset(p0, 0, (size_t)qnb);
+        memset(p1, 0, (size_t)qnb);
+        /* Fixed-stride run regions (n + 64B over-store slack each) so the
+         * partition is a single pass -- no counting pre-pass. */
+        uint8_t *qb[4];
+        qb[0] = tmp;
+        qb[1] = qb[0] + n + 64;
+        qb[2] = qb[1] + n + 64;
+        qb[3] = qb[2] + n + 64;
+        int cnt[4];
+        PROF_TIC();
+        prim_enc_partition_quad(ranks, n, thr0, thrL, thrR, p0, p1, qb, cnt, leaf_mask);
+        PROF_TOC(PROF_ENC_NODE_FULL, n);
+        if (I == 4) {
+            uint16_t a = (uint16_t)cnt[0], b = (uint16_t)cnt[1], c = (uint16_t)cnt[2];
+            memcpy(hdr, &a, 2); memcpy(hdr + 2, &b, 2); memcpy(hdr + 4, &c, 2);
+        } else {
+            uint8_t *hp = hdr;
+            for (int g = 0; g < 4; g++)
+                if (!(leaf_mask & (8u >> g))) {
+                    uint16_t s = (uint16_t)cnt[g]; memcpy(hp, &s, 2); hp += 2;
+                }
+        }
+        for (int g = 0; g < 4; g++)
+            codec_encode_node(table, gc[g], qb[g], cnt[g], depth + 2, out_ptr,
+                              tmp + 4 * ((size_t)n + 64));
+        return;
+    }
     /* Non-flat internal node.  codec.c owns: K_right header reservation,
      * FSE marker byte, optional FSE-attempt on the raw bitmap.  The
      * arch-specific primitive does only the SIMD-bound work: build the
@@ -399,7 +489,11 @@ int CODEC_ENCODE_ENTRY(const uint8_t *symbols, size_t n,
      * recover it without an out-of-band channel. */
     uint8_t *ptr = out;
     wire_write_block_n(ptr, N);
-    ptr += PIVCO_BLOCK_N_BYTES;
+    /* Per-block flags byte: record the quad fusion mode used (2 bits), so the
+     * decoder dispatches on the wire, not on re-derived eligibility. */
+    dec_mode("PIVCO_QUAD_MODE", &g_quad_mode, 2);
+    wire_write_block_flags(ptr, (uint8_t)(g_quad_mode & PIVCO_BLOCK_QUAD_MASK));
+    ptr += PIVCO_BLOCK_HDR_BYTES;
 
     /* One heap block: the per-block ranks buffer + the recursion's right-half
      * scratch (see the tree-walk note above).  +64 slack on ranks absorbs the
@@ -505,6 +599,13 @@ static void codec_decode_subtree(const pivco_huffman_table_t *table,
         return;
     }
 
+    case PIVCO_NODE_QUAD:
+        if (quad_fuse_node(g_block_qmode, node_id, table->tree_root)) {
+            codec_decode_quad(table, node_id, K, out_buf, in_ptr, scratch_top);
+            return;
+        }
+        /* not fused for this block -> decode as FULL (fall through) */
+        /* fallthrough */
     case PIVCO_NODE_INTERNAL_FULL:
     default: {
         /* Both children internal.  Recurse into both with disjoint
@@ -540,6 +641,59 @@ static void codec_decode_subtree(const pivco_huffman_table_t *table,
     }
 }
 
+/* Decode one quad node of K symbols into out_buf.  Wire (see
+ * the encoder): shape header (internal-slot sizes) + plane0 + plane1, then
+ * the four grandchild subtrees (leaf grandchildren emit nothing, const-filled
+ * from the planes).  Called from the QUAD case when the block mode fuses this
+ * node; grandchildren recurse through codec_decode_subtree, so nested quads
+ * (mode 2) fuse naturally. */
+static void codec_decode_quad(const pivco_huffman_table_t *table, int16_t node_id,
+                              int K, uint8_t *out_buf, const uint8_t **in_ptr,
+                              uint8_t *scratch_top)
+{
+    const pivco_tree_node_t *node = &table->tree[node_id];
+    const pivco_tree_node_t *ln = &table->tree[node->left];
+    const pivco_tree_node_t *hn = &table->tree[node->right];
+    int16_t gc[4] = { ln->left, ln->right, hn->left, hn->right };
+    unsigned leaf_mask = 0;
+    for (int g = 0; g < 4; g++)
+        if (table->tree[gc[g]].symbol >= 0) leaf_mask |= 8u >> g;
+    /* all-leaf == flat D=2, claimed by flat detection before quad marking. */
+    PIVCO_CHECK(leaf_mask != 15u);
+    int I = 4 - __builtin_popcount(leaf_mask);
+    int k[4] = { 0, 0, 0, 0 };
+    const uint8_t *p = *in_ptr;
+    if (I == 4) {
+        uint16_t a, b, c;
+        memcpy(&a, p, 2); memcpy(&b, p + 2, 2); memcpy(&c, p + 4, 2); p += 6;
+        k[0] = a; k[1] = b; k[2] = c; k[3] = K - a - b - c;
+        if (k[3] < 0) k[3] = 0;                 /* corrupt wire -> wrong output, not OOB */
+    } else {
+        for (int g = 0; g < 4; g++)
+            if (!(leaf_mask & (8u >> g))) {
+                uint16_t s; memcpy(&s, p, 2); p += 2; k[g] = s;
+            }
+    }
+    int qnb = bitmap_bytes(K);
+    const uint8_t *p0 = p; p += qnb;
+    const uint8_t *p1 = p; p += qnb;
+    *in_ptr = p;
+    uint8_t cbuf[4][64] __attribute__((aligned(64)));
+    const uint8_t *base[4];
+    uint8_t *top = scratch_top;
+    for (int g = 0; g < 4; g++) {
+        if (leaf_mask & (8u >> g)) {
+            memset(cbuf[g], (uint8_t)table->tree[gc[g]].symbol, 64);
+            base[g] = cbuf[g];
+        } else {
+            uint8_t *bg = scratch_carve(&top, k[g]);
+            codec_decode_subtree(table, gc[g], k[g], bg, in_ptr, top, /*tail_ok=*/0);
+            base[g] = bg;
+        }
+    }
+    prim_merge_quad(p0, p1, K, base[0], base[1], base[2], base[3], leaf_mask, out_buf);
+}
+
 int CODEC_DECODE_ENTRY(const uint8_t *in, size_t in_len,
                        const pivco_huffman_table_t *table,
                        uint8_t *symbols, size_t *consumed)
@@ -548,9 +702,13 @@ int CODEC_DECODE_ENTRY(const uint8_t *in, size_t in_len,
     (void)in_len;
     prim_codec_init();
 
-    /* Block header: first 2 bytes are N (symbol count for this block). */
+    /* Block header: first 2 bytes are N; quad-mode builds add a flags
+     * byte.  The flags byte alone decides fused decode -- eligibility is
+     * never re-derived here. */
     const uint8_t *ptr = in;
+    int block_qmode = wire_read_block_flags(ptr) & PIVCO_BLOCK_QUAD_MASK;
     const int N = wire_read_block_n(&ptr);
+    ptr += PIVCO_BLOCK_FLAGS_BYTES;
     if (N <= 0 || N > PIVCO_WIRE_MAX_N) return PIVCO_ERR_CORRUPT;
     const pivco_tree_node_t *root = &table->tree[table->tree_root];
 
@@ -599,6 +757,9 @@ int CODEC_DECODE_ENTRY(const uint8_t *in, size_t in_len,
     if (!scratch) return PIVCO_ERR_NULL;
     g_scratch_pad_left = PIVCO_SCRATCH_PAD_BUDGET;
 
+    /* The recursive walk fuses any QUAD node the block's mode selects (mode 1
+     * root only, mode 2 all); the QUAD case consults g_block_qmode. */
+    g_block_qmode = block_qmode;
     codec_decode_subtree(table, table->tree_root, N,
                           symbols, &ptr, scratch, /*tail_ok=*/0);
 

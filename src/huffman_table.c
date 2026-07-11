@@ -716,6 +716,44 @@ static int build_table_finish(const uint8_t lengths[PIVCO_MAX_SYMBOLS],
         }
     }
 
+    /* Mark the greedy non-overlapping quad set (fusion-CAPABLE nodes).  A
+     * quad-eligible node is an INTERNAL_FULL whose two children are each
+     * non-flat internal (BOTH_LEAVES / LEAF_LEFT / INTERNAL_FULL).  Fusing
+     * a node consumes it + its two children, so once marked we skip its
+     * children and continue searching at its four grandchildren -- a child
+     * of a quad can never itself be a quad root.  This is structural
+     * capability only; the per-block PIVCO_QUAD_MODE picks which marked
+     * nodes are actually fused (mode 1 root-only, mode 2 all), recorded in
+     * the wire.  A quad node otherwise decodes as INTERNAL_FULL.  (An
+     * all-leaf-grandchildren node is a flat D=2 subtree and was already
+     * claimed by flat detection, so it never reaches here as FULL.) */
+    {
+        int16_t stack[PIVCO_MAX_TREE_NODES];
+        int sp = 0;
+        stack[sp++] = table->tree_root;
+        while (sp > 0) {
+            int16_t n = stack[--sp];
+            if (n < 0 || table->tree[n].symbol >= 0) continue;  /* null / leaf */
+            if (table->node_type[n] == (uint8_t)PIVCO_NODE_INTERNAL_FULL) {
+                int16_t l = table->tree[n].left, r = table->tree[n].right;
+                uint8_t lt = table->node_type[l], rt = table->node_type[r];
+                int lok = lt == (uint8_t)PIVCO_NODE_BOTH_LEAVES ||
+                          lt == (uint8_t)PIVCO_NODE_LEAF_LEFT   ||
+                          lt == (uint8_t)PIVCO_NODE_INTERNAL_FULL;
+                int rok = rt == (uint8_t)PIVCO_NODE_BOTH_LEAVES ||
+                          rt == (uint8_t)PIVCO_NODE_LEAF_LEFT   ||
+                          rt == (uint8_t)PIVCO_NODE_INTERNAL_FULL;
+                if (lok && rok) {
+                    table->node_type[n] = (uint8_t)PIVCO_NODE_QUAD;
+                    stack[sp++] = table->tree[l].left;  stack[sp++] = table->tree[l].right;
+                    stack[sp++] = table->tree[r].left;  stack[sp++] = table->tree[r].right;
+                    continue;
+                }
+            }
+            stack[sp++] = table->tree[n].left;
+            stack[sp++] = table->tree[n].right;
+        }
+    }
 
     /* Populate max_leaf_depth[node] for every internal node.  Used by
      * the encoder to detect when a subtree's remaining bits fit in a

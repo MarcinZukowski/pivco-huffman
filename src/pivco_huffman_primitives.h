@@ -202,4 +202,47 @@
 #  error "pivco_huffman_primitives.h requires PIVCO_BACKEND_{SCALAR,NEON,X86,AVX512} to be defined."
 #endif
 
+#if !defined(PIVCO_HAVE_MERGE_QUAD)
+/* Scalar quad-node merge for backends without a SIMD form; keeps the
+ * wire decodable everywhere.  See the AVX-512 header for the contract. */
+PIVCO_PRIM_ALWAYS_INLINE void prim_merge_quad(const uint8_t *restrict p0, const uint8_t *restrict p1,
+    int N, const uint8_t *restrict A, const uint8_t *restrict B, const uint8_t *restrict C, const uint8_t *restrict D,
+    unsigned leaf_mask, uint8_t *restrict out)
+{
+    size_t ca = 0, cb = 0, cc = 0, cd = 0;
+    int advA = !(leaf_mask & 8u), advB = !(leaf_mask & 4u);
+    int advC = !(leaf_mask & 2u), advD = !(leaf_mask & 1u);
+    for (int j = 0; j < N; j++) {
+        int h = (p0[j >> 3] >> (j & 7)) & 1;
+        int l = (p1[j >> 3] >> (j & 7)) & 1;
+        switch ((h << 1) | l) {
+        case 0:  out[j] = A[ca]; ca += advA; break;
+        case 1:  out[j] = B[cb]; cb += advB; break;
+        case 2:  out[j] = C[cc]; cc += advC; break;
+        default: out[j] = D[cd]; cd += advD; break;
+        }
+    }
+}
+#endif
+
+#if !defined(PIVCO_HAVE_ENC_QUAD)
+/* Scalar quad encode partition (see the AVX-512 header). */
+PIVCO_PRIM_ALWAYS_INLINE void prim_enc_partition_quad(const uint8_t *restrict ranks,
+    int n, uint8_t thr0, uint8_t thrL, uint8_t thrR,
+    uint8_t *restrict p0, uint8_t *restrict p1, uint8_t *const q[4], int cnt[4], unsigned leaf_mask)
+{
+    size_t c[4] = {0, 0, 0, 0};
+    for (int j = 0; j < n; j++) {
+        uint8_t r = ranks[j];
+        int b0 = r > thr0;
+        int b1 = r > (b0 ? thrR : thrL);
+        p0[j >> 3] |= (uint8_t)(b0 << (j & 7));
+        p1[j >> 3] |= (uint8_t)(b1 << (j & 7));
+        int g = (b0 << 1) | b1;
+        if (!((leaf_mask >> (3 - g)) & 1u)) { q[g][c[g]] = r; c[g]++; }
+    }
+    for (int g = 0; g < 4; g++) cnt[g] = (int)c[g];
+}
+#endif
+
 #endif  /* PIVCO_HUFFMAN_PRIMITIVES_H */

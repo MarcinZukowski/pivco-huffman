@@ -132,6 +132,26 @@ main {
     fill: #64748b;
     pointer-events: none;
 }
+#tree-svg .quad-box {
+    fill: #7c3aed;             /* violet, very light fill */
+    fill-opacity: 0.05;
+    stroke: #7c3aed;
+    stroke-width: 1.5px;
+    pointer-events: none;
+}
+#tree-svg .quad-fork {
+    fill: none;
+    stroke: #7c3aed;
+    stroke-width: 2px;
+    stroke-dasharray: 4 2;
+    pointer-events: none;
+}
+#tree-svg .quad-label {
+    font: 10px monospace;
+    font-weight: 700;
+    fill: #7c3aed;
+    pointer-events: none;
+}
 #tree-svg .skew-bar { stroke: #444; stroke-width: 0.3px; }
 #tree-svg .prim-bubble rect {
     fill: #ffedd5;
@@ -259,6 +279,14 @@ table.node-table tr.in-flat { color: #b45309; }
         <label class="toggle">
             <input type="checkbox" id="fuse-leaves" checked>
             fuse-leaves
+        </label>
+        <label class="toggle" title="Highlight fused-root 4-way (ROOT4) quad-eligible nodes: a non-flat internal node whose two children are both non-flat internal nodes (its four grandchildren would be fused). 'root' highlights the tree root only when it is quad-eligible; 'all' highlights every quad-eligible node.">
+            quad:
+            <select id="quad-mode">
+                <option value="none">none</option>
+                <option value="root">root</option>
+                <option value="all">all</option>
+            </select>
         </label>
         <label class="toggle" title="Within-tier ordering of leaves when building the flat-aware tree. Affects which symbols land in the deepest D-flat chunk per length tier. 'symbol' is the textbook canonical order (sort by symbol value ascending, no frequency-based reorder).">
             keys:
@@ -860,6 +888,50 @@ function detectFlatSubtrees(root) {
     walk(root, false);
 }
 
+/* Quad (fused-root 4-way / ROOT4) eligibility.  A node is quad-eligible
+ * iff it is a non-flat internal node whose two children are both non-flat
+ * internal nodes (its four grandchildren are what ROOT4 would fuse).
+ *
+ * Mirrors the C reference: node_type == INTERNAL_FULL AND each child is a
+ * non-flat internal node (BOTH_LEAVES / LEAF_LEFT / INTERNAL_FULL).
+ *
+ * "internal" is `n.symbol < 0`; "flat-subtree" is the structural D>=2 flat
+ * property `n.flatCandidate` set by detectFlatSubtrees (independent of the
+ * show-flat toggle / per-node overrides, so eligibility is a fixed property
+ * of the tree topology). */
+function isNonFlatInternal(n) {
+    return !!n && n.symbol < 0 && !n.flatCandidate;
+}
+function isQuadEligible(n) {
+    return isNonFlatInternal(n)
+        && isNonFlatInternal(n.left)
+        && isNonFlatInternal(n.right);
+}
+
+/* Greedy top-down non-overlapping quad selection.  A quad-eligible node
+ * fuses itself + its two children (its four grandchildren become the
+ * streams), so a quad-eligible node that is a child of a marked quad is
+ * absorbed and cannot itself be a quad root.  Walking from the hierarchy
+ * root: if a node is quad-eligible, mark it and recurse only into its four
+ * grandchildren (skipping node.left / node.right, which are absorbed);
+ * otherwise recurse into node.left / node.right.  Returns a Set of the
+ * marked data-node objects. */
+function greedyQuadSet(rootData) {
+    const marked = new Set();
+    (function walk(n) {
+        if (!n) return;
+        if (isQuadEligible(n)) {
+            marked.add(n);
+            walk(n.left.left);  walk(n.left.right);
+            walk(n.right.left); walk(n.right.right);
+        } else {
+            walk(n.left);
+            walk(n.right);
+        }
+    })(rootData);
+    return marked;
+}
+
 /* Tag every node with `_primitive`: the abbreviated name of the decode
  * primitive applied at this node, given the current optimization
  * toggles in `meta`.  Children absorbed by a parent-level primitive
@@ -904,6 +976,7 @@ function annotatePrimitives(root, meta) {
             else                n._primitive = 'EPF';   /* INTERNAL_FULL: both sides   */
             ewalk(n.left); ewalk(n.right);
         })(root);
+        applyQuadFusion(root, meta);
         return;
     }
 
@@ -1039,6 +1112,38 @@ function annotatePrimitives(root, meta) {
         walk(n.left, n); walk(n.right, n);
     }
     walk(root, null);
+    applyQuadFusion(root, meta);
+}
+
+/* Quad fusion override: a fused quad Q (node R + its two children L,H,
+ * fusing R's four grandchildren into one 4-way operation) counts as a
+ * SINGLE op at Q — exactly like a flat-root absorbing its descendants.
+ * Runs at the END of annotatePrimitives (both encode + decode modes),
+ * after all normal per-node tagging, so it overrides the labels on Q
+ * and its two intermediate children.
+ *
+ *   Q          → 'Q4'   (1 op)
+ *   Q.left     → null    (absorbed intermediate merge/partition level)
+ *   Q.right    → null    (absorbed intermediate merge/partition level)
+ *
+ * The four grandchildren keep their normal primitives — they're the
+ * streams and decode normally.  opsForPrimitive already returns 1 for
+ * any non-null non-'C' label, so a byte passing through a fused quad
+ * now costs 1 op at Q instead of the old 2 (R-level + L/H-level). */
+function applyQuadFusion(root, meta) {
+    if (!meta || !meta.quadMode || meta.quadMode === 'none') return;
+    let quadSet;
+    if (meta.quadMode === 'all') {
+        quadSet = greedyQuadSet(root);
+    } else {
+        quadSet = new Set();
+        if (isQuadEligible(root)) quadSet.add(root);
+    }
+    quadSet.forEach(q => {
+        q._primitive = 'Q4';
+        if (q.left)  q.left._primitive  = null;
+        if (q.right) q.right._primitive = null;
+    });
 }
 
 /* Collect all internal nodes into an array. */
@@ -1720,6 +1825,84 @@ function renderTree(rootNode, meta) {
             toggleFlatten(d.data.id);
         });
 
+    /* Quad (fused-root 4-way / ROOT4) rendering.  A fused quad Q = node R
+     * + its two children L,H, fusing R's four grandchildren into one 4-way
+     * op.  We draw it structurally: a violet BOX enclosing the up-to-7-node
+     * span (R, L, H, and the four grandchildren), the two intermediate
+     * children L,H de-emphasised (small + faded, since they're fused away),
+     * and four straight violet "fork" edges from R directly to its four
+     * grandchildren, so it reads as one node forking into four streams.
+     *
+     * 'root' mode marks only the tree root (iff itself quad-eligible);
+     * 'all' mode marks every node in the greedy non-overlapping quad set.
+     * Violet is the quad colour — distinct from flat-box green, node-type
+     * orange, and the blue bit-prefix label. */
+    if (meta.quadMode && meta.quadMode !== 'none') {
+        // 'all' mode = greedy non-overlapping quads (built once per render);
+        // 'root' mode = tree root iff itself quad-eligible.
+        const quadDataSet = meta.quadMode === 'all'
+            ? greedyQuadSet(rootNode)
+            : (isQuadEligible(rootNode) ? new Set([rootNode]) : new Set());
+        // Map each data node to its laid-out d3 hierarchy node so we can
+        // read positions of R's children / grandchildren.
+        const hByData = new Map();
+        root.descendants().forEach(h => hByData.set(h.data, h));
+
+        quadDataSet.forEach(qData => {
+            const R = hByData.get(qData);
+            if (!R || !R.children || R.children.length < 2) return;
+            const L = R.children[0], H = R.children[1];
+            const grands = [];
+            [L, H].forEach(mid => {
+                if (mid && mid.children) mid.children.forEach(g => grands.push(g));
+            });
+
+            // Bounding box over R + L,H + grandchildren (mirror drawBox's
+            // x/y-extent approach, but over this explicit node list rather
+            // than n.descendants()).
+            const span = [R, L, H, ...grands].filter(Boolean);
+            let bx0 = Infinity, bx1 = -Infinity, by0 = Infinity, by1 = -Infinity;
+            span.forEach(d => {
+                if (d.x < bx0) bx0 = d.x;
+                if (d.x > bx1) bx1 = d.x;
+                if (d.y < by0) by0 = d.y;
+                if (d.y > by1) by1 = d.y;
+            });
+            const mX = 10, mY = 10;
+            gWorld.append('rect')
+                .attr('class', 'quad-box')
+                .attr('x', bx0 - mX).attr('y', by0 - mY)
+                .attr('width',  bx1 - bx0 + 2 * mX)
+                .attr('height', by1 - by0 + 2 * mY)
+                .attr('rx', 6)
+                .lower();   // behind the nodes / normal edges
+
+            // Four straight fork edges R -> each grandchild (overlay).
+            grands.forEach(g => {
+                gWorld.append('path')
+                    .attr('class', 'quad-fork')
+                    .attr('d', `M${R.x},${R.y}L${g.x},${g.y}`);
+            });
+
+            // De-emphasise the two intermediate children L,H (fused away):
+            // shrink + fade their circles.
+            [L, H].forEach(mid => {
+                if (!mid) return;
+                gWorld.selectAll(
+                    `g.node-internal[data-node-id="${mid.data.id}"] circle`)
+                    .attr('r', 2.5)
+                    .style('opacity', 0.35)
+                    .style('stroke-dasharray', '2 1.5');
+            });
+
+            // "Q4" label near R (upper-right).
+            gWorld.append('text')
+                .attr('class', 'quad-label')
+                .attr('x', R.x + 11).attr('y', R.y - 9)
+                .text('Q4');
+        });
+    }
+
     /* Optional internal-node bit-prefix label (off by default).
      * Placed above the circle / above the skew bar if it's shown. */
     if (meta.showBitPrefix) {
@@ -2203,12 +2386,21 @@ function computeTreeStats(rootNode, meta) {
     }
     walkLeaves(rootNode);
 
+    /* Fused-quad count for the current quad mode (mirrors applyQuadFusion). */
+    let nQuads = 0;
+    if (meta.quadMode === 'all') {
+        nQuads = greedyQuadSet(rootNode).size;
+    } else if (meta.quadMode === 'root') {
+        nQuads = isQuadEligible(rootNode) ? 1 : 0;
+    }
+
     return {
         totalN, n_leaves, longestCode,
         totalEntropyBits, totalBitsSaved, nFlat, flatRawBits,
         hufWeighted, byteEntropy,
         opsSimple: n_leaves ? (opsSimpleSum / n_leaves) : 0,
         opsW:      opsWeightedSum,
+        nQuads,
     };
 }
 
@@ -2797,6 +2989,12 @@ function renderStats(rootNode, meta, stats) {
     addRow('ops/byte (weighted)', opsW.toFixed(3),
         "Frequency-weighted ops per source byte: Σ p_leaf · ops_to_decode.  " +
         "Same primitive accounting as above, weighted by source byte frequency.");
+    if (meta.quadMode && meta.quadMode !== 'none') {
+        addRow('quads: N (fused)', (stats.nQuads || 0).toString(),
+            "Number of fused 4-way quads (ROOT4) in the current tree.  A quad " +
+            "fuses a node R + its two children into one 4-way op forking to R's " +
+            "four grandchildren — counted as ONE op, so ops/leaf above drops.");
+    }
     if (meta.showFlat) {
         const flatPct = totalN > 0 ? (100 * flatRawBits / (8 * totalN)).toFixed(1) : '-';
         addRow('# maximal flat subtrees', nFlat.toString(),
@@ -2874,6 +3072,7 @@ function refreshFromFreqs() {
     const viewMode = document.getElementById('view-mode').value;
     const constantDetect = document.getElementById('constant-detect').checked;
     const fuseLeaves = document.getElementById('fuse-leaves').checked;
+    const quadMode = document.getElementById('quad-mode').value;
     const showSkew = document.getElementById('show-skew').checked;
     const showBitPrefix = document.getElementById('show-bit-prefix').checked;
     const showLeafCode = document.getElementById('show-leaf-code').checked;
@@ -2935,7 +3134,7 @@ function refreshFromFreqs() {
         name: _name, isMain: _isMain, totalN: _totalN,
         phOpt, maxSkew, showFlat, condenseFlat, noOverlap, showSplitting,
         showPrimitives, showBitmaps, inputBitmap, bitmapLabel, mode, viewMode,
-        constantDetect, fuseLeaves,
+        constantDetect, fuseLeaves, quadMode,
         titleText, showLabels, sourceText,
         showLeafDetails, showSkew, showBitPrefix, showLeafCode,
         showBranchBits, keysSort, maxLen,
@@ -3101,6 +3300,7 @@ function setupToggles() {
     document.getElementById('tree-mode').addEventListener('change', refreshAndUrl);
     document.getElementById('constant-detect').addEventListener('change', refreshClearAndUrl);
     document.getElementById('fuse-leaves').addEventListener('change', refreshClearAndUrl);
+    document.getElementById('quad-mode').addEventListener('change', refreshAndUrl);
     document.getElementById('title-input').addEventListener('input', refreshAndUrl);
     document.getElementById('show-labels').addEventListener('input', refreshAndUrl);
     document.getElementById('show-leaf-details').addEventListener('change', refreshAndUrl);
@@ -3289,6 +3489,9 @@ const URL_PARAM_MAP = [
     { kind: 'str',  param: 'keys',           id: 'keys-sort',
       desc: 'Within-tier ordering of leaves when building the flat-aware tree. Affects which symbols land in the deepest D-flat chunk per length tier.',
       values: 'freq_desc | freq_asc | symbol' },
+    { kind: 'str',  param: 'quad',           id: 'quad-mode',
+      desc: 'Highlight fused-root 4-way (<b>ROOT4</b>) quad-eligible nodes: a non-flat internal node whose two children are both non-flat internal nodes (its four grandchildren would be fused).<br><br><b>root</b> highlights the tree root only when it is quad-eligible; <b>all</b> highlights every quad-eligible node.',
+      values: 'none | root | all' },
     { kind: 'str',  param: 'max-len',        id: 'max-len',
       desc: 'Maximum Huffman code length (length-limited).',
       values: 'integer 1..20' },

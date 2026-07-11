@@ -1021,6 +1021,117 @@ static inline void pack_dN_neon(uint8_t *out, const uint8_t *ranks,
  * placement logic (scratch_carve / place_tail). */
 #define PIVCO_PRIM_MERGE_OVERREAD 16
 
+/* NEON quad merge: 16 outputs/iter via vqtbl4q over four stream
+ * windows, index = (q<<4)|intra_block_rank with q=(b0<<1)|b1 from the
+ * two routing planes.  Shape-specialized so leaf slots (constant 64B
+ * buffer) skip their cursor advance.  Matches bench_merge4way's vvvv
+ * kernel; the plane->q unpack is the added per-16 cost vs a pre-unpacked
+ * quad byte array. */
+/* NEON quad merge: user's mask-LUT (expand_tab generalized to 4
+ * streams).  Per 8 lanes: 4 disjoint masks (and/andnot of planes) index
+ * LUT_g[mg] giving g*16+intra-8-rank for owning lanes / 0 else; OR the
+ * four; one vqtbl4_u8 gather.  Cursors advance by mask popcounts -- no
+ * psum16.  ~1.85x the old vqtbl4q+psum16 kernel (microbench). */
+static uint8_t pv_q_lm[4][256][8] __attribute__((aligned(8)));
+/* Carry pre-table for the 16-wide kernel: pv_q_lm_hi[g][c][m] is the
+ * high-byte (lanes 8..15) index contribution for stream g when the low
+ * byte contributed c owned lanes already (c = popcount of g's low-byte
+ * mask, 0..8).  Owned lanes hold g*16 + c + intra-high-rank; the +c
+ * continues the rank across the byte boundary so a single vqtbl4q gather
+ * covers all 16 outputs.  Non-owned lanes hold 0 (disjoint OR). */
+static uint8_t pv_q_lm_hi[4][9][256][8] __attribute__((aligned(8)));
+/* Single base table for the max-trick 16-wide (q16mt): rank for owned lanes,
+ * 0x80 for non-owned.  The [g] and [carry] dims of the pre-baked tables above
+ * fold into a runtime vadd of (g*16 + carry) followed by vmax_s8 with 0: owned
+ * lanes land in [0,63] (untouched by the max), non-owned 0x80 + offset stays
+ * negative (offset <= 56 < 128) and clamps to 0 -- no ownmask needed. */
+static uint8_t pv_q_base[256][8] __attribute__((aligned(8)));
+static int pv_q_lm_built = 0;
+static void pv_q_build(void){
+    if (pv_q_lm_built) return;
+    for (int g = 0; g < 4; g++) for (int m = 0; m < 256; m++) {
+        int r = 0;
+        for (int lane = 0; lane < 8; lane++) {
+            if ((m >> lane) & 1) { pv_q_lm[g][m][lane] = (uint8_t)(g*16 + r); r++; }
+            else pv_q_lm[g][m][lane] = 0;
+        }
+        for (int c = 0; c < 9; c++) {
+            int rr = c;
+            for (int lane = 0; lane < 8; lane++) {
+                if ((m >> lane) & 1) { pv_q_lm_hi[g][c][m][lane] = (uint8_t)(g*16 + rr); rr++; }
+                else pv_q_lm_hi[g][c][m][lane] = 0;
+            }
+        }
+    }
+    for (int m = 0; m < 256; m++) {
+        int r = 0;
+        for (int lane = 0; lane < 8; lane++)
+            if ((m >> lane) & 1) pv_q_base[m][lane] = (uint8_t)r++;
+            else pv_q_base[m][lane] = 0x80;
+    }
+    pv_q_lm_built = 1;
+}
+/* prim_merge_quad8 (8-wide) moved to bench/prim_variants/prims-quad.h */
+
+/* 16-wide variant: one vqtbl4q_u8 (16 outputs) per iter instead of
+ * vqtbl4_u8 (8).  The low byte builds the low-8 index (rank from 0), the
+ * high byte builds the high-8 index via the carry pre-table (rank from
+ * popcount of the low mask); vcombine forms the 16-byte gather index.
+ * Each stream owns <=16 of the 16 lanes, so g*16+rank stays in [0,63]. */
+PIVCO_PRIM_ALWAYS_INLINE void prim_merge_quad_impl(const uint8_t *restrict p0,
+    const uint8_t *restrict p1, int N,
+    const uint8_t *restrict A, const uint8_t *restrict B, const uint8_t *restrict C, const uint8_t *restrict D,
+    const int lfA, const int lfB, const int lfC, const int lfD, uint8_t *restrict out)
+{
+    int ca=0,cb=0,cc=0,cd=0,j=0;
+    for(; j+16<=N; j+=16){
+        int b=j>>3;
+        uint8_t x0=p0[b], y0=p0[b+1], x1=p1[b], y1=p1[b+1];
+        uint8_t mA=(uint8_t)(~x0&~x1),mB=(uint8_t)(~x0&x1),mC=(uint8_t)(x0&~x1),mD=(uint8_t)(x0&x1);
+        uint8_t nA=(uint8_t)(~y0&~y1),nB=(uint8_t)(~y0&y1),nC=(uint8_t)(y0&~y1),nD=(uint8_t)(y0&y1);
+        int pa=__builtin_popcount(mA),pb=__builtin_popcount(mB),
+            pc=__builtin_popcount(mC),pd=__builtin_popcount(mD);
+        /* leaf slots pin the cursor, so their high-byte rank restarts at 0
+         * (carry 0) to stay byte-identical to the 8-wide kernel; the ternary
+         * folds away per compile-time-constant lf. */
+        int ka=lfA?0:pa,kb=lfB?0:pb,kc=lfC?0:pc,kd=lfD?0:pd;
+        uint8x8_t lo=vorr_u8(vorr_u8(vld1_u8(pv_q_lm[0][mA]),vld1_u8(pv_q_lm[1][mB])),
+                             vorr_u8(vld1_u8(pv_q_lm[2][mC]),vld1_u8(pv_q_lm[3][mD])));
+        uint8x8_t hi=vorr_u8(vorr_u8(vld1_u8(pv_q_lm_hi[0][ka][nA]),vld1_u8(pv_q_lm_hi[1][kb][nB])),
+                             vorr_u8(vld1_u8(pv_q_lm_hi[2][kc][nC]),vld1_u8(pv_q_lm_hi[3][kd][nD])));
+        uint8x16x4_t src={{vld1q_u8(A+ca),vld1q_u8(B+cb),vld1q_u8(C+cc),vld1q_u8(D+cd)}};
+        vst1q_u8(out+j, vqtbl4q_u8(src, vcombine_u8(lo,hi)));
+        if(!lfA) ca+=pa+__builtin_popcount(nA);
+        if(!lfB) cb+=pb+__builtin_popcount(nB);
+        if(!lfC) cc+=pc+__builtin_popcount(nC);
+        if(!lfD) cd+=pd+__builtin_popcount(nD);
+    }
+    for(; j<N; j++){
+        int h=(p0[j>>3]>>(j&7))&1,l=(p1[j>>3]>>(j&7))&1;
+        switch((h<<1)|l){
+        case 0: out[j]=A[ca]; if(!lfA)ca++; break;
+        case 1: out[j]=B[cb]; if(!lfB)cb++; break;
+        case 2: out[j]=C[cc]; if(!lfC)cc++; break;
+        default:out[j]=D[cd]; if(!lfD)cd++; break; }
+    }
+}
+PIVCO_PRIM_ALWAYS_INLINE void prim_merge_quad(const uint8_t *restrict p0, const uint8_t *restrict p1,
+    int N, const uint8_t *restrict A, const uint8_t *restrict B, const uint8_t *restrict C, const uint8_t *restrict D,
+    unsigned leaf_mask, uint8_t *restrict out)
+{
+    pv_q_build();
+    switch(leaf_mask & 15u){
+#define PIVCO_Q(S) case (S): prim_merge_quad_impl(p0,p1,N,A,B,C,D,\
+        ((S)>>3)&1,((S)>>2)&1,((S)>>1)&1,(S)&1,out); break;
+    PIVCO_Q(0) PIVCO_Q(1) PIVCO_Q(2) PIVCO_Q(3) PIVCO_Q(4) PIVCO_Q(5) PIVCO_Q(6) PIVCO_Q(7)
+    PIVCO_Q(8) PIVCO_Q(9) PIVCO_Q(10) PIVCO_Q(11) PIVCO_Q(12) PIVCO_Q(13) PIVCO_Q(14) PIVCO_Q(15)
+#undef PIVCO_Q
+    }
+}
+#define PIVCO_HAVE_MERGE_QUAD 1
+
+/* prim_merge_quad8_mt (max-trick) moved to prims-quad.h */
+
 PIVCO_PRIM_ALWAYS_INLINE void prim_codec_init(void)
 { codec_init_neon(); }
 
