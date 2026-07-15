@@ -789,9 +789,13 @@ static inline void init_neon(uint8_t *ranks, int n,
  * old 4x mred (12 vpaddq) + 8 vgetq_lane SIMD->GPR extracts with 4 vpaddq +
  * one vget_lane_u64 -- the chunk masks now arrive as a single word that also
  * feeds a vcnt popcount with no stack round-trip. */
-static inline uint64_t masks64_neon(uint8x16_t v0, uint8x16_t v1,
-                                       uint8x16_t v2, uint8x16_t v3,
-                                       uint8x16_t vt, uint8x16_t bw)
+/* SIMD-side variant: returns the 8 mask bytes in a D-register so the
+ * caller can vcnt the byte-popcounts BEFORE moving the mask to a GPR --
+ * keeping the cursor chain off the GPR->SIMD fmov (a load-port uop that
+ * would sit ~6cy mid-chain). */
+static inline uint8x8_t masks64v_neon(uint8x16_t v0, uint8x16_t v1,
+                                      uint8x16_t v2, uint8x16_t v3,
+                                      uint8x16_t vt, uint8x16_t bw)
 {
     uint8x16_t w0 = vandq_u8(vcgtq_u8(v0, vt), bw);   /* chunks 0,1 */
     uint8x16_t w1 = vandq_u8(vcgtq_u8(v1, vt), bw);   /* chunks 2,3 */
@@ -800,8 +804,14 @@ static inline uint64_t masks64_neon(uint8x16_t v0, uint8x16_t v1,
     uint8x16_t t0 = vpaddq_u8(w0, w1);
     uint8x16_t t1 = vpaddq_u8(w2, w3);
     uint8x16_t u0 = vpaddq_u8(t0, t1);
-    uint8x16_t r  = vpaddq_u8(u0, u0);                /* low 8 bytes = mask_0..7 */
-    return vget_lane_u64(vreinterpret_u64_u8(vget_low_u8(r)), 0);
+    return vget_low_u8(vpaddq_u8(u0, u0));            /* low 8 bytes = mask_0..7 */
+}
+static inline uint64_t masks64_neon(uint8x16_t v0, uint8x16_t v1,
+                                       uint8x16_t v2, uint8x16_t v3,
+                                       uint8x16_t vt, uint8x16_t bw)
+{
+    return vget_lane_u64(vreinterpret_u64_u8(
+               masks64v_neon(v0, v1, v2, v3, vt, bw)), 0);
 }
 
 /* full: both sides compacted (right -> tmp, left in place into ranks).
@@ -820,6 +830,40 @@ static inline uint64_t masks64_neon(uint8x16_t v0, uint8x16_t v1,
  * `p16rev`).  The ~40 KB p16rev tables (tabA 4 KB + tabB 36 KB) make it NEON / big-
  * L1 only; the 16-byte tail overstore is absorbed by the ranks +64 / tmp +2N
  * scratch slack (codec.c). */
+/* Scatter one 64-rank group-set: per 16-lane group, ONE combined shuffle
+ * index (p16rev_tabA[m0] | p16rev_tabB0[m1]+pc0) yields both sides at
+ * once -- the register IS the left output; a loop-invariant full-reverse
+ * vqtbl1 recovers the right (top-pc reversed lanes at [0,pc); the [pc,16)
+ * tail is overwritten by the next group).  Prefix-summed popcounts give
+ * each group's store offsets up front -- no serial cursor chain across
+ * the 4 groups (issue #5).  Stores run 16 wide, up to +48/+16 past the
+ * valid counts into the ranks+64 / tmp+2N scratch slack.  Returns the
+ * group-set's right count. */
+__attribute__((always_inline)) static inline
+int part64_full_neon(uint8x16_t v0, uint8x16_t v1, uint8x16_t v2, uint8x16_t v3,
+                     uint64_t mask_word, uint64_t pcw,
+                     uint8_t *ldst, uint8_t *rdst)
+{
+    uint64_t pfx = pcw * 0x0101010101010101ULL;
+    uint8x16_t vg[4] = { v0, v1, v2, v3 };
+    static const uint8_t rev16_a[16] = {15,14,13,12,11,10,9,8,7,6,5,4,3,2,1,0};
+    uint8x16_t rev16 = vld1q_u8(rev16_a);
+#define _PART(g) do {                                                       \
+        uint8_t  m0 = (uint8_t)(mask_word >> (16*(g)));                     \
+        uint8_t  m1 = (uint8_t)(mask_word >> (16*(g) + 8));                 \
+        uint32_t pc0 = (uint32_t)((pcw >> (16*(g)))     & 0xFF);            \
+        uint32_t cr  = (g) == 0 ? 0u                                        \
+                     : (uint32_t)((pfx >> (8*(2*(g) - 1))) & 0xFF);         \
+        uint8x16_t ri = vorrq_u8(vld1q_u8(p16rev_tabA[m0]),                 \
+                                 vld1q_u8(&p16rev_tabB0[m1][pc0]));         \
+        uint8x16_t comb = vqtbl1q_u8(vg[g], ri);                           \
+        vst1q_u8(ldst + (16*(g) - cr), comb);                              \
+        vst1q_u8(rdst + cr, vqtbl1q_u8(comb, rev16));                       \
+    } while (0)
+    _PART(0); _PART(1); _PART(2); _PART(3);
+#undef _PART
+    return (int)(pfx >> 56);
+}
 static inline int part_full_neon(uint8_t *ranks, int n, uint8_t thr,
                                     uint8_t *bm, uint8_t *tmp)
 {
@@ -829,45 +873,38 @@ static inline int part_full_neon(uint8_t *ranks, int n, uint8_t thr,
     uint8x16_t vt = vdupq_n_u8(thr);
     static const uint8_t bw_a[16] = {1,2,4,8,16,32,64,128, 1,2,4,8,16,32,64,128};
     uint8x16_t bw = vld1q_u8(bw_a);
-    /* Right recovery: reversing the WHOLE comb register lands the top-pc reversed
-     * right lanes at output [0,pc) (the [pc,16) tail is left-reversed garbage the
-     * next group overwrites). */
-    static const uint8_t rev16_a[16] = {15,14,13,12,11,10,9,8,7,6,5,4,3,2,1,0};
-    uint8x16_t rev16 = vld1q_u8(rev16_a);
-    for (; j + 64 <= n; j += 64) {
-        uint8x16_t v0 = vld1q_u8(ranks + j);
-        uint8x16_t v1 = vld1q_u8(ranks + j + 16);
-        uint8x16_t v2 = vld1q_u8(ranks + j + 32);
-        uint8x16_t v3 = vld1q_u8(ranks + j + 48);
-        uint64_t mask_word = masks64_neon(v0, v1, v2, v3, vt, bw);
-        memcpy(bm + (j >> 3), &mask_word, 8);
-        uint64_t pcw = vget_lane_u64(vreinterpret_u64_u8(
-                           vcnt_u8(vcreate_u8(mask_word))), 0);
-        /* Prefix-sum the per-chunk popcounts (byte k of pfx = sum pc[0..k]) so
-         * each group's store offsets (cr rights / 16g-cr lefts before it) are
-         * known up front -- no serial n_left/n_right chain across the 4 groups;
-         * the cursors advance once per 64.  Overlap safety is unchanged: group
-         * g+1's store still starts exactly at group g's valid end, and all 4
-         * input loads precede every store in program order.  (issue #5) */
-        uint64_t pfx = pcw * 0x0101010101010101ULL;
-        uint8x16_t vg[4] = { v0, v1, v2, v3 };
-#define _PART(g) do {                                                       \
-        uint8_t  m0 = (uint8_t)(mask_word >> (16*(g)));                     \
-        uint8_t  m1 = (uint8_t)(mask_word >> (16*(g) + 8));                 \
-        uint32_t pc0 = (uint32_t)((pcw >> (16*(g)))     & 0xFF);            \
-        uint32_t cr  = (g) == 0 ? 0u                                        \
-                     : (uint32_t)((pfx >> (8*(2*(g) - 1))) & 0xFF);         \
-        uint8x16_t ri = vorrq_u8(vld1q_u8(p16rev_tabA[m0]),                   \
-                                 vld1q_u8(&p16rev_tabB0[m1][pc0]));           \
-        uint8x16_t comb = vqtbl1q_u8(vg[g], ri);                           \
-        vst1q_u8(ranks + n_left + (16*(g) - cr), comb);                     \
-        vst1q_u8(tmp + n_right + cr, vqtbl1q_u8(comb, rev16));              \
-    } while (0)
-        _PART(0); _PART(1); _PART(2); _PART(3);
-#undef _PART
-        uint32_t total_r = (uint32_t)(pfx >> 56);
-        n_right += (int)total_r;
-        n_left  += 64 - (int)total_r;
+    /* Software-pipelined one iteration deep (like the decode merges): the
+     * carried chain (loads -> cgt -> three serial vpaddq -> lane move ->
+     * multiply -> cursors) is ~2x the loop's port work, so the NEXT
+     * group-set's mask + popcount are started under the current scatter.
+     * The mask stays SIMD-side (masks64v_neon) and is vcnt'd there, so the
+     * popcount never round-trips through a GPR->SIMD fmov. */
+    if (j + 64 <= n) {
+        uint8x16_t c0 = vld1q_u8(ranks + j),      c1 = vld1q_u8(ranks + j + 16);
+        uint8x16_t c2 = vld1q_u8(ranks + j + 32), c3 = vld1q_u8(ranks + j + 48);
+        uint8x8_t mv = masks64v_neon(c0, c1, c2, c3, vt, bw);
+        uint64_t w   = vget_lane_u64(vreinterpret_u64_u8(mv), 0);
+        uint64_t pcw = vget_lane_u64(vreinterpret_u64_u8(vcnt_u8(mv)), 0);
+        for (; j + 128 <= n; j += 64) {
+            uint8x16_t n0 = vld1q_u8(ranks + j + 64), n1 = vld1q_u8(ranks + j + 80);
+            uint8x16_t n2 = vld1q_u8(ranks + j + 96), n3 = vld1q_u8(ranks + j + 112);
+            uint8x8_t nmv = masks64v_neon(n0, n1, n2, n3, vt, bw);
+            uint64_t nw   = vget_lane_u64(vreinterpret_u64_u8(nmv), 0);
+            uint64_t npcw = vget_lane_u64(vreinterpret_u64_u8(vcnt_u8(nmv)), 0);
+            memcpy(bm + (j >> 3), &w, 8);
+            int tr = part64_full_neon(c0, c1, c2, c3, w, pcw,
+                                      ranks + n_left, tmp + n_right);
+            n_right += tr;
+            n_left  += 64 - tr;
+            c0 = n0; c1 = n1; c2 = n2; c3 = n3;
+            w = nw; pcw = npcw;
+        }
+        memcpy(bm + (j >> 3), &w, 8);
+        int tr = part64_full_neon(c0, c1, c2, c3, w, pcw,
+                                  ranks + n_left, tmp + n_right);
+        n_right += tr;
+        n_left  += 64 - tr;
+        j += 64;
     }
     for (; j < n; j++) {
         if ((j & 7) == 0) bm[j >> 3] = 0;
