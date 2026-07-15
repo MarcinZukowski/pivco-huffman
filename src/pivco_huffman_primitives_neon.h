@@ -22,7 +22,7 @@
 #include "pivco_huffman_common.h"
 #include "pivco_huffman_neon_tables.h"   /* expand_tab*, compress_tab* */
 #include "pivco_huffman_neon_flat.h"     /* flat_d{2,3,4,5,6}_unpack */
-#include "pivco_huffman_neon_pack.h"     /* pack_d{5,6,7}_neon (ryg pack) */
+#include "pivco_huffman_neon_pack.h"     /* pack_d{5,6,7}_neon (variable-shift pack) */
 #include "pivco_prof.h"
 
 #include <arm_neon.h>
@@ -975,22 +975,48 @@ static inline int pack_d2_neon(uint8_t *out, const uint8_t *ranks, int n, uint8_
 }
 
 /* D=3: 8 ranks -> 24 bits, u32 horizontal accumulator. */
+/* D=3: pair adjacent codes into 6-bit values the D=4 way -- per-lane
+ * {0,3} shifts + one vpaddq (pair = c_even + 8 c_odd, one pair per
+ * byte), with the base subtract distributed through the mod-256 pairing
+ * (- 9*base, exact since the true pair < 64) -- then run the D=6
+ * variable-shift pyramid on the pairs: a 3-bit LSB-first stream IS the
+ * 6-bit LSB-first stream of its pairs, so the wire is unchanged and D=6
+ * needs no final shift.  32 codes/iter, with a 16-code self-paired
+ * cleanup.  Bounded like pack_d{5,6,7}: the 16-byte store runs only while
+ * it fits inside total_bytes, and the scalar tail packs + overwrites the
+ * remaining codes, so nothing is written past total_bytes. */
 static inline int pack_d3_neon(uint8_t *out, const uint8_t *ranks, int n, uint8_t base)
 {
-    static const int32_t shifts_lo[4] = { 0, 3, 6, 9 };
-    static const int32_t shifts_hi[4] = { 12, 15, 18, 21 };
-    uint8x8_t vb = vdup_n_u8(base);
+    static const int8_t  shifts_p[16] = { 0,3, 0,3, 0,3, 0,3, 0,3, 0,3, 0,3, 0,3 };
+    static const int8_t  shifts_1[16] = { 2,0, 2,0, 2,0, 2,0, 2,0, 2,0, 2,0, 2,0 };
+    static const int16_t shifts_2[8]  = { 2,-2, 2,-2, 2,-2, 2,-2 };
+    static const int32_t shifts_4[4]  = { 4,-4, 4,-4 };
+    const int8x16_t  shp = vld1q_s8(shifts_p);
+    const uint8x16_t b9  = vdupq_n_u8((uint8_t)(9 * base));
+    const int8x16_t  s1  = vld1q_s8(shifts_1);
+    const int16x8_t  s2  = vld1q_s16(shifts_2);
+    const int32x4_t  s3  = vld1q_s32(shifts_4);
+    const uint8x16_t compact = vld1q_u8(pivco_pack_compact_d6_neon);
+    const int total_bytes = (n * 3 + 7) >> 3;
     int i = 0;
-    for (; i + 8 <= n; i += 8) {
-        uint8x8_t b8 = vsub_u8(vld1_u8(ranks + i), vb);    /* local code in [0,2^D); no mask needed */
-        uint16x8_t v = vmovl_u8(b8);
-        uint32x4_t lo = vshlq_u32(vmovl_u16(vget_low_u16(v)),  vld1q_s32(shifts_lo));
-        uint32x4_t hi = vshlq_u32(vmovl_u16(vget_high_u16(v)), vld1q_s32(shifts_hi));
-        uint32_t packed = vaddvq_u32(vaddq_u32(lo, hi));
-        int bi = i * 3 / 8;
-        out[bi]     = (uint8_t)(packed       & 0xff);
-        out[bi + 1] = (uint8_t)((packed >> 8 ) & 0xff);
-        out[bi + 2] = (uint8_t)((packed >> 16) & 0xff);
+    for (; i + 32 <= n && ((i * 3) >> 3) + 16 <= total_bytes; i += 32) {
+        uint8x16_t b0   = vshlq_u8(vld1q_u8(ranks + i),      shp);
+        uint8x16_t b1   = vshlq_u8(vld1q_u8(ranks + i + 16), shp);
+        uint8x16_t pair = vsubq_u8(vpaddq_u8(b0, b1), b9);
+        uint16x8_t w16  = vreinterpretq_u16_u8(vshlq_u8(pair, s1));
+        uint32x4_t w32  = vreinterpretq_u32_u16(vshlq_u16(w16, s2));
+        uint64x2_t w64  = vreinterpretq_u64_u32(vshlq_u32(w32, s3));
+        vst1q_u8(out + ((i * 3) >> 3),
+                 vqtbl1q_u8(vreinterpretq_u8_u64(w64), compact));
+    }
+    for (; i + 16 <= n && ((i * 3) >> 3) + 16 <= total_bytes; i += 16) {
+        uint8x16_t b    = vshlq_u8(vld1q_u8(ranks + i), shp);
+        uint8x16_t pair = vsubq_u8(vpaddq_u8(b, b), b9);
+        uint16x8_t w16  = vreinterpretq_u16_u8(vshlq_u8(pair, s1));
+        uint32x4_t w32  = vreinterpretq_u32_u16(vshlq_u16(w16, s2));
+        uint64x2_t w64  = vreinterpretq_u64_u32(vshlq_u32(w32, s3));
+        vst1q_u8(out + ((i * 3) >> 3),
+                 vqtbl1q_u8(vreinterpretq_u8_u64(w64), compact));
     }
     return i;
 }
