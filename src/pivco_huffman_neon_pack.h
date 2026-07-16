@@ -4,25 +4,15 @@
  * a converging-shift pack for D=3).
  *
  * Variable-shift "converging pyramid" pack, 16 codes per q-vector iter.
- * Instead of a multiply-as-shift ladder, each pairing level shifts the
- * two halves of a lane pair TOWARDS each other with one USHL of {+s,-s}
- * per-lane counts, so the fields meet at the lane boundary and each
- * level is a single instruction:
+ * Each pairing level shifts the two halves of a lane pair towards each
+ * other with one USHL of {+s,-s} per-lane counts, so the fields meet at
+ * the lane boundary and each level is a single instruction:
  *   L1 u8  {8-D, 0}:            u16 = pair  << (8-D)
  *   L2 u16 {8-D, -(8-D)}:       u32 = quad  << (16-2D)
  *   L3 u32 {16-2D, -(16-2D)}:   u64 = octet << (32-4D)
  * The compact shuffle absorbs the whole bytes of the final (32-4D)
  * re-basing shift (its tables start at byte 1 for D=5/6), leaving a
  * residual >>4 for D=5/7 and no final shift for D=6.
- *
- * BOUNDED store: the 16-byte store carries 16-2D trailing junk bytes.
- * Rather than require output slack past the stream, the loop only runs a
- * full store while it fits entirely inside the packed region
- * ((i*D>>3)+16 <= total_bytes).  Since 16 > 2D for D<8 that always stops
- * a few chunks before the end, and the dispatcher's scalar tail --
- * which OVERWRITES bytes as it packs -- fills the remaining codes,
- * cleaning any in-buffer junk the last SIMD store left behind.  So the
- * kernel writes nothing past total_bytes and needs no padding.
  *
  * Internal header.  Not part of the public API. */
 
