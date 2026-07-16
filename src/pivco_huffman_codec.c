@@ -449,6 +449,38 @@ int CODEC_ENCODE_ENTRY(const uint8_t *symbols, size_t n,
  * is on.  The root call passes 0 -- the caller's output buffer has no
  * over-read slack. */
 
+/* ---------- Root-merge store-alignment peel ----------
+ *
+ * The root merge (node_id == tree_root, the only invocation whose
+ * out_buf is CALLER memory) streams wide SIMD stores into `symbols`;
+ * every other merge writes layout-fixed scratch.  When `symbols` is
+ * not 64-byte-aligned every wide store splits a cache line — a 13-16%
+ * x86 decode tax that comes and goes with the caller's allocator luck,
+ * since malloc guarantees only 16 bytes (the "allocation lottery"; see
+ * PIVCO_MERGE_ALIGN_PEEL in pivco_huffman_common.h and
+ * results/exp_alloc7 on the ping-pong-results branch).
+ *
+ * Fix: decode the first (-symbols & 63) symbols branchlessly (root
+ * bitmaps can be ~50/50, so a branchy peel would mispredict its way
+ * out of the win), then hand the kernel a line-aligned destination.
+ * The peel is a multiple of 8 so the bitmap handoff stays
+ * byte-aligned; reading up to `peel` bytes ahead of a vec cursor is
+ * safe for regions >= 64 bytes (guarded at the sites; at the root,
+ * tail_ok=0 means children were carved from scratch, disjoint from
+ * symbols).  x86 backends only: NEON's 8/16-byte stores at >=16-byte
+ * alignment never split a line, and the scalar backend stores bytes.
+ * Flat roots are not peeled (D-bit packed cursor); 64-byte-align
+ * output buffers if that case matters to you. */
+#if defined(PIVCO_BACKEND_X86) || defined(PIVCO_BACKEND_AVX512)
+#define PIVCO_ROOT_ALIGN_PEEL 1
+static inline int root_peel_len(const uint8_t *out, int n)
+{
+    if (((uintptr_t)out & 7) != 0) return 0;  /* can't reach a line boundary */
+    int p = PIVCO_MERGE_ALIGN_PEEL(out);
+    return p < n ? p : 0;
+}
+#endif
+
 static void codec_decode_subtree(const pivco_huffman_table_t *table,
                                    int16_t node_id, int K,
                                    uint8_t *out_buf,
@@ -482,10 +514,20 @@ static void codec_decode_subtree(const pivco_huffman_table_t *table,
         /* No K_right header (kr_header_needed returns false). */
         uint8_t bm_scratch[(size_t)bitmap_bytes(K) + 16];
         const uint8_t *bm = wire_read_bitmap(in_ptr, K, bm_scratch);
-        prim_merge_cst_cst(bm, K,
+        int j0 = 0;
+#ifdef PIVCO_ROOT_ALIGN_PEEL
+        if (node_id == table->tree_root) {
+            j0 = root_peel_len(out_buf, K);
+            const uint8_t two[2] = { (uint8_t)table->tree[node->left].symbol,
+                                     (uint8_t)table->tree[node->right].symbol };
+            for (int j = 0; j < j0; j++)
+                out_buf[j] = two[(bm[j >> 3] >> (j & 7)) & 1];
+        }
+#endif
+        prim_merge_cst_cst(bm + (j0 >> 3), K - j0,
                            (uint8_t)table->tree[node->left].symbol,
                            (uint8_t)table->tree[node->right].symbol,
-                           out_buf);
+                           out_buf + j0);
         return;
     }
 
@@ -499,9 +541,22 @@ static void codec_decode_subtree(const pivco_huffman_table_t *table,
             : scratch_carve(&scratch_top, K_right);
         codec_decode_subtree(table, node->right, K_right,
                               right_buf, in_ptr, scratch_top, g_dec_inplace);
-        prim_merge_cst_vec(bm, K,
+        int j0 = 0, rc0 = 0;
+#ifdef PIVCO_ROOT_ALIGN_PEEL
+        if (node_id == table->tree_root && K_right >= 64) {
+            j0 = root_peel_len(out_buf, K);
+            const uint8_t lsym = (uint8_t)table->tree[node->left].symbol;
+            for (int j = 0; j < j0; j++) {
+                int mb = (bm[j >> 3] >> (j & 7)) & 1;
+                uint8_t rv = right_buf[rc0];
+                out_buf[j] = mb ? rv : lsym;
+                rc0 += mb;
+            }
+        }
+#endif
+        prim_merge_cst_vec(bm + (j0 >> 3), K - j0,
                            (uint8_t)table->tree[node->left].symbol,
-                           right_buf, out_buf);
+                           right_buf + rc0, out_buf + j0);
         return;
     }
 
@@ -534,7 +589,20 @@ static void codec_decode_subtree(const pivco_huffman_table_t *table,
                               left_buf,  in_ptr, scratch_top, g_dec_inplace);
         codec_decode_subtree(table, node->right, K_right,
                               right_buf, in_ptr, scratch_top, g_dec_inplace);
-        prim_merge_vec_vec(bm, K, left_buf, right_buf, out_buf);
+        int j0 = 0, rc0 = 0, lc0 = 0;
+#ifdef PIVCO_ROOT_ALIGN_PEEL
+        if (node_id == table->tree_root && K_right >= 64 && K_left >= 64) {
+            j0 = root_peel_len(out_buf, K);
+            for (int j = 0; j < j0; j++) {
+                int mb = (bm[j >> 3] >> (j & 7)) & 1;
+                uint8_t rv = right_buf[rc0], lv = left_buf[lc0];
+                out_buf[j] = mb ? rv : lv;
+                rc0 += mb; lc0 += 1 - mb;
+            }
+        }
+#endif
+        prim_merge_vec_vec(bm + (j0 >> 3), K - j0,
+                           left_buf + lc0, right_buf + rc0, out_buf + j0);
         return;
     }
     }
@@ -575,10 +643,20 @@ int CODEC_DECODE_ENTRY(const uint8_t *in, size_t in_len,
         const uint8_t *bm = wire_read_bitmap(&ptr, N, bm_scratch);
         const pivco_tree_node_t *left_child  = &table->tree[root->left];
         const pivco_tree_node_t *right_child = &table->tree[root->right];
-        prim_merge_cst_cst(bm, N,
+        int j0 = 0;
+#ifdef PIVCO_ROOT_ALIGN_PEEL
+        j0 = root_peel_len(symbols, N);
+        if (j0) {
+            const uint8_t two[2] = { (uint8_t)left_child->symbol,
+                                     (uint8_t)right_child->symbol };
+            for (int j = 0; j < j0; j++)
+                symbols[j] = two[(bm[j >> 3] >> (j & 7)) & 1];
+        }
+#endif
+        prim_merge_cst_cst(bm + (j0 >> 3), N - j0,
                                (uint8_t)left_child->symbol,
                                (uint8_t)right_child->symbol,
-                               symbols);
+                               symbols + j0);
         *consumed = (size_t)(ptr - in);
         return PIVCO_OK;
     }
