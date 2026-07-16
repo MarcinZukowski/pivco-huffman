@@ -473,6 +473,147 @@ static void prim_pack_asof_f9974f5(const ctx_t *c) {
 }
 #endif /* USE_NEON_KERNELS */
 
+
+/* ============================================================================
+ * pack : pyramid-sse — 128-bit twin of the production AVX2 ryg/pyramid pack
+ *   (pivco_huffman_avx2_pack.h).  16 codes per xmm iter: maddubs (2D-bit
+ *   byte pairs) -> madd (4D-bit dword pairs) -> qword fuse (srlq +
+ *   and/andn/or) -> pshufb compact -> one 16-byte store whose trailing
+ *   junk (16 - 2D bytes) is overwritten by the next iter; the bench
+ *   pack_out +16 slack absorbs the last iter's junk (as
+ *   PIVCO_MAX_ENCODED_SIZE would in production).  Candidate production
+ *   fallback for the non-AVX2 tier (c3), where d5/6/7 currently pack
+ *   fully scalar and d3 used the mullo+hadd 8-codes/iter form.
+ *   PROMOTED to production for d3/5/6/7 on the non-AVX2 tier (2026-07-16);
+ *   the rows stay as the xmm-vs-ymm / xmm-vs-multishift comparison on
+ *   AVX2/AVX-512 builds.  The replaced hadd d3 is asof-b8bf472 below.
+ * ========================================================================== */
+#if defined(__SSE4_1__)
+#define PV_PACK_SSE_PYR(NAME, D_VAL, C0,C1,C2, C3,C4,C5, C6,C7,C8, C9,C10,C11, C12,C13)  \
+static inline int NAME##_k(uint8_t *out, const uint8_t *ranks, int n, uint8_t base)      \
+{                                                                                         \
+    const __m128i c0 = _mm_set1_epi16((int16_t)(((1 << (D_VAL)) << 8) | 1));              \
+    const __m128i c1 = _mm_set1_epi32((int32_t)(((int32_t)1 << (2*(D_VAL))) << 16) | 1);  \
+    const __m128i c3m = _mm_set1_epi64x((int64_t)(((int64_t)1 << (4*(D_VAL))) - 1));      \
+    const __m128i compact = _mm_setr_epi8(C0,C1,C2, C3,C4,C5, C6,C7,C8, C9,C10,C11,       \
+                                          C12,C13, -1,-1);                                \
+    const __m128i vb = _mm_set1_epi8((char)base);                                         \
+    int i = 0;                                                                            \
+    for (; i + 16 <= n; i += 16) {                                                        \
+        __m128i cb = _mm_sub_epi8(_mm_loadu_si128((const __m128i *)(ranks + i)), vb);     \
+        __m128i x  = _mm_maddubs_epi16(c0, cb);                                           \
+        x = _mm_madd_epi16(x, c1);                                                        \
+        __m128i xs = _mm_srli_epi64(x, 32 - 4*(D_VAL));                                   \
+        x = _mm_or_si128(_mm_and_si128(x, c3m), _mm_andnot_si128(c3m, xs));               \
+        _mm_storeu_si128((__m128i *)(out + ((i * (D_VAL)) >> 3)),                         \
+                          _mm_shuffle_epi8(x, compact));                                  \
+    }                                                                                     \
+    return i;                                                                             \
+}
+/* compact patterns: bytes [0..D-1] from qword0, [D..2D-1] from qword1 (pos 8+). */
+PV_PACK_SSE_PYR(pv_pack_pyr_sse_d2, 2, 0,1,8,  9,-1,-1, -1,-1,-1, -1,-1,-1, -1,-1)
+PV_PACK_SSE_PYR(pv_pack_pyr_sse_d3, 3, 0,1,2,  8,9,10,  -1,-1,-1, -1,-1,-1, -1,-1)
+PV_PACK_SSE_PYR(pv_pack_pyr_sse_d4, 4, 0,1,2,  3,8,9,   10,11,-1, -1,-1,-1, -1,-1)
+PV_PACK_SSE_PYR(pv_pack_pyr_sse_d5, 5, 0,1,2,  3,4,8,   9,10,11,  12,-1,-1, -1,-1)
+PV_PACK_SSE_PYR(pv_pack_pyr_sse_d6, 6, 0,1,2,  3,4,5,   8,9,10,   11,12,13, -1,-1)
+PV_PACK_SSE_PYR(pv_pack_pyr_sse_d7, 7, 0,1,2,  3,4,5,   6,8,9,    10,11,12, 13,14)
+#undef PV_PACK_SSE_PYR
+
+/* ============================================================================
+ * pack : asof-b8bf472 — the pre-pyramid SSE4.1 D=3 (prior production on the
+ *   non-AVX2 tier).  8 ranks -> 24 bits via _mm_mullo_epi32 multiply-as-shift
+ *   + two hadds; frozen verbatim from b8bf472:src/pivco_huffman_primitives_x86.h.
+ * ========================================================================== */
+static inline int pv_pack_d3_asof_b8bf472(uint8_t *out, const uint8_t *ranks, int n, uint8_t base)
+{
+    const __m128i mlo = _mm_setr_epi32(1, 8, 64, 512);
+    const __m128i mhi = _mm_setr_epi32(4096, 32768, 262144, 2097152);
+    const __m128i vb = _mm_set1_epi8((char)base);
+    int i = 0;
+    for (; i + 8 <= n; i += 8) {
+        __m128i v8 = _mm_sub_epi8(_mm_loadl_epi64((const __m128i *)(ranks + i)), vb);
+        __m128i v = _mm_cvtepu8_epi16(v8);                 /* 8 ranks -> u16; code in [0,2^D) */
+        __m128i vlo = _mm_unpacklo_epi16(v, _mm_setzero_si128());
+        __m128i vhi = _mm_unpackhi_epi16(v, _mm_setzero_si128());
+        vlo = _mm_mullo_epi32(vlo, mlo);
+        vhi = _mm_mullo_epi32(vhi, mhi);
+        __m128i s = _mm_add_epi32(vlo, vhi);
+        s = _mm_hadd_epi32(s, s);
+        s = _mm_hadd_epi32(s, s);
+        uint32_t packed = (uint32_t)_mm_cvtsi128_si32(s);
+        int bi = i * 3 / 8;
+        out[bi    ] = (uint8_t)(packed      );
+        out[bi + 1] = (uint8_t)(packed >>  8);
+        out[bi + 2] = (uint8_t)(packed >> 16);
+    }
+    return i;
+}
+static void prim_pack_d3_asof_b8bf472(const ctx_t *c) {
+    uint8_t *out = c->pack_out; const uint8_t *ranks = c->ranks;
+    int n = c->n, D = c->D; uint8_t base = c->rank_base;
+    int total_bytes = (n * D + 7) >> 3;
+    if (total_bytes > 0) out[total_bytes - 1] = 0;
+    int i = D == 3 ? pv_pack_d3_asof_b8bf472(out, ranks, n, base) : 0;
+    if (i >= n) return;
+    int bit_pos = i * D;
+    int byte_idx = bit_pos >> 3;
+    int bits_in_buf = bit_pos & 7;
+    uint64_t buf = bits_in_buf > 0
+        ? (uint64_t)out[byte_idx] & ((1u << bits_in_buf) - 1)
+        : 0;
+    for (; i < n; i++) {
+        uint32_t local = (uint32_t)(uint8_t)(ranks[i] - base);  /* code in [0,2^D); no mask */
+        buf |= (uint64_t)local << bits_in_buf;
+        bits_in_buf += D;
+        while (bits_in_buf >= 8) {
+            out[byte_idx++] = (uint8_t)(buf & 0xff);
+            buf >>= 8;
+            bits_in_buf -= 8;
+        }
+    }
+    if (bits_in_buf > 0) out[byte_idx] = (uint8_t)(buf & ((1u << bits_in_buf) - 1));
+}
+
+/* Adapter: same call shape as the production ST_PACK row; dispatcher body
+ * mirrors pack_dN_x86 (zero last byte, per-D kernel, scalar bit tail). */
+static void prim_pack_pyr_sse(const ctx_t *c) {
+    uint8_t *out = c->pack_out; const uint8_t *ranks = c->ranks;
+    int n = c->n, D = c->D; uint8_t base = c->rank_base;
+    int total_bytes = (n * D + 7) >> 3;
+    if (total_bytes > 0) out[total_bytes - 1] = 0;
+
+    int i = 0;
+    switch (D) {
+    case 2: i = pv_pack_pyr_sse_d2_k(out, ranks, n, base); break;
+    case 3: i = pv_pack_pyr_sse_d3_k(out, ranks, n, base); break;
+    case 4: i = pv_pack_pyr_sse_d4_k(out, ranks, n, base); break;
+    case 5: i = pv_pack_pyr_sse_d5_k(out, ranks, n, base); break;
+    case 6: i = pv_pack_pyr_sse_d6_k(out, ranks, n, base); break;
+    case 7: i = pv_pack_pyr_sse_d7_k(out, ranks, n, base); break;
+    default: break;
+    }
+    if (i >= n) return;
+
+    int bit_pos = i * D;
+    int byte_idx = bit_pos >> 3;
+    int bits_in_buf = bit_pos & 7;
+    uint64_t buf = bits_in_buf > 0
+        ? (uint64_t)out[byte_idx] & ((1u << bits_in_buf) - 1)
+        : 0;
+    for (; i < n; i++) {
+        uint32_t local = (uint32_t)(uint8_t)(ranks[i] - base);  /* code in [0,2^D); no mask */
+        buf |= (uint64_t)local << bits_in_buf;
+        bits_in_buf += D;
+        while (bits_in_buf >= 8) {
+            out[byte_idx++] = (uint8_t)(buf & 0xff);
+            buf >>= 8;
+            bits_in_buf -= 8;
+        }
+    }
+    if (bits_in_buf > 0) out[byte_idx] = (uint8_t)(buf & ((1u << bits_in_buf) - 1));
+}
+#endif /* __SSE4_1__ */
+
 /* ============================================================================
  * Registry — pack family (no-op where the ISA is unavailable)
  * ========================================================================== */
@@ -487,6 +628,13 @@ static void pv_register_pack(void) {
         PV_VARIANT_D(ST_PACK, "asof-2f80076", d, PV_ISA_AVX512,
                      "cd119a6~1 PACK_DN_AVX512_UNIFIED",
                      "sllv + reduce_add pack, 8 codes/iter", 0, PV_FN_AVX512F(prim_pack_sllv));
+        if (d == 3)
+            PV_VARIANT_D(ST_PACK, "asof-b8bf472", d, PV_ISA_SSE4,
+                         "b8bf472 (prior non-AVX2 production)",
+                         "mullo multiply-as-shift + 2x hadd, 8 codes/iter; replaced by the sse pyramid", 0, PV_FN_SSE(prim_pack_d3_asof_b8bf472));
+        PV_VARIANT_D(ST_PACK, "pyramid-sse", d, PV_ISA_SSE4,
+                     "128-bit twin of the AVX2 ryg/pyramid pack",
+                     "maddubs->madd->qword-fuse->pshufb, 16 codes/iter; candidate non-AVX2 production (c3 tier packs d5/6/7 scalar today)", 0, PV_FN_SSE(prim_pack_pyr_sse));
         PV_VARIANT_D(ST_PACK, "asof-f9974f5", d, PV_ISA_NEON,
                      "f9974f5 (prior production)",
                      "pre-PR#22 per-D packs: paired-add d2/d4, u32-horadd d3, ryg multiply-as-shift d5/d6/d7", 0, PV_FN_NEON(prim_pack_asof_f9974f5));

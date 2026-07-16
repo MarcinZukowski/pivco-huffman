@@ -1006,33 +1006,45 @@ static inline int pack_d8_sse_x86(uint8_t *out, const uint8_t *ranks, int n, uin
     return i;
 }
 
-/* SSE4.1 D=3: 8 ranks -> 24 bits via _mm_mullo_epi32 multiply-as-shift.
- * SSE4.1 lacks _mm_sllv_epi32; multiplying uint32 by 2^k achieves the
- * same per-lane left shift. */
-static inline int pack_d3_sse_x86(uint8_t *out, const uint8_t *ranks, int n, uint8_t base)
-{
-    const __m128i mlo = _mm_setr_epi32(1, 8, 64, 512);
-    const __m128i mhi = _mm_setr_epi32(4096, 32768, 262144, 2097152);
-    const __m128i vb = _mm_set1_epi8((char)base);
-    int i = 0;
-    for (; i + 8 <= n; i += 8) {
-        __m128i v8 = _mm_sub_epi8(_mm_loadl_epi64((const __m128i *)(ranks + i)), vb);
-        __m128i v = _mm_cvtepu8_epi16(v8);                 /* 8 ranks -> u16; code in [0,2^D) */
-        __m128i vlo = _mm_unpacklo_epi16(v, _mm_setzero_si128());
-        __m128i vhi = _mm_unpackhi_epi16(v, _mm_setzero_si128());
-        vlo = _mm_mullo_epi32(vlo, mlo);
-        vhi = _mm_mullo_epi32(vhi, mhi);
-        __m128i s = _mm_add_epi32(vlo, vhi);
-        s = _mm_hadd_epi32(s, s);
-        s = _mm_hadd_epi32(s, s);
-        uint32_t packed = (uint32_t)_mm_cvtsi128_si32(s);
-        int bi = i * 3 / 8;
-        out[bi    ] = (uint8_t)(packed      );
-        out[bi + 1] = (uint8_t)(packed >>  8);
-        out[bi + 2] = (uint8_t)(packed >> 16);
-    }
-    return i;
+/* SSE4.1 D=3/5/6/7: 128-bit twin of the AVX2 ryg/pyramid pack (see
+ * pivco_huffman_avx2_pack.h for the op-by-op story).  16 codes per xmm
+ * iter: maddubs (2D-bit byte pairs) -> madd (4D-bit dword pairs) ->
+ * qword fuse (srlq + and/andn/or) -> pshufb compact -> one 16-byte
+ * store.  The store's trailing junk (16 - 2D bytes) is overwritten by
+ * the next iter; the LAST iter's junk needs slack past the packed
+ * stream, which PIVCO_MAX_ENCODED_SIZE provides (same contract as the
+ * AVX2 kernels).  Replaces the mullo+hadd 8-codes/iter D=3 form and
+ * the D=5/6/7 scalar fallback on non-AVX2 hosts: c3/IvyBridge measures
+ * 5.1x (d3) and 19-22x (d5-d7); the old d3 is asof-b8bf472 in
+ * bench/prim_variants.  D=2/4 keep the simpler maddubs forms above
+ * (faster than a full pyramid at those widths on every host tested). */
+#define PIVCO_PACK_SSE_DN(NAME, D_VAL, C0,C1,C2, C3,C4,C5, C6,C7,C8, C9,C10,C11, C12,C13) \
+static inline int NAME(uint8_t *out, const uint8_t *ranks, int n, uint8_t base)          \
+{                                                                                         \
+    const __m128i c0 = _mm_set1_epi16((int16_t)(((1 << (D_VAL)) << 8) | 1));              \
+    const __m128i c1 = _mm_set1_epi32((int32_t)(((int32_t)1 << (2*(D_VAL))) << 16) | 1);  \
+    const __m128i c3m = _mm_set1_epi64x((int64_t)(((int64_t)1 << (4*(D_VAL))) - 1));      \
+    const __m128i compact = _mm_setr_epi8(C0,C1,C2, C3,C4,C5, C6,C7,C8, C9,C10,C11,       \
+                                          C12,C13, -1,-1);                                \
+    const __m128i vb = _mm_set1_epi8((char)base);                                         \
+    int i = 0;                                                                            \
+    for (; i + 16 <= n; i += 16) {                                                        \
+        __m128i cb = _mm_sub_epi8(_mm_loadu_si128((const __m128i *)(ranks + i)), vb);     \
+        __m128i x  = _mm_maddubs_epi16(c0, cb);                                           \
+        x = _mm_madd_epi16(x, c1);                                                        \
+        __m128i xs = _mm_srli_epi64(x, 32 - 4*(D_VAL));                                   \
+        x = _mm_or_si128(_mm_and_si128(x, c3m), _mm_andnot_si128(c3m, xs));               \
+        _mm_storeu_si128((__m128i *)(out + ((i * (D_VAL)) >> 3)),                         \
+                          _mm_shuffle_epi8(x, compact));                                  \
+    }                                                                                     \
+    return i;                                                                             \
 }
+/* compact patterns: bytes [0..D-1] from qword0, [D..2D-1] from qword1 (pos 8+). */
+PIVCO_PACK_SSE_DN(pack_d3_sse_x86, 3, 0,1,2,  8,9,10,  -1,-1,-1, -1,-1,-1, -1,-1)
+PIVCO_PACK_SSE_DN(pack_d5_sse_x86, 5, 0,1,2,  3,4,8,   9,10,11,  12,-1,-1, -1,-1)
+PIVCO_PACK_SSE_DN(pack_d6_sse_x86, 6, 0,1,2,  3,4,5,   8,9,10,   11,12,13, -1,-1)
+PIVCO_PACK_SSE_DN(pack_d7_sse_x86, 7, 0,1,2,  3,4,5,   6,8,9,    10,11,12, 13,14)
+#undef PIVCO_PACK_SSE_DN
 
 /* Dispatcher: native SIMD per-D path (mirrors pack_dN_x86) + scalar tail. */
 static inline void pack_dN_x86(uint8_t *out, const uint8_t *ranks,
@@ -1054,7 +1066,9 @@ static inline void pack_dN_x86(uint8_t *out, const uint8_t *ranks,
 #else
     case 2: i = pack_d2_sse_x86(out, ranks, n, base); break;
     case 3: i = pack_d3_sse_x86(out, ranks, n, base); break;
-    /* D=5,6,7 fall through to the scalar tail on SSE4.1-only hosts. */
+    case 5: i = pack_d5_sse_x86(out, ranks, n, base); break;
+    case 6: i = pack_d6_sse_x86(out, ranks, n, base); break;
+    case 7: i = pack_d7_sse_x86(out, ranks, n, base); break;
 #endif
     default: break;
     }
