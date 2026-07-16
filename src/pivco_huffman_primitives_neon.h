@@ -161,16 +161,14 @@ static inline void merge_vec_vec_neon(const uint8_t *bm, int K,
     PROF_TIC();
     const uint8_t *l_list = left, *r_list = right;
     intptr_t i = 0;
-    /* Software-pipelined one iteration deep: the carried chain (bitmap
-     * load -> vcnt -> 64-bit multiply -> cursor advance, ~12cy) is started
-     * for the NEXT iteration up front, so it
-     * resolves under the current iteration's four merges (~16cy) instead of
-     * stalling the top of each iteration.  The popcount reads the bitmap
-     * straight into SIMD (vld1_u8) rather than moving the GPR mask across --
-     * a GPR->SIMD fmov costs a load-port uop on Apple and would sit
-     * mid-chain -- while mask stays in the GPR for merge_neon_16B's SABD
-     * index.  pfx byte k = sum(bytepopcount[0..k]); bytes 1/3/5/7 are the
-     * 16-lane chunk boundaries c0, c0+c1, c0+c1+c2, total. */
+    /* Software-pipelined one iteration deep: the next iteration's carried
+     * chain (bitmap load -> vcnt -> 64-bit multiply -> cursor advance,
+     * ~12cy) is started up front so it resolves under the current four
+     * merges (~16cy).  The popcount loads the bitmap straight into SIMD
+     * (vld1_u8): a GPR->SIMD fmov costs a load-port uop on Apple and
+     * would sit mid-chain; mask stays in the GPR for merge_neon_16B's
+     * SABD index.  pfx byte k = sum(bytepopcount[0..k]); bytes 1/3/5/7
+     * are the 16-lane chunk boundaries c0, c0+c1, c0+c1+c2, total. */
 #define MERGE_VV_64(msk, pf) do {                                                     \
         intptr_t p0 = ((pf) >> 8) & 0xff, p1 = ((pf) >> 24) & 0xff,                    \
                  p2 = ((pf) >> 40) & 0xff, p3 = (pf) >> 56;                            \
@@ -789,10 +787,9 @@ static inline void init_neon(uint8_t *ranks, int n,
  * old 4x mred (12 vpaddq) + 8 vgetq_lane SIMD->GPR extracts with 4 vpaddq +
  * one vget_lane_u64 -- the chunk masks now arrive as a single word that also
  * feeds a vcnt popcount with no stack round-trip. */
-/* SIMD-side variant: returns the 8 mask bytes in a D-register so the
- * caller can vcnt the byte-popcounts BEFORE moving the mask to a GPR --
- * keeping the cursor chain off the GPR->SIMD fmov (a load-port uop that
- * would sit ~6cy mid-chain). */
+/* masks64v returns the mask bytes in a D-register so the caller can vcnt
+ * them before the GPR move, keeping the cursor chain off the GPR->SIMD
+ * fmov (a load-port uop, ~6cy mid-chain). */
 static inline uint8x8_t masks64v_neon(uint8x16_t v0, uint8x16_t v1,
                                       uint8x16_t v2, uint8x16_t v3,
                                       uint8x16_t vt, uint8x16_t bw)
@@ -830,14 +827,10 @@ static inline uint64_t masks64_neon(uint8x16_t v0, uint8x16_t v1,
  * `p16rev`).  The ~40 KB p16rev tables (tabA 4 KB + tabB 36 KB) make it NEON / big-
  * L1 only; the 16-byte tail overstore is absorbed by the ranks +64 / tmp +2N
  * scratch slack (codec.c). */
-/* Scatter one 64-rank group-set: per 16-lane group, ONE combined shuffle
- * index (p16rev_tabA[m0] | p16rev_tabB0[m1]+pc0) yields both sides at
- * once -- the register IS the left output; a loop-invariant full-reverse
- * vqtbl1 recovers the right (top-pc reversed lanes at [0,pc); the [pc,16)
- * tail is overwritten by the next group).  Prefix-summed popcounts give
- * each group's store offsets up front -- no serial cursor chain across
- * the 4 groups (issue #5).  Stores run 16 wide, up to +48/+16 past the
- * valid counts into the ranks+64 / tmp+2N scratch slack.  Returns the
+/* Scatter one 64-rank group-set (4 p16rev groups as above).  Prefix-summed
+ * popcounts give each group's store offsets up front, so the cursors
+ * advance once per 64 (issue #5).  Stores run 16 wide, up to +48/+16 past
+ * the valid counts into the ranks+64 / tmp+2N scratch slack.  Returns the
  * group-set's right count. */
 __attribute__((always_inline)) static inline
 int part64_full_neon(uint8x16_t v0, uint8x16_t v1, uint8x16_t v2, uint8x16_t v3,
@@ -875,10 +868,10 @@ static inline int part_full_neon(uint8_t *ranks, int n, uint8_t thr,
     uint8x16_t bw = vld1q_u8(bw_a);
     /* Software-pipelined one iteration deep (like the decode merges): the
      * carried chain (loads -> cgt -> three serial vpaddq -> lane move ->
-     * multiply -> cursors) is ~2x the loop's port work, so the NEXT
-     * group-set's mask + popcount are started under the current scatter.
-     * The mask stays SIMD-side (masks64v_neon) and is vcnt'd there, so the
-     * popcount never round-trips through a GPR->SIMD fmov. */
+     * multiply -> cursors) is ~2x the loop's port work, so the next
+     * group-set's mask + popcount start under the current scatter.  The
+     * mask is vcnt'd SIMD-side (masks64v_neon), keeping the GPR->SIMD
+     * fmov off the chain. */
     if (j + 64 <= n) {
         uint8x16_t c0 = vld1q_u8(ranks + j),      c1 = vld1q_u8(ranks + j + 16);
         uint8x16_t c2 = vld1q_u8(ranks + j + 32), c3 = vld1q_u8(ranks + j + 48);
@@ -986,11 +979,10 @@ static inline int pack_d2_neon(uint8_t *out, const uint8_t *ranks, int n, uint8_
 {
     static const int8_t shifts_d2[16] = { 0,2,4,6, 0,2,4,6, 0,2,4,6, 0,2,4,6 };
     const int8x16_t sh = vld1q_s8(shifts_d2);
-    /* Distribute the base subtract: shift the raw ranks and fold four into
-     * a byte, then subtract 85*base once --
+    /* Distribute the base subtract: shift raw ranks, fold four into a
+     * byte, subtract 85*base once --
      * (r0-b)+4(r1-b)+16(r2-b)+64(r3-b) = r0+4r1+16r2+64r3 - 85b, exact
-     * mod 256.  Drops one vsubq off each vector and, unrolled 4x, retires
-     * a full 16-byte store per iteration instead of four 4-byte ones. */
+     * mod 256. */
     const uint8x16_t b85 = vdupq_n_u8((uint8_t)(85 * base));
     int i = 0;
     for (; i + 64 <= n; i += 64) {
@@ -1001,7 +993,7 @@ static inline int pack_d2_neon(uint8_t *out, const uint8_t *ranks, int n, uint8_
         uint8x16_t r  = vpaddq_u8(vpaddq_u8(b0, b1), vpaddq_u8(b2, b3));
         vst1q_u8(out + (i >> 2), vsubq_u8(r, b85));
     }
-    for (; i + 16 <= n; i += 16) {   /* 16-wide cleanup; scalar tail below unchanged */
+    for (; i + 16 <= n; i += 16) {   /* 16-wide cleanup */
         uint8x16_t b  = vshlq_u8(vld1q_u8(ranks + i), sh);
         uint8x16_t s1 = vpaddq_u8(b, b);
         uint8x16_t s2 = vsubq_u8(vpaddq_u8(s1, s1), b85);
@@ -1011,17 +1003,13 @@ static inline int pack_d2_neon(uint8_t *out, const uint8_t *ranks, int n, uint8_
     return i;
 }
 
-/* D=3: 8 ranks -> 24 bits, u32 horizontal accumulator. */
-/* D=3: pair adjacent codes into 6-bit values the D=4 way -- per-lane
- * {0,3} shifts + one vpaddq (pair = c_even + 8 c_odd, one pair per
- * byte), with the base subtract distributed through the mod-256 pairing
- * (- 9*base, exact since the true pair < 64) -- then run the D=6
- * variable-shift pyramid on the pairs: a 3-bit LSB-first stream IS the
- * 6-bit LSB-first stream of its pairs, so the wire is unchanged and D=6
- * needs no final shift.  32 codes/iter, with a 16-code self-paired
- * cleanup.  Bounded like pack_d{5,6,7}: the 16-byte store runs only while
- * it fits inside total_bytes, and the scalar tail packs + overwrites the
- * remaining codes, so nothing is written past total_bytes. */
+/* D=3: pair adjacent codes into 6-bit values the D=4 way (per-lane {0,3}
+ * shifts + one vpaddq: pair = c_even + 8 c_odd, one per byte; base
+ * subtract distributed as - 9*base, exact since the true pair < 64),
+ * then run the D=6 variable-shift pyramid on the pairs -- a 3-bit
+ * LSB-first stream is exactly the 6-bit LSB-first stream of its pairs.
+ * 32 codes/iter plus a 16-code self-paired cleanup, store-bounded like
+ * pack_d{5,6,7} with the scalar tail packing the rest. */
 static inline int pack_d3_neon(uint8_t *out, const uint8_t *ranks, int n, uint8_t base)
 {
     static const int8_t  shifts_p[16] = { 0,3, 0,3, 0,3, 0,3, 0,3, 0,3, 0,3, 0,3 };
@@ -1073,7 +1061,7 @@ static inline int pack_d4_neon(uint8_t *out, const uint8_t *ranks, int n, uint8_
         uint8x16_t b1 = vshlq_u8(vld1q_u8(ranks + i + 16), sh);
         vst1q_u8(out + (i >> 1), vsubq_u8(vpaddq_u8(b0, b1), b17));
     }
-    for (; i + 16 <= n; i += 16) {   /* 16-wide cleanup; scalar tail below unchanged */
+    for (; i + 16 <= n; i += 16) {   /* 16-wide cleanup */
         uint8x16_t b = vshlq_u8(vld1q_u8(ranks + i), sh);
         vst1_u8(out + (i >> 1), vget_low_u8(vsubq_u8(vpaddq_u8(b, b), b17)));
     }
