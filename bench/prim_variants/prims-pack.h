@@ -12,14 +12,18 @@
  *                    cd119a6:src/pivco_huffman_pack_bmi2.h pack_dN_bmi2).
  *   asof-2f80076   — sllv + reduce_add pack, 8 codes/iter (the PACK macro at
  *                    cd119a6~1:src/pivco_huffman_primitives_avx512.h).
+ *   asof-f9974f5   — pre-PR#22 NEON per-D packs (git show
+ *                    f9974f5:src/pivco_huffman_primitives_neon.h pack_d{2,3,4}
+ *                    + f9974f5:src/pivco_huffman_neon_pack.h pack_d{5,6,7}).
  *
  * Each per-D SIMD kernel returns the number of codes it packed (a multiple of
  * its stride); a shared scalar tail (pv_pack_scalar_tail) finishes the
  * n % stride residual.  Production right_shift = 16 - depth - D, matching
  * scalar_pack in bench_prim.c (the correctness reference).
  *
- * Gated `#if defined(__AVX512VBMI2__)` (multishift / sllv) and `#if
- * defined(__BMI2__)` (pext); all three ISAs are present on the AVX-512 host.
+ * Gated `#if defined(__AVX512VBMI2__)` (multishift / sllv), `#if
+ * defined(__BMI2__)` (pext) — all three ISAs are present on the AVX-512
+ * host — and `#if defined(USE_NEON_KERNELS)` (asof-f9974f5).
  */
 #ifndef PIVCO_PRIM_VARIANTS_PACK_H
 #define PIVCO_PRIM_VARIANTS_PACK_H
@@ -302,6 +306,174 @@ static void prim_pack_sllv(const ctx_t *c) {
 #endif /* __AVX512F__ */
 
 /* ============================================================================
+ * asof-f9974f5 — pre-PR#22 NEON per-D packs (prior production)
+ *   The rank-based (u8, out/ranks/n/base) per-D kernels production shipped
+ *   before PR #22's variable-shift pyramid rework: non-unrolled paired-add
+ *   d2/d4 + distributed-base-free vsubq, u32-horadd d3, and the ryg
+ *   multiply-as-shift d5/d6/d7 with UNBOUNDED 16-byte stores (16-2D trailing
+ *   junk bytes per store; the bench pack_out's +16 slack absorbs the last
+ *   iter's junk, as PIVCO_MAX_ENCODED_SIZE did in production).  Frozen
+ *   verbatim; d7's compact shuffle is byte-identical to today's so it reuses
+ *   the production pivco_pack_compact_d7_neon, d5/d6 keep the old (byte-0
+ *   based) tables below.  The adapter mirrors the production pack_dN_neon
+ *   dispatcher (unchanged by #22): zero the last byte, per-D SIMD kernel,
+ *   scalar bit tail for the residual codes.
+ * ========================================================================== */
+#if defined(USE_NEON_KERNELS)
+
+/* Load 16 ranks, subtract base (1 rank/byte) — the byte-laid intermediate the
+ * multiply-as-shift pack expects, with no u16 narrow.  The local code is already
+ * in [0,2^D) (rank - flat_base_rank over a depth-D flat subtree), so no mask to D
+ * bits is needed. */
+static inline uint8x16_t
+pv_pack_load_byte_asof_f9974f5_neon(const uint8_t *ranks, uint8_t base)
+{
+    return vsubq_u8(vld1q_u8(ranks), vdupq_n_u8(base));
+}
+
+static const uint8_t pv_pack_compact_d5_asof_f9974f5_neon[16] = {
+    0, 1, 2, 3, 4,   8, 9, 10, 11, 12,
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff
+};
+static const uint8_t pv_pack_compact_d6_asof_f9974f5_neon[16] = {
+    0, 1, 2, 3, 4, 5,   8, 9, 10, 11, 12, 13,
+    0xff, 0xff, 0xff, 0xff
+};
+
+static inline int pv_pack_asof_f9974f5_d2(uint8_t *out, const uint8_t *ranks, int n, uint8_t base)
+{
+    static const int8_t shifts_d2[16] = { 0,2,4,6, 0,2,4,6, 0,2,4,6, 0,2,4,6 };
+    uint8x16_t vb = vdupq_n_u8(base);
+    int i = 0;
+    for (; i + 16 <= n; i += 16) {
+        uint8x16_t b = vsubq_u8(vld1q_u8(ranks + i), vb);  /* local code in [0,2^D); no mask needed */
+        b = vshlq_u8(b, vld1q_s8(shifts_d2));
+        uint8x16_t s1 = vpaddq_u8(b, b);
+        uint8x16_t s2 = vpaddq_u8(s1, s1);
+        uint32_t packed4 = vgetq_lane_u32(vreinterpretq_u32_u8(s2), 0);
+        memcpy(out + (i * 2 / 8), &packed4, 4);
+    }
+    return i;
+}
+
+/* D=3: 8 ranks -> 24 bits, u32 horizontal accumulator. */
+static inline int pv_pack_asof_f9974f5_d3(uint8_t *out, const uint8_t *ranks, int n, uint8_t base)
+{
+    static const int32_t shifts_lo[4] = { 0, 3, 6, 9 };
+    static const int32_t shifts_hi[4] = { 12, 15, 18, 21 };
+    uint8x8_t vb = vdup_n_u8(base);
+    int i = 0;
+    for (; i + 8 <= n; i += 8) {
+        uint8x8_t b8 = vsub_u8(vld1_u8(ranks + i), vb);    /* local code in [0,2^D); no mask needed */
+        uint16x8_t v = vmovl_u8(b8);
+        uint32x4_t lo = vshlq_u32(vmovl_u16(vget_low_u16(v)),  vld1q_s32(shifts_lo));
+        uint32x4_t hi = vshlq_u32(vmovl_u16(vget_high_u16(v)), vld1q_s32(shifts_hi));
+        uint32_t packed = vaddvq_u32(vaddq_u32(lo, hi));
+        int bi = i * 3 / 8;
+        out[bi]     = (uint8_t)(packed       & 0xff);
+        out[bi + 1] = (uint8_t)((packed >> 8 ) & 0xff);
+        out[bi + 2] = (uint8_t)((packed >> 16) & 0xff);
+    }
+    return i;
+}
+
+static inline int pv_pack_asof_f9974f5_d4(uint8_t *out, const uint8_t *ranks, int n, uint8_t base)
+{
+    static const int8_t shifts_d4[16] = { 0,4, 0,4, 0,4, 0,4, 0,4, 0,4, 0,4, 0,4 };
+    uint8x16_t vb = vdupq_n_u8(base);
+    int i = 0;
+    for (; i + 16 <= n; i += 16) {
+        uint8x16_t b = vsubq_u8(vld1q_u8(ranks + i), vb);  /* local code in [0,2^D); no mask needed */
+        b = vshlq_u8(b, vld1q_s8(shifts_d4));
+        uint8x16_t paired = vpaddq_u8(b, b);
+        vst1_u8(out + (i * 4 / 8), vget_low_u8(paired));
+    }
+    return i;
+}
+
+/* D as compile-time constant so vshrq_n_u64 / mask constants fold. */
+#define PV_PACK_NEON_DN_ASOF_F9974F5(NAME, D_VAL, COMPACT_TAB)                  \
+static inline int NAME(uint8_t *out, const uint8_t *ranks,                     \
+                       int n, uint8_t base)                                     \
+{                                                                                \
+    const uint8x16_t c0 = vreinterpretq_u8_u16(                                  \
+        vdupq_n_u16((uint16_t)(((1u << (D_VAL)) << 8) | 1u)));                   \
+    const uint16x8_t c1 = vreinterpretq_u16_u32(                                 \
+        vdupq_n_u32((uint32_t)(((1u << (2*(D_VAL))) << 16) | 1u)));              \
+    const uint64x2_t c3 = vdupq_n_u64(((uint64_t)1 << (4*(D_VAL))) - 1);         \
+    const uint8x16_t compact = vld1q_u8(COMPACT_TAB);                            \
+    int i = 0;                                                                   \
+    for (; i + 16 <= n; i += 16) {                                               \
+        uint8x16_t cb = pv_pack_load_byte_asof_f9974f5_neon(ranks + i, base);    \
+        /* Step 1: word[i] = cb[2i] + cb[2i+1] * 2^D  (8 u16 lanes)   */         \
+        uint16x8_t prod_lo = vmull_u8(vget_low_u8(cb),  vget_low_u8(c0));        \
+        uint16x8_t prod_hi = vmull_high_u8(cb, c0);                              \
+        uint16x8_t w = vpaddq_u16(prod_lo, prod_hi);                             \
+        /* Step 2: dword[i] = word[2i] + word[2i+1] * 2^(2D)  (4 u32 lanes) */   \
+        uint32x4_t prod32_lo = vmull_u16(vget_low_u16(w),  vget_low_u16(c1));    \
+        uint32x4_t prod32_hi = vmull_high_u16(w, c1);                            \
+        uint32x4_t d  = vpaddq_u32(prod32_lo, prod32_hi);                        \
+        /* Step 3: per-u64 lane, merge dword[2i+1] (right-shifted) with         \
+         * dword[2i].  After srli by (32 - 4D): the high-32 dword sits at       \
+         * bits [4D..4D+31].  Mask keeps low 4D bits of x, takes high 4D bits  \
+         * from xs — together 8D bits per u64.                                  */ \
+        uint64x2_t x  = vreinterpretq_u64_u32(d);                                \
+        uint64x2_t xs = vshrq_n_u64(x, 32 - 4*(D_VAL));                          \
+        uint64x2_t m  = vorrq_u64(vandq_u64(x, c3),                              \
+                                   vbicq_u64(xs, c3));                           \
+        /* Step 4: compact 2D consecutive bytes per 128-bit lane.   */           \
+        uint8x16_t packed = vqtbl1q_u8(vreinterpretq_u8_u64(m), compact);        \
+        vst1q_u8(out + ((i * (D_VAL)) >> 3), packed);                            \
+    }                                                                            \
+    return i;                                                                    \
+}
+PV_PACK_NEON_DN_ASOF_F9974F5(pv_pack_asof_f9974f5_d5, 5, pv_pack_compact_d5_asof_f9974f5_neon)
+PV_PACK_NEON_DN_ASOF_F9974F5(pv_pack_asof_f9974f5_d6, 6, pv_pack_compact_d6_asof_f9974f5_neon)
+PV_PACK_NEON_DN_ASOF_F9974F5(pv_pack_asof_f9974f5_d7, 7, pivco_pack_compact_d7_neon)
+#undef PV_PACK_NEON_DN_ASOF_F9974F5
+
+/* Adapter: same call shape as the production ST_PACK row (simd_pack ->
+ * prim_enc_pack_dN(ranks, n, D, rank_base, pack_out)); the dispatcher body
+ * mirrors pack_dN_neon (unchanged by #22) with the frozen kernels switched in. */
+static void prim_pack_asof_f9974f5(const ctx_t *c) {
+    uint8_t *out = c->pack_out; const uint8_t *ranks = c->ranks;
+    int n = c->n, D = c->D; uint8_t base = c->rank_base;
+    int total_bytes = (n * D + 7) >> 3;
+    if (total_bytes > 0) out[total_bytes - 1] = 0;
+
+    int i = 0;
+    switch (D) {
+    case 2: i = pv_pack_asof_f9974f5_d2(out, ranks, n, base); break;
+    case 3: i = pv_pack_asof_f9974f5_d3(out, ranks, n, base); break;
+    case 4: i = pv_pack_asof_f9974f5_d4(out, ranks, n, base); break;
+    case 5: i = pv_pack_asof_f9974f5_d5(out, ranks, n, base); break;
+    case 6: i = pv_pack_asof_f9974f5_d6(out, ranks, n, base); break;
+    case 7: i = pv_pack_asof_f9974f5_d7(out, ranks, n, base); break;
+    default: break;
+    }
+    if (i >= n) return;
+
+    int bit_pos = i * D;
+    int byte_idx = bit_pos >> 3;
+    int bits_in_buf = bit_pos & 7;
+    uint64_t buf = bits_in_buf > 0
+        ? (uint64_t)out[byte_idx] & ((1u << bits_in_buf) - 1)
+        : 0;
+    for (; i < n; i++) {
+        uint32_t local = (uint32_t)(uint8_t)(ranks[i] - base);  /* code in [0,2^D); no mask */
+        buf |= (uint64_t)local << bits_in_buf;
+        bits_in_buf += D;
+        while (bits_in_buf >= 8) {
+            out[byte_idx++] = (uint8_t)(buf & 0xff);
+            buf >>= 8;
+            bits_in_buf -= 8;
+        }
+    }
+    if (bits_in_buf > 0) out[byte_idx] = (uint8_t)(buf & ((1u << bits_in_buf) - 1));
+}
+#endif /* USE_NEON_KERNELS */
+
+/* ============================================================================
  * Registry — pack family (no-op where the ISA is unavailable)
  * ========================================================================== */
 static void pv_register_pack(void) {
@@ -315,6 +487,9 @@ static void pv_register_pack(void) {
         PV_VARIANT_D(ST_PACK, "asof-2f80076", d, PV_ISA_AVX512,
                      "cd119a6~1 PACK_DN_AVX512_UNIFIED",
                      "sllv + reduce_add pack, 8 codes/iter", 0, PV_FN_AVX512F(prim_pack_sllv));
+        PV_VARIANT_D(ST_PACK, "asof-f9974f5", d, PV_ISA_NEON,
+                     "f9974f5 (prior production)",
+                     "pre-PR#22 per-D packs: paired-add d2/d4, u32-horadd d3, ryg multiply-as-shift d5/d6/d7", 0, PV_FN_NEON(prim_pack_asof_f9974f5));
     }
 }
 

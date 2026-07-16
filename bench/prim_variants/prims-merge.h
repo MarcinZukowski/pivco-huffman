@@ -577,6 +577,74 @@ static inline void prim_merge_cv_com64_neon(const uint8_t *bm, int K,
 }
 static void prim_merge_cv_com64(const ctx_t *c){ prim_merge_cv_com64_neon(c->bm, c->n, MERGE_LEFT_SYM, c->merge_right, c->out); }
 
+/* ============================================================================
+ * merge_vec_vec : asof-f9974f5 — pre-PR#22 COM64 main loop (prior production)
+ *   The production merge before the PR #22 software pipelining: nothing is
+ *   started for the next iteration, and the byte-popcounts cross to a GPR
+ *   before the prefix-sum multiply.  Frozen here verbatim (PROF markers
+ *   dropped per graveyard convention); reuses the production merge_neon_16B /
+ *   merge_neon_8B_lo / g_merge_shuf0/1 / expand_popcnt, all unchanged by #22.
+ * ========================================================================== */
+static inline void prim_merge_vv_asof_f9974f5_neon(const uint8_t *bm, int K,
+                                     const uint8_t *left,
+                                     const uint8_t *right,
+                                     uint8_t *out)
+{
+    const uint8_t *l_list = left, *r_list = right;
+    intptr_t i = 0;
+    for (; i + 64 <= K; i += 64) {
+        uint64_t mask; memcpy(&mask, bm + (i >> 3), 8);
+        uint8x8_t vmask = vcreate_u8(mask);
+        uint8x8_t pop8  = vcnt_u8(vmask);
+        /* Per-chunk cursor splits: move the 8 byte-popcounts to a GPR and
+         * prefix-sum them with a single 64-bit multiply (offloads to the scalar
+         * pipe; cheaper than the SIMD vpadd+vmul fold).  Byte k of the product
+         * holds sum(pop8[0..k]), so bytes 1/3/5/7 are the 16-bit chunk
+         * boundaries c0, c0+c1, c0+c1+c2, total. */
+        uint64_t all_pop = vget_lane_u64(vreinterpret_u64_u8(pop8), 0);
+        uint64_t pfx = all_pop * 0x0101010101010101ull;
+        intptr_t pop0 = (pfx >> 8)  & 0xff;
+        intptr_t pop1 = (pfx >> 24) & 0xff;
+        intptr_t pop2 = (pfx >> 40) & 0xff;
+        intptr_t pop3 =  pfx >> 56;
+        merge_neon_16B(out + i,      l_list,             r_list,        mask,       g_merge_shuf0, g_merge_shuf1);
+        merge_neon_16B(out + i + 16, l_list + 16 - pop0, r_list + pop0, mask >> 16, g_merge_shuf0, g_merge_shuf1);
+        merge_neon_16B(out + i + 32, l_list + 32 - pop1, r_list + pop1, mask >> 32, g_merge_shuf0, g_merge_shuf1);
+        merge_neon_16B(out + i + 48, l_list + 48 - pop2, r_list + pop2, mask >> 48, g_merge_shuf0, g_merge_shuf1);
+        r_list += pop3; l_list += 64 - pop3;
+    }
+    int j = (int)i;
+
+    /* Residue on the main tables: 16-wide, then 8-wide (low half). */
+    for (; j + 16 <= K; j += 16) {
+        uint16_t m16; memcpy(&m16, bm + (j >> 3), 2);
+        merge_neon_16B(out + j, l_list, r_list, (intptr_t)m16,
+                       g_merge_shuf0, g_merge_shuf1);
+        /* expand_popcnt, not __builtin_popcount: aarch64 has no GPR
+         * popcount (fmov+cnt+addv+fmov, ~7cy) and this sits on the
+         * serial cursor chain between tail iterations. */
+        int pop = expand_popcnt[m16 & 0xff] + expand_popcnt[m16 >> 8];
+        r_list += pop; l_list += 16 - pop;
+    }
+    if (j + 8 <= K) {
+        intptr_t m8 = bm[j >> 3];
+        merge_neon_8B_lo(out + j, l_list, r_list, m8,
+                         g_merge_shuf0, g_merge_shuf1);
+        int pop = expand_popcnt[m8];
+        r_list += pop; l_list += 8 - pop;
+        j += 8;
+    }
+    /* Scalar tail (1..7 leftover). */
+    int lc = (int)(l_list - left), rc = (int)(r_list - right);
+    for (; j < K; j++) {
+        int mb = (bm[j >> 3] >> (j & 7)) & 1;
+        out[j] = mb ? right[rc++] : left[lc++];
+    }
+}
+static void prim_merge_vv_asof_f9974f5(const ctx_t *c){
+    prim_merge_vv_asof_f9974f5_neon(c->bm, c->n, c->merge_left, c->merge_right, c->out);
+}
+
 
 #endif /* USE_NEON_KERNELS */
 
@@ -1999,6 +2067,8 @@ static void pv_register_merge(void) {
     PV_VARIANT(ST_MERGE_VEC_VEC, "iurii2-c-kld",   PV_ISA_AVX512, "issue-#11 suggestion 3 (2026-07)",
                "kld = load the k mask register straight from memory (kmovq mem-form) + knot for the L side + popcnt from memory", 0, PV_FN_VBMI2(prim_merge_vv_c_kld));
     /* merge_vec_vec — NEON */
+    PV_VARIANT(ST_MERGE_VEC_VEC, "asof-f9974f5", PV_ISA_NEON, "f9974f5 (prior production)",
+               "pre-PR#22 COM64 main loop (no software pipelining; GPR-side popcount)", 0, PV_FN_NEON(prim_merge_vv_asof_f9974f5));
     PV_VARIANT(ST_MERGE_VEC_VEC, "com64",     PV_ISA_NEON, "asof-d24c0eb (prior production)",
                "V5 stride-64 COM, 4 chunks, byte prefix-sum cursors; production before the two-table merge", 0, PV_FN_NEON(prim_merge_vv_com64));
     PV_VARIANT(ST_MERGE_VEC_VEC, "asof-4dd08e3", PV_ISA_NEON, "4dd08e3 (2026-05-10)",

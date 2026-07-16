@@ -643,6 +643,85 @@ static int prim_part_asof_a3a3d19_neon(uint8_t *ranks, int n, uint8_t thr,
 }
 static void prim_part_asof_a3a3d19(const ctx_t *c){ prim_part_asof_a3a3d19_neon(c->ranks_work, c->n, c->rank_thr, c->bm, c->tmp8); }
 
+/* asof-f9974f5 — the p16rev FULL partition that was production NEON before the
+ * PR #22 software pipelining (f9974f5 = last commit with it as production).
+ * Frozen here verbatim: the mask crosses to a GPR via the old masks64_neon
+ * (copied below, also reshaped by #22) and is vcnt'd after a vcreate
+ * round-trip; nothing is started for the next group-set.  Reuses the
+ * production build_tabs/p16rev_tabA/p16rev_tabB0, unchanged by #22. */
+static inline uint64_t pv_masks64_asof_f9974f5_neon(uint8x16_t v0, uint8x16_t v1,
+                                       uint8x16_t v2, uint8x16_t v3,
+                                       uint8x16_t vt, uint8x16_t bw)
+{
+    uint8x16_t w0 = vandq_u8(vcgtq_u8(v0, vt), bw);   /* chunks 0,1 */
+    uint8x16_t w1 = vandq_u8(vcgtq_u8(v1, vt), bw);   /* chunks 2,3 */
+    uint8x16_t w2 = vandq_u8(vcgtq_u8(v2, vt), bw);   /* chunks 4,5 */
+    uint8x16_t w3 = vandq_u8(vcgtq_u8(v3, vt), bw);   /* chunks 6,7 */
+    uint8x16_t t0 = vpaddq_u8(w0, w1);
+    uint8x16_t t1 = vpaddq_u8(w2, w3);
+    uint8x16_t u0 = vpaddq_u8(t0, t1);
+    uint8x16_t r  = vpaddq_u8(u0, u0);                /* low 8 bytes = mask_0..7 */
+    return vget_lane_u64(vreinterpret_u64_u8(vget_low_u8(r)), 0);
+}
+static inline int prim_part_asof_f9974f5_neon(uint8_t *ranks, int n, uint8_t thr,
+                                    uint8_t *bm, uint8_t *tmp)
+{
+    build_tabs();
+    int n_left = 0, n_right = 0;
+    int j = 0;
+    uint8x16_t vt = vdupq_n_u8(thr);
+    static const uint8_t bw_a[16] = {1,2,4,8,16,32,64,128, 1,2,4,8,16,32,64,128};
+    uint8x16_t bw = vld1q_u8(bw_a);
+    /* Right recovery: reversing the WHOLE comb register lands the top-pc reversed
+     * right lanes at output [0,pc) (the [pc,16) tail is left-reversed garbage the
+     * next group overwrites). */
+    static const uint8_t rev16_a[16] = {15,14,13,12,11,10,9,8,7,6,5,4,3,2,1,0};
+    uint8x16_t rev16 = vld1q_u8(rev16_a);
+    for (; j + 64 <= n; j += 64) {
+        uint8x16_t v0 = vld1q_u8(ranks + j);
+        uint8x16_t v1 = vld1q_u8(ranks + j + 16);
+        uint8x16_t v2 = vld1q_u8(ranks + j + 32);
+        uint8x16_t v3 = vld1q_u8(ranks + j + 48);
+        uint64_t mask_word = pv_masks64_asof_f9974f5_neon(v0, v1, v2, v3, vt, bw);
+        memcpy(bm + (j >> 3), &mask_word, 8);
+        uint64_t pcw = vget_lane_u64(vreinterpret_u64_u8(
+                           vcnt_u8(vcreate_u8(mask_word))), 0);
+        /* Prefix-sum the per-chunk popcounts (byte k of pfx = sum pc[0..k]) so
+         * each group's store offsets (cr rights / 16g-cr lefts before it) are
+         * known up front -- no serial n_left/n_right chain across the 4 groups;
+         * the cursors advance once per 64.  Overlap safety is unchanged: group
+         * g+1's store still starts exactly at group g's valid end, and all 4
+         * input loads precede every store in program order.  (issue #5) */
+        uint64_t pfx = pcw * 0x0101010101010101ULL;
+        uint8x16_t vg[4] = { v0, v1, v2, v3 };
+#define _PART(g) do {                                                       \
+        uint8_t  m0 = (uint8_t)(mask_word >> (16*(g)));                     \
+        uint8_t  m1 = (uint8_t)(mask_word >> (16*(g) + 8));                 \
+        uint32_t pc0 = (uint32_t)((pcw >> (16*(g)))     & 0xFF);            \
+        uint32_t cr  = (g) == 0 ? 0u                                        \
+                     : (uint32_t)((pfx >> (8*(2*(g) - 1))) & 0xFF);         \
+        uint8x16_t ri = vorrq_u8(vld1q_u8(p16rev_tabA[m0]),                   \
+                                 vld1q_u8(&p16rev_tabB0[m1][pc0]));           \
+        uint8x16_t comb = vqtbl1q_u8(vg[g], ri);                           \
+        vst1q_u8(ranks + n_left + (16*(g) - cr), comb);                     \
+        vst1q_u8(tmp + n_right + cr, vqtbl1q_u8(comb, rev16));              \
+    } while (0)
+        _PART(0); _PART(1); _PART(2); _PART(3);
+#undef _PART
+        uint32_t total_r = (uint32_t)(pfx >> 56);
+        n_right += (int)total_r;
+        n_left  += 64 - (int)total_r;
+    }
+    for (; j < n; j++) {
+        if ((j & 7) == 0) bm[j >> 3] = 0;
+        uint8_t r = ranks[j];
+        if (r > thr) { bm[j >> 3] |= (uint8_t)(1u << (j & 7)); tmp[n_right++] = r; }
+        else         { ranks[n_left++] = r; }
+    }
+    return n_right;
+}
+static void prim_part_asof_f9974f5(const ctx_t *c){ prim_part_asof_f9974f5_neon(c->ranks_work, c->n, c->rank_thr, c->bm, c->tmp8); }
+
 /* p16revback — p16rev without the per-group rev shuffle.  The combined index (one OR
  * of the production p16rev_tabA/tabB) still yields {left fwd | right reversed} in
  * one vqtbl1q; the LEFT store is unchanged (comb -> ranks, forward).  But the
@@ -1951,6 +2030,9 @@ static void pv_register_partition(void) {
     PV_VARIANT(ST_PART, "asof-a3a3d19", PV_ISA_NEON, "per-8-chunk ctab8 COM64 (ex-production)",
                "the prior production NEON full partition, before p16rev was promoted; kept benchable as the baseline", 1,
                PV_FN_NEON(prim_part_asof_a3a3d19));
+    PV_VARIANT(ST_PART, "asof-f9974f5", PV_ISA_NEON, "f9974f5 (prior production)",
+               "pre-PR#22 p16rev main loop (no software pipelining; mask popcount after a GPR round-trip)", 1,
+               PV_FN_NEON(prim_part_asof_f9974f5));
     PV_VARIANT(ST_PART, "p16revback", PV_ISA_NEON, "p16rev, right stored backward + one final reverse pass",
                "drops p16rev's per-group rev shuffle: store comb backward into scratch (keep top pc), one 16-wide reverse pass after the stride loop. wins only N1/Graviton2 +7.5%; loses M4 -4% V1/G3 -5% V2/G4 -5% V3 -2% (extra reverse-pass store traffic > saved shuffle on wide cores); not promoted", 1,
                PV_FN_NEON(prim_part_p16revback));
