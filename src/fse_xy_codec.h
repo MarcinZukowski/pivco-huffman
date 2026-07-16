@@ -17,23 +17,54 @@ static size_t encode_x(int x, const uint8_t *src, size_t n,
                        const FSE_CTable *ct)
 {
     if (x < 2 || x > 16) return 0;
-    if (n % (size_t)x != 0) return 0;   /* bench restriction */
+    if (n < (size_t)x) return 0;   /* need one symbol per cursor */
 
     BIT_CStream_t bitC;
     if (FSE_isError(BIT_initCStream(&bitC, dst, dst_cap))) return 0;
 
     FSE_CState_t st[16];
+    /* Any-length form (the old n % x == 0 restriction was a bench-era
+     * shortcut that cost every unaligned bitmap the wide path).  The
+     * decoder assigns position p to cursor p % x round-robin, including
+     * its partial final round, so the encoder walks positions in exact
+     * reverse decode order with the SAME mapping: the highest x
+     * positions are each cursor's last-decoded symbol and are absorbed
+     * into that cursor's initial state (writes no bits); every earlier
+     * position is a real encode.  For n % x == 0 this degenerates to
+     * the classic per-round order bit-for-bit, so previously-valid
+     * streams are unchanged. */
     size_t i = n;
-    for (int k = x - 1; k >= 0; k--) {
-        FSE_initCState2(&st[k], ct, src[--i]);
+    for (int j = 0; j < x; j++) {
+        --i;
+        FSE_initCState2(&st[i % (size_t)x], ct, src[i]);
     }
 
     /* Flush after at most 4 symbols: at tableLog 12 each FSE_encodeSymbol
      * adds up to 12 bits, and a flush leaves up to 7 bits in the 64-bit
      * container, so 7 + 4*12 = 55 <= 64 is safe but 7 + 5*12 = 67 would
      * overflow and silently drop bits (corrupts high-nbBits runs).  This
-     * matches FSE's own 4-symbols-between-flushes bound and the decoder's
-     * reload-every-4 cadence (D8RND). */
+     * matches FSE's own 4-symbols-between-flushes bound; the decoder's
+     * reload cadence is independent (bits are a continuous stream). */
+    /* i == n - x here.  Encode the remaining positions [0, i) in strictly
+     * decreasing order, cursor = pos % x -- the same operation sequence the
+     * flat loop produces, so the emitted bitstream is bit-identical (flush
+     * cadence doesn't change the bits).  Structured for speed: peel the
+     * (i % x) positions above the nearest x-aligned boundary with the
+     * general form, then run fully-unrolled x-wide rounds where the cursor
+     * IS the loop counter (no per-symbol modulo, inner loop unrolls at the
+     * constant x) -- this is the old aligned fast path, restored. */
+    int pk = 0;
+    size_t peel = i % (size_t)x;              /* == n % x; 0 for aligned n */
+    for (size_t p = 0; p < peel; p++) {
+        --i;
+        FSE_encodeSymbol(&bitC, &st[i % (size_t)x], src[i]);
+        if (++pk == 4 && i > 0) { BIT_flushBitsFast(&bitC); pk = 0; }
+    }
+    if (pk > 0) BIT_flushBitsFast(&bitC);   /* clean the container before the rounds */
+
+    /* i is now a multiple of x: the rest is the original aligned fast path,
+     * unchanged from before the any-length work -- fully-unrolled x-wide
+     * rounds (cursor == loop counter, round-local flush counter). */
     while (i > 0) {
         int pushed = 0;
         for (int k = x - 1; k >= 0; k--) {

@@ -6,7 +6,7 @@
  * which led to silent drift (scalar+NEON added the FSE marker byte in
  * 2026-05-13, x86+AVX-512 didn't — broke scalar↔SSE cross-decoding).
  *
- * Wire format (v0.5+):
+ * Wire format (v0.6+; the uint16 block_N header below is the v0.5 addition):
  *
  * Per-block header (once, at the very start of each encoded block):
  *   [block_N: uint16 LE, 2 bytes]                  symbol count N for this
