@@ -493,10 +493,149 @@ static inline void merge_flat_d4_x86(uint8_t *symbols, int n,
  * 32-entry scatter is 2 pshufb + blendv, with bit 4 moved to the sign bit by
  * one psllw (idx bytes are pre-masked, so the cross-byte spill is clean).
  * Falls through to the stock 8-wide ryg path + scalar tail. */
+/* ---- AVX2 ymm widening of the D=5/6/7 flat decoders ----
+ * 32 codes/iter: each 128-bit lane runs the SSE kernel's constants on its
+ * own packed window (lane1 loads at +S bytes, S = 10/12/14); c2s tables
+ * broadcast per lane; blendv select tree is byte-wise so lanes never
+ * interact.  Returns codes decoded (multiple of 32); the callers shift
+ * their frame and let the 128-bit body + scalar tail finish.  Measured
+ * 1.5-1.9x over the 128-bit kernels on c4/c5/c5a/c6a (bench_prim). */
+#ifdef PIVCO_HAS_AVX2
+static inline __m256i flat_bc128_x86(const uint8_t *p)
+{
+    return _mm256_broadcastsi128_si256(_mm_loadu_si128((const __m128i *)p));
+}
+static inline __m256i flat_load2_x86(const uint8_t *p, int stride)
+{
+    return _mm256_inserti128_si256(
+        _mm256_castsi128_si256(_mm_loadu_si128((const __m128i *)p)),
+        _mm_loadu_si128((const __m128i *)(p + stride)), 1);
+}
+
+static inline int merge_flat_d5_ymm_x86(uint8_t *symbols, int n,
+                                        const uint8_t *bm, const uint8_t *c2s)
+{
+    const __m256i lo = flat_bc128_x86(c2s), hi = flat_bc128_x86(c2s + 16);
+    const __m256i pair5_shuf = _mm256_broadcastsi128_si256(
+        _mm_setr_epi8(0,1, 1,2, 2,3, 3,4, 5,6, 6,7, 7,8, 8,9));
+    const __m256i mul5     = _mm256_set1_epi64x(0x0001000400100040ll); /* {64,16,4,1} */
+    const __m256i m1f_even = _mm256_set1_epi16(0x001F);
+    const __m256i m1f_odd  = _mm256_set1_epi16(0x1F00);
+    int pb = (5 * n) >> 3;
+    int blocks = pb >= 26 ? (pb - 26) / 20 + 1 : 0;
+    if (blocks > (n >> 5)) blocks = n >> 5;
+    for (int b = 0; b < blocks; ++b) {
+        __m256i packed = flat_load2_x86(bm + b * 20, 10);
+        __m256i x = _mm256_mullo_epi16(_mm256_shuffle_epi8(packed, pair5_shuf), mul5);
+        __m256i idx = _mm256_or_si256(
+            _mm256_and_si256(_mm256_srli_epi16(x, 6), m1f_even),
+            _mm256_and_si256(_mm256_srli_epi16(x, 3), m1f_odd));
+        __m256i rlo = _mm256_shuffle_epi8(lo, idx);
+        __m256i rhi = _mm256_shuffle_epi8(hi, idx);
+        __m256i sel = _mm256_slli_epi16(idx, 3);   /* bit4 -> sign bit */
+        _mm256_storeu_si256((__m256i *)(symbols + (b << 5)),
+                            _mm256_blendv_epi8(rlo, rhi, sel));
+    }
+    return blocks << 5;
+}
+
+static inline int merge_flat_d6_ymm_x86(uint8_t *symbols, int n,
+                                        const uint8_t *bm, const uint8_t *c2s)
+{
+    const __m256i t0 = flat_bc128_x86(c2s),      t1 = flat_bc128_x86(c2s + 16);
+    const __m256i t2 = flat_bc128_x86(c2s + 32), t3 = flat_bc128_x86(c2s + 48);
+    const __m256i pair6_shuf = _mm256_broadcastsi128_si256(
+        _mm_setr_epi8(0,1, 1,2, 3,4, 4,5, 6,7, 7,8, 9,10, 10,11));
+    const __m256i mul6     = _mm256_set1_epi32(0x00010010);            /* {16,1} */
+    const __m256i m3f_even = _mm256_set1_epi16(0x003F);
+    const __m256i m3f_odd  = _mm256_set1_epi16(0x3F00);
+    int pb = (6 * n) >> 3;
+    int blocks = pb >= 28 ? (pb - 28) / 24 + 1 : 0;
+    if (blocks > (n >> 5)) blocks = n >> 5;
+    for (int b = 0; b < blocks; ++b) {
+        __m256i packed = flat_load2_x86(bm + b * 24, 12);
+        __m256i x = _mm256_mullo_epi16(_mm256_shuffle_epi8(packed, pair6_shuf), mul6);
+        __m256i idx = _mm256_or_si256(
+            _mm256_and_si256(_mm256_srli_epi16(x, 4), m3f_even),
+            _mm256_and_si256(_mm256_srli_epi16(x, 2), m3f_odd));
+        __m256i r0 = _mm256_shuffle_epi8(t0, idx);
+        __m256i r1 = _mm256_shuffle_epi8(t1, idx);
+        __m256i r2 = _mm256_shuffle_epi8(t2, idx);
+        __m256i r3 = _mm256_shuffle_epi8(t3, idx);
+        __m256i s4 = _mm256_slli_epi16(idx, 3);   /* bit4 -> sign bit */
+        __m256i s5 = _mm256_slli_epi16(idx, 2);   /* bit5 -> sign bit */
+        __m256i a  = _mm256_blendv_epi8(r0, r1, s4);
+        __m256i b2 = _mm256_blendv_epi8(r2, r3, s4);
+        _mm256_storeu_si256((__m256i *)(symbols + (b << 5)),
+                            _mm256_blendv_epi8(a, b2, s5));
+    }
+    return blocks << 5;
+}
+
+static inline int merge_flat_d7_ymm_x86(uint8_t *symbols, int n,
+                                        const uint8_t *bm, const uint8_t *c2s)
+{
+    const __m256i t0 = flat_bc128_x86(c2s),      t1 = flat_bc128_x86(c2s + 16);
+    const __m256i t2 = flat_bc128_x86(c2s + 32), t3 = flat_bc128_x86(c2s + 48);
+    const __m256i t4 = flat_bc128_x86(c2s + 64), t5 = flat_bc128_x86(c2s + 80);
+    const __m256i t6 = flat_bc128_x86(c2s + 96), t7 = flat_bc128_x86(c2s + 112);
+    const __m256i g_lo = _mm256_broadcastsi128_si256(
+        _mm_setr_epi8(0,1,2,3, 1,2,3,4, 3,4,5,6, 5,6,7,8));
+    const __m256i g_hi = _mm256_broadcastsi128_si256(
+        _mm_setr_epi8(7,8,9,10, 8,9,10,11, 10,11,12,13, 12,13,14,15));
+    const __m256i mul7 = _mm256_broadcastsi128_si256(
+        _mm_setr_epi32(64,1,4,16));   /* <<(6-o), o={0,6,4,2} */
+    const __m256i m7f_even = _mm256_set1_epi32(0x0000007F);
+    const __m256i m7f_odd  = _mm256_set1_epi32(0x00007F00);
+    int pb = (7 * n) >> 3;
+    int blocks = pb >= 30 ? (pb - 30) / 28 + 1 : 0;
+    if (blocks > (n >> 5)) blocks = n >> 5;
+    for (int b = 0; b < blocks; ++b) {
+        __m256i packed = flat_load2_x86(bm + b * 28, 14);
+        __m256i xl = _mm256_mullo_epi32(_mm256_shuffle_epi8(packed, g_lo), mul7);
+        __m256i xh = _mm256_mullo_epi32(_mm256_shuffle_epi8(packed, g_hi), mul7);
+        __m256i cl = _mm256_or_si256(
+            _mm256_and_si256(_mm256_srli_epi32(xl, 6), m7f_even),
+            _mm256_and_si256(_mm256_srli_epi32(xl, 5), m7f_odd));
+        __m256i ch = _mm256_or_si256(
+            _mm256_and_si256(_mm256_srli_epi32(xh, 6), m7f_even),
+            _mm256_and_si256(_mm256_srli_epi32(xh, 5), m7f_odd));
+        __m256i idx = _mm256_packus_epi32(cl, ch);   /* per-lane, in order */
+        __m256i r0 = _mm256_shuffle_epi8(t0, idx);
+        __m256i r1 = _mm256_shuffle_epi8(t1, idx);
+        __m256i r2 = _mm256_shuffle_epi8(t2, idx);
+        __m256i r3 = _mm256_shuffle_epi8(t3, idx);
+        __m256i r4 = _mm256_shuffle_epi8(t4, idx);
+        __m256i r5 = _mm256_shuffle_epi8(t5, idx);
+        __m256i r6 = _mm256_shuffle_epi8(t6, idx);
+        __m256i r7 = _mm256_shuffle_epi8(t7, idx);
+        __m256i s4 = _mm256_slli_epi16(idx, 3);   /* bit4 -> sign bit */
+        __m256i s5 = _mm256_slli_epi16(idx, 2);   /* bit5 -> sign bit */
+        __m256i s6 = _mm256_slli_epi16(idx, 1);   /* bit6 -> sign bit */
+        __m256i a0 = _mm256_blendv_epi8(r0, r1, s4);
+        __m256i a1 = _mm256_blendv_epi8(r2, r3, s4);
+        __m256i a2 = _mm256_blendv_epi8(r4, r5, s4);
+        __m256i a3 = _mm256_blendv_epi8(r6, r7, s4);
+        __m256i b0 = _mm256_blendv_epi8(a0, a1, s5);
+        __m256i b1 = _mm256_blendv_epi8(a2, a3, s5);
+        _mm256_storeu_si256((__m256i *)(symbols + (b << 5)),
+                            _mm256_blendv_epi8(b0, b1, s6));
+    }
+    return blocks << 5;
+}
+#endif /* PIVCO_HAS_AVX2 */
+
 static inline void merge_flat_d5_x86(uint8_t *symbols, int n,
                                                 const uint8_t *bm,
                                                 const uint8_t *c2s)
 {
+#ifdef PIVCO_HAS_AVX2
+    {   /* ymm blocks first; shift the frame so the 128-bit body and the
+         * scalar tail below run unchanged on the remainder. */
+        int done = merge_flat_d5_ymm_x86(symbols, n, bm, c2s);
+        symbols += done; bm += (done * 5) >> 3; n -= done;
+    }
+#endif
     /* pshufb on either table uses code&15; blend by bit 4. */
     __m128i lo = _mm_loadu_si128((const __m128i *)c2s);        /* c2s[0..15]  */
     __m128i hi = _mm_loadu_si128((const __m128i *)(c2s + 16)); /* c2s[16..31] */
@@ -544,6 +683,13 @@ static inline void merge_flat_d6_x86(uint8_t *symbols, int n,
                                                 const uint8_t *bm,
                                                 const uint8_t *c2s)
 {
+#ifdef PIVCO_HAS_AVX2
+    {   /* ymm blocks first; shift the frame so the 128-bit body and the
+         * scalar tail below run unchanged on the remainder. */
+        int done = merge_flat_d6_ymm_x86(symbols, n, bm, c2s);
+        symbols += done; bm += (done * 6) >> 3; n -= done;
+    }
+#endif
     /* four pshufb (code&15 into each quarter) then a 2-level blend by
      * bits 5,4 selects the right quarter. */
     __m128i t0 = _mm_loadu_si128((const __m128i *)c2s);
@@ -668,6 +814,13 @@ static inline void merge_flat_d7_x86(uint8_t *symbols, int n,
                                                 const uint8_t *bm,
                                                 const uint8_t *c2s)
 {
+#ifdef PIVCO_HAS_AVX2
+    {   /* ymm blocks first; shift the frame so the 128-bit body and the
+         * scalar tail below run unchanged on the remainder. */
+        int done = merge_flat_d7_ymm_x86(symbols, n, bm, c2s);
+        symbols += done; bm += (done * 7) >> 3; n -= done;
+    }
+#endif
     int i = 0;
     if (n >= 19)
         i = merge_flat_d7_pair_x86(symbols, n, bm, c2s);

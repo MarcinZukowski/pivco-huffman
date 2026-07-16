@@ -2026,6 +2026,26 @@ static void prim_merge_cst_vec_skewfuse(const ctx_t *c)
 /* ============================================================================
  * Registry — merge family (no-op where the ISA is unavailable)
  * ========================================================================== */
+
+/* ============================================================================
+ * merge_flat : avx2-ymm — PROMOTED to production (merge_flat_d{5,6,7}_ymm_x86
+ *   in pivco_huffman_primitives_x86.h, 2026-07-16); this row calls the
+ *   production ymm kernels directly (ymm blocks + scalar tail only, no
+ *   128-bit mid-range) so it stays the isolated ymm measurement.
+ * ========================================================================== */
+#if defined(__AVX2__) && !defined(__AVX512VBMI2__)
+static void prim_merge_flat_avx2ymm(const ctx_t *c) {
+    int i = 0;
+    switch (c->D) {
+    case 5: i = merge_flat_d5_ymm_x86(c->out, c->n, c->bm, c->c2s); break;
+    case 6: i = merge_flat_d6_ymm_x86(c->out, c->n, c->bm, c->c2s); break;
+    case 7: i = merge_flat_d7_ymm_x86(c->out, c->n, c->bm, c->c2s); break;
+    default: break;
+    }
+    merge_flat_tail_x86(c->out, i, c->n, c->bm, c->D, c->c2s);
+}
+#endif /* __AVX2__ && !__AVX512VBMI2__ */
+
 static void pv_register_merge(void) {
 #if defined(USE_NEON_KERNELS)
     pv_build_cc_tables();
@@ -2066,6 +2086,13 @@ static void pv_register_merge(void) {
                "vrb structure for vec_vec: ssize_t, separate bm cursor, 4x unroll, serial lc/rc updates", 0, PV_FN_VBMI2(prim_merge_vv_c_vrb));
     PV_VARIANT(ST_MERGE_VEC_VEC, "iurii2-c-kld",   PV_ISA_AVX512, "issue-#11 suggestion 3 (2026-07)",
                "kld = load the k mask register straight from memory (kmovq mem-form) + knot for the L side + popcnt from memory", 0, PV_FN_VBMI2(prim_merge_vv_c_kld));
+    /* merge_flat — AVX2 ymm widening of the SSE d5/d6/d7 (see kernels above) */
+    for (int d = 5; d <= 7; d++)
+        PV_VARIANT_D(ST_MERGE_FLAT, "avx2-ymm", d, PV_ISA_AVX2,
+                     "256-bit widening of the production SSE flat decoders",
+                     "pair-gather + mul-as-shift unpack, pshufb scatter + blendv tree, 32 codes/iter", 0,
+                     PV_FN_SSE_AVX2(prim_merge_flat_avx2ymm));
+
     /* merge_vec_vec — NEON */
     PV_VARIANT(ST_MERGE_VEC_VEC, "asof-f9974f5", PV_ISA_NEON, "f9974f5 (prior production)",
                "pre-PR#22 COM64 main loop (no software pipelining; GPR-side popcount)", 0, PV_FN_NEON(prim_merge_vv_asof_f9974f5));
