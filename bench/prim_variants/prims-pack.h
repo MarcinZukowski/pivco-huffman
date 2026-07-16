@@ -33,7 +33,10 @@
 #include <string.h>
 
 /* Shared scalar tail: pack codes [start, n) starting at bit start*D.
- * Matches scalar_pack's LSB-first byte layout (the bench reference). */
+ * Matches scalar_pack's LSB-first byte layout (the bench reference).
+ * NB: these u16 codes_la kernels register under ST_U16_PACK — the
+ * rank-based ST_PACK slot fills u8 ranks, not la_work (they sat on
+ * ST_PACK from before the slot split and failed its check). */
 static inline void pv_pack_scalar_tail(uint8_t *out, const uint16_t *codes_la,
                                        int start, int n, int D, int right_shift) {
     uint32_t mask = (1u << D) - 1;
@@ -619,13 +622,13 @@ static void prim_pack_pyr_sse(const ctx_t *c) {
  * ========================================================================== */
 static void pv_register_pack(void) {
     for (int d = 2; d <= 7; d++) {
-        PV_VARIANT_D(ST_PACK, "multishift", d, PV_ISA_AVX512,
+        PV_VARIANT_D(ST_U16_PACK, "multishift", d, PV_ISA_AVX512,
                      "bench_pack_v2.c pack_v2_dN",
                      "vpmultishiftqb, 64 codes/iter", 0, PV_FN_VBMI2(prim_pack_multishift));
-        PV_VARIANT_D(ST_PACK, "asof-cd119a6", d, PV_ISA_AVX512,
+        PV_VARIANT_D(ST_U16_PACK, "asof-cd119a6", d, PV_ISA_AVX512,
                      "cd119a6 pack_dN_bmi2",
                      "BMI2 pext pack, 8 codes/iter", 0, PV_FN_BMI2(prim_pack_bmi2));
-        PV_VARIANT_D(ST_PACK, "asof-2f80076", d, PV_ISA_AVX512,
+        PV_VARIANT_D(ST_U16_PACK, "asof-2f80076", d, PV_ISA_AVX512,
                      "cd119a6~1 PACK_DN_AVX512_UNIFIED",
                      "sllv + reduce_add pack, 8 codes/iter", 0, PV_FN_AVX512F(prim_pack_sllv));
         if (d == 3)
