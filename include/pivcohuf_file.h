@@ -59,10 +59,7 @@ extern "C" {
 
 #define PIVCOHUF_MAGIC          "PIVCOHUF"
 #define PIVCOHUF_VERSION_MAJOR  0
-#define PIVCOHUF_VERSION_MINOR  7  /* 0.5: uint16 block_N header (shipped
-                                      unversioned); 0.6: FSE wide-cursor path,
-                                      any bitmap length; 0.7: larger-K child's
-                                      region first (decode-order wire). */
+#define PIVCOHUF_VERSION_MINOR  8
 #define PIVCOHUF_HEADER_SIZE    26
 
 typedef enum {

@@ -51,11 +51,11 @@ static uint8_t *decode_scratch_ensure(size_t need)
 }
 
 /* MERGE_OVERREAD: the SIMD merges load their source buffers in
- * full-vector chunks, so they may READ (never write) up to this many
+ * full-vector chunks, so they may read (never write) up to this many
  * bytes past a source's end.  Every buffer the decode walk hands to a
  * merge therefore needs this much trailing slack inside the arena; the
  * caller's `symbols` buffer, which guarantees none, is only ever a
- * merge DESTINATION (writes are exact). */
+ * merge destination (writes are exact). */
 #define MERGE_OVERREAD ((size_t)PIVCO_PRIM_MERGE_OVERREAD)
 
 /* Thread-local growable encode scratch arena.  Mirrors the decode arena
@@ -127,7 +127,7 @@ extern uint64_t g_pivco_fse_bytes_out[PIVCO_FSE_STATS_SLOTS];
  * DFS, emitting records in decompression order (an Euler walk): the
  * partition runs at node entry (it routes the ranks the recursion
  * needs) and the K_right header is written there too, but the node's
- * marker+bitmap record is emitted AFTER the children's regions —
+ * marker+bitmap record is emitted after the children's regions —
  * exactly where the decoder's merge consumes it, so the decoder reads
  * the stream strictly forward.  At each non-flat internal node,
  * `ranks[0..n)` holds the surviving leaves' in-order ranks; partition
@@ -368,18 +368,18 @@ int CODEC_ENCODE_ENTRY(const uint8_t *symbols, size_t n,
  *
  * Scratch placement is a two-buffer ping-pong (out, tmp):
  *
- *   - the LARGER child decodes in place into out's tail
+ *   - the larger child decodes in place into out's tail
  *     out[K_small, K): safe under the merge, whose write cursor can
  *     never overtake its tail-side read cursor (by the time it writes
  *     out[i] it has consumed at least i - K_small tail bytes);
- *   - the SMALLER child decodes into tmp[0, K_small), and its own
- *     recursion uses out's still-empty prefix out[0, K_small) as ITS
+ *   - the smaller child decodes into tmp[0, K_small), and its own
+ *     recursion uses out's still-empty prefix out[0, K_small) as its
  *     partner — the pair (tmp, out-prefix) ping-pongs down the
- *     smaller-child spine instead of growing an arena.
+ *     smaller-child spine.
  *
  * The caller guarantees tmp capacity floor(K/2): a node's smaller child
  * is at most floor(K/2), and everything a smaller child's subtree puts
- * in ITS partner stays inside out[0, K_small).  The walk's footprint is
+ * in its partner stays inside out[0, K_small).  The walk's footprint is
  * therefore out[0,K), plus at most floor(K/2) bytes past tmp (the
  * largest smaller-child on the larger-child spine), plus MERGE_OVERREAD
  * read slack past whichever region ends last.
@@ -541,17 +541,21 @@ int CODEC_DECODE_ENTRY(const uint8_t *in, size_t in_len,
     }
 
     /* Remaining root shapes recurse.  The ping-pong walk parks children
-     * in its out buffer's tail and prefix and the merges READ their
+     * in its out buffer's tail and prefix and the merges read their
      * sources with up-to-MERGE_OVERREAD slack past the end — guarantees
      * the caller's `symbols` doesn't offer.  So the root's children
      * decode into the thread-local arena (grown on demand, reused
      * across blocks) and only the root's own merge, whose writes are
      * exact, targets `symbols`.
      *
-     * Arena bound: (MAX_CODE_LEN+2)·N is the pre-ping-pong carve
-     * allocator's loose bound, kept verbatim for this commit; the
-     * ping-pong walk's true high-water is under 1.5·N and the arena
-     * shrinks to it in the next commit. */
+     * Arena bound: (MAX_CODE_LEN+2)·N, loose.  The ping-pong walk's
+     * true high-water is under 1.5·N — but only on valid streams, so
+     * that figure is not a safe allocation target.  Against invalid
+     * data (a bitmap popcount disagreeing with the declared child
+     * counts) the floor is 2·N plus kernel-overtouch pad: with splits
+     * bounded (0 <= KR <= K — not currently checked), every recursive
+     * (out, tmp) placement satisfies out + 2K <= 2·N and tmp + K <=
+     * 2·N as arena offsets, which caps hostile cursor excursions too. */
     size_t need = (size_t)N * (PIVCO_MAX_CODE_LEN + 2) + MERGE_OVERREAD;
 
     if ((pivco_node_type_t)table->node_type[table->tree_root]

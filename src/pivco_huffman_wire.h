@@ -6,12 +6,11 @@
  * which led to silent drift (scalar+NEON added the FSE marker byte in
  * 2026-05-13, x86+AVX-512 didn't — broke scalar↔SSE cross-decoding).
  *
- * Wire format (v0.7): file data in decompression order, larger-K
+ * Wire format (v0.8): file data in decompression order, larger-K
  * child first.  The layout is an Euler walk of the tree — each node's
  * K_right split header lands at its pre-order position (on the way
  * down), its marker+bitmap record at its post-order position (on the
  * way up, after its children's regions):
- *  (v0.5: uint16 block_N header; v0.6: FSE wide-cursor, any length.)
  *
  * Per-block header (once, at the very start of each encoded block):
  *   [block_N: uint16 LE, 2 bytes]                  symbol count N for this
@@ -43,8 +42,7 @@
  * information in prefix position anyway — but it consumes a node's
  * bitmap only at merge time, after both children are decoded.  So the
  * stream is read strictly forward, each byte touched once, and the
- * decoder's L1 working set is a moving window instead of the whole
- * compressed block.
+ * decoder's L1 working set is a moving window.
  *
  * The larger-K child goes first so the decoder meets each node's
  * dominant half while the smaller sibling's buffer is still empty —
