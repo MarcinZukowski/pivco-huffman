@@ -50,109 +50,13 @@ static uint8_t *decode_scratch_ensure(size_t need)
     return g_decode_scratch;
 }
 
-/* ---------- Runtime placement flags (issue #10 integration) ----------
- *
- * PIVCO_DEC_CARVE=1    page-hazard-aware scratch carving: child slices
- *                      are nudged off page boundaries (issue #8's
- *                      split-load penalty on a parked merge cursor).
- * PIVCO_DEC_INPLACE=1  in-place merge: an internal node's longer child
- *                      decodes into out_buf's tail instead of scratch,
- *                      halving the merge working set.
- *
- * Both default OFF: placement is then byte-identical to the plain bump
- * allocator.  Read once per process (per backend TU). */
-static int g_dec_carve   = -1;
-static int g_dec_inplace = -1;
-static inline int dec_flag(const char *name, int *cache)
-{
-    int v = *cache;
-    if (v < 0) {
-        const char *e = getenv(name);
-        v = (e && e[0] == '1');
-        *cache = v;
-    }
-    return v;
-}
-
-/* SCRATCH_PAGE is the page-split-load hazard granularity used by
- * scratch_carve below: the hardware page size (16 KB Apple Silicon,
- * 4 KB elsewhere in the fleet; a 64 KB-page Linux arm64 kernel gets
- * needless-but-harmless 4 KB padding). */
-#if defined(__APPLE__) && defined(__aarch64__)
-#define SCRATCH_PAGE   ((uintptr_t)16384)
-#else
-#define SCRATCH_PAGE   ((uintptr_t)4096)
-#endif
-#define MERGE_OVERREAD ((uintptr_t)PIVCO_PRIM_MERGE_OVERREAD)
-/* Keep the first ~cache line of every slice straddle-free: a merge
- * cursor lingers NEAR offset 0 (not just at it) while the other side
- * drains. */
-#define START_GUARD    ((uintptr_t)64)
-
-/* ALL padding draws from a per-block budget (reset in the decode
- * entry): when it runs out, slices are placed unpadded -- a perf
- * hazard reachable only by adversarial page phases, never a safety
- * issue.  Absolute (not per-page) so the arena bound is identical on
- * every platform. */
-#define PIVCO_SCRATCH_PAD_BUDGET ((size_t)16384)
-static __thread size_t g_scratch_pad_left;
-
-/* Carve a child slice off the arena.  With PIVCO_DEC_CARVE off this is
- * a plain bump.  With it on, page-hazard-aware placement (issue #8):
- *   - sub-page slice: never crosses a page boundary (its cursor dwells
- *     everywhere inside it, so a mid-slice straddle is the hammer);
- *   - page-crossing slice: interior straddles are unavoidable (and its
- *     cursor moves fast anyway); small nudges keep the START zone and
- *     the exhausted-cursor END position straddle-free (the end lands ON
- *     a boundary, so the end-position load reads the next page without
- *     straddling). */
-static inline uint8_t *scratch_carve(uint8_t **top, int size)
-{
-    uintptr_t p = (uintptr_t)*top;
-    if (g_dec_carve) {
-        uintptr_t rem = SCRATCH_PAGE - (p & (SCRATCH_PAGE - 1));  /* 1..PAGE */
-        uintptr_t pad = 0;
-        if ((uintptr_t)size + MERGE_OVERREAD <= SCRATCH_PAGE) {
-            if ((uintptr_t)size + MERGE_OVERREAD > rem)
-                pad = rem;                              /* sub-page: never cross */
-        } else {
-            if (rem < START_GUARD) pad = rem;           /* clean start */
-            uintptr_t end  = p + pad + (uintptr_t)size;
-            uintptr_t erem = SCRATCH_PAGE - (end & (SCRATCH_PAGE - 1));
-            if (erem < MERGE_OVERREAD) {
-                pad += erem;                            /* end onto boundary */
-                uintptr_t srem = SCRATCH_PAGE - ((p + pad) & (SCRATCH_PAGE - 1));
-                if (srem < START_GUARD) pad += srem;    /* re-clean start */
-            }
-        }
-        if (pad <= g_scratch_pad_left) g_scratch_pad_left -= pad; else pad = 0;
-        p += pad;
-    }
-    *top = (uint8_t *)(p + (uintptr_t)size);
-    return (uint8_t *)p;
-}
-
-/* Place an internal node's tail child at out_buf + offset (in-place
- * merge; only called when tail_ok && PIVCO_DEC_INPLACE).  A tail's
- * position is fixed by the merge invariant, so it cannot be nudged;
- * the one dangerous placement is a SUB-PAGE tail that would cross a
- * page boundary (a small slice's cursor is parked everywhere in it) --
- * that one falls back to a no-cross carve, charging the extra scratch
- * content to the same pad budget. */
-static inline uint8_t *place_tail(uint8_t *out_buf, int offset, int size,
-                                  uint8_t **top)
-{
-    uint8_t *p = out_buf + offset;
-    if (g_dec_carve && (uintptr_t)size + MERGE_OVERREAD <= SCRATCH_PAGE) {
-        uintptr_t rem = SCRATCH_PAGE - ((uintptr_t)p & (SCRATCH_PAGE - 1));
-        if ((uintptr_t)size + MERGE_OVERREAD > rem &&
-            (size_t)size <= g_scratch_pad_left) {
-            g_scratch_pad_left -= (size_t)size;   /* charge the content... */
-            return scratch_carve(top, size);      /* ...the carve pads itself */
-        }
-    }
-    return p;
-}
+/* MERGE_OVERREAD: the SIMD merges load their source buffers in
+ * full-vector chunks, so they may READ (never write) up to this many
+ * bytes past a source's end.  Every buffer the decode walk hands to a
+ * merge therefore needs this much trailing slack inside the arena; the
+ * caller's `symbols` buffer, which guarantees none, is only ever a
+ * merge DESTINATION (writes are exact). */
+#define MERGE_OVERREAD ((size_t)PIVCO_PRIM_MERGE_OVERREAD)
 
 /* Thread-local growable encode scratch arena.  Mirrors the decode arena
  * above: holds the per-block ranks buffer + the tree-walk's right-half
@@ -220,12 +124,21 @@ extern uint64_t g_pivco_fse_bytes_out[PIVCO_FSE_STATS_SLOTS];
 
 /* ---------- Encode tree walk ---------- *
  *
- * DFS, pre-order: emit the partition bitmap at this node, then recurse left,
- * then right.  At each non-flat internal node, `ranks[0..n)` holds the
- * surviving leaves' in-order ranks; partition routes each by `rank >
- * split_rank[node]`, leaving the left half in place in `ranks[0..n_left)` and
- * compacting the right half into `tmp[0..n_right)`.  The recursion descends
- * left on `ranks`, right on `tmp`. */
+ * DFS, emitting records in decompression order (an Euler walk): the
+ * partition runs at node entry (it routes the ranks the recursion
+ * needs) and the K_right header is written there too, but the node's
+ * marker+bitmap record is emitted AFTER the children's regions —
+ * exactly where the decoder's merge consumes it, so the decoder reads
+ * the stream strictly forward.  At each non-flat internal node,
+ * `ranks[0..n)` holds the surviving leaves' in-order ranks; partition
+ * routes each by `rank > split_rank[node]`, leaving the left half in
+ * place in `ranks[0..n_left)` and compacting the right half into
+ * `tmp[0..n_right)`.  The recursion descends left on `ranks`, right on
+ * `tmp`.  The bitmap is staged in a stack buffer across the recursion
+ * (its final stream position depends on the children's — FSE-variable —
+ * encoded sizes, so it can't be written in place up front);
+ * ≤ bitmap_bytes(N)+64 per level, tree height ≤ PIVCO_MAX_CODE_LEN
+ * levels. */
 
 /* Arch-agnostic FSE attempt on a freshly-built raw bitmap.
  *
@@ -334,21 +247,16 @@ static void codec_encode_node(const pivco_huffman_table_t *table,
         return;
     }
 
-    /* Non-flat internal node.  codec.c owns: K_right header reservation,
-     * FSE marker byte, optional FSE-attempt on the raw bitmap.  The
-     * arch-specific primitive does only the SIMD-bound work: build the
-     * raw bitmap and partition codes_la. */
-    uint8_t *kr_slot = wire_reserve_kr_header(table, node_id, out_ptr);
-
-    /* Reserve marker (default = 0, raw bitmap). */
-    uint8_t *marker_slot = *out_ptr;
-    *marker_slot = 0;
-    *out_ptr += 1;
-
-    /* Reserve the bitmap region; primitive fills it in. */
+    /* Non-flat internal node.  codec.c owns: K_right header, FSE marker
+     * byte, optional FSE-attempt on the raw bitmap.  The arch-specific
+     * primitive does only the SIMD-bound work: build the raw bitmap and
+     * partition the ranks.
+     *
+     * The bitmap is built into a stack staging buffer (+64 slack
+     * absorbs the SIMD partitions' over-wide tail stores) and copied
+     * into the stream after the children's regions. */
     int nbytes = bitmap_bytes(n);
-    uint8_t *bm = *out_ptr;
-    *out_ptr += nbytes;
+    uint8_t bm_stage[(size_t)nbytes + 64];
 
     /* Pick the partition variant by node_type, mirroring the decode-side
      * dispatch.  The bitmap (and thus the wire bytes) is identical across
@@ -361,28 +269,51 @@ static void codec_encode_node(const pivco_huffman_table_t *table,
     PROF_TIC();
     switch ((pivco_node_type_t)table->node_type[node_id]) {
     case PIVCO_NODE_BOTH_LEAVES:
-        n_right = prim_enc_partition_none(ranks, n, thr, bm);        break;
+        n_right = prim_enc_partition_none(ranks, n, thr, bm_stage);        break;
     case PIVCO_NODE_LEAF_LEFT:
-        n_right = prim_enc_partition_right(ranks, n, thr, bm, tmp);  break;
+        n_right = prim_enc_partition_right(ranks, n, thr, bm_stage, tmp);  break;
     default:
-        n_right = prim_enc_partition_full(ranks, n, thr, bm, tmp);   break;
+        n_right = prim_enc_partition_full(ranks, n, thr, bm_stage, tmp);   break;
     }
     PROF_TOC(PROF_ENC_NODE_FULL, n);
     int n_left  = n - n_right;
 
-    /* Optional FSE attempt on the raw bitmap.  On commit, marker_slot
-     * and bm region are rewritten in place and *out_ptr is advanced to
-     * the end of the FSE payload (which may be shorter than the raw
-     * bitmap region we already reserved).  No-op otherwise. */
+    /* One K_right header per recursion site, consumed by the decoder
+     * at node entry so it can size both children before their regions
+     * arrive. */
+    wire_write_kr_header(table, node_id, out_ptr, n_right);
+
+    /* Emit the larger-K child's region first: the decoder can then
+     * decode it into scratch that the smaller, not-yet-decoded
+     * sibling's buffer overlaps (hole-reuse), shrinking the arena
+     * high-water.  The two rank buffers (ranks=left, tmp=right) and
+     * the shared deeper scratch tmp+n_right are mutually disjoint, so
+     * the call order is free.  A leaf child emits nothing, so this
+     * only changes the stream at INTERNAL_FULL nodes — exactly where
+     * the decoder reorders. */
+    if (n_right > n_left) {
+        codec_encode_node(table, node->right, tmp,   n_right, depth + 1,
+                           out_ptr, tmp + n_right);
+        codec_encode_node(table, node->left,  ranks, n_left,  depth + 1,
+                           out_ptr, tmp + n_right);
+    } else {
+        codec_encode_node(table, node->left,  ranks, n_left,  depth + 1,
+                           out_ptr, tmp + n_right);
+        codec_encode_node(table, node->right, tmp,   n_right, depth + 1,
+                           out_ptr, tmp + n_right);
+    }
+
+    /* Emit this node's record: marker + staged bitmap.  The FSE attempt
+     * may rewrite marker+bm in place with [fse_len][payload] and pull
+     * *out_ptr back to the payload end.  No-op otherwise. */
+    uint8_t *marker_slot = *out_ptr;
+    *marker_slot = 0;
+    *out_ptr += 1;
+    uint8_t *bm = *out_ptr;
+    memcpy(bm, bm_stage, (size_t)nbytes);
+    *out_ptr += nbytes;
     codec_maybe_fse_attempt(marker_slot, bm, nbytes,
                              n, n_left, n_right, depth, out_ptr);
-
-    wire_commit_kr_header(kr_slot, n_right);
-
-    codec_encode_node(table, node->left,  ranks, n_left,  depth + 1,
-                       out_ptr, tmp + n_right);
-    codec_encode_node(table, node->right, tmp,   n_right, depth + 1,
-                       out_ptr, tmp + n_right);
 }
 
 int CODEC_ENCODE_ENTRY(const uint8_t *symbols, size_t n,
@@ -423,37 +354,51 @@ int CODEC_ENCODE_ENTRY(const uint8_t *symbols, size_t n,
     return PIVCO_OK;
 }
 
-/* ---------- Bottom-up decode tree walk ---------- *
+/* ---------- Bottom-up decode tree walk (ping-pong scratch) ---------- *
  *
- * Bottom-up: each call decodes a subtree into a contiguous K-byte
- * output buffer.  Internal nodes recurse into their children (which
- * write to scratch arenas), then merge per the bitmap.  The flat-
- * subtree fast path bypasses recursion entirely.
+ * Each call decodes a subtree's K symbols into out[0,K).  Internal
+ * nodes recurse into their children, then merge per the node's bitmap.
+ * The flat-subtree fast path bypasses recursion entirely.
+ *
+ * The wire is in decompression order — larger-K child first — so the
+ * input cursor is consumed strictly forward and each record is loaded
+ * exactly where it is used: the K_right header at node entry, the
+ * children's regions during their recursion, the node's bitmap right
+ * before its merge.
+ *
+ * Scratch placement is a two-buffer ping-pong (out, tmp):
+ *
+ *   - the LARGER child decodes in place into out's tail
+ *     out[K_small, K): safe under the merge, whose write cursor can
+ *     never overtake its tail-side read cursor (by the time it writes
+ *     out[i] it has consumed at least i - K_small tail bytes);
+ *   - the SMALLER child decodes into tmp[0, K_small), and its own
+ *     recursion uses out's still-empty prefix out[0, K_small) as ITS
+ *     partner — the pair (tmp, out-prefix) ping-pongs down the
+ *     smaller-child spine instead of growing an arena.
+ *
+ * The caller guarantees tmp capacity floor(K/2): a node's smaller child
+ * is at most floor(K/2), and everything a smaller child's subtree puts
+ * in ITS partner stays inside out[0, K_small).  The walk's footprint is
+ * therefore out[0,K), plus at most floor(K/2) bytes past tmp (the
+ * largest smaller-child on the larger-child spine), plus MERGE_OVERREAD
+ * read slack past whichever region ends last.
  *
  * Dispatch on node_type, computed at build-table time (by children's
  * leafness — a leaf child's symbol goes straight into the parent's
  * merge, so the walk never recurses into a leaf):
  *
- *   INTERNAL_FLAT   — packed-bits flat decode into out_buf
+ *   INTERNAL_FLAT   — packed-bits flat decode into out
  *   BOTH_LEAVES     — both children leaves, merge_cst_cst directly
- *   LEAF_LEFT       — left child leaf, recurse right, merge_cst_vec
- *   INTERNAL_FULL   — both children internal: recurse both, merge_vec_vec
- *
- * `scratch_top` is the arena pointer for child output buffers; each
- * caller carves its children's slices off it (see scratch_carve) when
- * calling further down.
- *
- * `tail_ok` is nonzero when out_buf is arena-backed (a carve or a
- * nested tail) and so has MERGE_OVERREAD trailing slack: a child may
- * then be placed in its tail (see place_tail) when PIVCO_DEC_INPLACE
- * is on.  The root call passes 0 -- the caller's output buffer has no
- * over-read slack. */
+ *   LEAF_LEFT       — left child leaf, recurse right (in place, into
+ *                     out's tail), merge_cst_vec
+ *   INTERNAL_FULL   — both children internal: larger child in place,
+ *                     smaller via the ping-pong partner, merge_vec_vec */
 
 static void codec_decode_subtree(const pivco_huffman_table_t *table,
                                    int16_t node_id, int K,
-                                   uint8_t *out_buf,
-                                   const uint8_t **in_ptr,
-                                   uint8_t *scratch_top, int tail_ok)
+                                   uint8_t *out, uint8_t *tmp,
+                                   const uint8_t **in_ptr)
 {
     if (K == 0) return;
 
@@ -474,7 +419,7 @@ static void codec_decode_subtree(const pivco_huffman_table_t *table,
         *in_ptr += total_bytes;
         const uint8_t *c2s =
             &table->flat_code_to_sym[table->flat_offset[node_id]];
-        prim_merge_flat(out_buf, K, bm, D, c2s);
+        prim_merge_flat(out, K, bm, D, c2s);
         return;
     }
 
@@ -485,56 +430,54 @@ static void codec_decode_subtree(const pivco_huffman_table_t *table,
         prim_merge_cst_cst(bm, K,
                            (uint8_t)table->tree[node->left].symbol,
                            (uint8_t)table->tree[node->right].symbol,
-                           out_buf);
+                           out);
         return;
     }
 
     case PIVCO_NODE_LEAF_LEFT: {
+        /* One internal child (right); the leaf contributes the K_left
+         * symbols the merge fills into out's prefix.  The right child
+         * decodes in place into out's tail, whatever its share of K. */
         int K_right = wire_read_kr_header(table, node_id, in_ptr);
+        uint8_t *right_buf = out + (K - K_right);
+        codec_decode_subtree(table, node->right, K_right,
+                              right_buf, tmp, in_ptr);
+
         uint8_t bm_scratch[(size_t)bitmap_bytes(K) + 16];
         const uint8_t *bm = wire_read_bitmap(in_ptr, K, bm_scratch);
-
-        uint8_t *right_buf = tail_ok
-            ? place_tail(out_buf, K - K_right, K_right, &scratch_top)
-            : scratch_carve(&scratch_top, K_right);
-        codec_decode_subtree(table, node->right, K_right,
-                              right_buf, in_ptr, scratch_top, g_dec_inplace);
         prim_merge_cst_vec(bm, K,
                            (uint8_t)table->tree[node->left].symbol,
-                           right_buf, out_buf);
+                           right_buf, out);
         return;
     }
 
     case PIVCO_NODE_INTERNAL_FULL:
     default: {
-        /* Both children internal.  Recurse into both with disjoint
-         * scratch slices, then merge. */
+        /* Both children internal.  Stream order == decode order ==
+         * larger first (strict >, ties left-first — must match the
+         * encoder). */
         int K_right = wire_read_kr_header(table, node_id, in_ptr);
-        uint8_t bm_scratch[(size_t)bitmap_bytes(K) + 16];
-        const uint8_t *bm = wire_read_bitmap(in_ptr, K, bm_scratch);
-
-        int K_left = K - K_right;
+        int K_left  = K - K_right;
         uint8_t *left_buf, *right_buf;
-        if (tail_ok && K_left >= K_right) {
-            /* Longer child decodes into out_buf's tail (free -- see
-             * place_tail), the shorter into a scratch carve.  Decode
-             * order stays left-then-right (the wire is pre-order) --
-             * only buffer placement differs. */
-            left_buf  = place_tail(out_buf, K_right, K_left, &scratch_top);
-            right_buf = scratch_carve(&scratch_top, K_right);
-        } else if (tail_ok) {
-            right_buf = place_tail(out_buf, K_left, K_right, &scratch_top);
-            left_buf  = scratch_carve(&scratch_top, K_left);
+        if (K_right > K_left) {
+            right_buf = out + K_left;            /* larger, in place    */
+            left_buf  = tmp;                     /* smaller, ping-pong  */
+            codec_decode_subtree(table, node->right, K_right,
+                                  right_buf, tmp, in_ptr);
+            codec_decode_subtree(table, node->left,  K_left,
+                                  left_buf,  out, in_ptr);
         } else {
-            left_buf  = scratch_carve(&scratch_top, K_left);
-            right_buf = scratch_carve(&scratch_top, K_right);
+            left_buf  = out + K_right;           /* larger, in place    */
+            right_buf = tmp;                     /* smaller, ping-pong  */
+            codec_decode_subtree(table, node->left,  K_left,
+                                  left_buf,  tmp, in_ptr);
+            codec_decode_subtree(table, node->right, K_right,
+                                  right_buf, out, in_ptr);
         }
 
-        codec_decode_subtree(table, node->left,  K_left,
-                              left_buf,  in_ptr, scratch_top, g_dec_inplace);
-        codec_decode_subtree(table, node->right, K_right,
-                              right_buf, in_ptr, scratch_top, g_dec_inplace);
-        prim_merge_vec_vec(bm, K, left_buf, right_buf, out_buf);
+        uint8_t bm_scratch[(size_t)bitmap_bytes(K) + 16];
+        const uint8_t *bm = wire_read_bitmap(in_ptr, K, bm_scratch);
+        prim_merge_vec_vec(bm, K, left_buf, right_buf, out);
         return;
     }
     }
@@ -583,24 +526,87 @@ int CODEC_DECODE_ENTRY(const uint8_t *in, size_t in_len,
         return PIVCO_OK;
     }
 
-    /* Scratch arena.  Worst case at a heavily-skewed node, the
-     * partition is one-sided so a single recursion can consume up to
-     * N bytes.  Bounded by (MAX_CODE_LEN+2) * N.  Grown on demand from a
-     * thread-local heap buffer so block size is a runtime parameter.
-     * With carve or in-place placement on, double it for carve-bump
-     * waste and add page + over-read slack (the exact 2N + budget
-     * bound comes with the arena-shrink step). */
-    dec_flag("PIVCO_DEC_CARVE",   &g_dec_carve);
-    dec_flag("PIVCO_DEC_INPLACE", &g_dec_inplace);
-    size_t need = (size_t)N * (PIVCO_MAX_CODE_LEN + 2);
-    if (g_dec_carve || g_dec_inplace)
-        need = 2 * need + SCRATCH_PAGE + MERGE_OVERREAD;
+    /* Flat root: the whole tree is one packed-bits region, decoded
+     * straight into symbols (exact writes, no merge, no scratch). */
+    if ((pivco_node_type_t)table->node_type[table->tree_root]
+        == PIVCO_NODE_INTERNAL_FLAT) {
+        int D = table->flat_depth[table->tree_root];
+        int total_bytes = (N * D + 7) >> 3;
+        const uint8_t *bm = ptr;
+        ptr += total_bytes;
+        prim_merge_flat(symbols, N, bm, D,
+                        &table->flat_code_to_sym[table->flat_offset[table->tree_root]]);
+        *consumed = (size_t)(ptr - in);
+        return PIVCO_OK;
+    }
+
+    /* Remaining root shapes recurse.  The ping-pong walk parks children
+     * in its out buffer's tail and prefix and the merges READ their
+     * sources with up-to-MERGE_OVERREAD slack past the end — guarantees
+     * the caller's `symbols` doesn't offer.  So the root's children
+     * decode into the thread-local arena (grown on demand, reused
+     * across blocks) and only the root's own merge, whose writes are
+     * exact, targets `symbols`.
+     *
+     * Arena bound: (MAX_CODE_LEN+2)·N is the pre-ping-pong carve
+     * allocator's loose bound, kept verbatim for this commit; the
+     * ping-pong walk's true high-water is under 1.5·N and the arena
+     * shrinks to it in the next commit. */
+    size_t need = (size_t)N * (PIVCO_MAX_CODE_LEN + 2) + MERGE_OVERREAD;
+
+    if ((pivco_node_type_t)table->node_type[table->tree_root]
+        == PIVCO_NODE_LEAF_LEFT) {
+        /* One internal child: it decodes at the arena base with the
+         * space after it as ping-pong partner; the cst_vec merge fills
+         * symbols. */
+        int K_right = wire_read_kr_header(table, table->tree_root, &ptr);
+        uint8_t *scratch = decode_scratch_ensure(need);
+        if (!scratch) return PIVCO_ERR_NULL;
+        codec_decode_subtree(table, root->right, K_right,
+                              scratch, scratch + K_right, &ptr);
+
+        uint8_t bm_scratch[(size_t)bitmap_bytes(N) + 16];
+        const uint8_t *bm = wire_read_bitmap(&ptr, N, bm_scratch);
+        prim_merge_cst_vec(bm, N,
+                           (uint8_t)table->tree[root->left].symbol,
+                           scratch, symbols);
+        *consumed = (size_t)(ptr - in);
+        return PIVCO_OK;
+    }
+
+    /* INTERNAL_FULL root — hybrid hole-reuse placement.  Both children
+     * decode into the arena's first N bytes, [larger | smaller], and
+     * the final merge writes symbols.  The larger child (first on the
+     * wire) uses the smaller sibling's still-empty slot as its
+     * ping-pong partner — hole-reuse; when a smaller-child on its spine
+     * outgrows that slot, the partner writes spill past N into fresh
+     * arena.  The smaller root child then decodes into its slot with a
+     * fresh partner beyond N. */
+    int K_right = wire_read_kr_header(table, table->tree_root, &ptr);
+    int K_left  = N - K_right;
     uint8_t *scratch = decode_scratch_ensure(need);
     if (!scratch) return PIVCO_ERR_NULL;
-    g_scratch_pad_left = PIVCO_SCRATCH_PAD_BUDGET;
 
-    codec_decode_subtree(table, table->tree_root, N,
-                          symbols, &ptr, scratch, /*tail_ok=*/0);
+    uint8_t *buf_left, *buf_right;
+    if (K_right > K_left) {                  /* right larger -> first on the wire */
+        buf_right = scratch;
+        buf_left  = scratch + K_right;
+        codec_decode_subtree(table, root->right, K_right,
+                              buf_right, /*tmp=*/buf_left, &ptr);
+        codec_decode_subtree(table, root->left,  K_left,
+                              buf_left,  /*tmp=*/scratch + N, &ptr);
+    } else {
+        buf_left  = scratch;
+        buf_right = scratch + K_left;
+        codec_decode_subtree(table, root->left,  K_left,
+                              buf_left,  /*tmp=*/buf_right, &ptr);
+        codec_decode_subtree(table, root->right, K_right,
+                              buf_right, /*tmp=*/scratch + N, &ptr);
+    }
+
+    uint8_t bm_scratch[(size_t)bitmap_bytes(N) + 16];
+    const uint8_t *bm = wire_read_bitmap(&ptr, N, bm_scratch);
+    prim_merge_vec_vec(bm, N, buf_left, buf_right, symbols);
 
     *consumed = (size_t)(ptr - in);
     return PIVCO_OK;

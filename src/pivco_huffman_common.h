@@ -82,11 +82,11 @@ static inline int bitmap_bytes(int n)
 
 /* K_right wire-format header decision (2026-05-12).
  *
- * Wire format: at each non-flat internal node whose bitmap is followed by
- * recursion into at least one non-leaf child, the encoder writes a 2-byte
- * little-endian uint16 K_right header immediately before the bitmap.  The
- * BU decoder reads this directly instead of running popcount; the TD
- * decoder skips it (still computes splits inline per stride).
+ * Wire format: at each non-flat internal node that recurses into at
+ * least one non-leaf child, the encoder writes a 2-byte little-endian
+ * uint16 K_right header at node entry.  The BU decoder reads it there
+ * instead of running popcount, and uses it to size both children
+ * before their regions arrive.
  *
  * Condition: node has at least one child that's NOT a leaf.  Encodes the
  * exact set of popcount call sites in the BU decoder.  Both-leaf cases
