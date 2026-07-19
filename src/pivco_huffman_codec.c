@@ -39,15 +39,29 @@
 static __thread uint8_t *g_decode_scratch     = NULL;
 static __thread size_t   g_decode_scratch_cap = 0;
 
+/* The returned base is aligned to a 16 KiB boundary plus 64*39 bytes.
+ * The in-place walk parks every nested child chain so it ends exactly
+ * at base + N; when that address sits within [-16, +256) of a 16 KiB
+ * page boundary, the merge tails' 16 B over-reads become page-split
+ * loads, ~25 cycles each on Apple M4 (page size == 16 KiB == the block
+ * size, so a page-aligned allocation hits the band deterministically —
+ * dna_fasta PH -11% E2E).  The odd 64-aligned offset pins the chain
+ * end mid-page on every host. */
+#define DECODE_SCRATCH_ALIGN ((uintptr_t)16384)   /* Apple page size */
+#define DECODE_SCRATCH_SHIFT (64 * 39)
 static uint8_t *decode_scratch_ensure(size_t need)
 {
+    need += DECODE_SCRATCH_ALIGN + DECODE_SCRATCH_SHIFT;
     if (need > g_decode_scratch_cap) {
         uint8_t *p = (uint8_t *)realloc(g_decode_scratch, need);
         if (!p) return NULL;
         g_decode_scratch     = p;
         g_decode_scratch_cap = need;
     }
-    return g_decode_scratch;
+    uintptr_t p = (uintptr_t)g_decode_scratch;
+    p = ((p + DECODE_SCRATCH_ALIGN - 1) & ~(DECODE_SCRATCH_ALIGN - 1))
+        + DECODE_SCRATCH_SHIFT;
+    return (uint8_t *)p;
 }
 
 /* MERGE_OVERREAD: the SIMD merges load their source buffers in
