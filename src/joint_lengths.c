@@ -57,6 +57,52 @@ _Static_assert(PIVCO_MAX_CODE_LEN <= 15,
 /* Max compact DP row width: j <= 128 at sigma = 256, padded to x4. */
 #define JL_WMAX 132
 
+/* ---------- SIMD selection ----------
+ *
+ * The DP row sweeps have NEON and SSE4.1 register-resident fast
+ * paths; every other build -- including the x86 SSE2 floor -- takes
+ * the generic sweep's scalar tail, which is the complete algorithm.
+ * PIVCO_JOINT_SCALAR forces the scalar path for A/B and debugging.
+ * Candidate costs can differ between the FMA and non-FMA forms in
+ * the last ulp, which only ever flips ties between equal-cost
+ * shapes. */
+#if !defined(PIVCO_JOINT_SCALAR) && defined(__ARM_NEON)
+#include <arm_neon.h>
+#define JL_SIMD_NEON 1
+#define JL_REGROWS 1
+#elif !defined(PIVCO_JOINT_SCALAR) && defined(__SSE4_1__)
+#include <immintrin.h>
+#define JL_SIMD_X86 1
+#define JL_REGROWS 1
+#else
+#define JL_REGROWS 0
+#endif
+
+#if defined(__clang__)
+#define JL_UNROLL _Pragma("clang loop unroll(full)")
+#else
+#define JL_UNROLL
+#endif
+
+#if defined(JL_SIMD_X86)
+/* f32x4 / u16x4 idioms for the SSE sweeps (u16x4 rides the low half
+ * of an __m128i; blends see garbage in the high half, stores are
+ * 8-byte).  FMA when the compiler has it (-mfma); mul+add otherwise. */
+#if defined(__FMA__)
+#define JL_FMLA(acc, x, y) _mm_fmadd_ps((x), (y), (acc))
+#else
+#define JL_FMLA(acc, x, y) _mm_add_ps((acc), _mm_mul_ps((x), (y)))
+#endif
+/* vextq_f32(a, b, N) / vext_u16(a, b, N) twins */
+#define JL_EXTQ_F32(a, b, N) _mm_castsi128_ps(_mm_alignr_epi8( \
+        _mm_castps_si128(b), _mm_castps_si128(a), 4 * (N)))
+#define JL_EXT_U16(a, b, N) \
+        _mm_srli_si128(_mm_unpacklo_epi64((a), (b)), 2 * (N))
+/* narrow a 4 x u32 compare mask to 4 x u16 (vmovn_u32 twin) */
+#define JL_MOVN32(m) \
+        _mm_packs_epi32(_mm_castps_si128(m), _mm_castps_si128(m))
+#endif
+
 /* ---------- effort knob (process-global, same pattern as the FSE
  * toggle).  Read once per pivco_huffman_build_table call. ---------- */
 
@@ -340,7 +386,15 @@ static double solve_slot_dp(const double *P, int sigma, double lam,
     int border[JL_MAX_FLAT], nb;
     if (!dp_take_order(lam, kap, bcap, border, &nb))
         return -1.0;
-    const int W = (((sigma >> 1) + 2) + 3) & ~3;   /* row width, x4 pad */
+    /* sigma <= 32 rows fit five q-registers at a fixed W = 20, and
+     * sigma <= 64 rows nine at W = 36: the take sweeps then run
+     * register-resident per diagonal (loads/stores once per row
+     * instead of per item), which is where the grouped tiers' time
+     * lives.  The register sweeps store their full fixed width, so W
+     * must equal it exactly on the small-sigma tiers. */
+    const int sm32 = sigma <= 32;
+    const int sm64 = !sm32 && sigma <= 64;
+    const int W = sm32 ? 20 : sm64 ? 36 : (((sigma >> 1) + 2) + 3) & ~3;
     const size_t plane = (size_t)(sigma + 1) * (size_t)W;
     /* One f32 cost plane + lmax u16 backtrack planes (~880 KB for the
      * exact solve at sigma = 256; the grouped tiers use a fraction). */
@@ -374,7 +428,12 @@ static double solve_slot_dp(const double *P, int sigma, double lam,
     }
 
     /* Lazy init: the doubling that produces a level writes each row up
-     * to its cap, so only the level-1 band rows need priming. */
+     * to its cap, so only the level-1 band rows need priming.  Lanes
+     * beyond a row's cap stay indeterminate and ARE loaded by the
+     * fixed-width register sweeps; dest > source keeps that junk out
+     * of every in-band cell (see the sweep comments) -- memory-safe
+     * and result-clean, but MSan users should define
+     * PIVCO_JOINT_SCALAR or pre-zero the buffer. */
     for (int t = tlo[1]; t <= thi[1]; t++)
         for (int j = 0; j < W; j++) cost[(size_t)t * W + j] = INFINITY;
     cost[2 * W + 0] = 0.0f;      /* level-1 entry: k = 0, s = 2, t = 2 */
@@ -390,6 +449,323 @@ static double solve_slot_dp(const double *P, int sigma, double lam,
             float *row = cost + (size_t)t * W;
             uint16_t *prow = archL + (size_t)t * W;   /* picks, archived
                                                        * in place */
+#if JL_REGROWS
+            if (jcap >= 20 && jcap < 36) {
+                /* Nine-group register-resident sweep for rows whose
+                 * dests all fit lanes 0..35: every wide sm64 row (the
+                 * grouped tiers' bulk) and the mid-band rows of
+                 * full-width exact solves.  Same junk-propagation
+                 * safety as below: dest > source always, so beyond-cap
+                 * lanes never contaminate the band.  Candidates are
+                 * computed on the fly per dest group, descending, so
+                 * sources are pre-item.  Narrower rows fall through to
+                 * the five-group body -- it only touches lanes 0..19,
+                 * which cover every dest, and processing 9 groups for
+                 * a 2-group band costs more than it saves. */
+#if defined(JL_SIMD_NEON)
+                float32x4_t r[9];
+                uint16x4_t pk[9];
+                const float32x4_t vinf = vdupq_n_f32(INFINITY);
+                const uint16x4_t z16 = vdup_n_u16(0);
+                JL_UNROLL
+                for (int g = 0; g < 9; g++) {
+                    r[g] = vld1q_f32(row + 4 * g);
+                    pk[g] = vdup_n_u16(0);
+                }
+                for (int oi = 0; oi < nb; oi++) {
+                    const int b = border[oi];
+                    if (b > bmax) continue;
+                    const int jstep = 1 << (b - 1);
+                    if (jcap - jstep < 0) continue;
+                    const float a = (float)((double)L
+                                            + lam * ((double)(L - b) + kap[b]));
+                    const float32x4_t va = vdupq_n_f32(a);
+                    const float32x4_t vtc = vdupq_n_f32((float)tc1);
+                    const float *dpb = dPt[p][b];
+                    const uint16x4_t vbit = vdup_n_u16((uint16_t)(1u << b));
+#define JL9_CAND(g) \
+    vaddq_f32(vfmaq_f32(r[g], vld1q_f32(dpb + 4 * (g)), va), vtc)
+#define JL9_TAKE(g, s, kq) do { \
+    const uint32x4_t m_ = vcltq_f32((s), r[g]); \
+    r[g] = vbslq_f32(m_, (s), r[g]); \
+    pk[g] = vbsl_u16(vmovn_u32(m_), (kq), pk[g]); } while (0)
+#define JL9_SHIFTK(K) do { \
+    JL_UNROLL \
+    for (int g = 8; g >= (K); g--) { \
+        const float32x4_t c_ = JL9_CAND(g - (K)); \
+        const uint16x4_t kq_ = vorr_u16(pk[g - (K)], vbit); \
+        JL9_TAKE(g, c_, kq_); \
+    } } while (0)
+#define JL9_EXT(N) do { \
+    float32x4_t chi_ = JL9_CAND(8); \
+    uint16x4_t khi_ = vorr_u16(pk[8], vbit); \
+    JL_UNROLL \
+    for (int g = 8; g >= 1; g--) { \
+        const float32x4_t clo_ = JL9_CAND(g - 1); \
+        const uint16x4_t klo_ = vorr_u16(pk[g - 1], vbit); \
+        JL9_TAKE(g, vextq_f32(clo_, chi_, N), \
+                 vext_u16(klo_, khi_, N)); \
+        chi_ = clo_; khi_ = klo_; \
+    } \
+    JL9_TAKE(0, vextq_f32(vinf, chi_, N), \
+             vext_u16(z16, khi_, N)); } while (0)
+                    switch (jstep) {
+                    case 1:  JL9_EXT(3);    break;
+                    case 2:  JL9_EXT(2);    break;
+                    case 4:  JL9_SHIFTK(1); break;
+                    case 8:  JL9_SHIFTK(2); break;
+                    case 16: JL9_SHIFTK(4); break;
+                    default: JL9_SHIFTK(8); break;   /* 32 */
+                    }
+#undef JL9_CAND
+#undef JL9_TAKE
+#undef JL9_SHIFTK
+#undef JL9_EXT
+                }
+                JL_UNROLL
+                for (int g = 0; g < 9; g++) {
+                    vst1q_f32(row + 4 * g, r[g]);
+                    vst1_u16(prow + 4 * g, pk[g]);
+                }
+#elif defined(JL_SIMD_X86)
+                __m128 r[9];
+                __m128i pk[9];
+                const __m128 vinf = _mm_set1_ps(INFINITY);
+                const __m128i z16 = _mm_setzero_si128();
+                JL_UNROLL
+                for (int g = 0; g < 9; g++) {
+                    r[g] = _mm_loadu_ps(row + 4 * g);
+                    pk[g] = _mm_setzero_si128();
+                }
+                for (int oi = 0; oi < nb; oi++) {
+                    const int b = border[oi];
+                    if (b > bmax) continue;
+                    const int jstep = 1 << (b - 1);
+                    if (jcap - jstep < 0) continue;
+                    const float a = (float)((double)L
+                                            + lam * ((double)(L - b) + kap[b]));
+                    const __m128 va = _mm_set1_ps(a);
+                    const __m128 vtc = _mm_set1_ps((float)tc1);
+                    const float *dpb = dPt[p][b];
+                    const __m128i vbit = _mm_set1_epi16((short)(1u << b));
+#define JL9_CAND(g) \
+    _mm_add_ps(JL_FMLA(r[g], _mm_loadu_ps(dpb + 4 * (g)), va), vtc)
+#define JL9_TAKE(g, s, kq) do { \
+    const __m128 m_ = _mm_cmplt_ps((s), r[g]); \
+    r[g] = _mm_blendv_ps(r[g], (s), m_); \
+    pk[g] = _mm_blendv_epi8(pk[g], (kq), JL_MOVN32(m_)); } while (0)
+#define JL9_SHIFTK(K) do { \
+    JL_UNROLL \
+    for (int g = 8; g >= (K); g--) { \
+        const __m128 c_ = JL9_CAND(g - (K)); \
+        const __m128i kq_ = _mm_or_si128(pk[g - (K)], vbit); \
+        JL9_TAKE(g, c_, kq_); \
+    } } while (0)
+#define JL9_EXT(N) do { \
+    __m128 chi_ = JL9_CAND(8); \
+    __m128i khi_ = _mm_or_si128(pk[8], vbit); \
+    JL_UNROLL \
+    for (int g = 8; g >= 1; g--) { \
+        const __m128 clo_ = JL9_CAND(g - 1); \
+        const __m128i klo_ = _mm_or_si128(pk[g - 1], vbit); \
+        JL9_TAKE(g, JL_EXTQ_F32(clo_, chi_, N), \
+                 JL_EXT_U16(klo_, khi_, N)); \
+        chi_ = clo_; khi_ = klo_; \
+    } \
+    JL9_TAKE(0, JL_EXTQ_F32(vinf, chi_, N), \
+             JL_EXT_U16(z16, khi_, N)); } while (0)
+                    switch (jstep) {
+                    case 1:  JL9_EXT(3);    break;
+                    case 2:  JL9_EXT(2);    break;
+                    case 4:  JL9_SHIFTK(1); break;
+                    case 8:  JL9_SHIFTK(2); break;
+                    case 16: JL9_SHIFTK(4); break;
+                    default: JL9_SHIFTK(8); break;   /* 32 */
+                    }
+#undef JL9_CAND
+#undef JL9_TAKE
+#undef JL9_SHIFTK
+#undef JL9_EXT
+                }
+                JL_UNROLL
+                for (int g = 0; g < 9; g++) {
+                    _mm_storeu_ps(row + 4 * g, r[g]);
+                    _mm_storel_epi64((__m128i *)(prow + 4 * g), pk[g]);
+                }
+#endif  /* backend nine-group sweep */
+                continue;
+            }
+            if (sm32 || sm64 || jcap < 20) {
+                /* Whole row in five registers across every item -- used
+                 * whenever every dest fits lanes 0..19: all of
+                 * sigma <= 32, narrow sm64 rows, and the narrow-band
+                 * rows of full-width exact solves (deep levels, band
+                 * edges); wider lanes are simply left untouched.  No
+                 * lane masking: a candidate's dest is always above its
+                 * source, so lanes beyond the cap only ever contaminate
+                 * lanes beyond the cap, and nothing in band ever reads
+                 * them (same argument the in-place generic sweep
+                 * relies on).  Shift-ins at the low edge are +inf. */
+#if defined(JL_SIMD_NEON)
+                float32x4_t r0 = vld1q_f32(row),      r1 = vld1q_f32(row + 4),
+                            r2 = vld1q_f32(row + 8),  r3 = vld1q_f32(row + 12),
+                            r4 = vld1q_f32(row + 16);
+                uint16x4_t p0 = vdup_n_u16(0), p1 = p0, p2 = p0, p3 = p0,
+                           p4 = p0;
+                const float32x4_t vinf = vdupq_n_f32(INFINITY);
+                const uint16x4_t z16 = vdup_n_u16(0);
+                for (int oi = 0; oi < nb; oi++) {
+                    const int b = border[oi];
+                    if (b > bmax) continue;
+                    const int jstep = 1 << (b - 1);
+                    if (jcap - jstep < 0) continue;
+                    const float a = (float)((double)L
+                                            + lam * ((double)(L - b) + kap[b]));
+                    const float32x4_t va = vdupq_n_f32(a);
+                    const float32x4_t vtc = vdupq_n_f32((float)tc1);
+                    const float *dpb = dPt[p][b];
+                    float32x4_t c0 = vaddq_f32(vfmaq_f32(r0, vld1q_f32(dpb), va), vtc);
+                    float32x4_t c1 = vaddq_f32(vfmaq_f32(r1, vld1q_f32(dpb + 4), va), vtc);
+                    float32x4_t c2 = vaddq_f32(vfmaq_f32(r2, vld1q_f32(dpb + 8), va), vtc);
+                    float32x4_t c3 = vaddq_f32(vfmaq_f32(r3, vld1q_f32(dpb + 12), va), vtc);
+                    float32x4_t c4 = vaddq_f32(vfmaq_f32(r4, vld1q_f32(dpb + 16), va), vtc);
+                    const uint16x4_t vbit = vdup_n_u16((uint16_t)(1u << b));
+                    uint16x4_t q0 = vorr_u16(p0, vbit), q1 = vorr_u16(p1, vbit),
+                               q2 = vorr_u16(p2, vbit), q3 = vorr_u16(p3, vbit),
+                               q4 = vorr_u16(p4, vbit);
+                    float32x4_t s0, s1, s2, s3, s4;
+                    uint16x4_t k0, k1, k2, k3, k4;
+                    switch (jstep) {
+                    case 1:
+                        s0 = vextq_f32(vinf, c0, 3); s1 = vextq_f32(c0, c1, 3);
+                        s2 = vextq_f32(c1, c2, 3);   s3 = vextq_f32(c2, c3, 3);
+                        s4 = vextq_f32(c3, c4, 3);
+                        k0 = vext_u16(z16, q0, 3);   k1 = vext_u16(q0, q1, 3);
+                        k2 = vext_u16(q1, q2, 3);    k3 = vext_u16(q2, q3, 3);
+                        k4 = vext_u16(q3, q4, 3);
+                        break;
+                    case 2:
+                        s0 = vextq_f32(vinf, c0, 2); s1 = vextq_f32(c0, c1, 2);
+                        s2 = vextq_f32(c1, c2, 2);   s3 = vextq_f32(c2, c3, 2);
+                        s4 = vextq_f32(c3, c4, 2);
+                        k0 = vext_u16(z16, q0, 2);   k1 = vext_u16(q0, q1, 2);
+                        k2 = vext_u16(q1, q2, 2);    k3 = vext_u16(q2, q3, 2);
+                        k4 = vext_u16(q3, q4, 2);
+                        break;
+                    case 4:
+                        s0 = vinf; s1 = c0; s2 = c1; s3 = c2; s4 = c3;
+                        k0 = z16;  k1 = q0; k2 = q1; k3 = q2; k4 = q3;
+                        break;
+                    case 8:
+                        s0 = vinf; s1 = vinf; s2 = c0; s3 = c1; s4 = c2;
+                        k0 = z16;  k1 = z16;  k2 = q0; k3 = q1; k4 = q2;
+                        break;
+                    default: /* 16 */
+                        s0 = vinf; s1 = vinf; s2 = vinf; s3 = vinf; s4 = c0;
+                        k0 = z16;  k1 = z16;  k2 = z16;  k3 = z16;  k4 = q0;
+                        break;
+                    }
+                    uint32x4_t m;
+                    m = vcltq_f32(s0, r0); r0 = vbslq_f32(m, s0, r0);
+                    p0 = vbsl_u16(vmovn_u32(m), k0, p0);
+                    m = vcltq_f32(s1, r1); r1 = vbslq_f32(m, s1, r1);
+                    p1 = vbsl_u16(vmovn_u32(m), k1, p1);
+                    m = vcltq_f32(s2, r2); r2 = vbslq_f32(m, s2, r2);
+                    p2 = vbsl_u16(vmovn_u32(m), k2, p2);
+                    m = vcltq_f32(s3, r3); r3 = vbslq_f32(m, s3, r3);
+                    p3 = vbsl_u16(vmovn_u32(m), k3, p3);
+                    m = vcltq_f32(s4, r4); r4 = vbslq_f32(m, s4, r4);
+                    p4 = vbsl_u16(vmovn_u32(m), k4, p4);
+                }
+                vst1q_f32(row, r0);      vst1q_f32(row + 4, r1);
+                vst1q_f32(row + 8, r2);  vst1q_f32(row + 12, r3);
+                vst1q_f32(row + 16, r4);
+                vst1_u16(prow, p0);      vst1_u16(prow + 4, p1);
+                vst1_u16(prow + 8, p2);  vst1_u16(prow + 12, p3);
+                vst1_u16(prow + 16, p4);
+#elif defined(JL_SIMD_X86)
+                __m128 r0 = _mm_loadu_ps(row),      r1 = _mm_loadu_ps(row + 4),
+                       r2 = _mm_loadu_ps(row + 8),  r3 = _mm_loadu_ps(row + 12),
+                       r4 = _mm_loadu_ps(row + 16);
+                __m128i p0 = _mm_setzero_si128(), p1 = p0, p2 = p0, p3 = p0,
+                        p4 = p0;
+                const __m128 vinf = _mm_set1_ps(INFINITY);
+                const __m128i z16 = _mm_setzero_si128();
+                for (int oi = 0; oi < nb; oi++) {
+                    const int b = border[oi];
+                    if (b > bmax) continue;
+                    const int jstep = 1 << (b - 1);
+                    if (jcap - jstep < 0) continue;
+                    const float a = (float)((double)L
+                                            + lam * ((double)(L - b) + kap[b]));
+                    const __m128 va = _mm_set1_ps(a);
+                    const __m128 vtc = _mm_set1_ps((float)tc1);
+                    const float *dpb = dPt[p][b];
+                    __m128 c0 = _mm_add_ps(JL_FMLA(r0, _mm_loadu_ps(dpb), va), vtc);
+                    __m128 c1 = _mm_add_ps(JL_FMLA(r1, _mm_loadu_ps(dpb + 4), va), vtc);
+                    __m128 c2 = _mm_add_ps(JL_FMLA(r2, _mm_loadu_ps(dpb + 8), va), vtc);
+                    __m128 c3 = _mm_add_ps(JL_FMLA(r3, _mm_loadu_ps(dpb + 12), va), vtc);
+                    __m128 c4 = _mm_add_ps(JL_FMLA(r4, _mm_loadu_ps(dpb + 16), va), vtc);
+                    const __m128i vbit = _mm_set1_epi16((short)(1u << b));
+                    __m128i q0 = _mm_or_si128(p0, vbit), q1 = _mm_or_si128(p1, vbit),
+                            q2 = _mm_or_si128(p2, vbit), q3 = _mm_or_si128(p3, vbit),
+                            q4 = _mm_or_si128(p4, vbit);
+                    __m128 s0, s1, s2, s3, s4;
+                    __m128i k0, k1, k2, k3, k4;
+                    switch (jstep) {
+                    case 1:
+                        s0 = JL_EXTQ_F32(vinf, c0, 3); s1 = JL_EXTQ_F32(c0, c1, 3);
+                        s2 = JL_EXTQ_F32(c1, c2, 3);   s3 = JL_EXTQ_F32(c2, c3, 3);
+                        s4 = JL_EXTQ_F32(c3, c4, 3);
+                        k0 = JL_EXT_U16(z16, q0, 3);   k1 = JL_EXT_U16(q0, q1, 3);
+                        k2 = JL_EXT_U16(q1, q2, 3);    k3 = JL_EXT_U16(q2, q3, 3);
+                        k4 = JL_EXT_U16(q3, q4, 3);
+                        break;
+                    case 2:
+                        s0 = JL_EXTQ_F32(vinf, c0, 2); s1 = JL_EXTQ_F32(c0, c1, 2);
+                        s2 = JL_EXTQ_F32(c1, c2, 2);   s3 = JL_EXTQ_F32(c2, c3, 2);
+                        s4 = JL_EXTQ_F32(c3, c4, 2);
+                        k0 = JL_EXT_U16(z16, q0, 2);   k1 = JL_EXT_U16(q0, q1, 2);
+                        k2 = JL_EXT_U16(q1, q2, 2);    k3 = JL_EXT_U16(q2, q3, 2);
+                        k4 = JL_EXT_U16(q3, q4, 2);
+                        break;
+                    case 4:
+                        s0 = vinf; s1 = c0; s2 = c1; s3 = c2; s4 = c3;
+                        k0 = z16;  k1 = q0; k2 = q1; k3 = q2; k4 = q3;
+                        break;
+                    case 8:
+                        s0 = vinf; s1 = vinf; s2 = c0; s3 = c1; s4 = c2;
+                        k0 = z16;  k1 = z16;  k2 = q0; k3 = q1; k4 = q2;
+                        break;
+                    default: /* 16 */
+                        s0 = vinf; s1 = vinf; s2 = vinf; s3 = vinf; s4 = c0;
+                        k0 = z16;  k1 = z16;  k2 = z16;  k3 = z16;  k4 = q0;
+                        break;
+                    }
+                    __m128 m;
+                    m = _mm_cmplt_ps(s0, r0); r0 = _mm_blendv_ps(r0, s0, m);
+                    p0 = _mm_blendv_epi8(p0, k0, JL_MOVN32(m));
+                    m = _mm_cmplt_ps(s1, r1); r1 = _mm_blendv_ps(r1, s1, m);
+                    p1 = _mm_blendv_epi8(p1, k1, JL_MOVN32(m));
+                    m = _mm_cmplt_ps(s2, r2); r2 = _mm_blendv_ps(r2, s2, m);
+                    p2 = _mm_blendv_epi8(p2, k2, JL_MOVN32(m));
+                    m = _mm_cmplt_ps(s3, r3); r3 = _mm_blendv_ps(r3, s3, m);
+                    p3 = _mm_blendv_epi8(p3, k3, JL_MOVN32(m));
+                    m = _mm_cmplt_ps(s4, r4); r4 = _mm_blendv_ps(r4, s4, m);
+                    p4 = _mm_blendv_epi8(p4, k4, JL_MOVN32(m));
+                }
+                _mm_storeu_ps(row, r0);      _mm_storeu_ps(row + 4, r1);
+                _mm_storeu_ps(row + 8, r2);  _mm_storeu_ps(row + 12, r3);
+                _mm_storeu_ps(row + 16, r4);
+                _mm_storel_epi64((__m128i *)prow, p0);
+                _mm_storel_epi64((__m128i *)(prow + 4), p1);
+                _mm_storel_epi64((__m128i *)(prow + 8), p2);
+                _mm_storel_epi64((__m128i *)(prow + 12), p3);
+                _mm_storel_epi64((__m128i *)(prow + 16), p4);
+#endif  /* backend five-group sweep */
+                continue;
+            }
+#endif  /* JL_REGROWS */
             memset(prow, 0, (size_t)(jcap + 1) * sizeof(uint16_t));
             for (int oi = 0; oi < nb; oi++) {
                 const int b = border[oi];
@@ -401,10 +777,96 @@ static double solve_slot_dp(const double *P, int sigma, double lam,
                                         + lam * ((double)(L - b) + kap[b]));
                 const float tc = (float)tc1;
                 const float *dpb = dPt[p][b];
+                int j = jhi;
                 /* 0/1 in-place: dest j + jstep > src j, so iterate j
                  * descending -- a written dest is never re-read as a
-                 * source for the same chunk type. */
-                for (int j = jhi; j >= 0; j--) {
+                 * source for the same chunk type.  Stores are
+                 * unconditional: everything is L1-resident, so blending
+                 * beats the data-dependent branch of an "improved?"
+                 * early-out. */
+#if defined(JL_SIMD_NEON)
+                const float32x4_t va = vdupq_n_f32(a);
+                const float32x4_t vtc = vdupq_n_f32(tc);
+                const uint16x4_t vbit = vdup_n_u16((uint16_t)(1u << b));
+                for (; j >= 7; j -= 8) {
+                    const int b1 = j - 3, b2 = j - 7;
+                    float32x4_t s1 = vld1q_f32(row + b1);
+                    float32x4_t s2 = vld1q_f32(row + b2);
+                    float32x4_t c1 = vaddq_f32(
+                        vfmaq_f32(s1, vld1q_f32(dpb + b1), va), vtc);
+                    float32x4_t c2 = vaddq_f32(
+                        vfmaq_f32(s2, vld1q_f32(dpb + b2), va), vtc);
+                    float32x4_t d1 = vld1q_f32(row + b1 + jstep);
+                    float32x4_t d2 = vld1q_f32(row + b2 + jstep);
+                    uint32x4_t m1 = vcltq_f32(c1, d1);
+                    uint32x4_t m2 = vcltq_f32(c2, d2);
+                    vst1q_f32(row + b1 + jstep, vbslq_f32(m1, c1, d1));
+                    vst1q_f32(row + b2 + jstep, vbslq_f32(m2, c2, d2));
+                    uint16x4_t pv1 = vorr_u16(vld1_u16(prow + b1), vbit);
+                    uint16x4_t pv2 = vorr_u16(vld1_u16(prow + b2), vbit);
+                    uint16x4_t qv1 = vld1_u16(prow + b1 + jstep);
+                    uint16x4_t qv2 = vld1_u16(prow + b2 + jstep);
+                    vst1_u16(prow + b1 + jstep,
+                             vbsl_u16(vmovn_u32(m1), pv1, qv1));
+                    vst1_u16(prow + b2 + jstep,
+                             vbsl_u16(vmovn_u32(m2), pv2, qv2));
+                }
+                for (; j >= 3; j -= 4) {
+                    const int base = j - 3;
+                    float32x4_t src = vld1q_f32(row + base);
+                    float32x4_t cand = vaddq_f32(
+                        vfmaq_f32(src, vld1q_f32(dpb + base), va), vtc);
+                    float32x4_t dst = vld1q_f32(row + base + jstep);
+                    uint32x4_t m = vcltq_f32(cand, dst);
+                    vst1q_f32(row + base + jstep, vbslq_f32(m, cand, dst));
+                    uint16x4_t pm = vmovn_u32(m);
+                    uint16x4_t pv = vorr_u16(vld1_u16(prow + base), vbit);
+                    uint16x4_t qv = vld1_u16(prow + base + jstep);
+                    vst1_u16(prow + base + jstep, vbsl_u16(pm, pv, qv));
+                }
+#elif defined(JL_SIMD_X86)
+                const __m128 va = _mm_set1_ps(a);
+                const __m128 vtc = _mm_set1_ps(tc);
+                const __m128i vbit = _mm_set1_epi16((short)(1u << b));
+                for (; j >= 7; j -= 8) {
+                    const int b1 = j - 3, b2 = j - 7;
+                    __m128 s1 = _mm_loadu_ps(row + b1);
+                    __m128 s2 = _mm_loadu_ps(row + b2);
+                    __m128 c1 = _mm_add_ps(JL_FMLA(s1, _mm_loadu_ps(dpb + b1), va), vtc);
+                    __m128 c2 = _mm_add_ps(JL_FMLA(s2, _mm_loadu_ps(dpb + b2), va), vtc);
+                    __m128 d1 = _mm_loadu_ps(row + b1 + jstep);
+                    __m128 d2 = _mm_loadu_ps(row + b2 + jstep);
+                    __m128 m1 = _mm_cmplt_ps(c1, d1);
+                    __m128 m2 = _mm_cmplt_ps(c2, d2);
+                    _mm_storeu_ps(row + b1 + jstep, _mm_blendv_ps(d1, c1, m1));
+                    _mm_storeu_ps(row + b2 + jstep, _mm_blendv_ps(d2, c2, m2));
+                    __m128i pv1 = _mm_or_si128(
+                        _mm_loadl_epi64((const __m128i *)(prow + b1)), vbit);
+                    __m128i pv2 = _mm_or_si128(
+                        _mm_loadl_epi64((const __m128i *)(prow + b2)), vbit);
+                    __m128i qv1 = _mm_loadl_epi64((const __m128i *)(prow + b1 + jstep));
+                    __m128i qv2 = _mm_loadl_epi64((const __m128i *)(prow + b2 + jstep));
+                    _mm_storel_epi64((__m128i *)(prow + b1 + jstep),
+                        _mm_blendv_epi8(qv1, pv1, JL_MOVN32(m1)));
+                    _mm_storel_epi64((__m128i *)(prow + b2 + jstep),
+                        _mm_blendv_epi8(qv2, pv2, JL_MOVN32(m2)));
+                }
+                for (; j >= 3; j -= 4) {
+                    const int base = j - 3;
+                    __m128 src = _mm_loadu_ps(row + base);
+                    __m128 cand = _mm_add_ps(
+                        JL_FMLA(src, _mm_loadu_ps(dpb + base), va), vtc);
+                    __m128 dst = _mm_loadu_ps(row + base + jstep);
+                    __m128 m = _mm_cmplt_ps(cand, dst);
+                    _mm_storeu_ps(row + base + jstep, _mm_blendv_ps(dst, cand, m));
+                    __m128i pv = _mm_or_si128(
+                        _mm_loadl_epi64((const __m128i *)(prow + base)), vbit);
+                    __m128i qv = _mm_loadl_epi64((const __m128i *)(prow + base + jstep));
+                    _mm_storel_epi64((__m128i *)(prow + base + jstep),
+                        _mm_blendv_epi8(qv, pv, JL_MOVN32(m)));
+                }
+#endif  /* backend in-place sweep */
+                for (; j >= 0; j--) {
                     const float v = row[j];
                     if (!(v < INFINITY)) continue;
                     const float cand = v + a * dpb[j] + tc;
