@@ -193,6 +193,11 @@ static void usage(FILE *out) {
         "                        ratio on skewed data).  decompress auto-detects.\n"
         "  -b, --block-size N    symbols per block (1..65535; default per-arch).\n"
         "                        recorded in the stream; decompress reads it back.\n"
+        "  -e, --effort N        compress-time shaping effort (0..4, default 1):\n"
+        "                        0 simplest, 1 balanced, 2 faster-decompress,\n"
+        "                        3 fastest-decompress, 4 fastest-compress\n"
+        "                        (simplest under 256 KiB, else balanced).\n"
+        "                        wire-compatible; decompress needs no flag.\n"
         "  -f                    overwrite OUT if it exists\n"
         "  -r N                  re-run codec N times into the same buffer\n"
         "                        (no extra I/O); reports per-iter timing\n"
@@ -228,6 +233,15 @@ int main(int argc, char **argv)
             block_size = (size_t)strtoul(argv[i] + 13, NULL, 0);
         } else if (strcmp(argv[i], "--block-size") == 0 && i + 1 < argc) {
             block_size = (size_t)strtoul(argv[i + 1], NULL, 0);
+            i++;
+        } else if ((argv[i][0] == '-' && argv[i][1] == 'e' && argv[i][2] == '\0'
+                    && i + 1 < argc)) {
+            pivco_huffman_set_effort((pivco_effort_t)atoi(argv[i + 1]));
+            i++;   /* skip the N */
+        } else if (strncmp(argv[i], "--effort=", 9) == 0) {
+            pivco_huffman_set_effort((pivco_effort_t)atoi(argv[i] + 9));
+        } else if (strcmp(argv[i], "--effort") == 0 && i + 1 < argc) {
+            pivco_huffman_set_effort((pivco_effort_t)atoi(argv[i + 1]));
             i++;
         } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
             usage(stdout);

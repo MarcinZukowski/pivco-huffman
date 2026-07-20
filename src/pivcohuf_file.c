@@ -297,7 +297,19 @@ static int compress_dispatch(const uint8_t *in, size_t in_len,
     if (tm) memset(tm, 0, sizeof(*tm));
     int prev = pivco_huffman_get_fse_enabled();
     pivco_huffman_set_fse_enabled(use_ans);
+    /* FASTEST_COMPRESS is the one effort mode the bare table build
+     * cannot resolve (it needs the input size): below 256 KiB plain
+     * Huffman lengths encode fastest; above, a flatter tree ENCODES
+     * faster than the BALANCED shaping solve costs, and the solve's
+     * cost keeps shrinking as 1/n.  Same save/set/restore pattern as
+     * the FSE flag. */
+    pivco_effort_t eff_prev = pivco_huffman_get_effort();
+    if (eff_prev == PIVCO_EFFORT_FASTEST_COMPRESS)
+        pivco_huffman_set_effort(in_len < (size_t)262144
+                                 ? PIVCO_EFFORT_SIMPLEST_COMPRESS
+                                 : PIVCO_EFFORT_BALANCED);
     int r = pivcohuf_compress_impl(in, in_len, out, out_len, block_size, tm);
+    pivco_huffman_set_effort(eff_prev);
     pivco_huffman_set_fse_enabled(prev);
     return r;
 }
