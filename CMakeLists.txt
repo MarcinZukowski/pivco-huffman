@@ -254,6 +254,13 @@ add_library(pivco_huffman
     ${PIVCO_CODEC_OBJECTS}
 )
 target_include_directories(pivco_huffman PUBLIC include)
+if(UNIX AND NOT APPLE)
+    # joint_lengths.c uses log2(); glibc keeps it in libm.  PUBLIC so every
+    # executable and CMake consumer inherits it.  Raw-object consumers
+    # (libpivco_huffman_local.o, phaz_local.o) carry the undefined symbol
+    # and must add -lm at their final link -- TurboBench already does.
+    target_link_libraries(pivco_huffman PUBLIC m)
+endif()
 
 # Relocatable, drop-in object with the vendored FiniteStateEntropy symbols
 # localized (FSE_*/HUF_*/HIST_*/g_debuglevel, plus XXH/ERR/BIT/POOL/ZSTD

@@ -195,25 +195,6 @@ typedef struct { uint8_t depth, bit; double weight; } jl_chunk_t;
  *
  * Iterative, explicit frame stack: phase 0 frames are waiting on their
  * left child, phase 1 on their right. */
-
-/* libm-free log2 for the FSE-tax entropy model below: TurboBench links
- * the raw pre-localized libpivco_huffman_local.o without -lm, so this
- * TU must not reference libm.  Exact exponent split + atanh series on
- * [1/sqrt2, sqrt2); |err| < 1e-10, far inside the threshold's 16/wb
- * slack.  Caller guarantees 0 < x < 1. */
-static inline double jl_log2(double x)
-{
-    uint64_t b; memcpy(&b, &x, 8);
-    int e = (int)((b >> 52) & 0x7ff) - 1023;
-    b = (b & 0xfffffffffffffull) | 0x3ff0000000000000ull;   /* m in [1,2) */
-    double m; memcpy(&m, &b, 8);
-    if (m > 1.4142135623730951) { m *= 0.5; e += 1; }
-    const double t = (m - 1) / (m + 1), t2 = t * t;
-    const double ln = t * (2 + t2 * (2.0/3 + t2 * (2.0/5 + t2 * (2.0/7
-                        + t2 * (2.0/9 + t2 * (2.0/11))))));
-    return (double)e + ln * 1.4426950408889634;             /* log2(e) */
-}
-
 static double sim_subtree_time(const jl_chunk_t *ch, int n, int *i, int d,
                                const joint_params_t *jp, const double *kap,
                                double scale, int fse_on,
@@ -287,8 +268,8 @@ unwind:
             if (wb >= jp->fse_wmin) {
                 const double q = wl / w;
                 if (q > 0 && q < 1) {
-                    const double h2 = -(q * jl_log2(q)
-                                        + (1 - q) * jl_log2(1 - q));
+                    const double h2 = -(q * log2(q)
+                                        + (1 - q) * log2(1 - q));
                     if (1.0 - h2 > (1.0 - jp->fse_eta) + 16.0 / wb)
                         t += jp->fse_tau * w;
                 }
