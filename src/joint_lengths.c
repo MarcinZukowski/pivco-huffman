@@ -382,9 +382,20 @@ static int dp_row_cap(int t, int h, int sigma)
  * order is L-independent, so one sorted order serves every level.
  * Exactness of the slot DP needs (a) cross-level monotonicity:
  * spread(g) <= 1 + lam (kappa = 0 recovers lam <= 1/7), and (b) b = 0
- * dearest within the level (the parity fold runs it last).  Fills
- * border[0..*nb) with b = 1..bcap by ascending g; returns 1 iff both
- * hold (on 0 the caller keeps the baseline). */
+ * dearest within the level (the parity fold runs it last).
+ *
+ * Checking the spread over ALL b <= bcap is one notch conservative: a
+ * chunk with 2^b >= sigma holds the whole alphabet, so chunk-root
+ * Kraft equality makes it the unique chunk of its solution (root
+ * depth 0, the full-flat code) -- it co-occurs with nothing and its
+ * one multiset is priced order-free, so only b with 2^b < sigma need
+ * the bound.  At kappa = 0 that proves lam <= 1/6 for sigma >= 129
+ * (1/5 at sigma <= 128, 1/4 at <= 64, ...); relax here -- keeping
+ * every b takeable, only the spread restricted -- when lambda tuning
+ * wants the headroom.
+ *
+ * Fills border[0..*nb) with b = 1..bcap by ascending g; returns 1 iff
+ * both conditions hold (on 0 the caller keeps the baseline). */
 static int dp_take_order(double lam, const double *kap, int bcap,
                          int border[JL_MAX_FLAT], int *nb)
 {
