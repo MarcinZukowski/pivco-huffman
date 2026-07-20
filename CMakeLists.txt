@@ -89,6 +89,7 @@ endif()
 # PIVCO_BACKEND_* define and get linked into the pivco_huffman library.
 set(PIVCO_SOURCES
     src/huffman_table.c
+    src/joint_lengths.c
     src/pivco_huffman.c
     src/pivco_instrumentation.c
     src/pivco_prof.c

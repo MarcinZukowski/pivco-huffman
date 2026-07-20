@@ -240,6 +240,54 @@ typedef enum {
 void pivco_huffman_set_tree_mode(pivco_tree_mode_t mode);
 pivco_tree_mode_t pivco_huffman_get_tree_mode(void);
 
+/* ---------- Compression effort (encoder-side, build-time) ----------
+ *
+ * How much table-build time pivco_huffman_build_table spends shaping
+ * the code lengths for DECOMPRESSION speed (the joint length/shape
+ * pass in src/joint_lengths.c).  More shaping: slower table build,
+ * faster decompression, ~same compressed size -- an adoption guard
+ * only accepts shapes whose modeled bits stay within 1.5% of the
+ * Huffman baseline AND whose modeled decode time improves by at least
+ * 10%; on any reject the plain Huffman lengths are kept.  Encoder
+ * side only: the wire carries plain code lengths, so ANY decoder
+ * reads the output and both sides rebuild identical tables.
+ *
+ * The cost is per build_table CALL -- the file codec builds one table
+ * per file -- so it only matters for small inputs or high call rates.
+ * The superlatives are the extremes; most callers want the middle.
+ * Process-global (same pattern as the FSE toggle), read once per
+ * build.  Default = BALANCED. */
+typedef enum {
+    PIVCO_EFFORT_SIMPLEST_COMPRESS  = 0,  /* plain Huffman lengths: never
+                                             any shaping time, but decode
+                                             speed is left unclaimed */
+    PIVCO_EFFORT_BALANCED           = 1,  /* the default: a coarse grouped
+                                             solve buys most of the
+                                             decompress win */
+    PIVCO_EFFORT_FASTER_DECOMPRESS  = 2,  /* auto-tier solve: nearly all
+                                             of the win */
+    PIVCO_EFFORT_FASTEST_DECOMPRESS = 3,  /* exact DP, provably optimal
+                                             shape in-model: encode-once-
+                                             decode-forever data */
+    PIVCO_EFFORT_FASTEST_COMPRESS   = 4,  /* SIMPLEST below 256 KiB of
+                                             input, BALANCED above --
+                                             resolved by input size in the
+                                             pivcohuf file codec; a bare
+                                             build_table (no size known)
+                                             treats it as BALANCED */
+} pivco_effort_t;
+void pivco_huffman_set_effort(pivco_effort_t effort);
+pivco_effort_t pivco_huffman_get_effort(void);
+
+/* The pass itself (called by pivco_huffman_build_table between length
+ * derivation and table construction; exposed for tests/benchmarks).
+ * Rewrites lengths[] -- Huffman lengths for freq[], already limited to
+ * PIVCO_MAX_CODE_LEN -- in place.  Returns 0 if a shaped set was
+ * adopted, -1 if the baseline was kept (SIMPLEST effort, non-OPTIMIZED
+ * tree mode, guard reject, or internal failure such as malloc). */
+int pivco_joint_optimize_lengths(const uint64_t freq[PIVCO_MAX_SYMBOLS],
+                                 uint8_t lengths[PIVCO_MAX_SYMBOLS]);
+
 /* ---------- FSE table-usage stats (debug instrumentation) ----------
  *
  * Per-table-id counters incremented inside the encoder every time an

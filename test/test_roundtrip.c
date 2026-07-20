@@ -336,6 +336,149 @@ static void make_two_symbol_skewed(uint64_t freq[PIVCO_MAX_SYMBOLS])
     freq[0] = 900; freq[1] = 100;
 }
 
+/* ---------- Test: joint length/shape pass (effort modes) ---------- */
+
+/* 71 live symbols: sigma % gran != 0 for every grouped tier, so the
+ * pass ghost-pads with zero-frequency symbols -- those receive real
+ * codes the encoder never emits, and the decoder must rebuild the
+ * identical (ghost-including) table from the lengths alone. */
+static void make_odd_sigma(uint64_t freq[PIVCO_MAX_SYMBOLS])
+{
+    memset(freq, 0, PIVCO_MAX_SYMBOLS * sizeof(uint64_t));
+    for (int i = 0; i < 71; i++) freq[13 + 2 * i] = 100000 / (i + 3);
+}
+
+/* For each effort mode x distribution: build a table (shaped when
+ * effort > SIMPLEST), verify the lengths are Kraft-complete and capped
+ * and that every used symbol kept a code, verify the actual coded bits
+ * honor the pass's adoption guard against the SIMPLEST baseline,
+ * rebuild the decode table from the transmitted lengths alone (the
+ * wire contract), and roundtrip a block through the pair. */
+static int test_joint_lengths(void)
+{
+    printf("[test_joint_lengths] ");
+
+    typedef void (*make_fn)(uint64_t[PIVCO_MAX_SYMBOLS]);
+    static const struct { const char *name; make_fn make; } dists[] = {
+        {"uniform",   make_uniform},
+        {"english",   make_english},
+        {"zipfian",   make_zipfian},
+        {"geometric", make_geometric},
+        {"sparse_16", make_sparse_16},
+        {"odd_sigma", make_odd_sigma},
+    };
+    static const pivco_effort_t efforts[] = {
+        PIVCO_EFFORT_SIMPLEST_COMPRESS,
+        PIVCO_EFFORT_BALANCED,
+        PIVCO_EFFORT_FASTER_DECOMPRESS,
+        PIVCO_EFFORT_FASTEST_DECOMPRESS,
+        PIVCO_EFFORT_FASTEST_COMPRESS,   /* == BALANCED at build level */
+    };
+    const pivco_effort_t effort_prev = pivco_huffman_get_effort();
+    uint64_t seed = 0x0DDC0FFEE0DDF00DULL;
+
+    for (size_t d = 0; d < sizeof(dists) / sizeof(dists[0]); d++) {
+        uint64_t freq[PIVCO_MAX_SYMBOLS];
+        dists[d].make(freq);
+        uint64_t total = 0;
+        for (int i = 0; i < PIVCO_MAX_SYMBOLS; i++) total += freq[i];
+
+        double base_bits = 0;
+        for (size_t e = 0; e < sizeof(efforts) / sizeof(efforts[0]); e++) {
+            pivco_huffman_set_effort(efforts[e]);
+            pivco_huffman_table_t table;
+            int rc = pivco_huffman_build_table(freq, &table);
+            pivco_huffman_set_effort(effort_prev);
+            if (rc != PIVCO_OK)
+                FAIL("%s effort %d: build_table returned %d",
+                     dists[d].name, (int)efforts[e], rc);
+
+            /* Lengths must stay a capped, Kraft-COMPLETE code (the
+             * shaped set is Kraft-exact by construction; a hole or an
+             * overflow here means the deal miscounted). */
+            uint64_t kraft = 0;
+            double bits = 0;
+            for (int s = 0; s < PIVCO_MAX_SYMBOLS; s++) {
+                if (freq[s] > 0 && table.code_len[s] == 0)
+                    FAIL("%s effort %d: used symbol %d lost its code",
+                         dists[d].name, (int)efforts[e], s);
+                if (table.code_len[s] == 0) continue;
+                if (table.code_len[s] > PIVCO_MAX_CODE_LEN)
+                    FAIL("%s effort %d: code_len[%d] = %d exceeds cap",
+                         dists[d].name, (int)efforts[e], s, table.code_len[s]);
+                kraft += (uint64_t)1 << (PIVCO_MAX_CODE_LEN - table.code_len[s]);
+                bits += (double)freq[s] * table.code_len[s];
+            }
+            if (kraft != (uint64_t)1 << PIVCO_MAX_CODE_LEN)
+                FAIL("%s effort %d: Kraft sum %llu != %llu",
+                     dists[d].name, (int)efforts[e],
+                     (unsigned long long)kraft,
+                     (unsigned long long)1 << PIVCO_MAX_CODE_LEN);
+
+            /* The adoption guard bounds the size cost: coded bits stay
+             * within 1.5% of the plain-Huffman baseline (efforts[0]). */
+            if (e == 0)
+                base_bits = bits;
+            else if (bits > base_bits * 1.015 * (1 + 1e-9))
+                FAIL("%s effort %d: %.0f bits vs baseline %.0f breaks the "
+                     "1.5%% guard", dists[d].name, (int)efforts[e],
+                     bits, base_bits);
+
+            /* Wire contract: the decoder rebuilds the identical table
+             * from the transmitted lengths alone (ghost codes and all). */
+            pivco_huffman_table_t dtable;
+            rc = pivco_huffman_build_table_from_code_lens(table.code_len,
+                                                          &dtable);
+            if (rc != PIVCO_OK)
+                FAIL("%s effort %d: from_code_lens returned %d",
+                     dists[d].name, (int)efforts[e], rc);
+            if (memcmp(table.code_len, dtable.code_len,
+                       sizeof(table.code_len)) != 0
+                || memcmp(table.code, dtable.code, sizeof(table.code)) != 0)
+                FAIL("%s effort %d: decoder-side rebuild diverged",
+                     dists[d].name, (int)efforts[e]);
+
+            /* Roundtrip a block: encode with the freq-built table,
+             * decode with the lens-rebuilt one. */
+            uint8_t symbols[PIVCO_BLOCK_SIZE];
+            uint64_t rng = seed++;
+            for (int i = 0; i < PIVCO_BLOCK_SIZE; i++) {
+                uint64_t r = xorshift64(&rng) % total;
+                uint64_t cum = 0;
+                int sym;
+                for (sym = 0; sym < PIVCO_MAX_SYMBOLS; sym++) {
+                    cum += freq[sym];
+                    if (r < cum) break;
+                }
+                symbols[i] = (uint8_t)sym;
+            }
+            uint8_t encoded[PIVCO_MAX_ENCODED_SIZE];
+            uint8_t decoded[PIVCO_BLOCK_SIZE];
+            size_t enc_len, consumed;
+            rc = pivco_huffman_encode(symbols, PIVCO_BLOCK_SIZE, &table,
+                                      encoded, &enc_len);
+            if (rc != PIVCO_OK)
+                FAIL("%s effort %d: encode returned %d",
+                     dists[d].name, (int)efforts[e], rc);
+            rc = pivco_huffman_decode(encoded, enc_len, &dtable,
+                                      decoded, &consumed);
+            if (rc != PIVCO_OK)
+                FAIL("%s effort %d: decode returned %d",
+                     dists[d].name, (int)efforts[e], rc);
+            if (consumed != enc_len)
+                FAIL("%s effort %d: consumed %zu of %zu bytes",
+                     dists[d].name, (int)efforts[e], consumed, enc_len);
+            for (int i = 0; i < PIVCO_BLOCK_SIZE; i++)
+                if (symbols[i] != decoded[i])
+                    FAIL("%s effort %d: mismatch at %d",
+                         dists[d].name, (int)efforts[e], i);
+        }
+    }
+
+    printf("PASS\n");
+    return 0;
+}
+
 /* ---------- Main test runner ---------- */
 
 int test_roundtrip_all(void)
@@ -344,6 +487,7 @@ int test_roundtrip_all(void)
 
     failures += test_table_build();
     failures += test_single_symbol();
+    failures += test_joint_lengths();
 
     uint64_t freq[PIVCO_MAX_SYMBOLS];
     uint64_t seed = 0xDEADBEEFCAFE1234ULL;

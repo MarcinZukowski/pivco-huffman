@@ -84,6 +84,9 @@ five phases ending 2026-05-14; before that, each backend had its own
 
 - `include/pivco_huffman.h` — public API + table struct
 - `src/huffman_table.c` — `pivco_huffman_build_table` + flat-subtree detection
+- `src/joint_lengths.c` — joint code-length/flat-shape optimization: bends
+  Huffman lengths toward fewer, larger flat subtrees under a guard
+  (`pivco_effort_t` modes; encoder-side only, wire carries plain lengths)
 - `src/pivco_huffman_codec.c` — unified codec.  Compiled once per backend
   with `-DPIVCO_BACKEND_{SCALAR,NEON,X86,AVX512}`.  Owns: tree walk
   (encode + BU decode), wire-format I/O via `pivco_huffman_wire.h`,
