@@ -106,7 +106,7 @@ _Static_assert(PIVCO_MAX_CODE_LEN <= 15,
 /* ---------- effort knob (process-global, same pattern as the FSE
  * toggle).  Read once per pivco_huffman_build_table call. ---------- */
 
-static pivco_effort_t g_effort = PIVCO_EFFORT_BALANCED;
+static pivco_effort_t g_effort = PIVCO_EFFORT_PLAIN;
 
 void pivco_huffman_set_effort(pivco_effort_t effort)
 {
@@ -1311,7 +1311,7 @@ int pivco_joint_optimize_lengths(const uint64_t freq[PIVCO_MAX_SYMBOLS],
 {
     if (!freq || !lengths) return -1;
     const pivco_effort_t effort = g_effort;
-    if (effort == PIVCO_EFFORT_SIMPLEST_COMPRESS) return -1;
+    if (effort == PIVCO_EFFORT_PLAIN) return -1;
     /* The chunk model prices the OPTIMIZED decomposition; under the
      * other (ablation) tree modes the plain Huffman lengths are kept. */
     if (pivco_huffman_get_tree_mode() != PIVCO_TREE_MODE_OPTIMIZED) return -1;

@@ -349,9 +349,9 @@ static void make_odd_sigma(uint64_t freq[PIVCO_MAX_SYMBOLS])
 }
 
 /* For each effort mode x distribution: build a table (shaped when
- * effort > SIMPLEST), verify the lengths are Kraft-complete and capped
+ * effort > PLAIN), verify the lengths are Kraft-complete and capped
  * and that every used symbol kept a code, verify the actual coded bits
- * honor the pass's adoption guard against the SIMPLEST baseline,
+ * honor the pass's adoption guard against the PLAIN baseline,
  * rebuild the decode table from the transmitted lengths alone (the
  * wire contract), and roundtrip a block through the pair. */
 static int test_joint_lengths(void)
@@ -368,7 +368,7 @@ static int test_joint_lengths(void)
         {"odd_sigma", make_odd_sigma},
     };
     static const pivco_effort_t efforts[] = {
-        PIVCO_EFFORT_SIMPLEST_COMPRESS,
+        PIVCO_EFFORT_PLAIN,
         PIVCO_EFFORT_BALANCED,
         PIVCO_EFFORT_FASTER_DECOMPRESS,
         PIVCO_EFFORT_FASTEST_DECOMPRESS,

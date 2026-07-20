@@ -300,7 +300,7 @@ int pivco_huffman_build_table(const uint64_t freq[PIVCO_MAX_SYMBOLS],
     /* Optional joint length/shape pass (encoder side only; the decoder
        rebuilds identically from the transmitted lengths).  Any internal
        reject keeps the plain Huffman lengths above. */
-    if (pivco_huffman_get_effort() != PIVCO_EFFORT_SIMPLEST_COMPRESS)
+    if (pivco_huffman_get_effort() != PIVCO_EFFORT_PLAIN)
         (void)pivco_joint_optimize_lengths(freq, lengths);
 
     return build_table_finish(lengths, table);

@@ -256,20 +256,20 @@ pivco_tree_mode_t pivco_huffman_get_tree_mode(void);
  * per file -- so it only matters for small inputs or high call rates.
  * The superlatives are the extremes; most callers want the middle.
  * Process-global (same pattern as the FSE toggle), read once per
- * build.  Default = BALANCED. */
+ * build.  Default = PLAIN (shaping is opt-in until the
+ * lambda/guard tuning settles; see issue #20). */
 typedef enum {
-    PIVCO_EFFORT_SIMPLEST_COMPRESS  = 0,  /* plain Huffman lengths: never
-                                             any shaping time, but decode
-                                             speed is left unclaimed */
-    PIVCO_EFFORT_BALANCED           = 1,  /* the default: a coarse grouped
-                                             solve buys most of the
-                                             decompress win */
+    PIVCO_EFFORT_PLAIN              = 0,  /* plain Huffman lengths: no
+                                             shaping, no shaping time --
+                                             the default */
+    PIVCO_EFFORT_BALANCED           = 1,  /* a coarse grouped solve buys
+                                             most of the decompress win */
     PIVCO_EFFORT_FASTER_DECOMPRESS  = 2,  /* auto-tier solve: nearly all
                                              of the win */
     PIVCO_EFFORT_FASTEST_DECOMPRESS = 3,  /* exact DP, provably optimal
                                              shape in-model: encode-once-
                                              decode-forever data */
-    PIVCO_EFFORT_FASTEST_COMPRESS   = 4,  /* SIMPLEST below 256 KiB of
+    PIVCO_EFFORT_FASTEST_COMPRESS   = 4,  /* PLAIN below 256 KiB of
                                              input, BALANCED above --
                                              resolved by input size in the
                                              pivcohuf file codec; a bare
@@ -283,7 +283,7 @@ pivco_effort_t pivco_huffman_get_effort(void);
  * derivation and table construction; exposed for tests/benchmarks).
  * Rewrites lengths[] -- Huffman lengths for freq[], already limited to
  * PIVCO_MAX_CODE_LEN -- in place.  Returns 0 if a shaped set was
- * adopted, -1 if the baseline was kept (SIMPLEST effort, non-OPTIMIZED
+ * adopted, -1 if the baseline was kept (PLAIN effort, non-OPTIMIZED
  * tree mode, guard reject, or internal failure such as malloc). */
 int pivco_joint_optimize_lengths(const uint64_t freq[PIVCO_MAX_SYMBOLS],
                                  uint8_t lengths[PIVCO_MAX_SYMBOLS]);

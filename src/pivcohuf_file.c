@@ -306,7 +306,7 @@ static int compress_dispatch(const uint8_t *in, size_t in_len,
     pivco_effort_t eff_prev = pivco_huffman_get_effort();
     if (eff_prev == PIVCO_EFFORT_FASTEST_COMPRESS)
         pivco_huffman_set_effort(in_len < (size_t)262144
-                                 ? PIVCO_EFFORT_SIMPLEST_COMPRESS
+                                 ? PIVCO_EFFORT_PLAIN
                                  : PIVCO_EFFORT_BALANCED);
     int r = pivcohuf_compress_impl(in, in_len, out, out_len, block_size, tm);
     pivco_huffman_set_effort(eff_prev);
