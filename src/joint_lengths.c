@@ -142,6 +142,21 @@ typedef struct {
     double gamma;       /* decode cost per schedule record per block */
     double kappa[JL_MAX_FLAT + 1];  /* flat-kernel cost/symbol at depth b */
     double mu_cst;      /* lone-leaf merge cost relative to a full merge */
+    /* FSE decode tax (active only while the encoder's FSE dispatch is
+     * enabled): a merge whose bitmap the per-node FSE coder commits
+     * decodes ~fse_tau full-merge passes SLOWER per element (measured
+     * ~3-5x a raw merge on Apple M-class).  The guard's commit
+     * predictor mirrors the coder's bytes-shrink rule to first order:
+     * commit iff the node sees >= fse_wmin elements per block and its
+     * bitmap skew clears the coder's efficiency fse_eta plus marker
+     * overhead, 1 - H2(q) > (1 - fse_eta) + 16/W_block.  Without this
+     * term the pass concentrates routing into fewer, more skewed
+     * bitmaps, FSE commits on them for a real ratio win, and the
+     * decode tax swamps the merge-pass savings (bell_s10 was shipping
+     * -24% under PHA without this term). */
+    double fse_tau;     /* extra full-merge passes per element; 0 off */
+    double fse_eta;     /* modeled FSE efficiency threshold */
+    double fse_wmin;    /* min elements/block for a commit attempt */
 } joint_params_t;
 
 static const joint_params_t joint_defaults = {
@@ -152,6 +167,9 @@ static const joint_params_t joint_defaults = {
     170.0,          /* gamma */
     {0},            /* kappa */
     1.0,            /* mu_cst */
+    4.0,            /* fse_tau (measured Apple M-class) */
+    0.85,           /* fse_eta */
+    64.0,           /* fse_wmin */
 };
 
 /* ---------- kind-aware decode-time model (the adoption guard) ----------
@@ -179,6 +197,7 @@ typedef struct { uint8_t depth, bit; double weight; } jl_chunk_t;
  * left child, phase 1 on their right. */
 static double sim_subtree_time(const jl_chunk_t *ch, int n, int *i, int d,
                                const joint_params_t *jp, const double *kap,
+                               double scale, int fse_on,
                                int *recs, double *weight_out, int *kind)
 {
     struct {
@@ -240,6 +259,22 @@ unwind:
             t = w * jp->mu_cst;               /* one lone leaf: cst merge */
         else
             t = w;                            /* full partition */
+        /* FSE decode tax on predicted-committed bitmaps (see the
+         * fse_tau field doc): commit iff the merge sees enough
+         * elements per block and its left/right split is skewed
+         * enough that the modeled FSE saving clears the marker. */
+        if (fse_on && w > 0) {
+            const double wb = w * scale;      /* elements per block */
+            if (wb >= jp->fse_wmin) {
+                const double q = wl / w;
+                if (q > 0 && q < 1) {
+                    const double h2 = -(q * log2(q)
+                                        + (1 - q) * log2(1 - q));
+                    if (1.0 - h2 > (1.0 - jp->fse_eta) + 16.0 / wb)
+                        t += jp->fse_tau * w;
+                }
+            }
+        }
         rt = t + tl + tr;
         rw = w;
         rkind = 1;
@@ -269,9 +304,16 @@ static double chunk_list_time(jl_chunk_t *ch, int n,
         }
         ch[j + 1] = c;
     }
+    /* The FSE tax needs each merge's per-block element count; weights
+     * scale to one PIVCO_BLOCK_SIZE-symbol block.  Resolve the FSE
+     * toggle once per pricing (both guard sides see the same value). */
+    const double scale = total_weight > 0
+                       ? (double)PIVCO_BLOCK_SIZE / total_weight : 0.0;
+    const int fse_on = jp->fse_tau > 0 && pivco_huffman_get_fse_enabled();
     int i = 0, kind, recs = 0;
     double w;
-    double t = sim_subtree_time(ch, n, &i, 0, jp, kap, &recs, &w, &kind);
+    double t = sim_subtree_time(ch, n, &i, 0, jp, kap, scale, fse_on,
+                                &recs, &w, &kind);
     if (i != n) return -1.0;    /* malformed multiset (cannot happen) */
     if (jp->gamma > 0) {        /* per-record fixed cost x blocks */
         double blocks = ceil(total_weight / (double)PIVCO_BLOCK_SIZE);
