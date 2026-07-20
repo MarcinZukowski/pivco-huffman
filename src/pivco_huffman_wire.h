@@ -69,6 +69,7 @@
 
 #include "pivco_huffman.h"
 #include "pivco_huffman_common.h"
+#include "pivco_check.h"
 #include "pivco_prof.h"
 #ifdef PIVCO_HAS_FSE
 #include "pivco_fse.h"
@@ -128,13 +129,18 @@ static inline void wire_write_kr_header(const pivco_huffman_table_t *table,
 
 /* ---------- Decode side ---------- */
 
-/* Read the K_right header at node entry, returning the value as an
- * int.  If no header is present for this node, returns -1. */
+/* Read the K_right header at node entry.  Every decode-side call site
+ * dispatches on node_type first (LEAF_LEFT / INTERNAL_FULL), where the
+ * header is present by construction, so kr_header_needed() -- three
+ * dependent tree loads re-deriving a statically known truth -- is only
+ * consulted in debug builds.  (The encoder's write side still uses it:
+ * its walk visits header-less nodes too.) */
 static inline int wire_read_kr_header(const pivco_huffman_table_t *table,
                                        int16_t node_id,
                                        const uint8_t **in_ptr)
 {
-    if (!kr_header_needed(table, node_id)) return -1;
+    PIVCO_CHECK_DEBUG(kr_header_needed(table, node_id));
+    (void)table; (void)node_id;
     PROF_TIC();
     uint16_t v;
     memcpy(&v, *in_ptr, 2);

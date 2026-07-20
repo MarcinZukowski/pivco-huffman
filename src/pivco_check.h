@@ -19,7 +19,7 @@ void pivco_check_fail(const char *expr, const char *file, int line);
 
 #define PIVCO_CHECK(cond)                                                \
     do {                                                                 \
-        if (!(cond))                                                     \
+        if (__builtin_expect(!(cond), 0))                                \
             pivco_check_fail(#cond, __FILE__, __LINE__);                 \
     } while (0)
 
