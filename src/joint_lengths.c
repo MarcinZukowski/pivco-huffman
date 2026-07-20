@@ -1079,7 +1079,8 @@ static void realized_chunk_weights(const uint8_t *lb, const uint8_t *lc,
         }
     uint64_t wb[JL_MAX_CHUNKS + 1] = {0}, wc[JL_MAX_CHUNKS + 1] = {0};
     for (int s = 0; s < PIVCO_MAX_SYMBOLS; s++) {
-        const uint32_t f = (uint32_t)freq[s];
+        const uint32_t f = freq[s] > UINT32_MAX
+                               ? UINT32_MAX : (uint32_t)freq[s];
         const int Lb = lb[s] & 15, Lc = lc[s] & 15;
         wb[curb[Lb]] += f;
         if (--leftb[Lb] == 0 && ++curb[Lb] < endb[Lb])
@@ -1323,21 +1324,30 @@ int pivco_joint_optimize_lengths(const uint64_t freq[PIVCO_MAX_SYMBOLS],
                      * resolve it (the pivcohuf file codec resolves it
                      * by size before building) */
 
-    /* Frequencies narrow to u32 (and the model's sums wrap mod 2^32):
-     * a histogram totalling >= 4 GiB may shape differently -- still
-     * valid, still Kraft-exact -- lengths.  Correctness-only: every
-     * index below is bounded structurally, never by frequency values. */
+    /* Frequencies SATURATE to u32: a symbol with >= 2^32 occurrences
+     * keeps maximal weight instead of wrapping toward zero (a wrap
+     * once demoted a dominant symbol from length 1 to 6 and adopted a
+     * 6x-bigger shape).  Above the clamp only relative order among
+     * >= 4 GiB symbols is lost, which cannot change any sensible
+     * shape.  Correctness is unaffected either way: every index below
+     * is bounded structurally, never by frequency values. */
     jl_leaf_t leaf[PIVCO_MAX_SYMBOLS];
     uint32_t orv = 0, andv = ~(uint32_t)0;
     int n = 0;
     for (int i = 0; i < PIVCO_MAX_SYMBOLS; i++)
         if (freq[i]) {
-            uint32_t f = (uint32_t)freq[i];
+            uint32_t f = freq[i] > UINT32_MAX ? UINT32_MAX
+                                              : (uint32_t)freq[i];
             leaf[n].freq = f;
             leaf[n].sym  = (uint16_t)i;
             n++;
             orv |= f;
             andv &= f;
+        } else {
+            /* Harden the documented precondition: freq-0 symbols carry
+             * no code.  A stale nonzero length here once survived into
+             * an adopted set and broke Kraft (sum 2050/2048). */
+            lengths[i] = 0;
         }
     if (n < 2) return -1;
     sort_leaves(leaf, n, orv ^ andv);
