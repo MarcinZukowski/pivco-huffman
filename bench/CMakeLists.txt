@@ -100,6 +100,13 @@ add_executable(pivco_bench_prim ${CMAKE_SOURCE_DIR}/bench/bench_prim.c)
 target_include_directories(pivco_bench_prim PRIVATE
     ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/src ${PHTD_DIR}/include)
 target_link_libraries(pivco_bench_prim pivco_huffman m)
+if(UNIX AND NOT APPLE)
+    # prim_variants keeps byte-exact asm replicas (c3roll asof pairs) that
+    # address their tables absolutely -- R_X86_64_32S, illegal in a PIE
+    # link.  The encoding IS what those variants preserve, so link this
+    # research binary non-PIE instead of rewriting them RIP-relative.
+    target_link_options(pivco_bench_prim PRIVATE -no-pie)
+endif()
 
 # Optional Oodle reference comparison, consumed here by pivco_fair_bench and --
 # via the inherited OODLE_* vars -- by pivco_fse_xy_micro under extras/bench/.
