@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest        # x86-64: scalar + SSE4.1/AVX2 executed
+          - os: ubuntu-24.04-arm     # Linux NEON
+          - os: macos-latest         # Apple Silicon NEON
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+      - name: Configure
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build -j4
+      - name: Test
+        run: ./build/pivco_huffman_tests
+      - name: Drop-in object canary (the TurboBench link contract)
+        run: |
+          cmake --build build --target pivco_huffman_local -j4
+          echo 'int main(void){return 0;}' > canary.c
+          cc canary.c build/libpivco_huffman_local.o -lm -o canary
