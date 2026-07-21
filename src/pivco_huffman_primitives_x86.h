@@ -1252,6 +1252,16 @@ static inline void pack_dN_x86(uint8_t *out, const uint8_t *ranks,
 
 #define PIVCO_PRIM_ALWAYS_INLINE __attribute__((always_inline)) static inline
 
+#include "pivco_huffman_hist_scalar.h"
+
+/* SSE4.1/AVX2 has no histogram win over the shared scalar core (measured);
+ * alias it explicitly. */
+PIVCO_PRIM_ALWAYS_INLINE void prim_histogram_chunk(const uint8_t *in, size_t n,
+                                                   uint32_t hist[256],
+                                                   uint8_t *scratch)
+{ histogram_chunk_scalar(in, n, hist, scratch); }
+
+
 /* Widest load a merge kernel issues at a child-buffer cursor (16B loadu at child cursors);
  * the cursor can rest AT `size` on the exhausted side, so buffers a
  * merge reads need this much trailing slack.  Consumed by the decode

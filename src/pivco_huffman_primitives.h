@@ -30,6 +30,17 @@
  *  of the scalar↔SSE wire-format-drift bug this refactor exists to
  *  fix).
  *
+ *  void prim_histogram_chunk(const uint8_t *in, size_t n,
+ *                            uint32_t hist[256], uint8_t *scratch);
+ *
+ *    Adds the byte counts of in[0..n) into hist[256].  Caller
+ *    guarantees n <= PIVCO_PRIM_HIST_CHUNK (so no u32 counter can
+ *    overflow) and provides PIVCO_PRIM_HIST_SCRATCH bytes of scratch
+ *    (the AVX-512 bin buffers; other backends ignore it).  No
+ *    alignment requirements; reads and writes are exact.  Backends
+ *    without their own implementation alias the shared scalar core
+ *    (pivco_huffman_hist_scalar.h).
+ *
  *  Lifecycle:
  *
  *  void prim_codec_init(void);

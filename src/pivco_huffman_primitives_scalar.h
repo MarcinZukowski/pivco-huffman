@@ -144,6 +144,13 @@ static inline void merge_vec_vec_scalar(const uint8_t *bm, int K,
  * placement logic (scratch_carve / place_tail). */
 #define PIVCO_PRIM_MERGE_OVERREAD 1
 
+#include "pivco_huffman_hist_scalar.h"
+
+PIVCO_PRIM_ALWAYS_INLINE void prim_histogram_chunk(const uint8_t *in, size_t n,
+                                                   uint32_t hist[256],
+                                                   uint8_t *scratch)
+{ histogram_chunk_scalar(in, n, hist, scratch); }
+
 PIVCO_PRIM_ALWAYS_INLINE void prim_codec_init(void)
 { codec_init_scalar(); }
 

@@ -367,6 +367,20 @@ int pivco_huffman_encode_scalar(const uint8_t *symbols, size_t n,
                                 const pivco_huffman_table_t *table,
                                 uint8_t *out, size_t *out_len);
 
+/* Byte histogram: adds counts of in[0..n) into freq[256].  Dispatched
+ * like encode/decode; per-backend entries below. */
+int pivco_huffman_histogram(const uint8_t *in, size_t n, uint64_t freq[256]);
+int pivco_huffman_histogram_scalar(const uint8_t *in, size_t n, uint64_t freq[256]);
+#if defined(PIVCO_HAS_NEON) || defined(PIVCO_HAS_SVE)
+int pivco_huffman_histogram_neon(const uint8_t *in, size_t n, uint64_t freq[256]);
+#endif
+#ifdef PIVCO_HAS_SSE4
+int pivco_huffman_histogram_x86(const uint8_t *in, size_t n, uint64_t freq[256]);
+#endif
+#ifdef PIVCO_HAS_AVX512
+int pivco_huffman_histogram_avx512(const uint8_t *in, size_t n, uint64_t freq[256]);
+#endif
+
 int pivco_huffman_decode_scalar(const uint8_t *in, size_t in_len,
                                 const pivco_huffman_table_t *table,
                                 uint8_t *symbols, size_t *consumed);

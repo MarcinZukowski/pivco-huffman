@@ -147,40 +147,17 @@ static int pivcohuf_compress_impl(const uint8_t *in, size_t in_len,
 
     const size_t B = block_size;
 
-    /* Build histogram over real input.
-     *
-     * 4 uint32 sub-histograms interleaved in the hot loop break the
-     * same-bucket read-modify-write dependency that caps the naive
-     * scalar version (`freq[in[i]]++`) at L1 store-to-load latency.
-     * Each sub-hist counter is uint32 so the working set (4 KB) fits
-     * trivially in L1d on every platform.  Periodic accumulation into
-     * uint64 globals every 256 MB keeps a single bucket from
-     * overflowing uint32 on files > 4 GB. */
+    /* Build histogram over real input via the dispatched primitive
+     * (prim_histogram_chunk: 4x-u32 interleaved scalar core, or the
+     * AVX-512 positional bit-plane counter; chunked u32 -> u64
+     * accumulation lives in the codec entry).  PROF_FILE_HISTOGRAM is
+     * ticked inside the entry per chunk. */
     uint64_t real_freq[256] = {0};
-    { PROF_TIC(); double _t = TIC(tm);
-      const size_t CHUNK = (size_t)256 << 20;   /* 256 MiB */
-      uint32_t h0[256] = {0}, h1[256] = {0}, h2[256] = {0}, h3[256] = {0};
-      size_t off2 = 0;
-      while (off2 < in_len) {
-          size_t end = off2 + CHUNK;
-          if (end > in_len) end = in_len;
-          size_t i = off2;
-          for (; i + 4 <= end; i += 4) {
-              h0[in[i + 0]]++;
-              h1[in[i + 1]]++;
-              h2[in[i + 2]]++;
-              h3[in[i + 3]]++;
-          }
-          for (; i < end; i++) h0[in[i]]++;
-          /* Flush sub-hists into uint64 globals. */
-          for (int s = 0; s < 256; s++) {
-              real_freq[s] += (uint64_t)h0[s] + h1[s] + h2[s] + h3[s];
-              h0[s] = h1[s] = h2[s] = h3[s] = 0;
-          }
-          off2 = end;
-      }
+    { double _t = TIC(tm);
+      if (pivco_huffman_histogram(in, in_len, real_freq) != PIVCO_OK)
+          return PIVCOHUF_ERR_INTERNAL;
       if (in_len == 0) real_freq[0] = 1;
-      PROF_TOC(PROF_FILE_HISTOGRAM, in_len); TOC(tm, freq_ns, _t); }
+      TOC(tm, freq_ns, _t); }
 
     pivco_huffman_table_t real_table;
     { PROF_TIC(); double _t = TIC(tm);

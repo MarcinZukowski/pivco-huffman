@@ -161,9 +161,24 @@ typedef struct {
     const uint8_t  *sym_to_rank;          /* sym -> u8 rank              (prim_enc gather) */
     pivco_huffman_enc_init_aux_t enc_init_aux; /* pre-shifted rank tables (x86 prim_enc 4tab) */
     uint8_t  rank_thr, rank_base;
+    uint32_t *hist;                       /* prim_histogram_chunk output bins   */
+    uint8_t  *hist_scratch;               /* PIVCO_PRIM_HIST_SCRATCH bytes      */
     int n, D, depth;
 } ctx_t;
 
+#ifdef HAVE_SIMD
+/* "scalar" row = the PRODUCTION shared core (histogram_chunk_scalar,
+ * reachable from every backend build via the primitives chain) -- not a
+ * naive reimplementation; the independent naive loop lives only in the
+ * correctness check.  The BK row is the backend's prim alias (differs
+ * from the core only on AVX-512). */
+static void p_hist_scalar(const ctx_t *c){
+    histogram_chunk_scalar(c->symbuf, (size_t)c->n, c->hist, c->hist_scratch);
+}
+static void p_hist_prim(const ctx_t *c){
+    prim_histogram_chunk(c->symbuf, (size_t)c->n, c->hist, c->hist_scratch);
+}
+#endif
 static void p_unpack_scalar (const ctx_t *c){ scalar_unpack(c->codes,c->bm,c->n,c->D); }
 static void p_scatter_scalar(const ctx_t *c){ scalar_scatter(c->out,c->codes,c->c2s,c->n); }
 static void p_pack_scalar   (const ctx_t *c){ scalar_pack(c->pack_out,c->la_work,c->n,c->D,c->depth); }
@@ -412,6 +427,9 @@ typedef enum {
     /* ---- binary merge (decode, one per internal node) ---- */
     ST_MERGE_VEC_VEC, ST_MERGE_CST_CST, ST_MERGE_CST_VEC,
 
+    /* ---- encode-side histogram (prim_histogram_chunk) ---- */
+    ST_HISTOGRAM,
+
     /* ---- misc primitives ---- */
     ST_XOR, ST_XOR_ACCUM, ST_PLUS_ONE,
 } stage_t;
@@ -456,6 +474,7 @@ static const char *stage_name(stage_t s){
     case ST_MERGE_VEC_VEC:  return "merge_vec_vec";
     case ST_MERGE_CST_CST:  return "merge_cst_cst";
     case ST_MERGE_CST_VEC:   return "merge_cst_vec";
+    case ST_HISTOGRAM:  return "histogram_chunk";
     case ST_XOR:        return "xor";
     case ST_XOR_ACCUM:  return "xor_accum";
     case ST_PLUS_ONE:   return "plus_one";
@@ -551,6 +570,7 @@ static void stage_bits(stage_t s, int D, double *in, double *out, double *lut) {
     case ST_MERGE_VEC_VEC:  *in=8+8+1;    *out=8;        *lut=8+1;     break;
     case ST_MERGE_CST_CST:  *in=1;        *out=8;        *lut=0;       break;
     case ST_MERGE_CST_VEC:   *in=8+1;      *out=8;        *lut=8+1;     break;
+    case ST_HISTOGRAM:       *in=8;        *out=0;        *lut=0;       break;
     case ST_XOR:        *in=16;       *out=8;        *lut=0;       break;
     case ST_XOR_ACCUM:  *in=8;        *out=0;        *lut=0;       break;
     case ST_PLUS_ONE:   *in=0;        *out=8;        *lut=0;       break;
@@ -651,6 +671,8 @@ int main(int argc, char **argv) {
     uint16_t code_la_lut[256]; uint8_t sym_to_rank[256];
     uint8_t c2s_id[256];                                     /* identity c2s (merge_flat D=8 invariant) */
     uint16_t s2r_hi[256];                                    /* enc_init_aux backing (x86 2tab) */
+    uint32_t *hist = malloc(256 * sizeof(uint32_t));
+    uint8_t  *hist_scratch = malloc(PIVCO_PRIM_HIST_SCRATCH);
     srand(0xC0FFEE);
     for (int i=0;i<n+16;i++){ bm[i]=(uint8_t)rand(); la_pristine[i]=(uint16_t)rand(); }
     for (int i=0;i<n+16;i++){ merge_left[i]=(uint8_t)rand(); merge_right[i]=(uint8_t)rand(); }
@@ -776,6 +798,12 @@ int main(int argc, char **argv) {
     /* merge_vec_vec / merge_cst_cst experimental variants (neon_pcpc,
        unroll8, tbl/blendtab/vtbl/vtblq/d1flat) now live in
        prim_variants/prims-merge.h — run with --variants. */
+#if defined(HAVE_SIMD)
+    /* Encode-side histogram primitive (symbuf as input). */
+    reg("scalar", ST_HISTOGRAM, 0, 0, p_hist_scalar);
+    reg(BK,       ST_HISTOGRAM, 0, 0, p_hist_prim);
+#endif
+
     /* Synthetic byte-XOR — memory-bandwidth comparison point. */
     reg("scalar", ST_XOR, 0, 0, p_xor_scalar);
 #if defined(HAVE_SIMD)
@@ -923,6 +951,7 @@ int main(int argc, char **argv) {
                      .code_la_lut=code_la_lut, .sym_to_rank=sym_to_rank,
                      .enc_init_aux={ .s2r_hi=s2r_hi },
                      .rank_thr=rank_thr, .rank_base=rank_base,
+                     .hist=hist, .hist_scratch=hist_scratch,
                      .n=n, .D=p->D, .depth=PART_DEPTH };
         const char *chk = "ok";
 
@@ -964,6 +993,12 @@ int main(int argc, char **argv) {
             scalar_merge_cst_vec(ref, bm, n, MERGE_LEFT_SYM, merge_right);
             memset(out,0,n); p->run(&cx);
             if (memcmp(out,ref,n)) chk="FAIL";
+        } else if (p->stage == ST_HISTOGRAM) {
+            uint32_t refh[256] = {0};
+            for (int i = 0; i < n; i++) refh[symbuf[i]]++;
+            memset(hist, 0, 256 * sizeof(uint32_t));
+            p->run(&cx);
+            if (memcmp(hist, refh, sizeof(refh))) chk="FAIL";
         } else if (p->stage == ST_XOR) {
             scalar_xor(ref, merge_left, merge_right, n);
             memset(out,0,n); p->run(&cx);

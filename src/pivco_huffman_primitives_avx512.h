@@ -765,4 +765,201 @@ PIVCO_PRIM_ALWAYS_INLINE void prim_merge_vec_vec(const uint8_t *bm, int K,
                                                uint8_t *out)
 { merge_vec_vec_avx512(bm, K, left_buf, right_buf, out); }
 
+
+/* ---------------------------------------------------------------------------
+ * prim_histogram_chunk — positional (bit-plane) byte histogram.
+ *
+ * Port of Harold Aptroot's AVX-512 histogram, used under the MIT
+ * License (Copyright (c) 2026 Harold Aptroot):
+ *   https://gitlab.com/-/snippets/3745720  (hist.cpp + license.txt)
+ * Dissected in Jorn Engel's write-up:
+ *   https://github.com/JoernEngel/joernblog/blob/master/histogram.md
+ *
+ * Bytes are binned by their top 2 bits into four 16 KB buffers
+ * (masked vpcompressb), the remaining 6 bits rotated via one GF2P8
+ * affine so 1-bit "positional" counters (one bit of each of 512
+ * counters per zmm) can absorb them; vpternlog full-adder trees
+ * promote 1-bit -> 3-bit -> 8-bit -> 16-bit -> 32-bit counters.
+ * Input-shape independent by construction (~7.5 GB/s GNR, ~12-14 GB/s
+ * Zen 5 with clang; gcc trails ~10-35%% on the FA chains).
+ *
+ * Needs GFNI + BITALG + VBMI2 on top of the backend baseline; without
+ * the compile flags the shared scalar core is used instead.
+ * ------------------------------------------------------------------------- */
+#include "pivco_huffman_hist_scalar.h"
+
+#if defined(__GFNI__) && defined(__AVX512BITALG__)
+
+#define HIST_FA(hh, ll, a, b, c) do {                              \
+    __m512i _l = _mm512_ternarylogic_epi32((c), (b), (a), 0x96);   \
+    (hh) = _mm512_ternarylogic_epi32(_l, (b), (a), 0x8E);          \
+    (ll) = _l;                                                     \
+} while (0)
+
+/* consume one bin: N bytes of 6-bit morsels -> 64 u16 counters */
+static void hist_consume_bin_avx512(uint8_t *data, size_t N,
+                                    uint16_t *hist16)
+{
+    size_t tail = N & 63;
+    if (tail) {
+        __m512i *where = (__m512i *)(data + N - tail);
+        _mm512_store_epi64(where,
+            _mm512_or_epi64(_mm512_load_epi64(where),
+                            _mm512_movm_epi8(~0ull << tail)));
+        N = N + 64 - tail;
+    }
+    N /= 64;
+
+    __m512i h0 = _mm512_setzero_si512();
+    __m512i h1 = _mm512_setzero_si512();
+    __m512i w0_0 = _mm512_setzero_si512();
+    __m512i w1_0 = _mm512_setzero_si512();
+    __m512i w2_0 = _mm512_setzero_si512();
+
+    static const uint8_t tp_bytes[64] __attribute__((aligned(64))) = {
+        0, 8, 16, 24, 32, 40, 48, 56,
+        1, 9, 17, 25, 33, 41, 49, 57,
+        2, 10, 18, 26, 34, 42, 50, 58,
+        3, 11, 19, 27, 35, 43, 51, 59,
+        4, 12, 20, 28, 36, 44, 52, 60,
+        5, 13, 21, 29, 37, 45, 53, 61,
+        6, 14, 22, 30, 38, 46, 54, 62,
+        7, 15, 23, 31, 39, 47, 55, 63};
+    const __m512i tp = _mm512_load_si512((const void *)tp_bytes);
+
+    do {
+        size_t M = N > 31 ? 31 : N;
+        N -= M;
+        __m512i w = _mm512_setzero_si512();
+        do {
+            __m512i x0 = _mm512_sllv_epi64(_mm512_set1_epi64(1), _mm512_cvtepu8_epi64(_mm_loadu_si64(data + 0)));
+            __m512i x1 = _mm512_sllv_epi64(_mm512_set1_epi64(1), _mm512_cvtepu8_epi64(_mm_loadu_si64(data + 8)));
+            __m512i x2 = _mm512_sllv_epi64(_mm512_set1_epi64(1), _mm512_cvtepu8_epi64(_mm_loadu_si64(data + 16)));
+            __m512i x3 = _mm512_sllv_epi64(_mm512_set1_epi64(1), _mm512_cvtepu8_epi64(_mm_loadu_si64(data + 24)));
+            __m512i x4 = _mm512_sllv_epi64(_mm512_set1_epi64(1), _mm512_cvtepu8_epi64(_mm_loadu_si64(data + 32)));
+            __m512i x5 = _mm512_sllv_epi64(_mm512_set1_epi64(1), _mm512_cvtepu8_epi64(_mm_loadu_si64(data + 40)));
+            __m512i x6 = _mm512_sllv_epi64(_mm512_set1_epi64(1), _mm512_cvtepu8_epi64(_mm_loadu_si64(data + 48)));
+            __m512i x7 = _mm512_sllv_epi64(_mm512_set1_epi64(1), _mm512_cvtepu8_epi64(_mm_loadu_si64(data + 56)));
+            data += 64;
+
+            HIST_FA(x1, x2, x0, x1, x2);
+            HIST_FA(x4, x5, x3, x4, x5);
+            HIST_FA(x7, w0_0, x6, x7, w0_0);
+            HIST_FA(x5, w0_0, x2, x5, w0_0);
+            HIST_FA(x4, x7, x1, x4, x7);
+            HIST_FA(x5, w1_0, x7, x5, w1_0);
+            __m512i w3_0;
+            HIST_FA(w3_0, w2_0, x5, x4, w2_0);
+
+            w3_0 = _mm512_permutexvar_epi8(tp, w3_0);
+            w3_0 = _mm512_gf2p8affine_epi64_epi8(_mm512_set1_epi64(0x8040201008040201), w3_0, 0);
+            w3_0 = _mm512_popcnt_epi8(w3_0);
+            w = _mm512_add_epi8(w, w3_0);
+        } while (--M);
+
+        h0 = _mm512_add_epi16(h0, _mm512_and_epi64(w, _mm512_set1_epi16(0xFF)));
+        h1 = _mm512_add_epi16(h1, _mm512_srli_epi16(w, 8));
+    } while (N);
+
+    w0_0 = _mm512_permutexvar_epi8(tp, w0_0);
+    w1_0 = _mm512_permutexvar_epi8(tp, w1_0);
+    w2_0 = _mm512_permutexvar_epi8(tp, w2_0);
+    w0_0 = _mm512_gf2p8affine_epi64_epi8(_mm512_set1_epi64(0x8040201008040201), w0_0, 0);
+    w1_0 = _mm512_gf2p8affine_epi64_epi8(_mm512_set1_epi64(0x8040201008040201), w1_0, 0);
+    w2_0 = _mm512_gf2p8affine_epi64_epi8(_mm512_set1_epi64(0x8040201008040201), w2_0, 0);
+    w0_0 = _mm512_popcnt_epi8(w0_0);
+    w1_0 = _mm512_popcnt_epi8(w1_0);
+    w2_0 = _mm512_popcnt_epi8(w2_0);
+
+    __m512i w = _mm512_add_epi8(_mm512_add_epi8(w0_0, _mm512_add_epi8(w1_0, w1_0)),
+                                _mm512_slli_epi64(w2_0, 2));
+    h0 = _mm512_add_epi16(_mm512_slli_epi16(h0, 3), _mm512_and_epi64(w, _mm512_set1_epi16(0xFF)));
+    h1 = _mm512_add_epi16(_mm512_slli_epi16(h1, 3), _mm512_srli_epi16(w, 8));
+
+    _mm512_storeu_epi16(hist16, _mm512_add_epi16(h0, _mm512_loadu_epi16(hist16)));
+    _mm512_storeu_epi16(hist16 + 32, _mm512_add_epi16(h1, _mm512_loadu_epi16(hist16 + 32)));
+}
+
+static inline void histogram_chunk_avx512(const uint8_t *in, size_t n,
+                                          uint32_t hist[256], uint8_t *scratch)
+{
+    const uint8_t *ptr = in;
+    size_t N = n;
+    if (N >= 64) {
+        const uint8_t *end = ptr + N;
+        while ((uintptr_t)ptr & 63) hist[*ptr++] += 1;
+        N = (size_t)(end - ptr);
+    }
+
+    const size_t bufsize = 16 * 1024;
+    uint8_t *buffer0 = (uint8_t *)(((uintptr_t)scratch + 63) & ~(uintptr_t)63);
+    uint8_t *buffer1 = buffer0 + bufsize;
+    uint8_t *buffer2 = buffer1 + bufsize;
+    uint8_t *buffer3 = buffer2 + bufsize;
+
+    while (N >= 64) {
+        uint16_t hist16[256] = {0};
+        size_t count0 = 0, count1 = 0, count2 = 0, count3 = 0;
+        /* consume up to 2^16-64 bytes per round: a u16 counter cannot
+         * overflow within a round by construction */
+        size_t M = N >= 65472 ? 65472 : (N & (size_t)-64);
+        N -= M;
+        for (size_t i = 0; i < M; i += 64) {
+            __m512i data = _mm512_load_si512(ptr + i);
+            __mmask64 bit7 = _mm512_movepi8_mask(data);
+            __mmask64 bit6 = _mm512_movepi8_mask(_mm512_add_epi8(data, data));
+            __mmask64 b00 = _knot_mask64(_kor_mask64(bit6, bit7));
+            __mmask64 b01 = _kandn_mask64(bit7, bit6);
+            __mmask64 b10 = _kandn_mask64(bit6, bit7);
+            __mmask64 b11 = _kand_mask64(bit7, bit6);
+            data = _mm512_gf2p8affine_epi64_epi8(data, _mm512_set1_epi64(0x2010010204080000), 0);
+            _mm512_storeu_epi8(buffer0 + count0, _mm512_maskz_compress_epi8(b00, data));
+            _mm512_storeu_epi8(buffer1 + count1, _mm512_maskz_compress_epi8(b01, data));
+            _mm512_storeu_epi8(buffer2 + count2, _mm512_maskz_compress_epi8(b10, data));
+            _mm512_storeu_epi8(buffer3 + count3, _mm512_maskz_compress_epi8(b11, data));
+            count0 += (size_t)_mm_popcnt_u64(b00);
+            count1 += (size_t)_mm_popcnt_u64(b01);
+            count2 += (size_t)_mm_popcnt_u64(b10);
+            count3 += (size_t)_mm_popcnt_u64(b11);
+
+            if (count0 >= bufsize - 64) { hist_consume_bin_avx512(buffer0, count0, &hist16[0]);   count0 = 0; }
+            if (count1 >= bufsize - 64) { hist_consume_bin_avx512(buffer1, count1, &hist16[64]);  count1 = 0; }
+            if (count2 >= bufsize - 64) { hist_consume_bin_avx512(buffer2, count2, &hist16[128]); count2 = 0; }
+            if (count3 >= bufsize - 64) { hist_consume_bin_avx512(buffer3, count3, &hist16[192]); count3 = 0; }
+        }
+        ptr += M;
+
+        if (count0) hist_consume_bin_avx512(buffer0, count0, &hist16[0]);
+        if (count1) hist_consume_bin_avx512(buffer1, count1, &hist16[64]);
+        if (count2) hist_consume_bin_avx512(buffer2, count2, &hist16[128]);
+        if (count3) hist_consume_bin_avx512(buffer3, count3, &hist16[192]);
+
+        for (size_t i = 0; i < 256; i += 64) {
+            __m512i h0 = _mm512_loadu_epi16(hist16 + i);
+            __m512i h1 = _mm512_loadu_epi16(hist16 + i + 32);
+            __m512i w0 = _mm512_and_epi32(h0, _mm512_set1_epi32(0xFFFF));
+            __m512i w1 = _mm512_srli_epi32(h0, 16);
+            __m512i w2 = _mm512_and_epi32(h1, _mm512_set1_epi32(0xFFFF));
+            __m512i w3 = _mm512_srli_epi32(h1, 16);
+            _mm512_storeu_epi32(hist + i,      _mm512_add_epi32(w0, _mm512_loadu_epi32(hist + i)));
+            _mm512_storeu_epi32(hist + i + 16, _mm512_add_epi32(w1, _mm512_loadu_epi32(hist + i + 16)));
+            _mm512_storeu_epi32(hist + i + 32, _mm512_add_epi32(w2, _mm512_loadu_epi32(hist + i + 32)));
+            _mm512_storeu_epi32(hist + i + 48, _mm512_add_epi32(w3, _mm512_loadu_epi32(hist + i + 48)));
+        }
+    }
+
+    while (N) hist[ptr[--N]] += 1;
+}
+PIVCO_PRIM_ALWAYS_INLINE void prim_histogram_chunk(const uint8_t *in, size_t n,
+                                                   uint32_t hist[256],
+                                                   uint8_t *scratch)
+{ histogram_chunk_avx512(in, n, hist, scratch); }
+
+#else  /* no GFNI/BITALG compile support: fall back to the scalar core */
+PIVCO_PRIM_ALWAYS_INLINE void prim_histogram_chunk(const uint8_t *in, size_t n,
+                                                   uint32_t hist[256],
+                                                   uint8_t *scratch)
+{ histogram_chunk_scalar(in, n, hist, scratch); }
+#endif /* __GFNI__ && __AVX512BITALG__ */
+
 #endif  /* PIVCO_HUFFMAN_PRIMITIVES_AVX512_H */

@@ -479,6 +479,51 @@ static int test_joint_lengths(void)
     return 0;
 }
 
+
+/* ---- histogram primitive: dispatched vs naive, edges + alignment ---- */
+static int test_histogram(void)
+{
+    printf("histogram primitive:\n");
+    enum { HCAP = 5 * 1024 * 1024 + 128 };
+    uint8_t *buf = malloc(HCAP);
+    uint64_t seed = 0x9e3779b97f4a7c15ULL;
+    for (size_t i = 0; i < HCAP; i++) {
+        seed ^= seed << 13; seed ^= seed >> 7; seed ^= seed << 17;
+        buf[i] = (seed % 100) < 60 ? 'A' : (uint8_t)(seed >> 32);
+    }
+    size_t sizes[] = {0, 1, 7, 63, 64, 65, 127, 4095, 4096,
+                      65472, 65473, 1 << 20, 5 * 1024 * 1024};
+    size_t offs[] = {0, 1, 63};
+    int fails = 0;
+    for (unsigned si = 0; si < sizeof(sizes)/sizeof(sizes[0]); si++)
+        for (unsigned oi = 0; oi < sizeof(offs)/sizeof(offs[0]); oi++) {
+            size_t n = sizes[si];
+            const uint8_t *p = buf + offs[oi];
+            uint64_t ref[256] = {0}, got[256] = {0};
+            for (size_t i = 0; i < n; i++) ref[p[i]]++;
+            int rc = pivco_huffman_histogram(p, n, got);
+            if (rc != PIVCO_OK || memcmp(ref, got, sizeof(ref))) {
+                printf("  FAIL n=%zu off=%zu rc=%d\n", n, offs[oi], rc);
+                fails++;
+            }
+            /* accumulation semantics: second call adds */
+            if (n && rc == PIVCO_OK) {
+                pivco_huffman_histogram(p, n, got);
+                int ok = 1;
+                for (int s = 0; s < 256; s++) ok &= got[s] == 2 * ref[s];
+                if (!ok) { printf("  FAIL accum n=%zu\n", n); fails++; }
+            }
+        }
+    /* all-same buffer (bin-overflow flush path) */
+    memset(buf, 'Z', 1 << 20);
+    { uint64_t got[256] = {0};
+      pivco_huffman_histogram(buf, 1 << 20, got);
+      if (got['Z'] != (1u << 20)) { printf("  FAIL all-same\n"); fails++; } }
+    free(buf);
+    printf("  %s\n", fails ? "FAILED" : "all ok");
+    return fails;
+}
+
 /* ---------- Main test runner ---------- */
 
 int test_roundtrip_all(void)
@@ -488,6 +533,7 @@ int test_roundtrip_all(void)
     failures += test_table_build();
     failures += test_single_symbol();
     failures += test_joint_lengths();
+    failures += test_histogram();
 
     uint64_t freq[PIVCO_MAX_SYMBOLS];
     uint64_t seed = 0xDEADBEEFCAFE1234ULL;
