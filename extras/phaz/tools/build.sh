@@ -19,10 +19,14 @@ MARCH="${MARCH:-}"   # e.g. -march=native / -mcpu=native for benchmarking
 # 1. ensure pivco-huffman's zstd checkout is present (pinned 5233c58e)
 [ -f "$SRC/lib/zstd.h" ] || { echo "missing $SRC — clone pivco-huffman's ext/zstd first"; exit 1; }
 
-# 2. fresh disposable copy + apply the minimal patch
-echo ">> syncing zstd -> build/zstd and applying phaz.patch"
-rm -rf "$WORK"; mkdir -p "$PHAZ/build"
-rsync -a --exclude='.git' "$SRC/" "$WORK/"
+# 2. fresh disposable copy + apply the minimal patch.  Only lib/ is
+# needed (phaz.patch touches lib/compress + lib/decompress; the build is
+# `make -C lib libzstd.a`) -- copying the whole checkout dragged in
+# tests/cli-tests/bin symlinks, which rsync cannot create on Windows
+# hosts (TurboBench CI, MSYS: "symlink ... failed", error 23).
+echo ">> syncing zstd/lib -> build/zstd/lib and applying phaz.patch"
+rm -rf "$WORK"; mkdir -p "$WORK"
+rsync -a --exclude='.git' "$SRC/lib/" "$WORK/lib/"
 # apply with `patch` if present, else `git apply` (always available on dev boxes)
 if command -v patch >/dev/null 2>&1; then
   ( cd "$WORK" && patch -p1 < "$PHAZ/phaz.patch" )
@@ -52,8 +56,10 @@ echo ">> building phaz"
 # -Werror for real issues; -Wno-deprecated-declarations (ZSTD_generateSequences)
 # and -Wno-misleading-indentation (GCC style-nanny on the terse one-line style).
 # -I"$PHAZ" so the CLI + codec find phaz_codec.h.
+# -lm: libpivco's joint_lengths.c uses log2(); glibc keeps it in libm
+# (no-op on macOS).
 $CC -O3 -Wall -Werror -Wno-deprecated-declarations -Wno-misleading-indentation $MARCH $ZINC -I"$PH/include" -I"$PHAZ" \
-    "$PHAZ/tools/phaz.c" "$PHAZ/phaz_codec.c" "$LIB" "$PLOCAL" -o "$PHAZ/phaz"
+    "$PHAZ/tools/phaz.c" "$PHAZ/phaz_codec.c" "$LIB" "$PLOCAL" -o "$PHAZ/phaz" -lm
 
 # Relocatable, drop-in object for embedding (e.g. the TurboBench plugin):
 # phaz_codec + the *private patched* libzstd + pivco, merged into one .o that
