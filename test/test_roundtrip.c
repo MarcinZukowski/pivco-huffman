@@ -1,4 +1,5 @@
 #include "pivco_huffman.h"
+#include "pivco_huffman_primitives.h"  /* prim_histogram_chunk (arch-selected) */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -486,6 +487,8 @@ static int test_histogram(void)
     printf("histogram primitive:\n");
     enum { HCAP = 5 * 1024 * 1024 + 128 };
     uint8_t *buf = malloc(HCAP);
+    uint8_t *hscratch = malloc(PIVCO_PRIM_HIST_SCRATCH);
+    prim_codec_init();
     uint64_t seed = 0x9e3779b97f4a7c15ULL;
     for (size_t i = 0; i < HCAP; i++) {
         seed ^= seed << 13; seed ^= seed >> 7; seed ^= seed << 17;
@@ -499,27 +502,29 @@ static int test_histogram(void)
         for (unsigned oi = 0; oi < sizeof(offs)/sizeof(offs[0]); oi++) {
             size_t n = sizes[si];
             const uint8_t *p = buf + offs[oi];
-            uint64_t ref[256] = {0}, got[256] = {0};
+            uint64_t ref[256] = {0};
             for (size_t i = 0; i < n; i++) ref[p[i]]++;
-            int rc = pivco_huffman_histogram(p, n, got);
-            if (rc != PIVCO_OK || memcmp(ref, got, sizeof(ref))) {
-                printf("  FAIL n=%zu off=%zu rc=%d\n", n, offs[oi], rc);
+            uint32_t got32[256] = {0};
+            prim_histogram_chunk(p, n, got32, hscratch);
+            int ok = 1;
+            for (int s = 0; s < 256; s++) ok &= (uint64_t)got32[s] == ref[s];
+            if (!ok) {
+                printf("  FAIL n=%zu off=%zu\n", n, offs[oi]);
                 fails++;
             }
             /* accumulation semantics: second call adds */
-            if (n && rc == PIVCO_OK) {
-                pivco_huffman_histogram(p, n, got);
-                int ok = 1;
-                for (int s = 0; s < 256; s++) ok &= got[s] == 2 * ref[s];
+            if (n && ok) {
+                prim_histogram_chunk(p, n, got32, hscratch);
+                for (int s = 0; s < 256; s++) ok &= (uint64_t)got32[s] == 2 * ref[s];
                 if (!ok) { printf("  FAIL accum n=%zu\n", n); fails++; }
             }
         }
     /* all-same buffer (bin-overflow flush path) */
     memset(buf, 'Z', 1 << 20);
-    { uint64_t got[256] = {0};
-      pivco_huffman_histogram(buf, 1 << 20, got);
+    { uint32_t got[256] = {0};
+      prim_histogram_chunk(buf, 1 << 20, got, hscratch);
       if (got['Z'] != (1u << 20)) { printf("  FAIL all-same\n"); fails++; } }
-    free(buf);
+    free(buf); free(hscratch);
     printf("  %s\n", fails ? "FAILED" : "all ok");
     return fails;
 }

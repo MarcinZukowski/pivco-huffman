@@ -147,24 +147,6 @@ int pivco_huffman_encode(const uint8_t *symbols, size_t n,
     }
 }
 
-int pivco_huffman_histogram(const uint8_t *in, size_t n, uint64_t freq[256])
-{
-    switch (resolve_impl()) {
-    case PIVCO_IMPL_NEON:
-#ifdef PIVCO_HAS_AVX512
-        return pivco_huffman_histogram_avx512(in, n, freq);
-#elif defined(PIVCO_HAS_SVE)
-        return pivco_huffman_histogram_neon(in, n, freq);
-#elif defined(PIVCO_HAS_NEON)
-        return pivco_huffman_histogram_neon(in, n, freq);
-#elif defined(PIVCO_HAS_SSE4)
-        return pivco_huffman_histogram_x86(in, n, freq);
-#endif
-    default:
-        return pivco_huffman_histogram_scalar(in, n, freq);
-    }
-}
-
 int pivco_huffman_decode(const uint8_t *in, size_t in_len,
                          const pivco_huffman_table_t *table,
                          uint8_t *symbols, size_t *consumed)

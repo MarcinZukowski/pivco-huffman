@@ -31,33 +31,31 @@
  * -march=native: aarch64 -> NEON; x86 with AVX-512 VBMI2 -> AVX512; else SSE/
  * AVX2.  pack/merge/partition are benched via the production prim_* (exist on
  * every backend); the standalone unpack/scatter kernels are NEON-only. */
+/* The primitives router self-selects the backend from the build arch
+ * (see pivco_huffman_primitives.h); this block only derives the local
+ * HAVE_SIMD / BK conveniences and the PIVCO_HAS_* tier defines the
+ * included research headers expect when built standalone. */
 #if defined(__aarch64__)
-#  define PIVCO_BACKEND_NEON 1
 #  define HAVE_SIMD 1
 #  define USE_NEON_KERNELS 1
-#  define BK "neon"
 #elif defined(__x86_64__)
 #  if defined(__SSE4_1__)
 #    define PIVCO_HAS_SSE4 1
+#    define HAVE_SIMD 1
 #  endif
 #  if defined(__AVX2__)
 #    define PIVCO_HAS_AVX2 1
 #  endif
 #  if defined(__AVX512VBMI2__)
 #    define PIVCO_HAS_AVX512 1
-#    define PIVCO_BACKEND_AVX512 1
-#    define BK "avx512"
-#    define HAVE_SIMD 1
-#  elif defined(__SSE4_1__)
-#    define PIVCO_BACKEND_X86 1
-#    define BK "sse/avx2"
-#    define HAVE_SIMD 1
 #  endif
 #endif
 #include "pivco_huffman.h"
 #include "bench_canary.h"
 #if defined(HAVE_SIMD)
-#  include "pivco_huffman_primitives.h"   /* prim_enc_* (u8 rank) / prim_merge_flat
+#  include "pivco_huffman_primitives.h"   /* backend self-selected; BK below */
+#  define BK PIVCO_PRIM_BACKEND_NAME
+   /* prim_enc_* (u8 rank) / prim_merge_flat
                                              (+ NEON flat_dN) */
    /* Retired u16 (code_la) encode kernels (owned by ph-td; production encodes on
       u8 ranks).  Provides the u16enc_* rows + enc_mask8_codes_la_* used by

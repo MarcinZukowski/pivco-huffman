@@ -201,16 +201,36 @@
 #ifndef PIVCO_HUFFMAN_PRIMITIVES_H
 #define PIVCO_HUFFMAN_PRIMITIVES_H
 
+/* Backend selection.  The per-backend codec TUs pass an explicit
+ * PIVCO_BACKEND_* define (CMake) and keep full control.  Any OTHER TU
+ * may simply include this header: with no explicit define, the build
+ * architecture picks the backend (the same tier CMake's codec dispatch
+ * prefers for the build), so callers of prim_* never name a backend. */
+#if !defined(PIVCO_BACKEND_SCALAR) && !defined(PIVCO_BACKEND_NEON) \
+ && !defined(PIVCO_BACKEND_X86)    && !defined(PIVCO_BACKEND_AVX512)
+#  if defined(__aarch64__) || defined(__ARM_NEON)
+#    define PIVCO_BACKEND_NEON 1
+#  elif defined(__AVX512VBMI2__)
+#    define PIVCO_BACKEND_AVX512 1
+#  elif defined(__SSE4_1__)
+#    define PIVCO_BACKEND_X86 1
+#  else
+#    define PIVCO_BACKEND_SCALAR 1
+#  endif
+#endif
+
 #if defined(PIVCO_BACKEND_SCALAR)
 #  include "pivco_huffman_primitives_scalar.h"
+#  define PIVCO_PRIM_BACKEND_NAME "scalar"
 #elif defined(PIVCO_BACKEND_NEON)
 #  include "pivco_huffman_primitives_neon.h"
+#  define PIVCO_PRIM_BACKEND_NAME "neon"
 #elif defined(PIVCO_BACKEND_X86)
 #  include "pivco_huffman_primitives_x86.h"
+#  define PIVCO_PRIM_BACKEND_NAME "sse/avx2"
 #elif defined(PIVCO_BACKEND_AVX512)
 #  include "pivco_huffman_primitives_avx512.h"
-#else
-#  error "pivco_huffman_primitives.h requires PIVCO_BACKEND_{SCALAR,NEON,X86,AVX512} to be defined."
+#  define PIVCO_PRIM_BACKEND_NAME "avx512"
 #endif
 
 #endif  /* PIVCO_HUFFMAN_PRIMITIVES_H */

@@ -3,6 +3,7 @@
 
 #include "pivcohuf_file.h"
 #include "pivco_huffman.h"
+#include "pivco_huffman_primitives.h"  /* arch-selected prim_histogram_chunk */
 #include "pivco_prof.h"
 
 #include <stdio.h>
@@ -133,6 +134,34 @@ size_t pivcohuf_compress_bound(size_t in_len)
     return pivcohuf_compress_bound_blk(in_len, PIVCO_BLOCK_SIZE);
 }
 
+/* Chunked byte histogram: adds counts of in[0..n) into freq[256] via
+ * the arch-selected prim_histogram_chunk (4x-u32 scalar core, or the
+ * AVX-512 positional bit-plane counter).  Chunks so the primitive's
+ * u32 counters cannot overflow; scratch for the AVX-512 bins lives in
+ * a thread-local buffer (grown once, reused).  Internal to the file
+ * codec -- other callers use the primitive directly. */
+static __thread uint8_t *g_hist_scratch = NULL;
+static int file_histogram(const uint8_t *in, size_t n, uint64_t freq[256])
+{
+    prim_codec_init();
+    if (!g_hist_scratch) {
+        g_hist_scratch = (uint8_t *)malloc(PIVCO_PRIM_HIST_SCRATCH);
+        if (!g_hist_scratch) return PIVCOHUF_ERR_INTERNAL;
+    }
+    size_t off = 0;
+    while (off < n) {
+        size_t len = n - off;
+        if (len > PIVCO_PRIM_HIST_CHUNK) len = PIVCO_PRIM_HIST_CHUNK;
+        uint32_t h32[256] = {0};
+        PROF_TIC();
+        prim_histogram_chunk(in + off, len, h32, g_hist_scratch);
+        PROF_TOC(PROF_FILE_HISTOGRAM, len);
+        for (int s = 0; s < 256; s++) freq[s] += h32[s];
+        off += len;
+    }
+    return PIVCOHUF_OK;
+}
+
 static int pivcohuf_compress_impl(const uint8_t *in, size_t in_len,
                                   uint8_t *out, size_t *out_len,
                                   size_t block_size,
@@ -147,14 +176,11 @@ static int pivcohuf_compress_impl(const uint8_t *in, size_t in_len,
 
     const size_t B = block_size;
 
-    /* Build histogram over real input via the dispatched primitive
-     * (prim_histogram_chunk: 4x-u32 interleaved scalar core, or the
-     * AVX-512 positional bit-plane counter; chunked u32 -> u64
-     * accumulation lives in the codec entry).  PROF_FILE_HISTOGRAM is
-     * ticked inside the entry per chunk. */
+    /* Build histogram over real input via file_histogram above --
+     * prim_histogram_chunk under a chunked u32 -> u64 wrapper. */
     uint64_t real_freq[256] = {0};
     { double _t = TIC(tm);
-      if (pivco_huffman_histogram(in, in_len, real_freq) != PIVCO_OK)
+      if (file_histogram(in, in_len, real_freq) != PIVCOHUF_OK)
           return PIVCOHUF_ERR_INTERNAL;
       if (in_len == 0) real_freq[0] = 1;
       TOC(tm, freq_ns, _t); }

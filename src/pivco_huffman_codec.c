@@ -123,19 +123,15 @@ extern uint64_t g_pivco_fse_bytes_out[PIVCO_FSE_STATS_SLOTS];
 #if defined(PIVCO_BACKEND_SCALAR)
 #  define CODEC_ENCODE_ENTRY pivco_huffman_encode_scalar
 #  define CODEC_DECODE_ENTRY pivco_huffman_decode_scalar
-#  define CODEC_HISTOGRAM_ENTRY pivco_huffman_histogram_scalar
 #elif defined(PIVCO_BACKEND_NEON)
 #  define CODEC_ENCODE_ENTRY pivco_huffman_encode_neon
 #  define CODEC_DECODE_ENTRY pivco_huffman_decode_bu_neon
-#  define CODEC_HISTOGRAM_ENTRY pivco_huffman_histogram_neon
 #elif defined(PIVCO_BACKEND_X86)
 #  define CODEC_ENCODE_ENTRY pivco_huffman_encode_x86
 #  define CODEC_DECODE_ENTRY pivco_huffman_decode_bu_x86
-#  define CODEC_HISTOGRAM_ENTRY pivco_huffman_histogram_x86
 #elif defined(PIVCO_BACKEND_AVX512)
 #  define CODEC_ENCODE_ENTRY pivco_huffman_encode_avx512
 #  define CODEC_DECODE_ENTRY pivco_huffman_decode_bu_avx512
-#  define CODEC_HISTOGRAM_ENTRY pivco_huffman_histogram_avx512
 #else
 #  error "pivco_huffman_codec.c needs PIVCO_BACKEND_{SCALAR,NEON,X86,AVX512}"
 #endif
@@ -631,32 +627,5 @@ int CODEC_DECODE_ENTRY(const uint8_t *in, size_t in_len,
     prim_merge_vec_vec(bm, N, buf_left, buf_right, symbols);
 
     *consumed = (size_t)(ptr - in);
-    return PIVCO_OK;
-}
-
-/* ---------- Histogram entry ----------
- *
- * Adds the byte counts of in[0..n) into freq[256] (caller zeroes or
- * accumulates across calls).  Chunks the input so the primitive's u32
- * counters cannot overflow, flushing into the caller's u64 bins; the
- * primitive's staging buffers come from the encode scratch arena. */
-int CODEC_HISTOGRAM_ENTRY(const uint8_t *in, size_t n, uint64_t freq[256])
-{
-    if ((!in && n) || !freq) return PIVCO_ERR_NULL;
-    prim_codec_init();
-    uint8_t *scratch = encode_scratch_ensure(PIVCO_PRIM_HIST_SCRATCH);
-    if (!scratch) return PIVCO_ERR_NULL;
-
-    size_t off = 0;
-    while (off < n) {
-        size_t len = n - off;
-        if (len > PIVCO_PRIM_HIST_CHUNK) len = PIVCO_PRIM_HIST_CHUNK;
-        uint32_t h32[256] = {0};
-        PROF_TIC();
-        prim_histogram_chunk(in + off, len, h32, scratch);
-        PROF_TOC(PROF_FILE_HISTOGRAM, len);
-        for (int s = 0; s < 256; s++) freq[s] += h32[s];
-        off += len;
-    }
     return PIVCO_OK;
 }
