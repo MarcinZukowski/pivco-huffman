@@ -8,6 +8,7 @@
 ### CONSIDERED — open / parked / research direction
 
 **General**
+- [Bulk select: value-position queries on the wire format](#bulk-select-value-position-queries-on-the-wire-format-2026-07-27)
 - [Encode scratch thread_local → encoder API context](#encode-scratch-thread_local--encoder-api-context-2026-07-01)
 - [4-way root merge (top 2 levels in one pass)](#4-way-root-merge-top-2-levels-in-one-pass-2026-06-19)
 - [SIMD-ify scalar tails (overwrite or masked stores)](#simd-ify-scalar-tails-overwrite-or-masked-stores-2026-06-15)
@@ -122,6 +123,27 @@
 ## CONSIDERED
 
 **General**
+
+### Bulk select: value-position queries on the wire format, 2026-07-27
+Wavelet-tree "select all occurrences of v" as a bulk SIMD op (Marcin's
+idea): walk v's leaf-to-root spine, skip off-spine sibling regions
+(header walk only), expand a 0xff/0x00 membership mask through the
+existing merge kernels with the off-spine side constant 0 — a `WHERE
+col = v` mask straight off the compressed block, no decode.  Zero new
+primitives (cst_vec/vec_vec/cst_cst/merge_flat with a mask c2s; D=8
+flats = direct packed compare).  Cost telescopes to ≤ ~2.6N regardless
+of symbol depth (Huffman mass decay; Fibonacci worst case), so query
+cost is essentially value- and selectivity-independent.  Multi-value
+sets share spines (Steiner tree): k values ≈ 1.2–1.35× one value.
+`extras/bench/bench_select.c`, verified bit-exact on all dists:
+single-value beats decode+scan **always** (floor ×1.7, median ×2.6 M4
+/ ×4.4 GNR); loses to a *fair* SIMD scan of resident raw data
+(×0.2–0.6) — but a 3-value OR already amortizes to ×1.18 **over** raw
+on GNR (M4 crossover ~4–5 values), and cost is ~flat in predicate
+width while raw scanning is linear.  Open: bit-mask output (8× less
+store traffic), range queries via free whole-subtree masks, per-block
+region-offset index to skip without header walks.  Paper application
+section candidate.
 
 ### Encode scratch thread_local → encoder API context, 2026-07-01
 The per-block encode scratch (the ranks buffer + the tree-walk's right-half recursion buffer) is a `__thread` growable arena — `g_encode_scratch` / `encode_scratch_ensure` in `pivco_huffman_codec.c`, mirroring the existing decode arena — reused across blocks so a block-loop encode no longer mallocs/frees per block.  This is a stopgap (marked `@todo` at the arena).

@@ -104,6 +104,13 @@ target_include_directories(pivco_fse_tune PRIVATE
     ${CMAKE_SOURCE_DIR}/ext/fse/lib ${CMAKE_SOURCE_DIR}/extras
     ${CMAKE_CURRENT_SOURCE_DIR})
 
+add_executable(pivco_huffman_bench_select
+    bench_select.c
+    ${BENCH_DIST}
+)
+target_link_libraries(pivco_huffman_bench_select pivco_huffman m)
+target_include_directories(pivco_huffman_bench_select PRIVATE ${CMAKE_SOURCE_DIR}/src)
+
 add_executable(pivco_huffman_bench_encode
     bench_encode.c
     ${BENCH_DIST}
