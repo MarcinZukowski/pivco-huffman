@@ -30,6 +30,7 @@
 - [x86 COM merge + partition (prefix-sum cursor decoupling)](#x86-com-merge--partition-prefix-sum-cursor-decoupling-2026-06-16)
 
 **AVX-512**
+- [merge_flat without the unpack AND (replicated c2s table)](#merge_flat-without-the-unpack-and-replicated-c2s-table-2026-07-29)
 - [Pin the merge vpexpandb encoding per-uarch (dynamic dispatch)](#pin-the-merge-vpexpandb-encoding-per-uarch-dynamic-dispatch-2026-07-06)
 - [AVX-512 BW tier for Cascade Lake (c5)](#avx-512-bw-tier-for-cascade-lake-c5-2026-05-12)
 
@@ -246,6 +247,23 @@ cursor-decouple, which Intel's frontend can't absorb on the wider 8-chunk
 body.  Not shipped; same AMD-gated-retry caveat as merge.
 
 **AVX-512**
+
+### merge_flat without the unpack AND (replicated c2s table), 2026-07-29
+Drop the D-bit mask AND in the 64-wide unpack by replicating c2s to fill
+the vpermb table — index bits [D..5] become don't-care (vpermi2b at D=7
+ignores bit 7 outright).  Controlled per-D A/B (same tree,
+`-falign-functions=64`, one callsite toggled per arm) on c8i GNR + c8a
+Zen 5: D=2/3/4 (32 B ymm loads) win +2.5–6% on GNR (both clang-19 and
+gcc-14) and +3–12% on Zen 5; D=5/6/7 (64 B split-heavy zmm loads)
+neutral to WORSE — D=5 on GNR is reproducibly ~10% slower without the
+AND.  Byte-diff clean (same loop address and forms, only the vpandq
+differs), and putting back a semantically inert AND-0x3F restores full
+speed: the AND acts as a 1-cycle chain spacer — a pure timing-mode
+effect in the split-load regime, same family as the M4 code-layout
+modes.  Prim-level only (≤ ~0.5–1% E2E on flat-heavy dists).  Diff
+parked in `notes/noand-merge-flat-2026-07-29.patch` (raw/fast helper
+split + D=2/3/4 callsites), not landed: small win vs mode-flakiness
+risk.  Revisit on a compiler bump or if flat decode gets hotter.
 
 ### Pin the merge vpexpandb encoding per-uarch (dynamic dispatch), 2026-07-06
 The vpexpandb in the merge-masked `merge_cst_vec` / `merge_vec_vec` main loops
