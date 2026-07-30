@@ -589,13 +589,36 @@ static inline void merge_flat_d7_neon(uint8_t *symbols, int n,
     uint8x8_t  sub64  = vdup_n_u8(64);
     int i = 0;
     int fast_end = n >= 24 ? n - 24 : 0;
-    for (; i + 16 <= fast_end; i += 16) {
-        uint8x8_t cl = flat_d7_unpack_fast(bm + ((i      * 7) >> 3));
-        uint8x8_t ch = flat_d7_unpack_fast(bm + (((i + 8) * 7) >> 3));
-        uint8x16_t codes = vcombine_u8(cl, ch);
-        uint8x16_t s = vqtbl4q_u8(lo, codes);
-        s = vqtbx4q_u8(s, hi, vsubq_u8(codes, sub64q));
-        vst1q_u8(symbols + i, s);
+    /* 16-wide ryg unpack (from the 2026-07-30 csimd study, +14% over the
+     * two-per-8-helper form on Graviton 4): 16 codes span exactly 14 bytes
+     * (16*7 bits), so one 16 B window feeds a TBL byte-pair gather; a
+     * per-lane USHL right-shift ((pos&7) as negative counts) bottoms each
+     * field, vuzp1 keeps the low bytes, AND 0x7F masks bit 7.  Groups are
+     * byte-aligned every 16 codes (stride 14).  Map via independent
+     * tbl/tbl/orr (no tbx dependency chain).  Instruction-for-instruction
+     * the sequence clang emits for the csimd-ryg-map bench variant. */
+    {
+        static const uint8_t d7_gather_lo_t[16] =
+            { 0,1, 0,1, 1,2, 2,3, 3,4, 4,5, 5,6, 6,7 };
+        static const uint8_t d7_gather_hi_t[16] =
+            { 7,8, 7,8, 8,9, 9,10, 10,11, 11,12, 12,13, 13,14 };
+        static const int16_t d7_shift_t[8] =           /* -(pos & 7) */
+            { 0, -7, -6, -5, -4, -3, -2, -1 };
+        const uint8x16_t gather_lo = vld1q_u8(d7_gather_lo_t);
+        const uint8x16_t gather_hi = vld1q_u8(d7_gather_hi_t);
+        const int16x8_t  shift     = vld1q_s16(d7_shift_t);
+        const uint8x16_t m7f       = vdupq_n_u8(0x7F);
+        const uint8_t   *wp        = bm;
+        for (; i + 16 <= fast_end; i += 16, wp += 14) {
+            uint8x16_t win = vld1q_u8(wp);
+            uint16x8_t vl = vshlq_u16(vreinterpretq_u16_u8(vqtbl1q_u8(win, gather_lo)), shift);
+            uint16x8_t vh = vshlq_u16(vreinterpretq_u16_u8(vqtbl1q_u8(win, gather_hi)), shift);
+            uint8x16_t codes = vandq_u8(vuzp1q_u8(vreinterpretq_u8_u16(vl),
+                                                  vreinterpretq_u8_u16(vh)), m7f);
+            uint8x16_t s = vorrq_u8(vqtbl4q_u8(lo, codes),
+                                    vqtbl4q_u8(hi, vsubq_u8(codes, sub64q)));
+            vst1q_u8(symbols + i, s);
+        }
     }
     for (; i + 8 <= fast_end; i += 8) {
         uint8x8_t codes = flat_d7_unpack_fast(bm + ((i * 7) >> 3));

@@ -152,6 +152,10 @@ elseif(TARGET_ARCH STREQUAL "x86_64" OR TARGET_ARCH STREQUAL "amd64")
                         OUTPUT_VARIABLE CPU_HAS_AVX512 OUTPUT_STRIP_TRAILING_WHITESPACE
                         ERROR_QUIET)
     endif()
+    option(PIVCO_DISABLE_AVX512 "Force the AVX2 tier even on AVX-512 VBMI2 hosts (A/B testing)" OFF)
+    if(PIVCO_DISABLE_AVX512)
+        set(CPU_HAS_AVX512 "0")
+    endif()
     if(COMPILER_HAS_AVX2)
         execute_process(COMMAND grep -c " avx2 " /proc/cpuinfo
                         OUTPUT_VARIABLE CPU_HAS_AVX2 OUTPUT_STRIP_TRAILING_WHITESPACE

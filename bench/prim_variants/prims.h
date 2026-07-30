@@ -87,6 +87,31 @@ static inline const char *pv_isa_name(pv_isa_t i) {
 #  define PV_FN_AVX512F(f) NULL
 #endif
 
+
+/* ---- shared GNU-vector-extension plumbing ----
+ * Vector typedefs + the __builtin_shufflevector gate used by the csimd-*
+ * variants (prims-flat.h / prims-pack.h).  prims-boncz.h predates this
+ * block and keeps identical duplicate typedefs (legal C11). */
+typedef uint8_t  pv_u8x16 __attribute__((vector_size(16)));
+typedef uint8_t  pv_u8x32 __attribute__((vector_size(32)));
+typedef uint8_t  pv_u8x8  __attribute__((vector_size(8)));
+typedef uint32_t pv_u32x8 __attribute__((vector_size(32)));
+typedef uint16_t pv_u16x16 __attribute__((vector_size(32)));
+typedef uint64_t pv_u64x8  __attribute__((vector_size(64)));
+typedef uint64_t pv_u64x4  __attribute__((vector_size(32)));
+typedef uint64_t pv_u64x2  __attribute__((vector_size(16)));
+typedef uint16_t pv_u16x8  __attribute__((vector_size(16)));
+typedef uint32_t pv_u32x4  __attribute__((vector_size(16)));
+
+/* csimd gate: __builtin_shufflevector needs clang or gcc >= 12; on older
+ * gcc the csimd rows are listed-but-not-runnable (NULL fn). */
+#if defined(__clang__) || (defined(__GNUC__) && __GNUC__ >= 12)
+#  define PV_HAS_CSIMD 1
+#  define PV_FN_CSIMD(f) (f)
+#else
+#  define PV_FN_CSIMD(f) NULL
+#endif
+
 /* Append a variant to bench_prim's PRIMS[] table (same translation unit;
  * prim_t / PRIMS / NPRIMS / stage_t / ctx_t are provided by bench_prim.c).
  *   STAGE   logical primitive, e.g. ST_PART / ST_MERGE_VEC_VEC

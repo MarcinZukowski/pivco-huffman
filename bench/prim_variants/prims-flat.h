@@ -596,6 +596,538 @@ static void prim_mf_695c36e_d7_x86(const ctx_t *c){ pv_mf_695c36e_d7_x86k(c->out
 /* ============================================================================
  * Registry — flat family (no-op where the ISA is unavailable)
  * ========================================================================== */
+
+
+/* ==== boncz-shuf: P. Boncz's portable shuffle unpack (duckdb#23313) ====
+ * The DUCKDB_AUTOVEC ShuffleUnpack fast path (u8 arm of ShuffleUnpackIter),
+ * GNU vector extensions, 8 values / 16B window / W-byte stride, scalar
+ * tail.  Kept as the external portable baseline the csimd-* rows are
+ * measured against (csimd-ryg is x2-3 faster on every host).  The
+ * portable PackBlock core ('boncz-plain') was dropped 2026-07-30 as
+ * uninteresting (per-value RMW, x6-35 behind production); it remains in
+ * git history (7814851).  Typedefs + PV_FN_CSIMD from prims.h. */
+#if defined(PV_HAS_CSIMD)
+/* 8 values per iter from a 16B window; stride 3 bytes (8x3 bits). */
+__attribute__((always_inline)) static inline void boncz_shuf8_d3(const uint8_t *base, uint8_t *out) {
+    pv_u8x16 w; memcpy(&w, base, 16);
+    pv_u8x32 g = __builtin_shufflevector(w, w, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 1, 2, 3, 4, 1, 2, 3, 4, 1, 2, 3, 4, 2, 3, 4, 5, 2, 3, 4, 5);
+    pv_u32x8 v = (((pv_u32x8)g) >> (pv_u32x8){0, 3, 6, 1, 4, 7, 2, 5})
+                 & ((pv_u32x8){} + 7u);
+    pv_u8x8 o = __builtin_shufflevector((pv_u8x32)v, (pv_u8x32)v, 0, 4, 8, 12, 16, 20, 24, 28);
+    memcpy(out, &o, 8);
+}
+
+static void boncz_unpack_shuf_d3(uint8_t *codes, const uint8_t *bm, int n) {
+    /* 8 values per 3-byte stride; window reads 16B, so reserve a tail */
+    int iters = n / 8, safe = iters;
+    while (safe > 0 && (size_t)(safe - 1) * 3 + 16 > ((size_t)n * 3 + 7) / 8) safe--;
+    for (int s = 0; s < safe; s++)
+        boncz_shuf8_d3(bm + (size_t)s * 3, codes + (size_t)s * 8);
+    for (int i = safe * 8; i < n; i++) {
+        size_t bp = (size_t)i * 3;
+        uint32_t w; memcpy(&w, bm + bp / 8, 4);
+        codes[i] = (uint8_t)((w >> (bp % 8)) & 7u);
+    }
+}
+
+__attribute__((always_inline)) static inline void boncz_shuf8_d5(const uint8_t *base, uint8_t *out) {
+    pv_u8x16 w; memcpy(&w, base, 16);
+    pv_u8x32 g = __builtin_shufflevector(w, w, 0, 1, 2, 3, 0, 1, 2, 3, 1, 2, 3, 4, 1, 2, 3, 4, 2, 3, 4, 5, 3, 4, 5, 6, 3, 4, 5, 6, 4, 5, 6, 7);
+    pv_u32x8 v = (((pv_u32x8)g) >> (pv_u32x8){0, 5, 2, 7, 4, 1, 6, 3})
+                 & ((pv_u32x8){} + 31u);
+    pv_u8x8 o = __builtin_shufflevector((pv_u8x32)v, (pv_u8x32)v, 0, 4, 8, 12, 16, 20, 24, 28);
+    memcpy(out, &o, 8);
+}
+
+static void boncz_unpack_shuf_d5(uint8_t *codes, const uint8_t *bm, int n) {
+    /* 8 values per 5-byte stride; window reads 16B, so reserve a tail */
+    int iters = n / 8, safe = iters;
+    while (safe > 0 && (size_t)(safe - 1) * 5 + 16 > ((size_t)n * 5 + 7) / 8) safe--;
+    for (int s = 0; s < safe; s++)
+        boncz_shuf8_d5(bm + (size_t)s * 5, codes + (size_t)s * 8);
+    for (int i = safe * 8; i < n; i++) {
+        size_t bp = (size_t)i * 5;
+        uint32_t w; memcpy(&w, bm + bp / 8, 4);
+        codes[i] = (uint8_t)((w >> (bp % 8)) & 31u);
+    }
+}
+
+__attribute__((always_inline)) static inline void boncz_shuf8_d6(const uint8_t *base, uint8_t *out) {
+    pv_u8x16 w; memcpy(&w, base, 16);
+    pv_u8x32 g = __builtin_shufflevector(w, w, 0, 1, 2, 3, 0, 1, 2, 3, 1, 2, 3, 4, 2, 3, 4, 5, 3, 4, 5, 6, 3, 4, 5, 6, 4, 5, 6, 7, 5, 6, 7, 8);
+    pv_u32x8 v = (((pv_u32x8)g) >> (pv_u32x8){0, 6, 4, 2, 0, 6, 4, 2})
+                 & ((pv_u32x8){} + 63u);
+    pv_u8x8 o = __builtin_shufflevector((pv_u8x32)v, (pv_u8x32)v, 0, 4, 8, 12, 16, 20, 24, 28);
+    memcpy(out, &o, 8);
+}
+
+static void boncz_unpack_shuf_d6(uint8_t *codes, const uint8_t *bm, int n) {
+    /* 8 values per 6-byte stride; window reads 16B, so reserve a tail */
+    int iters = n / 8, safe = iters;
+    while (safe > 0 && (size_t)(safe - 1) * 6 + 16 > ((size_t)n * 6 + 7) / 8) safe--;
+    for (int s = 0; s < safe; s++)
+        boncz_shuf8_d6(bm + (size_t)s * 6, codes + (size_t)s * 8);
+    for (int i = safe * 8; i < n; i++) {
+        size_t bp = (size_t)i * 6;
+        uint32_t w; memcpy(&w, bm + bp / 8, 4);
+        codes[i] = (uint8_t)((w >> (bp % 8)) & 63u);
+    }
+}
+static void pv_boncz_unpack_shuf_d3(const ctx_t *c) { boncz_unpack_shuf_d3(c->codes, c->bm, c->n); }
+static void pv_boncz_unpack_shuf_d5(const ctx_t *c) { boncz_unpack_shuf_d5(c->codes, c->bm, c->n); }
+static void pv_boncz_unpack_shuf_d6(const ctx_t *c) { boncz_unpack_shuf_d6(c->codes, c->bm, c->n); }
+#endif /* PV_HAS_CSIMD */
+
+/* ==== csimd (GNU vector extension) + ryg-width reference unpack variants ====
+ * One algorithm at three layers: csimd-ryg is ryg's multiply-as-shift
+ * unpack expressed portably (16 codes / 16B window); sse-ryg / avx2-ryg
+ * are the production x86_flat.h helpers at xmm width and the hand-widened
+ * ymm form -- the width-experiment control arms.  A per-lane variable-
+ * shift sibling ("csimd-shift") was benched and dropped 2026-07-30: the
+ * mul form was >= on every host (SSE lacks u16 variable shifts; even
+ * NEON prefers the mul pipe).  Typedefs + PV_FN_CSIMD from prims.h. */
+#if defined(__SSE4_1__)
+#  include "pivco_huffman_x86_flat.h"   /* production ryg SSE unpack helpers */
+#  define PV_FN_SSE_RYG(f) (f)
+#else
+#  define PV_FN_SSE_RYG(f) NULL
+#endif /* __SSE4_1__ */
+
+#if defined(PV_HAS_CSIMD)
+/* ---- D=2: 16 codes / 16 B window / 4-byte stride ---- */
+__attribute__((always_inline)) static inline pv_u8x16 csimd_rygv16_d2(const uint8_t *bm) {
+    pv_u8x16 w; memcpy(&w, bm, 16);
+    pv_u8x32 g = __builtin_shufflevector(w, w, 0, 1, 0, 1, 0, 1, 0, 1, 1, 2, 1, 2, 1, 2, 1, 2, 2, 3, 2, 3, 2, 3, 2, 3, 3, 4, 3, 4, 3, 4, 3, 4);
+    pv_u16x16 v = ((pv_u16x16)g * (pv_u16x16){16384, 4096, 1024, 256, 16384, 4096, 1024, 256, 16384, 4096, 1024, 256, 16384, 4096, 1024, 256}) >> 14;
+    return __builtin_shufflevector((pv_u8x32)v, (pv_u8x32)v, 0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30);
+}
+__attribute__((always_inline)) static inline void csimd_ryg16_d2(const uint8_t *bm, uint8_t *out) {
+    pv_u8x16 o = csimd_rygv16_d2(bm);
+    memcpy(out, &o, 16);
+}
+static void csimd_ryg_unpack_d2(uint8_t *codes, const uint8_t *bm, int n) {
+    int iters = n / 16, safe = iters;
+    size_t bmbytes = ((size_t)n * 2 + 7) / 8;
+    while (safe > 0 && (size_t)(safe - 1) * 4 + 16 > bmbytes) safe--;
+    for (int s = 0; s < safe; s++)
+        csimd_ryg16_d2(bm + (size_t)s * 4, codes + (size_t)s * 16);
+    for (int i = safe * 16; i < n; i++) {
+        size_t bp = (size_t)i * 2;
+        uint32_t w; memcpy(&w, bm + bp / 8, 4);
+        codes[i] = (uint8_t)((w >> (bp % 8)) & 3u);
+    }
+}
+/* ---- D=3: 16 codes / 16 B window / 6-byte stride ---- */
+__attribute__((always_inline)) static inline pv_u8x16 csimd_rygv16_d3(const uint8_t *bm) {
+    pv_u8x16 w; memcpy(&w, bm, 16);
+    pv_u8x32 g = __builtin_shufflevector(w, w, 0, 1, 0, 1, 0, 1, 1, 2, 1, 2, 1, 2, 2, 3, 2, 3, 3, 4, 3, 4, 3, 4, 4, 5, 4, 5, 4, 5, 5, 6, 5, 6);
+    pv_u16x16 v = ((pv_u16x16)g * (pv_u16x16){8192, 1024, 128, 4096, 512, 64, 2048, 256, 8192, 1024, 128, 4096, 512, 64, 2048, 256}) >> 13;
+    return __builtin_shufflevector((pv_u8x32)v, (pv_u8x32)v, 0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30);
+}
+__attribute__((always_inline)) static inline void csimd_ryg16_d3(const uint8_t *bm, uint8_t *out) {
+    pv_u8x16 o = csimd_rygv16_d3(bm);
+    memcpy(out, &o, 16);
+}
+static void csimd_ryg_unpack_d3(uint8_t *codes, const uint8_t *bm, int n) {
+    int iters = n / 16, safe = iters;
+    size_t bmbytes = ((size_t)n * 3 + 7) / 8;
+    while (safe > 0 && (size_t)(safe - 1) * 6 + 16 > bmbytes) safe--;
+    for (int s = 0; s < safe; s++)
+        csimd_ryg16_d3(bm + (size_t)s * 6, codes + (size_t)s * 16);
+    for (int i = safe * 16; i < n; i++) {
+        size_t bp = (size_t)i * 3;
+        uint32_t w; memcpy(&w, bm + bp / 8, 4);
+        codes[i] = (uint8_t)((w >> (bp % 8)) & 7u);
+    }
+}
+/* ---- D=4: 16 codes / 16 B window / 8-byte stride ---- */
+__attribute__((always_inline)) static inline pv_u8x16 csimd_rygv16_d4(const uint8_t *bm) {
+    pv_u8x16 w; memcpy(&w, bm, 16);
+    pv_u8x32 g = __builtin_shufflevector(w, w, 0, 1, 0, 1, 1, 2, 1, 2, 2, 3, 2, 3, 3, 4, 3, 4, 4, 5, 4, 5, 5, 6, 5, 6, 6, 7, 6, 7, 7, 8, 7, 8);
+    pv_u16x16 v = ((pv_u16x16)g * (pv_u16x16){4096, 256, 4096, 256, 4096, 256, 4096, 256, 4096, 256, 4096, 256, 4096, 256, 4096, 256}) >> 12;
+    return __builtin_shufflevector((pv_u8x32)v, (pv_u8x32)v, 0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30);
+}
+__attribute__((always_inline)) static inline void csimd_ryg16_d4(const uint8_t *bm, uint8_t *out) {
+    pv_u8x16 o = csimd_rygv16_d4(bm);
+    memcpy(out, &o, 16);
+}
+static void csimd_ryg_unpack_d4(uint8_t *codes, const uint8_t *bm, int n) {
+    int iters = n / 16, safe = iters;
+    size_t bmbytes = ((size_t)n * 4 + 7) / 8;
+    while (safe > 0 && (size_t)(safe - 1) * 8 + 16 > bmbytes) safe--;
+    for (int s = 0; s < safe; s++)
+        csimd_ryg16_d4(bm + (size_t)s * 8, codes + (size_t)s * 16);
+    for (int i = safe * 16; i < n; i++) {
+        size_t bp = (size_t)i * 4;
+        uint32_t w; memcpy(&w, bm + bp / 8, 4);
+        codes[i] = (uint8_t)((w >> (bp % 8)) & 15u);
+    }
+}
+/* ---- D=5: 16 codes / 16 B window / 10-byte stride ---- */
+__attribute__((always_inline)) static inline pv_u8x16 csimd_rygv16_d5(const uint8_t *bm) {
+    pv_u8x16 w; memcpy(&w, bm, 16);
+    pv_u8x32 g = __builtin_shufflevector(w, w, 0, 1, 0, 1, 1, 2, 1, 2, 2, 3, 3, 4, 3, 4, 4, 5, 5, 6, 5, 6, 6, 7, 6, 7, 7, 8, 8, 9, 8, 9, 9, 10);
+    pv_u16x16 v = ((pv_u16x16)g * (pv_u16x16){2048, 64, 512, 16, 128, 1024, 32, 256, 2048, 64, 512, 16, 128, 1024, 32, 256}) >> 11;
+    return __builtin_shufflevector((pv_u8x32)v, (pv_u8x32)v, 0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30);
+}
+__attribute__((always_inline)) static inline void csimd_ryg16_d5(const uint8_t *bm, uint8_t *out) {
+    pv_u8x16 o = csimd_rygv16_d5(bm);
+    memcpy(out, &o, 16);
+}
+static void csimd_ryg_unpack_d5(uint8_t *codes, const uint8_t *bm, int n) {
+    int iters = n / 16, safe = iters;
+    size_t bmbytes = ((size_t)n * 5 + 7) / 8;
+    while (safe > 0 && (size_t)(safe - 1) * 10 + 16 > bmbytes) safe--;
+    for (int s = 0; s < safe; s++)
+        csimd_ryg16_d5(bm + (size_t)s * 10, codes + (size_t)s * 16);
+    for (int i = safe * 16; i < n; i++) {
+        size_t bp = (size_t)i * 5;
+        uint32_t w; memcpy(&w, bm + bp / 8, 4);
+        codes[i] = (uint8_t)((w >> (bp % 8)) & 31u);
+    }
+}
+/* ---- D=6: 16 codes / 16 B window / 12-byte stride ---- */
+__attribute__((always_inline)) static inline pv_u8x16 csimd_rygv16_d6(const uint8_t *bm) {
+    pv_u8x16 w; memcpy(&w, bm, 16);
+    pv_u8x32 g = __builtin_shufflevector(w, w, 0, 1, 0, 1, 1, 2, 2, 3, 3, 4, 3, 4, 4, 5, 5, 6, 6, 7, 6, 7, 7, 8, 8, 9, 9, 10, 9, 10, 10, 11, 11, 12);
+    pv_u16x16 v = ((pv_u16x16)g * (pv_u16x16){1024, 16, 64, 256, 1024, 16, 64, 256, 1024, 16, 64, 256, 1024, 16, 64, 256}) >> 10;
+    return __builtin_shufflevector((pv_u8x32)v, (pv_u8x32)v, 0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30);
+}
+__attribute__((always_inline)) static inline void csimd_ryg16_d6(const uint8_t *bm, uint8_t *out) {
+    pv_u8x16 o = csimd_rygv16_d6(bm);
+    memcpy(out, &o, 16);
+}
+static void csimd_ryg_unpack_d6(uint8_t *codes, const uint8_t *bm, int n) {
+    int iters = n / 16, safe = iters;
+    size_t bmbytes = ((size_t)n * 6 + 7) / 8;
+    while (safe > 0 && (size_t)(safe - 1) * 12 + 16 > bmbytes) safe--;
+    for (int s = 0; s < safe; s++)
+        csimd_ryg16_d6(bm + (size_t)s * 12, codes + (size_t)s * 16);
+    for (int i = safe * 16; i < n; i++) {
+        size_t bp = (size_t)i * 6;
+        uint32_t w; memcpy(&w, bm + bp / 8, 4);
+        codes[i] = (uint8_t)((w >> (bp % 8)) & 63u);
+    }
+}
+/* ---- D=7: 16 codes / 16 B window / 14-byte stride ---- */
+__attribute__((always_inline)) static inline pv_u8x16 csimd_rygv16_d7(const uint8_t *bm) {
+    pv_u8x16 w; memcpy(&w, bm, 16);
+    pv_u8x32 g = __builtin_shufflevector(w, w, 0, 1, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13, 14);
+    pv_u16x16 v = ((pv_u16x16)g * (pv_u16x16){512, 4, 8, 16, 32, 64, 128, 256, 512, 4, 8, 16, 32, 64, 128, 256}) >> 9;
+    return __builtin_shufflevector((pv_u8x32)v, (pv_u8x32)v, 0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30);
+}
+__attribute__((always_inline)) static inline void csimd_ryg16_d7(const uint8_t *bm, uint8_t *out) {
+    pv_u8x16 o = csimd_rygv16_d7(bm);
+    memcpy(out, &o, 16);
+}
+static void csimd_ryg_unpack_d7(uint8_t *codes, const uint8_t *bm, int n) {
+    int iters = n / 16, safe = iters;
+    size_t bmbytes = ((size_t)n * 7 + 7) / 8;
+    while (safe > 0 && (size_t)(safe - 1) * 14 + 16 > bmbytes) safe--;
+    for (int s = 0; s < safe; s++)
+        csimd_ryg16_d7(bm + (size_t)s * 14, codes + (size_t)s * 16);
+    for (int i = safe * 16; i < n; i++) {
+        size_t bp = (size_t)i * 7;
+        uint32_t w; memcpy(&w, bm + bp / 8, 4);
+        codes[i] = (uint8_t)((w >> (bp % 8)) & 127u);
+    }
+}
+#endif /* PV_HAS_CSIMD */
+
+#if defined(__SSE4_1__)
+/* Reference rows: the production ryg SSE helpers as a pure unpack.
+ * D=4 yields 16 codes/call (2 codes/byte), the rest 8/call; each call
+ * loads 16 B from bm_ptr, so the loop leaves tail slack and finishes
+ * scalar (mirrors the merge_flat_dN_x86 bounds). */
+/* Per-D drivers (no in-loop dispatch).  D=4 yields 16 codes/call
+ * (2 codes/byte), the rest 8/call; each call loads 16 B from bm_ptr, so
+ * the loops leave tail slack and finish scalar (mirrors the
+ * merge_flat_dN_x86 bounds). */
+#define SSE_RYG_DRIVER(D, HELPER)                                             \
+    static void sse_ryg_unpack_d##D(uint8_t *codes, const uint8_t *bm, int n) \
+    {                                                                         \
+        size_t bmbytes = ((size_t)n * (D) + 7) / 8;                           \
+        int i = 0;                                                            \
+        while (i + 8 <= n && (((size_t)i * (D)) >> 3) + 16 <= bmbytes) {      \
+            _mm_storel_epi64((__m128i *)(codes + i),                          \
+                             HELPER(bm + (((size_t)i * (D)) >> 3)));          \
+            i += 8;                                                           \
+        }                                                                     \
+        for (; i < n; i++) {                                                  \
+            size_t bp = (size_t)i * (D);                                      \
+            uint32_t w; memcpy(&w, bm + bp / 8, 4);                           \
+            codes[i] = (uint8_t)((w >> (bp % 8)) & ((1u << (D)) - 1u));       \
+        }                                                                     \
+    }
+SSE_RYG_DRIVER(2, flat_d2_unpack_x86)
+SSE_RYG_DRIVER(3, flat_d3_unpack_x86)
+SSE_RYG_DRIVER(5, flat_d5_unpack_x86)
+SSE_RYG_DRIVER(6, flat_d6_unpack_x86)
+static void sse_ryg_unpack_d4(uint8_t *codes, const uint8_t *bm, int n)
+{
+    size_t bmbytes = ((size_t)n * 4 + 7) / 8;
+    int i = 0;
+    while (i + 16 <= n && (size_t)(i >> 1) + 16 <= bmbytes) {
+        _mm_storeu_si128((__m128i *)(codes + i), flat_d4_unpack_x86(bm + (i >> 1)));
+        i += 16;
+    }
+    for (; i < n; i++) {
+        size_t bp = (size_t)i * 4;
+        uint32_t w; memcpy(&w, bm + bp / 8, 4);
+        codes[i] = (uint8_t)((w >> (bp % 8)) & 15u);
+    }
+}
+#endif /* __SSE4_1__ */
+
+#if defined(__AVX2__)
+/* Hand-written AVX2 ryg: the width experiment's control arm.  Same
+ * algorithm as port-mul, explicit 256-bit intrinsics: broadcast the 16 B
+ * window to both ymm lanes, in-lane vpshufb pair-gather (both lanes index
+ * the same window copy), one vpmullw, vpsrlw, vpackuswb + vpermq narrow.
+ * 16 codes / 16 B window / 2D-byte stride. */
+#include <immintrin.h>
+#define PV_FN_AVX2RYG(f) (f)
+
+__attribute__((always_inline)) static inline void avx2_ryg16_d2(const uint8_t *bm, uint8_t *out) {
+    __m256i w = _mm256_broadcastsi128_si256(_mm_loadu_si128((const __m128i *)bm));
+    const __m256i shuf = _mm256_setr_epi8(0, 1, 0, 1, 0, 1, 0, 1, 1, 2, 1, 2, 1, 2, 1, 2, 2, 3, 2, 3, 2, 3, 2, 3, 3, 4, 3, 4, 3, 4, 3, 4);
+    const __m256i mult = _mm256_setr_epi16(16384, 4096, 1024, 256, 16384, 4096, 1024, 256, 16384, 4096, 1024, 256, 16384, 4096, 1024, 256);
+    __m256i v = _mm256_shuffle_epi8(w, shuf);
+    v = _mm256_srli_epi16(_mm256_mullo_epi16(v, mult), 14);
+    v = _mm256_packus_epi16(v, _mm256_setzero_si256());
+    v = _mm256_permute4x64_epi64(v, 0x08);
+    _mm_storeu_si128((__m128i *)out, _mm256_castsi256_si128(v));
+}
+static void avx2_ryg_unpack_d2(uint8_t *codes, const uint8_t *bm, int n) {
+    int iters = n / 16, safe = iters;
+    size_t bmbytes = ((size_t)n * 2 + 7) / 8;
+    while (safe > 0 && (size_t)(safe - 1) * 4 + 16 > bmbytes) safe--;
+    for (int s = 0; s < safe; s++)
+        avx2_ryg16_d2(bm + (size_t)s * 4, codes + (size_t)s * 16);
+    for (int i = safe * 16; i < n; i++) {
+        size_t bp = (size_t)i * 2;
+        uint32_t w2; memcpy(&w2, bm + bp / 8, 4);
+        codes[i] = (uint8_t)((w2 >> (bp % 8)) & 3u);
+    }
+}
+__attribute__((always_inline)) static inline void avx2_ryg16_d3(const uint8_t *bm, uint8_t *out) {
+    __m256i w = _mm256_broadcastsi128_si256(_mm_loadu_si128((const __m128i *)bm));
+    const __m256i shuf = _mm256_setr_epi8(0, 1, 0, 1, 0, 1, 1, 2, 1, 2, 1, 2, 2, 3, 2, 3, 3, 4, 3, 4, 3, 4, 4, 5, 4, 5, 4, 5, 5, 6, 5, 6);
+    const __m256i mult = _mm256_setr_epi16(8192, 1024, 128, 4096, 512, 64, 2048, 256, 8192, 1024, 128, 4096, 512, 64, 2048, 256);
+    __m256i v = _mm256_shuffle_epi8(w, shuf);
+    v = _mm256_srli_epi16(_mm256_mullo_epi16(v, mult), 13);
+    v = _mm256_packus_epi16(v, _mm256_setzero_si256());
+    v = _mm256_permute4x64_epi64(v, 0x08);
+    _mm_storeu_si128((__m128i *)out, _mm256_castsi256_si128(v));
+}
+static void avx2_ryg_unpack_d3(uint8_t *codes, const uint8_t *bm, int n) {
+    int iters = n / 16, safe = iters;
+    size_t bmbytes = ((size_t)n * 3 + 7) / 8;
+    while (safe > 0 && (size_t)(safe - 1) * 6 + 16 > bmbytes) safe--;
+    for (int s = 0; s < safe; s++)
+        avx2_ryg16_d3(bm + (size_t)s * 6, codes + (size_t)s * 16);
+    for (int i = safe * 16; i < n; i++) {
+        size_t bp = (size_t)i * 3;
+        uint32_t w2; memcpy(&w2, bm + bp / 8, 4);
+        codes[i] = (uint8_t)((w2 >> (bp % 8)) & 7u);
+    }
+}
+__attribute__((always_inline)) static inline void avx2_ryg16_d4(const uint8_t *bm, uint8_t *out) {
+    __m256i w = _mm256_broadcastsi128_si256(_mm_loadu_si128((const __m128i *)bm));
+    const __m256i shuf = _mm256_setr_epi8(0, 1, 0, 1, 1, 2, 1, 2, 2, 3, 2, 3, 3, 4, 3, 4, 4, 5, 4, 5, 5, 6, 5, 6, 6, 7, 6, 7, 7, 8, 7, 8);
+    const __m256i mult = _mm256_setr_epi16(4096, 256, 4096, 256, 4096, 256, 4096, 256, 4096, 256, 4096, 256, 4096, 256, 4096, 256);
+    __m256i v = _mm256_shuffle_epi8(w, shuf);
+    v = _mm256_srli_epi16(_mm256_mullo_epi16(v, mult), 12);
+    v = _mm256_packus_epi16(v, _mm256_setzero_si256());
+    v = _mm256_permute4x64_epi64(v, 0x08);
+    _mm_storeu_si128((__m128i *)out, _mm256_castsi256_si128(v));
+}
+static void avx2_ryg_unpack_d4(uint8_t *codes, const uint8_t *bm, int n) {
+    int iters = n / 16, safe = iters;
+    size_t bmbytes = ((size_t)n * 4 + 7) / 8;
+    while (safe > 0 && (size_t)(safe - 1) * 8 + 16 > bmbytes) safe--;
+    for (int s = 0; s < safe; s++)
+        avx2_ryg16_d4(bm + (size_t)s * 8, codes + (size_t)s * 16);
+    for (int i = safe * 16; i < n; i++) {
+        size_t bp = (size_t)i * 4;
+        uint32_t w2; memcpy(&w2, bm + bp / 8, 4);
+        codes[i] = (uint8_t)((w2 >> (bp % 8)) & 15u);
+    }
+}
+__attribute__((always_inline)) static inline void avx2_ryg16_d5(const uint8_t *bm, uint8_t *out) {
+    __m256i w = _mm256_broadcastsi128_si256(_mm_loadu_si128((const __m128i *)bm));
+    const __m256i shuf = _mm256_setr_epi8(0, 1, 0, 1, 1, 2, 1, 2, 2, 3, 3, 4, 3, 4, 4, 5, 5, 6, 5, 6, 6, 7, 6, 7, 7, 8, 8, 9, 8, 9, 9, 10);
+    const __m256i mult = _mm256_setr_epi16(2048, 64, 512, 16, 128, 1024, 32, 256, 2048, 64, 512, 16, 128, 1024, 32, 256);
+    __m256i v = _mm256_shuffle_epi8(w, shuf);
+    v = _mm256_srli_epi16(_mm256_mullo_epi16(v, mult), 11);
+    v = _mm256_packus_epi16(v, _mm256_setzero_si256());
+    v = _mm256_permute4x64_epi64(v, 0x08);
+    _mm_storeu_si128((__m128i *)out, _mm256_castsi256_si128(v));
+}
+static void avx2_ryg_unpack_d5(uint8_t *codes, const uint8_t *bm, int n) {
+    int iters = n / 16, safe = iters;
+    size_t bmbytes = ((size_t)n * 5 + 7) / 8;
+    while (safe > 0 && (size_t)(safe - 1) * 10 + 16 > bmbytes) safe--;
+    for (int s = 0; s < safe; s++)
+        avx2_ryg16_d5(bm + (size_t)s * 10, codes + (size_t)s * 16);
+    for (int i = safe * 16; i < n; i++) {
+        size_t bp = (size_t)i * 5;
+        uint32_t w2; memcpy(&w2, bm + bp / 8, 4);
+        codes[i] = (uint8_t)((w2 >> (bp % 8)) & 31u);
+    }
+}
+__attribute__((always_inline)) static inline void avx2_ryg16_d6(const uint8_t *bm, uint8_t *out) {
+    __m256i w = _mm256_broadcastsi128_si256(_mm_loadu_si128((const __m128i *)bm));
+    const __m256i shuf = _mm256_setr_epi8(0, 1, 0, 1, 1, 2, 2, 3, 3, 4, 3, 4, 4, 5, 5, 6, 6, 7, 6, 7, 7, 8, 8, 9, 9, 10, 9, 10, 10, 11, 11, 12);
+    const __m256i mult = _mm256_setr_epi16(1024, 16, 64, 256, 1024, 16, 64, 256, 1024, 16, 64, 256, 1024, 16, 64, 256);
+    __m256i v = _mm256_shuffle_epi8(w, shuf);
+    v = _mm256_srli_epi16(_mm256_mullo_epi16(v, mult), 10);
+    v = _mm256_packus_epi16(v, _mm256_setzero_si256());
+    v = _mm256_permute4x64_epi64(v, 0x08);
+    _mm_storeu_si128((__m128i *)out, _mm256_castsi256_si128(v));
+}
+static void avx2_ryg_unpack_d6(uint8_t *codes, const uint8_t *bm, int n) {
+    int iters = n / 16, safe = iters;
+    size_t bmbytes = ((size_t)n * 6 + 7) / 8;
+    while (safe > 0 && (size_t)(safe - 1) * 12 + 16 > bmbytes) safe--;
+    for (int s = 0; s < safe; s++)
+        avx2_ryg16_d6(bm + (size_t)s * 12, codes + (size_t)s * 16);
+    for (int i = safe * 16; i < n; i++) {
+        size_t bp = (size_t)i * 6;
+        uint32_t w2; memcpy(&w2, bm + bp / 8, 4);
+        codes[i] = (uint8_t)((w2 >> (bp % 8)) & 63u);
+    }
+}
+__attribute__((always_inline)) static inline void avx2_ryg16_d7(const uint8_t *bm, uint8_t *out) {
+    __m256i w = _mm256_broadcastsi128_si256(_mm_loadu_si128((const __m128i *)bm));
+    const __m256i shuf = _mm256_setr_epi8(0, 1, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13, 14);
+    const __m256i mult = _mm256_setr_epi16(512, 4, 8, 16, 32, 64, 128, 256, 512, 4, 8, 16, 32, 64, 128, 256);
+    __m256i v = _mm256_shuffle_epi8(w, shuf);
+    v = _mm256_srli_epi16(_mm256_mullo_epi16(v, mult), 9);
+    v = _mm256_packus_epi16(v, _mm256_setzero_si256());
+    v = _mm256_permute4x64_epi64(v, 0x08);
+    _mm_storeu_si128((__m128i *)out, _mm256_castsi256_si128(v));
+}
+static void avx2_ryg_unpack_d7(uint8_t *codes, const uint8_t *bm, int n) {
+    int iters = n / 16, safe = iters;
+    size_t bmbytes = ((size_t)n * 7 + 7) / 8;
+    while (safe > 0 && (size_t)(safe - 1) * 14 + 16 > bmbytes) safe--;
+    for (int s = 0; s < safe; s++)
+        avx2_ryg16_d7(bm + (size_t)s * 14, codes + (size_t)s * 16);
+    for (int i = safe * 16; i < n; i++) {
+        size_t bp = (size_t)i * 7;
+        uint32_t w2; memcpy(&w2, bm + bp / 8, 4);
+        codes[i] = (uint8_t)((w2 >> (bp % 8)) & 127u);
+    }
+}
+#else
+#define PV_FN_AVX2RYG(f) NULL
+#endif /* __AVX2__ */
+
+#if defined(PV_HAS_CSIMD)
+static void pv_csimd_ryg_d2(const ctx_t *c)   { csimd_ryg_unpack_d2(c->codes, c->bm, c->n); }
+static void pv_csimd_ryg_d3(const ctx_t *c)   { csimd_ryg_unpack_d3(c->codes, c->bm, c->n); }
+static void pv_csimd_ryg_d4(const ctx_t *c)   { csimd_ryg_unpack_d4(c->codes, c->bm, c->n); }
+static void pv_csimd_ryg_d5(const ctx_t *c)   { csimd_ryg_unpack_d5(c->codes, c->bm, c->n); }
+static void pv_csimd_ryg_d6(const ctx_t *c)   { csimd_ryg_unpack_d6(c->codes, c->bm, c->n); }
+static void pv_csimd_ryg_d7(const ctx_t *c)   { csimd_ryg_unpack_d7(c->codes, c->bm, c->n); }
+#endif /* PV_HAS_CSIMD */
+#if defined(__SSE4_1__)
+static void pv_sse_ryg_d2(const ctx_t *c) { sse_ryg_unpack_d2(c->codes, c->bm, c->n); }
+static void pv_sse_ryg_d3(const ctx_t *c) { sse_ryg_unpack_d3(c->codes, c->bm, c->n); }
+static void pv_sse_ryg_d4(const ctx_t *c) { sse_ryg_unpack_d4(c->codes, c->bm, c->n); }
+static void pv_sse_ryg_d5(const ctx_t *c) { sse_ryg_unpack_d5(c->codes, c->bm, c->n); }
+static void pv_sse_ryg_d6(const ctx_t *c) { sse_ryg_unpack_d6(c->codes, c->bm, c->n); }
+#endif /* __SSE4_1__ */
+#if defined(__AVX2__)
+static void pv_avx2_ryg_d2(const ctx_t *c) { avx2_ryg_unpack_d2(c->codes, c->bm, c->n); }
+static void pv_avx2_ryg_d3(const ctx_t *c) { avx2_ryg_unpack_d3(c->codes, c->bm, c->n); }
+static void pv_avx2_ryg_d4(const ctx_t *c) { avx2_ryg_unpack_d4(c->codes, c->bm, c->n); }
+static void pv_avx2_ryg_d5(const ctx_t *c) { avx2_ryg_unpack_d5(c->codes, c->bm, c->n); }
+static void pv_avx2_ryg_d6(const ctx_t *c) { avx2_ryg_unpack_d6(c->codes, c->bm, c->n); }
+static void pv_avx2_ryg_d7(const ctx_t *c) { avx2_ryg_unpack_d7(c->codes, c->bm, c->n); }
+#endif
+
+#if defined(PV_HAS_CSIMD) && defined(USE_NEON_KERNELS)
+#  define PV_FN_CSIMD_NEON(f) (f)
+/* ==== csimd-ryg-map: hybrid flat decode (NEON), D=7 only ====
+ * csimd-ryg portable unpack feeding an intrinsic vqtbl c2s map -- the
+ * runtime-index table lookup is the one stage generic vector C cannot
+ * express, so the map is the only intrinsic line.  16 symbols/iter.
+ * D=7 is the only D where it beats the fused production merge (+14%
+ * Graviton 4, +3% M4); D=2..6 variants were benched and dropped --
+ * the vqtbl map cost grows with table size and eats the unpack win.
+ * NOTE: loads 16..128 B from c2s regardless of 2^D (bench c2s buffer is
+ * 256 B; production adoption must bound table loads like merge_flat does). */
+static void csimd_ryg_map_d7(uint8_t *out, int n, const uint8_t *bm, const uint8_t *c2s) {
+    uint8x16x4_t lo = { { vld1q_u8(c2s),      vld1q_u8(c2s + 16), vld1q_u8(c2s + 32),  vld1q_u8(c2s + 48) } };
+    uint8x16x4_t hi = { { vld1q_u8(c2s + 64), vld1q_u8(c2s + 80), vld1q_u8(c2s + 96),  vld1q_u8(c2s + 112) } };
+    uint8x16_t s64 = vdupq_n_u8(64);
+    int iters = n / 16, safe = iters;
+    size_t bmbytes = ((size_t)n * 7 + 7) / 8;
+    while (safe > 0 && (size_t)(safe - 1) * 14 + 16 > bmbytes) safe--;
+    for (int s = 0; s < safe; s++) {
+        pv_u8x16 v = csimd_rygv16_d7(bm + (size_t)s * 14);
+        uint8x16_t codes; memcpy(&codes, &v, 16);
+        vst1q_u8(out + (size_t)s * 16, vorrq_u8(vqtbl4q_u8(lo, codes), vqtbl4q_u8(hi, vsubq_u8(codes, s64))));
+    }
+    for (int i = safe * 16; i < n; i++) {
+        size_t bp = (size_t)i * 7;
+        uint32_t w; memcpy(&w, bm + bp / 8, 4);
+        out[i] = c2s[(w >> (bp % 8)) & 127u];
+    }
+}
+static void pv_csimd_ryg_map_d7(const ctx_t *c) { csimd_ryg_map_d7(c->out, c->n, c->bm, c->c2s); }
+#else
+#  define PV_FN_CSIMD_NEON(f) NULL
+#endif /* PV_HAS_CSIMD && USE_NEON_KERNELS */
+
+#if defined(USE_NEON_KERNELS)
+/* asof-08f90b0: merge_flat_d7_neon as of 08f90b0, before the ryg 16-wide
+ * unpack swap (2026-07-30) -- main loop unpacked via two per-8
+ * flat_d7_unpack_fast calls.  Kept per the replaced-kernel rule; deltas
+ * vs the new form measured at swap time: see commit message. */
+static void merge_flat_d7_neon_asof_08f90b0(uint8_t *symbols, int n,
+                                            const uint8_t *bm,
+                                            const uint8_t *c2s)
+{
+    uint8x16x4_t lo, hi;
+    lo.val[0] = vld1q_u8(c2s);       lo.val[1] = vld1q_u8(c2s + 16);
+    lo.val[2] = vld1q_u8(c2s + 32);  lo.val[3] = vld1q_u8(c2s + 48);
+    hi.val[0] = vld1q_u8(c2s + 64);  hi.val[1] = vld1q_u8(c2s + 80);
+    hi.val[2] = vld1q_u8(c2s + 96);  hi.val[3] = vld1q_u8(c2s + 112);
+    uint8x16_t sub64q = vdupq_n_u8(64);
+    uint8x8_t  sub64  = vdup_n_u8(64);
+    int i = 0;
+    int fast_end = n >= 24 ? n - 24 : 0;
+    for (; i + 16 <= fast_end; i += 16) {
+        uint8x8_t cl = flat_d7_unpack_fast(bm + ((i      * 7) >> 3));
+        uint8x8_t ch = flat_d7_unpack_fast(bm + (((i + 8) * 7) >> 3));
+        uint8x16_t codes = vcombine_u8(cl, ch);
+        uint8x16_t s = vqtbl4q_u8(lo, codes);
+        s = vqtbx4q_u8(s, hi, vsubq_u8(codes, sub64q));
+        vst1q_u8(symbols + i, s);
+    }
+    for (; i + 8 <= fast_end; i += 8) {
+        uint8x8_t codes = flat_d7_unpack_fast(bm + ((i * 7) >> 3));
+        uint8x8_t s = vqtbl4_u8(lo, codes);
+        s = vqtbx4_u8(s, hi, vsub_u8(codes, sub64));
+        vst1_u8(symbols + i, s);
+    }
+    for (; i + 8 <= n; i += 8) {
+        uint8x8_t codes = flat_d7_unpack_safe(bm + ((i * 7) >> 3));
+        uint8x8_t s = vqtbl4_u8(lo, codes);
+        s = vqtbx4_u8(s, hi, vsub_u8(codes, sub64));
+        vst1_u8(symbols + i, s);
+    }
+    for (; i < n; i++) {
+        uint32_t code = extract_D_bits_neon(bm, i * 7, 7);
+        symbols[i] = c2s[code];
+    }
+}
+static void pv_merge_flat_d7_asof_08f90b0(const ctx_t *c) { merge_flat_d7_neon_asof_08f90b0(c->out, c->n, c->bm, c->c2s); }
+#endif /* USE_NEON_KERNELS */
+
 static void pv_register_flat(void) {
     PV_VARIANT_D(ST_UNPACK,     "fl_natural", 2, PV_ISA_NEON, "bench_unpack_fl_layout.c",
                  "row-major shift+mask + vst4q deinterleave (D|8 only)", 0, PV_FN_NEON(prim_flat_unpack_fl_natural_d2));
@@ -635,6 +1167,50 @@ static void pv_register_flat(void) {
                  "scalar-unrolled u64 gather, 8 codes/iter; the u32-lane pair-gather that replaced it wins -17% c3 / -36% c4/c5 / -42% c5a / -47% c6a", 0, PV_FN_SSE(prim_mf_695c36e_d7_x86));
     PV_VARIANT_D(ST_MERGE_FLAT, "pair32", 7, PV_ISA_NEON, "x86 d7 pair-gather ported back for comparison",
                  "2 vqtbl1 u32-lane gathers + vshlq_u32 + vuzp1 compact; production vqtbl4/vqtbx4 scatter; LOSES +46% M4 / +28% c8g -- prod's one-code-per-u16 unpack + vmovn is cheaper than the pair split; x86 won only because it escaped a scalar loop", 0, PV_FN_NEON(prim_mf_pair32_d7_neon));
+    PV_VARIANT_D(ST_UNPACK, "avx2-ryg", 2, PV_ISA_AVX2,
+                 "width control arm for port-mul", "hand-AVX2 ryg, broadcast window + in-lane gather; 16 codes/iter", 0, PV_FN_AVX2RYG(pv_avx2_ryg_d2));
+    PV_VARIANT_D(ST_UNPACK, "avx2-ryg", 3, PV_ISA_AVX2,
+                 "width control arm for port-mul", "hand-AVX2 ryg, broadcast window + in-lane gather; 16 codes/iter", 0, PV_FN_AVX2RYG(pv_avx2_ryg_d3));
+    PV_VARIANT_D(ST_UNPACK, "avx2-ryg", 4, PV_ISA_AVX2,
+                 "width control arm for port-mul", "hand-AVX2 ryg, broadcast window + in-lane gather; 16 codes/iter", 0, PV_FN_AVX2RYG(pv_avx2_ryg_d4));
+    PV_VARIANT_D(ST_UNPACK, "avx2-ryg", 5, PV_ISA_AVX2,
+                 "width control arm for port-mul", "hand-AVX2 ryg, broadcast window + in-lane gather; 16 codes/iter", 0, PV_FN_AVX2RYG(pv_avx2_ryg_d5));
+    PV_VARIANT_D(ST_UNPACK, "avx2-ryg", 6, PV_ISA_AVX2,
+                 "width control arm for port-mul", "hand-AVX2 ryg, broadcast window + in-lane gather; 16 codes/iter", 0, PV_FN_AVX2RYG(pv_avx2_ryg_d6));
+    PV_VARIANT_D(ST_UNPACK, "avx2-ryg", 7, PV_ISA_AVX2,
+                 "width control arm for port-mul", "hand-AVX2 ryg, broadcast window + in-lane gather; 16 codes/iter", 0, PV_FN_AVX2RYG(pv_avx2_ryg_d7));
+    PV_VARIANT_D(ST_UNPACK, "csimd-ryg", 2, PV_ISA_SCALAR,
+                 "portable rewrite of x86_flat.h ryg SSE", "mul-as-shift, GNU vector ext; 16 codes/16B window", 0, PV_FN_CSIMD(pv_csimd_ryg_d2));
+    PV_VARIANT_D(ST_UNPACK, "csimd-ryg", 3, PV_ISA_SCALAR,
+                 "portable rewrite of x86_flat.h ryg SSE", "mul-as-shift, GNU vector ext; 16 codes/16B window", 0, PV_FN_CSIMD(pv_csimd_ryg_d3));
+    PV_VARIANT_D(ST_UNPACK, "csimd-ryg", 4, PV_ISA_SCALAR,
+                 "portable rewrite of x86_flat.h ryg SSE", "mul-as-shift, GNU vector ext; 16 codes/16B window", 0, PV_FN_CSIMD(pv_csimd_ryg_d4));
+    PV_VARIANT_D(ST_UNPACK, "csimd-ryg", 5, PV_ISA_SCALAR,
+                 "portable rewrite of x86_flat.h ryg SSE", "mul-as-shift, GNU vector ext; 16 codes/16B window", 0, PV_FN_CSIMD(pv_csimd_ryg_d5));
+    PV_VARIANT_D(ST_UNPACK, "csimd-ryg", 6, PV_ISA_SCALAR,
+                 "portable rewrite of x86_flat.h ryg SSE", "mul-as-shift, GNU vector ext; 16 codes/16B window", 0, PV_FN_CSIMD(pv_csimd_ryg_d6));
+    PV_VARIANT_D(ST_UNPACK, "csimd-ryg", 7, PV_ISA_SCALAR,
+                 "portable rewrite of x86_flat.h ryg SSE", "mul-as-shift, GNU vector ext; 16 codes/16B window", 0, PV_FN_CSIMD(pv_csimd_ryg_d7));
+    PV_VARIANT_D(ST_UNPACK, "sse-ryg", 2, PV_ISA_SSE4,
+                 "production pivco_huffman_x86_flat.h", "ryg SSE helpers driven as pure unpack (reference)", 0, PV_FN_SSE_RYG(pv_sse_ryg_d2));
+    PV_VARIANT_D(ST_UNPACK, "sse-ryg", 3, PV_ISA_SSE4,
+                 "production pivco_huffman_x86_flat.h", "ryg SSE helpers driven as pure unpack (reference)", 0, PV_FN_SSE_RYG(pv_sse_ryg_d3));
+    PV_VARIANT_D(ST_UNPACK, "sse-ryg", 4, PV_ISA_SSE4,
+                 "production pivco_huffman_x86_flat.h", "ryg SSE helpers driven as pure unpack (reference)", 0, PV_FN_SSE_RYG(pv_sse_ryg_d4));
+    PV_VARIANT_D(ST_UNPACK, "sse-ryg", 5, PV_ISA_SSE4,
+                 "production pivco_huffman_x86_flat.h", "ryg SSE helpers driven as pure unpack (reference)", 0, PV_FN_SSE_RYG(pv_sse_ryg_d5));
+    PV_VARIANT_D(ST_UNPACK, "sse-ryg", 6, PV_ISA_SSE4,
+                 "production pivco_huffman_x86_flat.h", "ryg SSE helpers driven as pure unpack (reference)", 0, PV_FN_SSE_RYG(pv_sse_ryg_d6));
+    PV_VARIANT_D(ST_UNPACK, "csimd-boncz", 3, PV_ISA_SCALAR,
+                 "duckdb#23313 (P. Boncz)", "ShuffleUnpackIter u8 arm, GNU vector ext; 8 vals/16B window", 0, PV_FN_CSIMD(pv_boncz_unpack_shuf_d3));
+    PV_VARIANT_D(ST_UNPACK, "csimd-boncz", 5, PV_ISA_SCALAR,
+                 "duckdb#23313 (P. Boncz)", "ShuffleUnpackIter u8 arm, GNU vector ext; 8 vals/16B window", 0, PV_FN_CSIMD(pv_boncz_unpack_shuf_d5));
+    PV_VARIANT_D(ST_UNPACK, "csimd-boncz", 6, PV_ISA_SCALAR,
+                 "duckdb#23313 (P. Boncz)", "ShuffleUnpackIter u8 arm, GNU vector ext; 8 vals/16B window", 0, PV_FN_CSIMD(pv_boncz_unpack_shuf_d6));
+    PV_VARIANT_D(ST_MERGE_FLAT, "csimd-ryg-map", 7, PV_ISA_NEON,
+                 "csimd-ryg unpack + vqtbl map", "hybrid: portable unpack, intrinsic table map; 16 syms/iter", 0, PV_FN_CSIMD_NEON(pv_csimd_ryg_map_d7));
+    PV_VARIANT_D(ST_MERGE_FLAT, "asof-08f90b0", 7, PV_ISA_NEON,
+                 "08f90b0 merge_flat_d7_neon", "pre-ryg-unpack form: 2x flat_d7_unpack_fast per 16 codes", 0, PV_FN_NEON(pv_merge_flat_d7_asof_08f90b0));
 }
 
 #endif /* PIVCO_PRIM_VARIANTS_FLAT_H */

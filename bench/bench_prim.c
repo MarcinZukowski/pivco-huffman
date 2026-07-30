@@ -273,6 +273,81 @@ static void neon_scatter(const ctx_t *c) {
 }
 #endif /* USE_NEON_KERNELS */
 
+#if defined(PIVCO_HAS_AVX512)   /* standalone unpack: production avx512_flat helpers */
+/* Pure-unpack rows: each case is the matching merge_flat_dN_avx512 loop with
+   the c2s vpermb removed -- codes are stored, not mapped.  Loop bounds (the
+   128-slack wide loop, fast/safe 16-wide tails) are copied verbatim from
+   pivco_huffman_primitives_avx512.h so the bm over-read guarantees are
+   identical; the helpers themselves come from pivco_huffman_avx512_flat.h. */
+static void avx512_unpack(const ctx_t *c) {
+    int n = c->n, i = 0; uint8_t *cd = c->codes; const uint8_t *bm = c->bm;
+    switch (c->D) {
+    case 2:
+        for (; i + 128 <= n; i += 64)
+            _mm512_storeu_si512((__m512i *)(cd + i), flat_d2_unpack64_avx512_fast(bm + (i >> 2)));
+        for (; i + 16 <= n; i += 16)
+            _mm_storeu_si128((__m128i *)(cd + i), flat_d2_unpack_avx512(bm + (i >> 2)));
+        break;
+    case 3: {
+        for (; i + 128 <= n; i += 64)
+            _mm512_storeu_si512((__m512i *)(cd + i), flat_d3_unpack64_avx512_fast(bm + ((i * 3) >> 3)));
+        int fe = n >= 16 ? n - 16 : 0;
+        for (; i + 16 <= fe; i += 16)
+            _mm_storeu_si128((__m128i *)(cd + i), flat_d3_unpack_avx512_fast(bm + ((i * 3) >> 3)));
+        if (i + 16 <= n) {
+            _mm_storeu_si128((__m128i *)(cd + i), flat_d3_unpack_avx512_safe(bm + ((i * 3) >> 3)));
+            i += 16;
+        }
+        break;
+    }
+    case 4:
+        for (; i + 128 <= n; i += 64)
+            _mm512_storeu_si512((__m512i *)(cd + i), flat_d4_unpack64_avx512_fast(bm + ((i * 4) >> 3)));
+        for (; i + 16 <= n; i += 16)
+            _mm_storeu_si128((__m128i *)(cd + i), flat_d4_unpack_avx512(bm + (i >> 1)));
+        break;
+    case 5: {
+        int f64 = n >= 64 ? n - 64 : 0;
+        for (; i + 64 <= f64; i += 64)
+            _mm512_storeu_si512((__m512i *)(cd + i), flat_d5_unpack64_avx512_fast(bm + ((i * 5) >> 3)));
+        int fe = n >= 16 ? n - 16 : 0;
+        for (; i + 16 <= fe; i += 16)
+            _mm_storeu_si128((__m128i *)(cd + i), flat_d5_unpack_avx512_fast(bm + ((i * 5) >> 3)));
+        if (i + 16 <= n) {
+            _mm_storeu_si128((__m128i *)(cd + i), flat_d5_unpack_avx512_safe(bm + ((i * 5) >> 3)));
+            i += 16;
+        }
+        break;
+    }
+    case 6: {
+        for (; i + 128 <= n; i += 64)
+            _mm512_storeu_si512((__m512i *)(cd + i), flat_d6_unpack64_avx512_fast(bm + ((i * 6) >> 3)));
+        int fe = n >= 16 ? n - 16 : 0;
+        for (; i + 16 <= fe; i += 16)
+            _mm_storeu_si128((__m128i *)(cd + i), flat_d6_unpack_avx512_fast(bm + ((i * 6) >> 3)));
+        if (i + 16 <= n) {
+            _mm_storeu_si128((__m128i *)(cd + i), flat_d6_unpack_avx512_safe(bm + ((i * 6) >> 3)));
+            i += 16;
+        }
+        break;
+    }
+    case 7: {
+        for (; i + 128 <= n; i += 64)
+            _mm512_storeu_si512((__m512i *)(cd + i), flat_d7_unpack64_avx512_fast(bm + ((i * 7) >> 3)));
+        int fe = n >= 16 ? n - 16 : 0;
+        for (; i + 16 <= fe; i += 16)
+            _mm_storeu_si128((__m128i *)(cd + i), flat_d7_unpack_avx512_fast(bm + ((i * 7) >> 3)));
+        if (i + 16 <= n) {
+            _mm_storeu_si128((__m128i *)(cd + i), flat_d7_unpack_avx512_safe(bm + ((i * 7) >> 3)));
+            i += 16;
+        }
+        break;
+    }
+    }
+    for (; i < n; i++) cd[i] = (uint8_t)extract_D_bits_avx512(bm, i * c->D, c->D);
+}
+#endif /* PIVCO_HAS_AVX512 */
+
 #if defined(HAVE_SIMD)   /* pack/merge/partition: production prim_*, all backends */
 static void simd_merge_flat(const ctx_t *c){ prim_merge_flat(c->out, c->n, c->bm, c->D, c->c2s); }
 /* rank-based production primitives */
@@ -739,6 +814,9 @@ int main(int argc, char **argv) {
         reg("scalar",ST_UNPACK, d,0,p_unpack_scalar);
 #if defined(USE_NEON_KERNELS)
         if (d <= 7) reg(BK,ST_UNPACK, d,0,neon_unpack);
+#endif
+#if defined(PIVCO_HAS_AVX512)
+        if (d <= 7) reg(BK,ST_UNPACK, d,0,avx512_unpack);
 #endif
         reg("scalar",ST_SCATTER,d,0,p_scatter_scalar);
 #if defined(USE_NEON_KERNELS)
