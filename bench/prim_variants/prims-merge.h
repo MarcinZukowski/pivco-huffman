@@ -309,6 +309,105 @@ static void prim_merge_vv_com128(const ctx_t *c){
 }
 
 /* ============================================================================
+ * merge_vec_vec : aqrit-notab — table-free shuffle-index synthesis (issue #26)
+ *
+ * From aqrit's gist (aa27a7930d0cab9ab97112236aae2182), verbatim except the
+ * signature const/int match.  The shuffle control is COMPUTED, not looked up:
+ * an inclusive per-lane prefix popcount comes from vcnt over the bitmap byte
+ * broadcast AND'ed with progressive masks {0x1,0x3,..,0xFF}, the right-source
+ * index is the exclusive prefix (vext by 15), the left index is (16+lane) -
+ * r_shuf, and the L/R select mask falls out as exclusive - inclusive (0x00 or
+ * 0xFF per lane) — one vsub, no table.  ~12 ALU ops per 16 outputs vs the
+ * production two-table SABD merge's ~6 + two 16 B index-table loads; the trade
+ * is pure-ALU (no 8 KiB g_merge_shuf0/1 footprint, no bitmap->table load-load
+ * dependency) vs more ops.  aqrit self-closed the issue doubting x86 (byte
+ * popcount needs pshufb there); this NEON form he could not run.
+ * ==========================================================================*/
+static const uint8_t pv_aqrit_popcnt_mask[16] = { /* inclusive prefix scan over packed bits */
+    0x1, 0x3, 0x7, 0x0F, 0x1F, 0x3F, 0x7F, 0xFF,
+    0x1, 0x3, 0x7, 0x0F, 0x1F, 0x3F, 0x7F, 0xFF
+};
+static const uint8_t pv_aqrit_left_id[16] = { 16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31 };
+
+/* `left` and `right` must end with 16 bytes of padding (bench buffers have
+ * the canary slack the production speculative loads already rely on). */
+static inline void pv_merge_vec_vec_aqrit_neon(const uint8_t *bm, int K,
+                                               const uint8_t *left,
+                                               const uint8_t *right,
+                                               uint8_t *out)
+{
+    size_t i = 0;
+    if (K >= 16) {
+        const uint8x16_t popcnt_mask_v = vld1q_u8(pv_aqrit_popcnt_mask);
+        const uint8x16_t left_id_v = vld1q_u8(pv_aqrit_left_id);
+
+        const size_t end = ((size_t)K >> 3) & ~(size_t)1;
+        do {
+            uint8x8_t bm_lo = vdup_n_u8(bm[i]);
+            uint8x8_t bm_hi = vdup_n_u8(bm[i + 1]);
+            uint8x16x2_t src;
+            src.val[0] = vld1q_u8(right);
+            src.val[1] = vld1q_u8(left);
+
+            uint8x16_t prefix_half = vcntq_u8(vandq_u8(vcombine_u8(bm_lo, bm_hi), popcnt_mask_v));
+            uint8x16_t carry = vcombine_u8(vdup_n_u8(0), vcnt_u8(bm_lo));
+            uint8x16_t prefix = vaddq_u8(prefix_half, carry);
+
+            uint8_t r_popcnt = vgetq_lane_u8(prefix, 15);
+            right += r_popcnt;
+            left += 16 - r_popcnt;
+
+            uint8x16_t r_shuf = vextq_u8(vdupq_n_u8(0), prefix, 15); /* exclusive */
+            uint8x16_t l_shuf = vsubq_u8(left_id_v, r_shuf);
+            uint8x16_t r_select = vsubq_u8(r_shuf, prefix);
+            uint8x16_t shuf = vbslq_u8(r_select, r_shuf, l_shuf);
+
+            vst1q_u8(&out[i * 8], vqtbl2q_u8(src, shuf));
+            i += 2;
+        } while (i < end);
+    }
+
+    if (K & 8) { /* just for kicks */
+        const uint64_t mul = UINT64_C(0x0002040810204080);
+        const uint64_t kx01 = UINT64_C(0x0101010101010101);
+        const uint64_t left_adj = UINT64_C(0x0F0E0D0C0B0A0908);
+
+        uint64_t x = bm[i];
+        uint8x8x2_t src;
+        src.val[0] = vld1_u8(right);
+        src.val[1] = vld1_u8(left);
+
+        uint64_t unpacked = (((x & 0xFE) * mul) ^ x) & kx01; /* unpack bits */
+        uint64_t prefix = unpacked * kx01;
+        size_t r_popcnt = (size_t)(prefix >> 56);
+        right += r_popcnt;
+        left += ((size_t)8) - r_popcnt;
+
+        uint64_t r_shuf = prefix - unpacked;
+        uint64_t l_shuf = left_adj - r_shuf;
+        uint64_t r_select = (unpacked << 8) - unpacked;
+        uint64_t shuf = (r_select & r_shuf) | (~r_select & l_shuf);
+        vst1_u8(&out[i * 8], vtbl2_u8(src, vcreate_u8(shuf)));
+        i++;
+    }
+
+    if (K & 7) {
+        size_t x = bm[i];
+        uint8_t *end = &out[K];
+        out += i * 8;
+        do {
+            size_t b = x & 1; x >>= 1;
+            uint8_t r = *right; right += b;
+            uint8_t l = *left; left += b ^ 1;
+            *out = b ? r : l;
+        } while (++out < end);
+    }
+}
+static void prim_merge_vv_aqrit(const ctx_t *c){
+    pv_merge_vec_vec_aqrit_neon(c->bm, c->n, c->merge_left, c->merge_right, c->out);
+}
+
+/* ============================================================================
  * merge_cst_cst : tbl / blendtab / vtblq / vtbl / d1flat
  *   Alternate two-constant-symbol merges tried against the production cst_cst.
  *   tbl/blendtab use precomputed 256x8 LUTs (mask->bits / mask->blended out);
@@ -2116,6 +2215,8 @@ static void pv_register_merge(void) {
                "COM prefix-sum cursor-decouple, 32/iter (2 chunks); narrower than shipped com64", 0, PV_FN_NEON(prim_merge_vv_com32));
     PV_VARIANT(ST_MERGE_VEC_VEC, "com128",    PV_ISA_NEON, "bench_merge_neon.c",
                "COM 128/iter (8 chunks, lo/hi u64 split + cross-half bias); regalloc-heavy, loses on Graviton", 0, PV_FN_NEON(prim_merge_vv_com128));
+    PV_VARIANT(ST_MERGE_VEC_VEC, "aqrit-notab", PV_ISA_NEON, "aqrit / issue #26 gist",
+               "table-free shuffle synthesis: vcnt prefix popcount + exclusive-minus-inclusive select; ~12 ALU ops per 16, no 8KiB index tables", 0, PV_FN_NEON(prim_merge_vv_aqrit));
     /* merge_cst_cst — NEON */
     PV_VARIANT(ST_MERGE_CST_CST, "tbl",       PV_ISA_NEON, "bench_prim experiment",
                "256x8 mask->0xFF/0x00 LUT + vand/veor blend", 0, PV_FN_NEON(prim_merge_cc_tbl));
