@@ -1897,8 +1897,8 @@ static long pv_vv64_l7r7(uint8_t *out, const uint8_t *left,
         "addl %r14d,%edx\n"
         "cmpq %rsi,%rdi\n"
         "jne 1b\n"
-        "popq %r15\n"
         "popq %r14\n"
+        "popq %r15\n"
         "popq %rbx\n"
         "ret\n");
 }
@@ -1943,9 +1943,9 @@ static long pv_vv64_l7r8(uint8_t *out, const uint8_t *left,
         "addl %r14d,%edx\n"
         "cmpq %rsi,%rdi\n"
         "jne 1b\n"
-        "popq %rbp\n"
-        "popq %r15\n"
         "popq %r14\n"
+        "popq %r15\n"
+        "popq %rbp\n"
         "popq %rbx\n"
         "ret\n");
 }
@@ -1989,8 +1989,8 @@ static long pv_vv64_l8r7(uint8_t *out, const uint8_t *left,
         "addl %r14d,%edx\n"
         "cmpq %rsi,%rdi\n"
         "jne 1b\n"
-        "popq %r13\n"
         "popq %r14\n"
+        "popq %r13\n"
         "popq %rbx\n"
         "ret\n");
 }
@@ -2035,9 +2035,9 @@ static long pv_vv64_l8r8(uint8_t *out, const uint8_t *left,
         "addl %r14d,%edx\n"
         "cmpq %rsi,%rdi\n"
         "jne 1b\n"
-        "popq %rbp\n"
-        "popq %r13\n"
         "popq %r14\n"
+        "popq %r13\n"
+        "popq %rbp\n"
         "popq %rbx\n"
         "ret\n");
 }
@@ -2059,6 +2059,8 @@ static void prim_merge_vv_l8r7(const ctx_t *c){ pv_vv_matrix(c->bm, c->n, c->mer
 static void prim_merge_vv_l8r8(const ctx_t *c){ pv_vv_matrix(c->bm, c->n, c->merge_left, c->merge_right, c->out, pv_vv64_l8r8); }
 
 static void prim_merge_cv_maskz(const ctx_t *c){ pv_merge_cst_vec_avx512_maskz(c->bm, c->n, MERGE_LEFT_SYM, c->merge_right, c->out); }
+
+
 #endif /* __AVX512VBMI2__ && __AVX512VBMI__ */
 
 #if defined(USE_NEON_KERNELS)
@@ -2162,7 +2164,7 @@ static void pv_register_merge(void) {
     PV_VARIANT(ST_MERGE_VEC_VEC, "iurii-asm-l7r7", PV_ISA_AVX512, "vec_vec vpexpandb encoding matrix (2026-07)",
                "issue-#11 loop, L-expand 7B / R-expand 7B", 0, PV_FN_VBMI2(prim_merge_vv_l7r7));
     PV_VARIANT(ST_MERGE_VEC_VEC, "iurii-asm-l7r8", PV_ISA_AVX512, "vec_vec vpexpandb encoding matrix (2026-07)",
-               "issue-#11 loop, L-expand 7B / R-expand 8B", 0, PV_FN_VBMI2(prim_merge_vv_l7r8));
+               "issue-#11 loop, L-expand 7B / R-expand 8B (disp8)", 0, PV_FN_VBMI2(prim_merge_vv_l7r8));
     PV_VARIANT(ST_MERGE_VEC_VEC, "iurii-asm-l8r7", PV_ISA_AVX512, "vec_vec vpexpandb encoding matrix (2026-07)",
                "issue-#11 loop, L-expand 8B / R-expand 7B; fastest on c7a/Zen 4", 0, PV_FN_VBMI2(prim_merge_vv_l8r7));
     PV_VARIANT(ST_MERGE_VEC_VEC, "iurii-asm-l8r8", PV_ISA_AVX512, "vec_vec vpexpandb encoding matrix (2026-07)",

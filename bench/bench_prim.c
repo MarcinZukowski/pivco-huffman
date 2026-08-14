@@ -518,8 +518,12 @@ typedef struct {
     const char       *origin;
     const char       *note;
 } prim_t;
-static prim_t PRIMS[512]; static int NPRIMS = 0;
+static prim_t PRIMS[1024]; static int NPRIMS = 0;
 static void reg(const char *v, stage_t s, int D, int ip, void (*fn)(const ctx_t *)) {
+    if (NPRIMS >= (int)(sizeof PRIMS / sizeof PRIMS[0])) {
+        fprintf(stderr, "bench_prim: PRIMS[] overflow at '%s' — raise the cap\n", v);
+        exit(1);
+    }
     PRIMS[NPRIMS++] = (prim_t){ .variant=v, .stage=s, .D=D, .inplace=ip, .run=fn };
 }
 /* Graveyard variant families (bench-only; ctx_t / compress_tab /
@@ -973,7 +977,7 @@ int main(int argc, char **argv) {
            scalar/backend stay ahead of the later-registered variants, and
            per-D variants (e.g. flat fl_natural) slot under their own D rather
            than after the last D. */
-        prim_t grouped[512]; int ng = 0;
+        static prim_t grouped[sizeof PRIMS / sizeof PRIMS[0]]; int ng = 0;
         for (int k=0;k<NPRIMS;k++) {
             stage_t s = PRIMS[k].stage;
             int sseen=0; for (int j=0;j<k;j++) if (PRIMS[j].stage==s){sseen=1;break;}
@@ -990,6 +994,9 @@ int main(int argc, char **argv) {
         memcpy(PRIMS, grouped, (size_t)ng*sizeof(prim_t)); NPRIMS = ng;
     }
 
+    /* Line-buffer stdout: a crashing variant must not eat the rows already
+       measured (block buffering hid the l7r8 SIGSEGV as clean truncation). */
+    setvbuf(stdout, NULL, _IOLBF, 0);
     printf("bench_prim: n=%d elems, best-of-9 x %d reps, partition depth=%d%s\n",
            n, reps, PART_DEPTH, variants ? "  [* production, + variant]" : "");
     printf("%-22s %-3s %-15s %10s  %5s %5s %5s   %6s %6s %6s  %s\n",
