@@ -21,6 +21,7 @@
  */
 
 #include "pivco_huffman.h"
+#include "bench_ctx.h"
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -45,7 +46,7 @@ static double h2(double p)
     return -p * log2(p) - (1.0 - p) * log2(1.0 - p);
 }
 
-static uint64_t fill_subtree_freq(const pivco_huffman_table_t *t,
+static uint64_t fill_subtree_freq(const pivco_table_t *t,
                                   const uint64_t freq[256],
                                   int16_t node,
                                   uint64_t out[])
@@ -59,7 +60,7 @@ static uint64_t fill_subtree_freq(const pivco_huffman_table_t *t,
 }
 
 /* Full TANS: every internal node contributes H₂(p) · subtree_freq. */
-static void walk_full_tans(const pivco_huffman_table_t *t,
+static void walk_full_tans(const pivco_table_t *t,
                            const uint64_t subtree_freq[],
                            int16_t node, double *bits)
 {
@@ -75,7 +76,7 @@ static void walk_full_tans(const pivco_huffman_table_t *t,
 
 /* TANS with flat carve-out: flat-subtree roots stay at N·D; other
    internal nodes contribute H₂(p) · subtree_freq. */
-static void walk_flat_carve(const pivco_huffman_table_t *t,
+static void walk_flat_carve(const pivco_table_t *t,
                             const uint64_t subtree_freq[],
                             int16_t node, double *bits, double *flat_bits)
 {
@@ -100,7 +101,7 @@ static void walk_flat_carve(const pivco_huffman_table_t *t,
    symbol count).  Reported tans_flat_bps / shannon_bps depend only on
    the relative shape of freq[]. */
 static void analyze_freq(const uint64_t freq[256],
-                         pivco_huffman_table_t *tbl,
+                         pivco_table_t *tbl,
                          uint64_t subtree_freq[],
                          double *huf_bps, double *tans_flat_bps,
                          double *shannon_bps, double *flat_share)
@@ -117,7 +118,7 @@ static void analyze_freq(const uint64_t freq[256],
         return;
     }
 
-    if (pivco_huffman_build_table(freq, tbl) != PIVCO_OK) {
+    if (pivco_build_table(bench_cfg(), freq, tbl) != PIVCO_OK) {
         *huf_bps = *tans_flat_bps = *shannon_bps = 0.0/0.0;
         *flat_share = 0.0;
         return;
@@ -144,7 +145,7 @@ static int run_dist_mode(int main_only)
 {
     bench_init();
     int n = bench_num_distributions();
-    pivco_huffman_table_t *tbl = malloc(sizeof(*tbl));
+    pivco_table_t *tbl = malloc(sizeof(*tbl));
     uint64_t *subtree_freq = calloc(PIVCO_MAX_TREE_NODES, sizeof(uint64_t));
     if (!tbl || !subtree_freq) { fprintf(stderr, "OOM\n"); return 1; }
 
@@ -213,7 +214,7 @@ static double byte_hist_entropy(const int *hist, int total_bytes)
     return H;
 }
 
-static void simulate_partition(const pivco_huffman_table_t *t,
+static void simulate_partition(const pivco_table_t *t,
                                uint16_t *codes_la, int n,
                                int16_t node_id, int depth,
                                double *flat_bits,
@@ -339,7 +340,7 @@ typedef struct {
     double  bit_H;        /* = byte_H under IID */
 } exact_depth_t;
 
-static void walk_exact(const pivco_huffman_table_t *t,
+static void walk_exact(const pivco_table_t *t,
                        const uint64_t subtree_freq[],
                        int16_t node_id, int depth,
                        double scale,
@@ -375,7 +376,7 @@ static int run_exact_tier_mode(int main_only)
     bench_init();
     int n_dists = bench_num_distributions();
 
-    pivco_huffman_table_t *tbl = malloc(sizeof(*tbl));
+    pivco_table_t *tbl = malloc(sizeof(*tbl));
     uint64_t *subtree_freq = calloc(PIVCO_MAX_TREE_NODES, sizeof(uint64_t));
     if (!tbl || !subtree_freq) { fprintf(stderr, "OOM\n"); return 1; }
 
@@ -399,7 +400,7 @@ static int run_exact_tier_mode(int main_only)
         for (int s = 0; s < 256; s++) { total_freq += freq[s]; if (freq[s]) n_syms++; }
         if (n_syms < 2 || total_freq == 0) continue;
 
-        if (pivco_huffman_build_table(freq, tbl) != PIVCO_OK) continue;
+        if (pivco_build_table(bench_cfg(), freq, tbl) != PIVCO_OK) continue;
 
         /* Scale so one logical "block" is 8192 symbols. */
         double scale = (double)PIVCO_BLOCK_SIZE / (double)total_freq;
@@ -505,7 +506,7 @@ static int run_verify_dist_mode(int main_only)
     bench_init();
     int n_dists = bench_num_distributions();
 
-    pivco_huffman_table_t *tbl = malloc(sizeof(*tbl));
+    pivco_table_t *tbl = malloc(sizeof(*tbl));
     uint16_t *codes_la = malloc(PIVCO_BLOCK_SIZE * sizeof(uint16_t));
     uint16_t *tmp_buf  = malloc(PIVCO_BLOCK_SIZE * sizeof(uint16_t));
     uint8_t  *symbols  = malloc(PIVCO_BLOCK_SIZE);
@@ -536,7 +537,7 @@ static int run_verify_dist_mode(int main_only)
         for (int s = 0; s < 256; s++) if (freq_true[s]) n_syms++;
         if (n_syms < 2) continue;
 
-        if (pivco_huffman_build_table(freq_true, tbl) != PIVCO_OK) continue;
+        if (pivco_build_table(bench_cfg(), freq_true, tbl) != PIVCO_OK) continue;
 
         depth_bucket_t depth_stats[MAX_DEPTH_BUCKETS] = {{0}};
         double flat_bits = 0.0;
@@ -630,7 +631,7 @@ int main(int argc, char **argv)
         return 2;
     }
 
-    pivco_huffman_table_t *tbl = malloc(sizeof(*tbl));
+    pivco_table_t *tbl = malloc(sizeof(*tbl));
     uint64_t *subtree_freq = calloc(PIVCO_MAX_TREE_NODES, sizeof(uint64_t));
     if (!tbl || !subtree_freq) { fprintf(stderr, "OOM\n"); return 1; }
 
@@ -675,7 +676,7 @@ int main(int argc, char **argv)
             for (int s = 0; s < 256; s++) if (freq[s]) n_syms++;
             if (n_syms < 2) { n_skipped_singleton++; off += blk; n_blocks++; continue; }
 
-            if (pivco_huffman_build_table(freq, tbl) != PIVCO_OK) {
+            if (pivco_build_table(bench_cfg(), freq, tbl) != PIVCO_OK) {
                 fprintf(stderr, "build_table failed at block %d of %s\n",
                         n_blocks, path);
                 break;

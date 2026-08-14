@@ -39,6 +39,7 @@
 
 #define FSE_STATIC_LINKING_ONLY
 #include "pivco_huffman.h"
+#include "bench_ctx.h"
 #include "fse.h"
 #include "hist.h"
 
@@ -109,7 +110,7 @@ static uint64_t xs_next(stats_t *s)
 
 /* Returns the depth (from this node) at which all leaves sit if the
  * subtree rooted here is flat, or -1 otherwise.  A leaf returns 0. */
-static int subtree_flat_depth(const pivco_huffman_table_t *t, int16_t node)
+static int subtree_flat_depth(const pivco_table_t *t, int16_t node)
 {
     const pivco_tree_node_t *n = &t->tree[node];
     if (n->symbol >= 0) return 0;
@@ -122,7 +123,7 @@ static int subtree_flat_depth(const pivco_huffman_table_t *t, int16_t node)
 
 /* Collect leaf frequencies (in source-order) into `out`, returning
  * count of leaves filled. */
-static int collect_leaf_freqs(const pivco_huffman_table_t *t, int16_t node,
+static int collect_leaf_freqs(const pivco_table_t *t, int16_t node,
                                 const uint64_t *freq, uint64_t *out, int cap)
 {
     const pivco_tree_node_t *n = &t->tree[node];
@@ -139,7 +140,7 @@ static int collect_leaf_freqs(const pivco_huffman_table_t *t, int16_t node,
 /* Walk the tree returning total subtree count.  Accumulates FSE
  * measurements into `s`.  Detects maximal flat subtrees (D ≥ 2)
  * and accounts them separately into s->flat_*. */
-static uint64_t walk(const pivco_huffman_table_t *t, int16_t node, int depth,
+static uint64_t walk(const pivco_table_t *t, int16_t node, int depth,
                      const uint64_t *freq, stats_t *s,
                      uint8_t *bitmap_buf, uint8_t *expand_buf,
                      uint8_t *scratch, size_t scratch_cap)
@@ -286,12 +287,12 @@ int main(int argc, char **argv)
 
         /* Build the Huffman table; pivco's build takes a table* by
          * reference, returns 0 on success. */
-        pivco_huffman_table_t table_storage;
-        if (pivco_huffman_build_table(freq_global, &table_storage) != 0) {
+        pivco_table_t table_storage;
+        if (pivco_build_table(bench_cfg(), freq_global, &table_storage) != 0) {
             printf("  %-22s  build_table failed\n", name);
             continue;
         }
-        const pivco_huffman_table_t *table = &table_storage;
+        const pivco_table_t *table = &table_storage;
 
         /* Weighted Huffman avg code length from leaf depths in the table.
          * pivco's tree stores leaf depth implicitly via the symbol's

@@ -7,7 +7,7 @@
  *   max_node_benefit = max over the OPTIMIZED tree's bitmap-emitting
  *   internal nodes of (n_node/N) * (1 - H_binary(p_split)) -- the largest
  *   single-node bits-saved-per-source-byte from entropy-coding one
- *   partition bitmap.  Tree comes from pivco_huffman_build_table (the
+ *   partition bitmap.  Tree comes from pivco_build_table (the
  *   library); flat subtrees (packed bits, no bitmap) are skipped.  Same
  *   metric as tree_viz "Top internal nodes by bits saved" (/byte).
  *
@@ -16,6 +16,7 @@
  *   --csv    comma-separated output (no padding / rule line) */
 
 #include <math.h>
+#include "bench_ctx.h"
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -62,7 +63,7 @@ static double h_binary(double p)
 /* Flat depth of the subtree rooted at `node`: D if every leaf sits at the
  * same depth D from here, else -1 (leaf = 0).  Pure tree-structure read of
  * the library-built tree -- no rebuild logic. */
-static int subtree_flat_depth(const pivco_huffman_table_t *t, int16_t node)
+static int subtree_flat_depth(const pivco_table_t *t, int16_t node)
 {
     const pivco_tree_node_t *n = &t->tree[node];
     if (n->symbol >= 0) return 0;
@@ -73,7 +74,7 @@ static int subtree_flat_depth(const pivco_huffman_table_t *t, int16_t node)
     return ld + 1;
 }
 
-static uint64_t subtree_freq_sum(const pivco_huffman_table_t *t,
+static uint64_t subtree_freq_sum(const pivco_table_t *t,
                                   const uint64_t *freq, int16_t node)
 {
     const pivco_tree_node_t *n = &t->tree[node];
@@ -88,7 +89,7 @@ static uint64_t subtree_freq_sum(const pivco_huffman_table_t *t,
  * Returns the subtree's total frequency count.  This is the per-node
  * "bits saved by entropy-coding the partition bitmap" maximum -- the same
  * metric tree_viz shows as "Top internal nodes by bits saved". */
-static uint64_t walk_top1(const pivco_huffman_table_t *t,
+static uint64_t walk_top1(const pivco_table_t *t,
                           const uint64_t *freq, int16_t node,
                           double *max_saved)
 {
@@ -163,10 +164,10 @@ int main(int argc, char **argv)
             }
         }
 
-        pivco_huffman_table_t t;
+        pivco_table_t t;
         int min_len = 0, max_len = 0;
         double avg_len = 0.0, max_node_benefit = 0.0;
-        if (pivco_huffman_build_table(f, &t) == PIVCO_OK) {
+        if (pivco_build_table(bench_cfg(), f, &t) == PIVCO_OK) {
             int mn = 255, mx = 0;
             double wsum = 0.0;
             for (int s = 0; s < 256; s++) {

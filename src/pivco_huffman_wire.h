@@ -107,7 +107,7 @@ static inline int wire_read_block_n(const uint8_t **in_ptr)
  * The encoder's partition runs before anything is emitted for the
  * node, so the header value is known and written directly at node
  * entry.  No-op when the node carries no header (kr_header_needed()). */
-static inline void wire_write_kr_header(const pivco_huffman_table_t *table,
+static inline void wire_write_kr_header(const pivco_table_t *table,
                                          int16_t node_id,
                                          uint8_t **out_ptr, int n_right)
 {
@@ -135,7 +135,7 @@ static inline void wire_write_kr_header(const pivco_huffman_table_t *table,
  * dependent tree loads re-deriving a statically known truth -- is only
  * consulted in debug builds.  (The encoder's write side still uses it:
  * its walk visits header-less nodes too.) */
-static inline int wire_read_kr_header(const pivco_huffman_table_t *table,
+static inline int wire_read_kr_header(const pivco_table_t *table,
                                        int16_t node_id,
                                        const uint8_t **in_ptr)
 {

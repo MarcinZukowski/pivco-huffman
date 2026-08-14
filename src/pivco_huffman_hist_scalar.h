@@ -1,4 +1,4 @@
-/* pivco_huffman_hist_scalar.h — the shared scalar histogram core.
+/* pivco_hist_scalar.h — the shared scalar histogram core.
  *
  * Included by every backend primitives header; backends without their
  * own implementation alias prim_histogram_chunk to this (currently
@@ -7,7 +7,7 @@
  * its own, see primitives_avx512.h).  Not a backend header itself: no
  * prim_* aliases here, specialized name only.
  *
- * Contract: see prim_histogram_chunk in pivco_huffman_primitives.h.
+ * Contract: see prim_histogram_chunk in pivco_primitives.h.
  */
 #ifndef PIVCO_HUFFMAN_HIST_SCALAR_H
 #define PIVCO_HUFFMAN_HIST_SCALAR_H

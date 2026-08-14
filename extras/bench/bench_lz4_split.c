@@ -31,6 +31,7 @@
  */
 
 #include "pivco_huffman.h"
+#include "bench_ctx.h"
 #define FSE_STATIC_LINKING_ONLY
 #define HUF_STATIC_LINKING_ONLY
 #include "fse.h"
@@ -187,8 +188,8 @@ static double huffman_ratio(const uint8_t *buf, size_t len)
     if (len == 0) return 0.0;
     uint64_t freq[256];
     (void)shannon_entropy(buf, len, freq);
-    pivco_huffman_table_t table;
-    if (pivco_huffman_build_table(freq, &table) != PIVCO_OK) return -1.0;
+    pivco_table_t table;
+    if (pivco_build_table(bench_cfg(), freq, &table) != PIVCO_OK) return -1.0;
     uint64_t total_bits = 0;
     for (int s = 0; s < 256; s++) {
         if (freq[s] > 0)
@@ -310,8 +311,8 @@ static codec_result_t bench_ph(const uint8_t *src, size_t len, int iters)
 
     uint64_t freq[256];
     (void)shannon_entropy(padded_src, padded, freq);
-    pivco_huffman_table_t table;
-    if (pivco_huffman_build_table(freq, &table) != PIVCO_OK) {
+    pivco_table_t table;
+    if (pivco_build_table(bench_cfg(), freq, &table) != PIVCO_OK) {
         r.note = "build_table failed";
         free(padded_src);
         return r;
@@ -322,10 +323,7 @@ static codec_result_t bench_ph(const uint8_t *src, size_t len, int iters)
     size_t  *enc_off = (size_t *)calloc((size_t)(n_blocks + 1), sizeof(size_t));
     for (int b = 0; b < n_blocks; b++) {
         size_t out_len = enc_cap_per;
-        int rc = pivco_huffman_encode(
-            padded_src + (size_t)b * PIVCO_BLOCK_SIZE,
-            PIVCO_BLOCK_SIZE,
-            &table, enc + enc_off[b], &out_len);
+        int rc = pivco_encode(bench_enc_ctx(), &table, padded_src + (size_t)b * PIVCO_BLOCK_SIZE, PIVCO_BLOCK_SIZE, enc + enc_off[b], &out_len);
         if (rc != PIVCO_OK) {
             r.note = "encode failed";
             free(enc); free(enc_off); free(padded_src);
@@ -343,9 +341,7 @@ static codec_result_t bench_ph(const uint8_t *src, size_t len, int iters)
         for (int i = 0; i < iters; i++) {
             for (int b = 0; b < n_blocks; b++) {
                 size_t consumed = 0;
-                pivco_huffman_decode(
-                    enc + enc_off[b], enc_off[b + 1] - enc_off[b],
-                    &table, dec + (size_t)b * PIVCO_BLOCK_SIZE, &consumed);
+                pivco_decode(bench_dec_ctx(), &table, enc + enc_off[b], enc_off[b + 1] - enc_off[b], dec + (size_t)b * PIVCO_BLOCK_SIZE, &consumed);
             }
             sink ^= dec[0] ^ dec[padded - 1];
         }

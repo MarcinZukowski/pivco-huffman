@@ -1,7 +1,7 @@
 /* Correctness-focused tests covering small inputs, edge-case
  * distributions, and the real-world dataset files in extras/datasets/.
  *
- * Tests both the low-level block codec (pivco_huffman_encode/decode)
+ * Tests both the low-level block codec (pivco_encode/decode)
  * and the high-level file codec (pivcohuf_compress/decompress).  The
  * file-codec layer is the one users hit; the block codec is the
  * underlying primitive.  Bugs typically live in the block codec but

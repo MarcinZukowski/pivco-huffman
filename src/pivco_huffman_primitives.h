@@ -58,7 +58,7 @@
  *  void prim_enc_init(uint8_t ranks[n], int n,
  *                      const uint8_t *symbols,
  *                      const uint8_t sym_to_rank[256],
- *                      const pivco_huffman_enc_init_aux_t *aux);
+ *                      const pivco_enc_init_aux_t *aux);
  *
  *    Build the per-block in-order rank array, gathering from `sym_to_rank`
  *    (= table->sym_to_rank) indexed by each input symbol:

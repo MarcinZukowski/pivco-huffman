@@ -23,7 +23,7 @@ add_executable(pivco_huffman_bench
     ${CMAKE_SOURCE_DIR}/bench/bench_distributions.c
 )
 target_link_libraries(pivco_huffman_bench pivco_huffman huf0 m)
-target_include_directories(pivco_huffman_bench PRIVATE ${CMAKE_SOURCE_DIR}/ext/fse/lib)
+target_include_directories(pivco_huffman_bench PRIVATE ${CMAKE_SOURCE_DIR}/ext/fse/lib ${CMAKE_SOURCE_DIR}/bench)
 
 # Independent (namespaced) top-down TD library, retired from the main
 # lib but resurrected as its own lib so the fair-bench can show the

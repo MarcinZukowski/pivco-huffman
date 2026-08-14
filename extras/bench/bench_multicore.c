@@ -18,6 +18,7 @@
  */
 
 #include "pivco_huffman.h"
+#include "bench_ctx.h"
 #define HUF_STATIC_LINKING_ONLY
 #include "huf.h"
 
@@ -56,7 +57,7 @@ typedef struct {
     /* PIVCO encoded data (shared, read-only) */
     const uint8_t       *pivco_enc;
     const size_t        *pivco_off;
-    const pivco_huffman_table_t *pivco_table;
+    const pivco_table_t *pivco_table;
 
     /* huf0 encoded data (shared, read-only) */
     const uint8_t       *huf0_enc;
@@ -87,12 +88,7 @@ static void *worker(void *arg)
         for (int r = 0; r < a->reps; r++) {
             for (int b = 0; b < NBLOCKS; b++) {
                 size_t consumed;
-                pivco_huffman_decode(
-                    a->pivco_enc + a->pivco_off[b],
-                    a->pivco_off[b + 1] - a->pivco_off[b],
-                    a->pivco_table,
-                    a->out_buf + (size_t)b * BLOCKSZ,
-                    &consumed);
+                pivco_decode(bench_dec_ctx(), a->pivco_table, a->pivco_enc + a->pivco_off[b], a->pivco_off[b + 1] - a->pivco_off[b], a->out_buf + (size_t)b * BLOCKSZ, &consumed);
             }
         }
     } else {
@@ -112,7 +108,7 @@ static void *worker(void *arg)
 
 static double run_codec(int codec, int n_threads, int reps,
                          const uint8_t *pivco_enc, const size_t *pivco_off,
-                         const pivco_huffman_table_t *pivco_table,
+                         const pivco_table_t *pivco_table,
                          const uint8_t *huf0_enc, const size_t *huf0_off,
                          uint8_t **out_bufs)
 {
@@ -178,16 +174,15 @@ int main(int argc, char **argv)
     bench_generate_symbols(dist_idx, symbols, TOTAL_SYMBOLS, 0xBEEFCAFE12345678ULL);
 
     /* PIVCO encode (per 8 KB block). */
-    pivco_huffman_table_t pivco_table;
-    pivco_huffman_build_table(bench_dist_freq(dist_idx), &pivco_table);
+    pivco_table_t pivco_table;
+    pivco_build_table(bench_cfg(), bench_dist_freq(dist_idx), &pivco_table);
     size_t  pivco_cap = (size_t)NBLOCKS * BLOCKSZ * 8;
     uint8_t *pivco_enc = (uint8_t *)malloc(pivco_cap);
     size_t  *pivco_off = (size_t *)malloc((NBLOCKS + 1) * sizeof(size_t));
     pivco_off[0] = 0;
     for (int b = 0; b < NBLOCKS; b++) {
         size_t elen;
-        pivco_huffman_encode(symbols + (size_t)b * BLOCKSZ, BLOCKSZ, &pivco_table,
-                             pivco_enc + pivco_off[b], &elen);
+        pivco_encode(bench_enc_ctx(), &pivco_table, symbols + (size_t)b * BLOCKSZ, BLOCKSZ, pivco_enc + pivco_off[b], &elen);
         pivco_off[b + 1] = pivco_off[b] + elen;
     }
     size_t pivco_total = pivco_off[NBLOCKS];

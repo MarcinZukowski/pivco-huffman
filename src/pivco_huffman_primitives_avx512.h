@@ -14,7 +14,7 @@
  * before they produce silently-incorrect output.
  *
  * Notable kernels (all kept symmetric with the legacy
- * pivco_huffman_avx512.c bodies they replace):
+ * pivco_avx512.c bodies they replace):
  *
  *   - enc_init_avx512: 64-char vpermex2var_epi8 byte-split table lookup
  *     (chunked over a 256-entry uint16 LUT split into 8 byte-half
@@ -716,7 +716,7 @@ PIVCO_PRIM_ALWAYS_INLINE void prim_codec_init(void)
 PIVCO_PRIM_ALWAYS_INLINE void prim_enc_init(uint8_t *ranks, int n,
                                               const uint8_t *symbols,
                                               const uint8_t *sym_to_rank,
-                                              const pivco_huffman_enc_init_aux_t *aux)
+                                              const pivco_enc_init_aux_t *aux)
 { (void)aux; init_avx512(ranks, n, symbols, sym_to_rank); }
 
 PIVCO_PRIM_ALWAYS_INLINE int prim_enc_partition_full(uint8_t *ranks,

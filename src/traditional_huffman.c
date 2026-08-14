@@ -126,7 +126,7 @@ typedef struct {
     int       table_size;
 } fast_table_t;
 
-static void build_fast_table(const pivco_huffman_table_t *ht, fast_table_t *ft)
+static void build_fast_table(const pivco_table_t *ht, fast_table_t *ft)
 {
     ft->table_log  = ht->max_len;
     ft->table_size = 1 << ft->table_log;
@@ -153,7 +153,7 @@ static inline uint8_t fast_decode(bitreader_t *br, const fast_table_t *ft)
  * ================================================================ */
 
 int trad_huffman_encode(const uint8_t *symbols, size_t n_symbols,
-                        const pivco_huffman_table_t *table,
+                        const pivco_table_t *table,
                         uint8_t *out, size_t *out_len, size_t *out_bits)
 {
     if (!symbols || !table || !out || !out_len) return PIVCO_ERR_NULL;
@@ -180,7 +180,7 @@ int trad_huffman_encode(const uint8_t *symbols, size_t n_symbols,
  * ================================================================ */
 
 int trad_huffman_decode(const uint8_t *in, size_t in_bits,
-                        const pivco_huffman_table_t *table,
+                        const pivco_table_t *table,
                         uint8_t *symbols, size_t n_symbols)
 {
     if (!in || !table || !symbols) return PIVCO_ERR_NULL;
@@ -220,7 +220,7 @@ int trad_huffman_decode(const uint8_t *in, size_t in_bits,
 #define STREAM_HEADER_SIZE 6   /* 3 × uint16_t */
 
 int trad_huffman_encode_4s(const uint8_t *symbols, size_t n_symbols,
-                           const pivco_huffman_table_t *table,
+                           const pivco_table_t *table,
                            uint8_t *out, size_t *out_len)
 {
     if (!symbols || !table || !out || !out_len) return PIVCO_ERR_NULL;
@@ -274,7 +274,7 @@ int trad_huffman_encode_4s(const uint8_t *symbols, size_t n_symbols,
 }
 
 int trad_huffman_decode_4s(const uint8_t *in, size_t in_len,
-                           const pivco_huffman_table_t *table,
+                           const pivco_table_t *table,
                            uint8_t *symbols, size_t n_symbols)
 {
     if (!in || !table || !symbols) return PIVCO_ERR_NULL;

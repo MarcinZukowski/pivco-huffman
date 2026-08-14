@@ -1,6 +1,6 @@
 /* ---------- Joint code-length / flat-shape optimization ----------
  *
- * pivco_huffman_build_table derives code lengths that minimize
+ * pivco_build_table derives code lengths that minimize
  * compressed bits.  This pass additionally bends them -- at an
  * explicitly priced, guard-bounded cost in bits -- so the per-length
  * class counts land on round binary numbers and the OPTIMIZED chunk
@@ -103,20 +103,8 @@ _Static_assert(PIVCO_MAX_CODE_LEN <= 15,
         _mm_packs_epi32(_mm_castps_si128(m), _mm_castps_si128(m))
 #endif
 
-/* ---------- effort knob (process-global, same pattern as the FSE
- * toggle).  Read once per pivco_huffman_build_table call. ---------- */
-
-static pivco_effort_t g_effort = PIVCO_EFFORT_PLAIN;
-
-void pivco_huffman_set_effort(pivco_effort_t effort)
-{
-    g_effort = effort;
-}
-
-pivco_effort_t pivco_huffman_get_effort(void)
-{
-    return g_effort;
-}
+/* ---------- effort knob: pivco_cfg_t.effort, passed down from
+ * pivco_build_table per call. ---------- */
 
 /* ---------- model knobs ----------
  *
@@ -155,6 +143,7 @@ typedef struct {
      * decode tax swamps the merge-pass savings (bell_s10 was shipping
      * -24% under PHA without this term). */
     double fse_tau;     /* extra full-merge passes per element; 0 off */
+    int fse_enabled;    /* from build cfg (was the process global) */
     double fse_eta;     /* modeled FSE efficiency threshold */
     double fse_wmin;    /* min elements/block for a commit attempt */
 } joint_params_t;
@@ -168,6 +157,7 @@ static const joint_params_t joint_defaults = {
     {0},            /* kappa */
     1.0,            /* mu_cst */
     4.0,            /* fse_tau (measured Apple M-class) */
+    1,              /* fse_enabled (overwritten per call) */
     0.85,           /* fse_eta */
     64.0,           /* fse_wmin */
 };
@@ -309,7 +299,7 @@ static double chunk_list_time(jl_chunk_t *ch, int n,
      * toggle once per pricing (both guard sides see the same value). */
     const double scale = total_weight > 0
                        ? (double)PIVCO_BLOCK_SIZE / total_weight : 0.0;
-    const int fse_on = jp->fse_tau > 0 && pivco_huffman_get_fse_enabled();
+    const int fse_on = jp->fse_tau > 0 && jp->fse_enabled;
     int i = 0, kind, recs = 0;
     double w;
     double t = sim_subtree_time(ch, n, &i, 0, jp, kap, scale, fse_on,
@@ -1307,16 +1297,19 @@ static int joint_core(jl_leaf_t *sf, int sigma,
 }
 
 int pivco_joint_optimize_lengths(const uint64_t freq[PIVCO_MAX_SYMBOLS],
-                                 uint8_t lengths[PIVCO_MAX_SYMBOLS])
+                                 uint8_t lengths[PIVCO_MAX_SYMBOLS],
+                                 const pivco_cfg_t *cfg)
 {
+    if (!cfg) cfg = &pivco_cfg_default;
+    const pivco_effort_t effort = cfg->effort;
     if (!freq || !lengths) return -1;
-    const pivco_effort_t effort = g_effort;
     if (effort == PIVCO_EFFORT_PLAIN) return -1;
     /* The chunk model prices the OPTIMIZED decomposition; under the
      * other (ablation) tree modes the plain Huffman lengths are kept. */
-    if (pivco_huffman_get_tree_mode() != PIVCO_TREE_MODE_OPTIMIZED) return -1;
+    if (cfg->tree_mode != PIVCO_TREE_MODE_OPTIMIZED) return -1;
 
     joint_params_t jp = joint_defaults;
+    jp.fse_enabled = cfg->fse_enabled;
     jp.gran = effort == PIVCO_EFFORT_FASTER_DECOMPRESS  ? 0
             : effort == PIVCO_EFFORT_FASTEST_DECOMPRESS ? 1
             : -1;   /* BALANCED -- and FASTEST_COMPRESS reaching a bare

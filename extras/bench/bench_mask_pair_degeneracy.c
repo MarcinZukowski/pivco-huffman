@@ -26,6 +26,7 @@
  */
 
 #include "pivco_huffman.h"
+#include "bench_ctx.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -63,7 +64,7 @@ typedef struct {
 /* Walk one partition node like encode_node_neon — build mask byte for
  * each 8-group and partition into left/right children — but accumulate
  * mask stats instead of writing a bitstream. */
-static void walk_partition(const pivco_huffman_table_t *t,
+static void walk_partition(const pivco_table_t *t,
                             int16_t node_id,
                             uint16_t *indices, int n,
                             int depth,
@@ -137,8 +138,8 @@ static void run_dist(int idx, int n_blocks)
     const char *name = bench_dist_name(idx);
     const uint64_t *freq = bench_dist_freq(idx);
 
-    pivco_huffman_table_t t;
-    if (pivco_huffman_build_table(freq, &t) != PIVCO_OK) {
+    pivco_table_t t;
+    if (pivco_build_table(bench_cfg(), freq, &t) != PIVCO_OK) {
         printf("%-15s  build_table failed\n", name);
         return;
     }

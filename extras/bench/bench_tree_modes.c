@@ -17,6 +17,7 @@
  * Compiled as part of extras/bench/CMakeLists.txt.
  */
 #include "pivco_huffman.h"
+#include "bench_ctx.h"
 #include "huf.h"
 #ifdef PIVCO_HAS_OODLE
 #  include "bench_oodle_wrapper.h"
@@ -54,16 +55,16 @@ static void measure_mode(pivco_tree_mode_t mode, const uint8_t *sym, size_t n,
                           double *dec_mbs_out, double *ratio_out,
                           int *flat_internal_nodes_out)
 {
-    pivco_huffman_set_tree_mode(mode);
+    bench_cfg()->tree_mode = (mode);
 
-    pivco_huffman_table_t *table = malloc(sizeof(*table));
+    pivco_table_t *table = malloc(sizeof(*table));
     assert(table);
 
     /* Build table from per-byte frequencies. */
     uint64_t freq[PIVCO_MAX_SYMBOLS];
     memset(freq, 0, sizeof(freq));
     for (size_t i = 0; i < n; i++) freq[sym[i]]++;
-    int rc = pivco_huffman_build_table(freq, table);
+    int rc = pivco_build_table(bench_cfg(), freq, table);
     if (rc != PIVCO_OK) { fprintf(stderr, "build_table failed: %d\n", rc); free(table); return; }
 
     /* Encode the whole buffer in 8K blocks, capture compressed bytes. */
@@ -76,7 +77,7 @@ static void measure_mode(pivco_tree_mode_t mode, const uint8_t *sym, size_t n,
     size_t blocks = n / BLK;
     for (size_t b = 0; b < blocks; b++) {
         size_t got;
-        int r = pivco_huffman_encode(sym + b * BLK, BLK, table, enc + total_enc, &got);
+        int r = pivco_encode(bench_enc_ctx(), table, sym + b * BLK, BLK, enc + total_enc, &got);
         if (r != PIVCO_OK) { fprintf(stderr, "encode err blk %zu: %d\n", b, r); goto out; }
         total_enc += got;
     }
@@ -96,8 +97,7 @@ static void measure_mode(pivco_tree_mode_t mode, const uint8_t *sym, size_t n,
         const uint8_t *p = enc;
         for (size_t b = 0; b < blocks; b++) {
             size_t consumed;
-            int rc2 = pivco_huffman_decode(p, total_enc - (size_t)(p - enc),
-                                            table, dec + b * BLK, &consumed);
+            int rc2 = pivco_decode(bench_dec_ctx(), table, p, total_enc - (size_t)(p - enc), dec + b * BLK, &consumed);
             if (rc2 != PIVCO_OK) { fprintf(stderr, "decode err blk %zu: %d\n", b, rc2); goto out; }
             p += consumed;
         }
@@ -116,8 +116,7 @@ static void measure_mode(pivco_tree_mode_t mode, const uint8_t *sym, size_t n,
             const uint8_t *p = enc;
             for (size_t b = 0; b < blocks; b++) {
                 size_t consumed;
-                pivco_huffman_decode(p, total_enc - (size_t)(p - enc),
-                                      table, dec + b * BLK, &consumed);
+                pivco_decode(bench_dec_ctx(), table, p, total_enc - (size_t)(p - enc), dec + b * BLK, &consumed);
                 p += consumed;
             }
         }
@@ -218,7 +217,7 @@ int main(int argc, char **argv) {
     const char *dist_filter = (argc > 2) ? argv[2] : NULL;
 
     /* FSE disabled across all measurements -- pure tree-shape ablation. */
-    pivco_huffman_set_fse_enabled(0);
+    bench_cfg()->fse_enabled = (0);
 
     uint8_t *sym = malloc(BUF_BYTES);
     assert(sym);

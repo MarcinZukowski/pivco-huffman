@@ -24,6 +24,7 @@
  */
 
 #include <stdio.h>
+#include "bench_ctx.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
@@ -218,10 +219,10 @@ static result_t measure_ph(const uint8_t *sym, size_t n, int fse_on,
     #define WSZ(w)  (((w) + 1 < nwin) ? G   : (n    - (w) * G))
     R.builds = (int)nwin;
 
-    pivco_huffman_set_fse_enabled(fse_on);
-    pivco_huffman_set_tree_mode(tree_mode);
+    bench_cfg()->fse_enabled = (fse_on);
+    bench_cfg()->tree_mode = (tree_mode);
 
-    pivco_huffman_table_t *gtbl = NULL, *wtbl = NULL, *wtbls = NULL;
+    pivco_table_t *gtbl = NULL, *wtbl = NULL, *wtbls = NULL;
     uint8_t (*win_clen)[256] = NULL;
     uint8_t *enc = NULL, *enco = NULL, *dec = NULL;
     size_t  *off = NULL, *offo = NULL;
@@ -231,7 +232,7 @@ static result_t measure_ph(const uint8_t *sym, size_t n, int fse_on,
     if (!gtbl || !wtbl) goto done_fail;
     uint64_t f[256];
     histo_u64(sym, n, f);
-    if (pivco_huffman_build_table(f, gtbl) != 0) goto done_fail;
+    if (pivco_build_table(bench_cfg(), f, gtbl) != 0) goto done_fail;
 
     /* per-window tables + their code_lens, for opaque enc/dec */
     win_clen = malloc(nwin * 256);
@@ -239,7 +240,7 @@ static result_t measure_ph(const uint8_t *sym, size_t n, int fse_on,
     if (!win_clen || !wtbls) goto done_fail;
     for (size_t w = 0; w < nwin; w++) {
         uint64_t wf[256]; histo_u64(sym + w * G, WSZ(w), wf);
-        if (pivco_huffman_build_table(wf, &wtbls[w]) != 0) goto done_fail;
+        if (pivco_build_table(bench_cfg(), wf, &wtbls[w]) != 0) goto done_fail;
         memcpy(win_clen[w], wtbls[w].code_len, 256);
     }
 
@@ -254,7 +255,7 @@ static result_t measure_ph(const uint8_t *sym, size_t n, int fse_on,
     off[0] = 0;
     for (size_t b = 0; b < nblk; b++) {
         size_t L = 0;
-        if (pivco_huffman_encode(sym + b * BLK, BLK, gtbl, enc + off[b], &L) != 0) goto done_fail;
+        if (pivco_encode(bench_enc_ctx(), gtbl, sym + b * BLK, BLK, enc + off[b], &L) != 0) goto done_fail;
         off[b + 1] = off[b] + L;
     }
     /* pre-encode opaque stream (per-window tables) */
@@ -262,48 +263,48 @@ static result_t measure_ph(const uint8_t *sym, size_t n, int fse_on,
     for (size_t w = 0; w < nwin; w++)
         for (size_t i = 0, wb = WBPW(w); i < wb; i++) {
             size_t b = w * bpw + i, L = 0;
-            if (pivco_huffman_encode(sym + b * BLK, BLK, &wtbls[w], enco + offo[b], &L) != 0) goto done_fail;
+            if (pivco_encode(bench_enc_ctx(), &wtbls[w], sym + b * BLK, BLK, enco + offo[b], &L) != 0) goto done_fail;
             offo[b + 1] = offo[b] + L;
         }
 
     /* correctness check (prebuilt + opaque) */
     for (size_t b = 0; b < nblk; b++) {
         size_t c = 0;
-        pivco_huffman_decode(enc + off[b], off[b+1]-off[b], gtbl, dec, &c);
+        pivco_decode(bench_dec_ctx(), gtbl, enc + off[b], off[b+1]-off[b], dec, &c);
         if (memcmp(sym + b * BLK, dec, BLK) != 0) { fprintf(stderr,"ph PB mismatch blk %zu\n",b); goto done_fail; }
     }
     for (size_t w = 0; w < nwin; w++)
         for (size_t i = 0, wb = WBPW(w); i < wb; i++) {
             size_t b = w*bpw+i, c = 0;
-            pivco_huffman_decode(enco + offo[b], offo[b+1]-offo[b], &wtbls[w], dec, &c);
+            pivco_decode(bench_dec_ctx(), &wtbls[w], enco + offo[b], offo[b+1]-offo[b], dec, &c);
             if (memcmp(sym + b * BLK, dec, BLK) != 0) { fprintf(stderr,"ph OP mismatch blk %zu\n",b); goto done_fail; }
         }
 
     double best;
     /* ---- encode prebuilt: global table, just emit ---- */
     BEST_MBPS({
-        for (size_t b = 0; b < nblk; b++) { size_t L=0; pivco_huffman_encode(sym + b*BLK, BLK, gtbl, enc + off[b], &L); }
+        for (size_t b = 0; b < nblk; b++) { size_t L=0; pivco_encode(bench_enc_ctx(), gtbl, sym + b*BLK, BLK, enc + off[b], &L); }
     });
     R.enc_pb = best;
     /* ---- encode opaque: rebuild table per window + emit ---- */
     BEST_MBPS({
         for (size_t w = 0; w < nwin; w++) {
             uint64_t wf[256]; histo_u64(sym + w*G, WSZ(w), wf);
-            pivco_huffman_build_table(wf, wtbl);
-            for (size_t i = 0, wb = WBPW(w); i < wb; i++) { size_t b=w*bpw+i, L=0; pivco_huffman_encode(sym + b*BLK, BLK, wtbl, enco + offo[b], &L); }
+            pivco_build_table(bench_cfg(), wf, wtbl);
+            for (size_t i = 0, wb = WBPW(w); i < wb; i++) { size_t b=w*bpw+i, L=0; pivco_encode(bench_enc_ctx(), wtbl, sym + b*BLK, BLK, enco + offo[b], &L); }
         }
     });
     R.enc_op = best;
     /* ---- decode prebuilt: global table ---- */
     BEST_MBPS({
-        for (size_t b = 0; b < nblk; b++) { size_t c=0; pivco_huffman_decode(enc + off[b], off[b+1]-off[b], gtbl, dec, &c); }
+        for (size_t b = 0; b < nblk; b++) { size_t c=0; pivco_decode(bench_dec_ctx(), gtbl, enc + off[b], off[b+1]-off[b], dec, &c); }
     });
     R.dec_pb = best;
     /* ---- decode opaque: rebuild table-from-codelens per window ---- */
     BEST_MBPS({
         for (size_t w = 0; w < nwin; w++) {
-            pivco_huffman_build_table_from_code_lens(win_clen[w], wtbl);
-            for (size_t i = 0, wb = WBPW(w); i < wb; i++) { size_t b=w*bpw+i, c=0; pivco_huffman_decode(enco + offo[b], offo[b+1]-offo[b], wtbl, dec, &c); }
+            pivco_build_table_from_code_lens(bench_cfg(), win_clen[w], wtbl);
+            for (size_t i = 0, wb = WBPW(w); i < wb; i++) { size_t b=w*bpw+i, c=0; pivco_decode(bench_dec_ctx(), wtbl, enco + offo[b], offo[b+1]-offo[b], dec, &c); }
         }
     });
     R.dec_op = best;
@@ -753,7 +754,7 @@ typedef result_t (*engine_fn)(const uint8_t*, size_t);
 static const struct { const char *name; engine_fn fn; } ENGINES[] = {
     {"ph", e_ph}, {"pha", e_pha},
     /* Tree-shape ablation variants — same codec as `ph`, different chunk-
-     * decomposition at build_table.  See pivco_huffman_set_tree_mode().
+     * decomposition at build_table.  See bench_cfg()->tree_mode = ().
      * Used by paper/plots/tree_modes_*.svg and <tab-tree-modes>. */
     {"ph_naive", e_ph_naive}, {"ph_flat", e_ph_flat},
     {"td_naive", e_td_naive}, {"td_scl_opt", e_td_scl},

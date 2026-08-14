@@ -41,6 +41,7 @@
  */
 
 #include "pivco_huffman.h"
+#include "bench_ctx.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -91,7 +92,7 @@ static cov_t opt_cov(const multiset_t *m, int min_D)
 
 /* ---------- Canonical-tree coverage (current production) ---------- */
 
-static int local_min(const pivco_huffman_table_t *t, int16_t node_id)
+static int local_min(const pivco_table_t *t, int16_t node_id)
 {
     const pivco_tree_node_t *n = &t->tree[node_id];
     if (n->symbol >= 0) return 0;
@@ -100,7 +101,7 @@ static int local_min(const pivco_huffman_table_t *t, int16_t node_id)
     return 1 + (l < r ? l : r);
 }
 
-static int local_max(const pivco_huffman_table_t *t, int16_t node_id)
+static int local_max(const pivco_table_t *t, int16_t node_id)
 {
     const pivco_tree_node_t *n = &t->tree[node_id];
     if (n->symbol >= 0) return 0;
@@ -109,7 +110,7 @@ static int local_max(const pivco_huffman_table_t *t, int16_t node_id)
     return 1 + (l > r ? l : r);
 }
 
-static uint64_t subtree_freq_sum(const pivco_huffman_table_t *t,
+static uint64_t subtree_freq_sum(const pivco_table_t *t,
                                   int16_t node_id,
                                   const uint64_t *freq)
 {
@@ -126,7 +127,7 @@ static uint64_t subtree_freq_sum(const pivco_huffman_table_t *t,
    Also accumulates freq-weighted partition cost (sum of subtree freqs
    over partitioning internals = total weight passing through partition
    ops = proxy for runtime cost). */
-static void canonical_walk(const pivco_huffman_table_t *t,
+static void canonical_walk(const pivco_table_t *t,
                             int16_t node_id, int cur_depth,
                             const uint64_t *freq,
                             int *flat_d2_leaves,    uint64_t *flat_d2_freq,
@@ -189,7 +190,7 @@ static int cmp_u64_desc(const void *a, const void *b)
    length, return the maximum freq sum we can place into flat slots
    (top-K freqs of length L go to the K flat slots at depth L). */
 static uint64_t freq_optimal_for_shape(const uint16_t *per_depth_flat,
-                                        const pivco_huffman_table_t *t,
+                                        const pivco_table_t *t,
                                         const uint64_t *freq)
 {
     uint64_t total = 0;
@@ -220,7 +221,7 @@ static uint64_t freq_optimal_for_shape(const uint16_t *per_depth_flat,
                of subtree-freq-sum); normalised by /total_freq it is the
                mean number of partitions traversed per decoded element. */
 static void opt_partition(const multiset_t *m,
-                           const pivco_huffman_table_t *t,
+                           const pivco_table_t *t,
                            const uint64_t *freq,
                            int *count, uint64_t *cost)
 {
@@ -284,9 +285,9 @@ static void analyze(int d)
     const char *name = bench_dist_name(d);
     const uint64_t *freq = bench_dist_freq(d);
 
-    pivco_huffman_table_t *t =
-        (pivco_huffman_table_t *)malloc(sizeof(*t));
-    if (pivco_huffman_build_table(freq, t) != PIVCO_OK) {
+    pivco_table_t *t =
+        (pivco_table_t *)malloc(sizeof(*t));
+    if (pivco_build_table(bench_cfg(), freq, t) != PIVCO_OK) {
         printf("%-14s | build_table failed\n", name);
         free(t);
         return;

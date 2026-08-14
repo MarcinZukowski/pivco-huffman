@@ -157,7 +157,7 @@ typedef struct {
     uint8_t  *tmp8;                       /* right-side scatter target                     */
     const uint16_t *code_la_lut;          /* sym -> u16 left-aligned code (u16enc gather) */
     const uint8_t  *sym_to_rank;          /* sym -> u8 rank              (prim_enc gather) */
-    pivco_huffman_enc_init_aux_t enc_init_aux; /* pre-shifted rank tables (x86 prim_enc 4tab) */
+    pivco_enc_init_aux_t enc_init_aux; /* pre-shifted rank tables (x86 prim_enc 4tab) */
     uint8_t  rank_thr, rank_base;
     uint32_t *hist;                       /* prim_histogram_chunk output bins   */
     uint8_t  *hist_scratch;               /* PIVCO_PRIM_HIST_SCRATCH bytes      */

@@ -3,7 +3,6 @@
 
 #include "pivcohuf_file.h"
 #include "pivco_huffman.h"
-#include "pivco_huffman_primitives.h"  /* arch-selected prim_histogram_chunk */
 #include "pivco_prof.h"
 
 #include <stdio.h>
@@ -134,35 +133,10 @@ size_t pivcohuf_compress_bound(size_t in_len)
     return pivcohuf_compress_bound_blk(in_len, PIVCO_BLOCK_SIZE);
 }
 
-/* Chunked byte histogram: adds counts of in[0..n) into freq[256] via
- * the arch-selected prim_histogram_chunk (4x-u32 scalar core, or the
- * AVX-512 positional bit-plane counter).  Chunks so the primitive's
- * u32 counters cannot overflow; scratch for the AVX-512 bins lives in
- * a thread-local buffer (grown once, reused).  Internal to the file
- * codec -- other callers use the primitive directly. */
-static __thread uint8_t *g_hist_scratch = NULL;
-static int file_histogram(const uint8_t *in, size_t n, uint64_t freq[256])
-{
-    prim_codec_init();
-    if (!g_hist_scratch) {
-        g_hist_scratch = (uint8_t *)malloc(PIVCO_PRIM_HIST_SCRATCH);
-        if (!g_hist_scratch) return PIVCOHUF_ERR_INTERNAL;
-    }
-    size_t off = 0;
-    while (off < n) {
-        size_t len = n - off;
-        if (len > PIVCO_PRIM_HIST_CHUNK) len = PIVCO_PRIM_HIST_CHUNK;
-        uint32_t h32[256] = {0};
-        PROF_TIC();
-        prim_histogram_chunk(in + off, len, h32, g_hist_scratch);
-        PROF_TOC(PROF_FILE_HISTOGRAM, len);
-        for (int s = 0; s < 256; s++) freq[s] += h32[s];
-        off += len;
-    }
-    return PIVCOHUF_OK;
-}
 
-static int pivcohuf_compress_impl(const uint8_t *in, size_t in_len,
+static int pivcohuf_compress_impl(pivco_encoder_t *enc_ctx,
+                                  const pivco_cfg_t *cfg,
+                                  const uint8_t *in, size_t in_len,
                                   uint8_t *out, size_t *out_len,
                                   size_t block_size,
                                   pivcohuf_timing_t *tm)
@@ -180,14 +154,14 @@ static int pivcohuf_compress_impl(const uint8_t *in, size_t in_len,
      * prim_histogram_chunk under a chunked u32 -> u64 wrapper. */
     uint64_t real_freq[256] = {0};
     { double _t = TIC(tm);
-      if (file_histogram(in, in_len, real_freq) != PIVCOHUF_OK)
+      if (pivco_histogram(enc_ctx, in, in_len, real_freq) != PIVCO_OK)
           return PIVCOHUF_ERR_INTERNAL;
       if (in_len == 0) real_freq[0] = 1;
       TOC(tm, freq_ns, _t); }
 
-    pivco_huffman_table_t real_table;
+    pivco_table_t real_table;
     { PROF_TIC(); double _t = TIC(tm);
-      if (pivco_huffman_build_table(real_freq, &real_table) != PIVCO_OK)
+      if (pivco_build_table(cfg, real_freq, &real_table) != PIVCO_OK)
           return PIVCOHUF_ERR_INTERNAL;
       PROF_TOC(PROF_FILE_BUILD_TABLE_REAL, 1); TOC(tm, build_ns, _t); }
 
@@ -195,9 +169,9 @@ static int pivcohuf_compress_impl(const uint8_t *in, size_t in_len,
      * uses the exact table the decoder reconstructs from the wire.  The tree
      * is fully determined by the code lengths (within-tier order is symbol-
      * value), so nothing beyond the lengths is transmitted. */
-    pivco_huffman_table_t table;
+    pivco_table_t table;
     { PROF_TIC(); double _t = TIC(tm);
-      if (pivco_huffman_build_table_from_code_lens(real_table.code_len,
+      if (pivco_build_table_from_code_lens(cfg, real_table.code_len,
                                                     &table) != PIVCO_OK)
           return PIVCOHUF_ERR_INTERNAL;
       PROF_TOC(PROF_FILE_BUILD_TABLE_SYN, 1); TOC(tm, build_ns, _t); }
@@ -261,7 +235,7 @@ static int pivcohuf_compress_impl(const uint8_t *in, size_t in_len,
 
         { PROF_TIC();
           size_t enc_len = 0;
-          if (pivco_huffman_encode(blk_src, this_n, &table, p, &enc_len) != PIVCO_OK) {
+          if (pivco_encode(enc_ctx, &table, blk_src, this_n, p, &enc_len) != PIVCO_OK) {
               free(block_buf);
               return PIVCOHUF_ERR_INTERNAL;
           }
@@ -289,31 +263,30 @@ static int pivcohuf_compress_impl(const uint8_t *in, size_t in_len,
 }
 
 /* pha (#PHA): same wire/decoder, but per-block bitmaps may be ANS(FSE)-coded.
- * The FSE path is selected by a process-global flag; save/set/restore it
- * around the whole compress so the caller's setting is not disturbed.
- * Decompress needs no flag — it auto-detects FSE markers per block. */
+ * The FSE path is selected per build via pivco_cfg_t.fse_enabled (baked
+ * into the table).  Decompress needs no flag — it auto-detects FSE
+ * markers per block. */
 static int compress_dispatch(const uint8_t *in, size_t in_len,
                              uint8_t *out, size_t *out_len,
-                             int use_ans, size_t block_size,
-                             pivcohuf_timing_t *tm)
+                             const pivco_cfg_t *cfg_in, int use_ans,
+                             size_t block_size, pivcohuf_timing_t *tm)
 {
     if (tm) memset(tm, 0, sizeof(*tm));
-    int prev = pivco_huffman_get_fse_enabled();
-    pivco_huffman_set_fse_enabled(use_ans);
+    pivco_cfg_t cfg = cfg_in ? *cfg_in : pivco_cfg_default;
+    cfg.fse_enabled = use_ans;
     /* FASTEST_COMPRESS is the one effort mode the bare table build
      * cannot resolve (it needs the input size): below 256 KiB plain
      * Huffman lengths encode fastest; above, a flatter tree ENCODES
      * faster than the BALANCED shaping solve costs, and the solve's
-     * cost keeps shrinking as 1/n.  Same save/set/restore pattern as
-     * the FSE flag. */
-    pivco_effort_t eff_prev = pivco_huffman_get_effort();
-    if (eff_prev == PIVCO_EFFORT_FASTEST_COMPRESS)
-        pivco_huffman_set_effort(in_len < (size_t)262144
-                                 ? PIVCO_EFFORT_PLAIN
-                                 : PIVCO_EFFORT_BALANCED);
-    int r = pivcohuf_compress_impl(in, in_len, out, out_len, block_size, tm);
-    pivco_huffman_set_effort(eff_prev);
-    pivco_huffman_set_fse_enabled(prev);
+     * cost keeps shrinking as 1/n. */
+    if (cfg.effort == PIVCO_EFFORT_FASTEST_COMPRESS)
+        cfg.effort = in_len < (size_t)262144 ? PIVCO_EFFORT_PLAIN
+                                             : PIVCO_EFFORT_BALANCED;
+    pivco_encoder_t *enc_ctx = pivco_encoder_create();
+    if (!enc_ctx) return PIVCOHUF_ERR_INTERNAL;
+    int r = pivcohuf_compress_impl(enc_ctx, &cfg, in, in_len, out, out_len,
+                                   block_size, tm);
+    pivco_encoder_free(enc_ctx);
     return r;
 }
 
@@ -322,20 +295,31 @@ int pivcohuf_compress_blk(const uint8_t *in, size_t in_len,
                           int use_ans, size_t block_size,
                           pivcohuf_timing_t *timing)
 {
-    return compress_dispatch(in, in_len, out, out_len, use_ans, block_size, timing);
+    return compress_dispatch(in, in_len, out, out_len, NULL, use_ans,
+                             block_size, timing);
+}
+
+int pivcohuf_compress_cfg(const uint8_t *in, size_t in_len,
+                          uint8_t *out, size_t *out_len,
+                          const pivco_cfg_t *cfg, size_t block_size,
+                          pivcohuf_timing_t *timing)
+{
+    int use_ans = cfg ? cfg->fse_enabled : 0;
+    return compress_dispatch(in, in_len, out, out_len, cfg, use_ans,
+                             block_size, timing);
 }
 
 int pivcohuf_compress_ex(const uint8_t *in, size_t in_len,
                          uint8_t *out, size_t *out_len, int use_ans)
 {
-    return compress_dispatch(in, in_len, out, out_len, use_ans,
+    return compress_dispatch(in, in_len, out, out_len, NULL, use_ans,
                              PIVCO_BLOCK_SIZE, NULL);
 }
 
 int pivcohuf_compress(const uint8_t *in, size_t in_len,
                       uint8_t *out, size_t *out_len)
 {
-    return compress_dispatch(in, in_len, out, out_len, 0,
+    return compress_dispatch(in, in_len, out, out_len, NULL, 0,
                              PIVCO_BLOCK_SIZE, NULL);
 }
 
@@ -343,7 +327,7 @@ int pivcohuf_compress_timed(const uint8_t *in, size_t in_len,
                             uint8_t *out, size_t *out_len,
                             int use_ans, pivcohuf_timing_t *timing)
 {
-    return compress_dispatch(in, in_len, out, out_len, use_ans,
+    return compress_dispatch(in, in_len, out, out_len, NULL, use_ans,
                              PIVCO_BLOCK_SIZE, timing);
 }
 
@@ -375,7 +359,8 @@ int pivcohuf_peek_uncompressed_size(const uint8_t *in, size_t in_len,
     return PIVCOHUF_OK;
 }
 
-static int pivcohuf_decompress_impl(const uint8_t *in, size_t in_len,
+static int pivcohuf_decompress_impl(pivco_decoder_t *dec_ctx,
+                                    const uint8_t *in, size_t in_len,
                                     uint8_t *out, size_t *out_len,
                                     pivcohuf_timing_t *tm)
 {
@@ -410,9 +395,9 @@ static int pivcohuf_decompress_impl(const uint8_t *in, size_t in_len,
         code_lens[2*i + 1] = (nibbles[i] >> 4) & 0x0F;
     }
 
-    pivco_huffman_table_t table;
+    pivco_table_t table;
     { PROF_TIC(); double _t = TIC(tm);
-      if (pivco_huffman_build_table_from_code_lens(code_lens, &table) != PIVCO_OK)
+      if (pivco_build_table_from_code_lens(NULL, code_lens, &table) != PIVCO_OK)
           return PIVCOHUF_ERR_INTERNAL;
       PROF_TOC(PROF_FILE_BUILD_TABLE_SYN, 1); TOC(tm, build_ns, _t); }
     /* Sanity check: rebuilt code lengths must match. */
@@ -447,7 +432,7 @@ static int pivcohuf_decompress_impl(const uint8_t *in, size_t in_len,
 
         { PROF_TIC();
           size_t consumed = 0;
-          if (pivco_huffman_decode(p, blk_enc_len, &table,
+          if (pivco_decode(dec_ctx, &table, p, blk_enc_len,
                                    blk_out, &consumed) != PIVCO_OK) {
               err = PIVCOHUF_ERR_INTERNAL; break;
           }
@@ -472,7 +457,13 @@ static int pivcohuf_decompress_impl(const uint8_t *in, size_t in_len,
 int pivcohuf_decompress(const uint8_t *in, size_t in_len,
                         uint8_t *out, size_t *out_len)
 {
-    return pivcohuf_decompress_impl(in, in_len, out, out_len, NULL);
+    {
+        pivco_decoder_t *dec_ctx = pivco_decoder_create();
+        if (!dec_ctx) return PIVCOHUF_ERR_INTERNAL;
+        int r = pivcohuf_decompress_impl(dec_ctx, in, in_len, out, out_len, NULL);
+        pivco_decoder_free(dec_ctx);
+        return r;
+    }
 }
 
 int pivcohuf_decompress_timed(const uint8_t *in, size_t in_len,
@@ -480,5 +471,11 @@ int pivcohuf_decompress_timed(const uint8_t *in, size_t in_len,
                               pivcohuf_timing_t *timing)
 {
     if (timing) memset(timing, 0, sizeof(*timing));
-    return pivcohuf_decompress_impl(in, in_len, out, out_len, timing);
+    {
+        pivco_decoder_t *dec_ctx = pivco_decoder_create();
+        if (!dec_ctx) return PIVCOHUF_ERR_INTERNAL;
+        int r = pivcohuf_decompress_impl(dec_ctx, in, in_len, out, out_len, timing);
+        pivco_decoder_free(dec_ctx);
+        return r;
+    }
 }

@@ -1,4 +1,5 @@
 #include "pivco_huffman.h"
+#include "bench_ctx.h"
 #include "mem.h"
 #define HUF_STATIC_LINKING_ONLY
 #include "huf.h"
@@ -83,9 +84,9 @@ int main(int argc, char **argv)
         } else if (strcmp(argv[i], "--tdbu") == 0) {
             tdbu_only = 1;
         } else if (strcmp(argv[i], "--no-fse") == 0) {
-            pivco_huffman_set_fse_enabled(0);
+            bench_cfg()->fse_enabled = (0);
         } else if (strncmp(argv[i], "--effort=", 9) == 0) {
-            pivco_huffman_set_effort((pivco_effort_t)atoi(argv[i] + 9));
+            bench_cfg()->effort = ((pivco_effort_t)atoi(argv[i] + 9));
         } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
             printf("Usage: %s [repeats] [--all] [--tdbu] [--no-fse] [--effort=N]\n"
                    "  repeats   passes over 4M symbols per timed run (default %d)\n"
@@ -188,14 +189,14 @@ int main(int argc, char **argv)
         const char *name = bench_dist_name(d);
         const uint64_t *freq = bench_dist_freq(d);
 
-        pivco_huffman_table_t *table = (pivco_huffman_table_t *)malloc(sizeof(pivco_huffman_table_t));
-        int rc = pivco_huffman_build_table(freq, table);
+        pivco_table_t *table = (pivco_table_t *)malloc(sizeof(pivco_table_t));
+        int rc = pivco_build_table(bench_cfg(), freq, table);
         if (rc != PIVCO_OK) {
             printf("%-13s ERROR: build_table returned %d\n", name, rc);
             continue;
         }
         /* trad_huffman_decode* read the 2^L flat table, no longer auto-built */
-        pivco_huffman_build_traditional_table(table);
+        pivco_build_traditional_table(table);
 
         /* Generate full 4M symbol sequence */
         uint8_t *symbols = (uint8_t *)malloc(TOTAL_SYMBOLS);
@@ -208,8 +209,7 @@ int main(int argc, char **argv)
         pivco_enc_off[0] = 0;
         for (int b = 0; b < NBLOCKS; b++) {
             size_t len;
-            pivco_huffman_encode_scalar(symbols + (size_t)b * BLK, BLK, table,
-                                        pivco_enc_buf + pivco_enc_off[b], &len);
+            pivco_encode_scalar(bench_enc_ctx(), table, symbols + (size_t)b * BLK, BLK, pivco_enc_buf + pivco_enc_off[b], &len);
             pivco_enc_off[b + 1] = pivco_enc_off[b] + len;
         }
 
@@ -219,8 +219,7 @@ int main(int argc, char **argv)
         neon_enc_off[0] = 0;
         for (int b = 0; b < NBLOCKS; b++) {
             size_t len;
-            pivco_huffman_encode(symbols + (size_t)b * BLK, BLK, table,
-                                      neon_enc_buf + neon_enc_off[b], &len);
+            pivco_encode(bench_enc_ctx(), table, symbols + (size_t)b * BLK, BLK, neon_enc_buf + neon_enc_off[b], &len);
             neon_enc_off[b + 1] = neon_enc_off[b] + len;
         }
 #endif
@@ -291,8 +290,7 @@ int main(int argc, char **argv)
             size_t consumed;
 
             /* PIVCO scalar — first block */
-            rc = pivco_huffman_decode_scalar(pivco_enc_buf, pivco_enc_off[1],
-                                             table, dec, &consumed);
+            rc = pivco_decode_scalar(bench_dec_ctx(), table, pivco_enc_buf, pivco_enc_off[1], dec, &consumed);
             if (rc != PIVCO_OK || memcmp(symbols, dec, BLK) != 0) {
                 printf("%-13s ERROR: pivco roundtrip failed\n", name);
                 free(dec); goto cleanup;
@@ -359,10 +357,7 @@ int main(int argc, char **argv)
          * commit 1399cee for the regression that motivated this. */
         for (int b = 0; b < NBLOCKS; b++) {
             size_t consumed;
-            pivco_huffman_decode_scalar(
-                pivco_enc_buf + pivco_enc_off[b],
-                pivco_enc_off[b+1] - pivco_enc_off[b],
-                table, dec_buf + (size_t)b * BLK, &consumed);
+            pivco_decode_scalar(bench_dec_ctx(), table, pivco_enc_buf + pivco_enc_off[b], pivco_enc_off[b+1] - pivco_enc_off[b], dec_buf + (size_t)b * BLK, &consumed);
         }
         uint64_t expected_cksum = fnv1a(dec_buf, TOTAL_SYMBOLS);
 
@@ -370,37 +365,25 @@ int main(int argc, char **argv)
         BENCH(p_dec_n, {
             for (int b = 0; b < NBLOCKS; b++) {
                 size_t consumed;
-                pivco_huffman_decode(
-                    neon_enc_buf + neon_enc_off[b],
-                    neon_enc_off[b+1] - neon_enc_off[b],
-                    table, dec_buf + (size_t)b * BLK, &consumed);
+                pivco_decode(bench_dec_ctx(), table, neon_enc_buf + neon_enc_off[b], neon_enc_off[b+1] - neon_enc_off[b], dec_buf + (size_t)b * BLK, &consumed);
             }
         }, "pivco_n");
 
         /* Bottom-up merge decoder.  Same encoded stream as the
-         * top-down decoder; routed per-arch.  See pivco_huffman_bu_*.c. */
+         * top-down decoder; routed per-arch.  See pivco_bu_*.c. */
         BENCH(p_dec_bu, {
             for (int b = 0; b < NBLOCKS; b++) {
                 size_t consumed;
 #if defined(PIVCO_HAS_NEON)
-                pivco_huffman_decode_bu_neon(
-                    neon_enc_buf + neon_enc_off[b],
-                    neon_enc_off[b+1] - neon_enc_off[b],
-                    table, dec_buf + (size_t)b * BLK, &consumed);
+                pivco_decode_bu_neon(bench_dec_ctx(), table, neon_enc_buf + neon_enc_off[b], neon_enc_off[b+1] - neon_enc_off[b], dec_buf + (size_t)b * BLK, &consumed);
 #elif defined(PIVCO_HAS_AVX512)
                 /* AVX-512 hosts: codec_avx512 (Phase 5 backend, 2026-05-14).
-                 * Distinct symbol from pivco_huffman_decode_bu_x86 (= codec_x86,
+                 * Distinct symbol from pivco_decode_bu_x86 (= codec_x86,
                  * SSE/AVX2 only); the runtime dispatcher in pivco_huffman.c
                  * picks this entry on AVX-512 hosts too. */
-                pivco_huffman_decode_bu_avx512(
-                    neon_enc_buf + neon_enc_off[b],
-                    neon_enc_off[b+1] - neon_enc_off[b],
-                    table, dec_buf + (size_t)b * BLK, &consumed);
+                pivco_decode_bu_avx512(bench_dec_ctx(), table, neon_enc_buf + neon_enc_off[b], neon_enc_off[b+1] - neon_enc_off[b], dec_buf + (size_t)b * BLK, &consumed);
 #elif defined(PIVCO_HAS_SSE4)
-                pivco_huffman_decode_bu_x86(
-                    neon_enc_buf + neon_enc_off[b],
-                    neon_enc_off[b+1] - neon_enc_off[b],
-                    table, dec_buf + (size_t)b * BLK, &consumed);
+                pivco_decode_bu_x86(bench_dec_ctx(), table, neon_enc_buf + neon_enc_off[b], neon_enc_off[b+1] - neon_enc_off[b], dec_buf + (size_t)b * BLK, &consumed);
 #endif
             }
         }, "pivco_bu");
@@ -411,10 +394,7 @@ int main(int argc, char **argv)
         BENCH(p_dec_s, {
             for (int b = 0; b < NBLOCKS; b++) {
                 size_t consumed;
-                pivco_huffman_decode_scalar(
-                    pivco_enc_buf + pivco_enc_off[b],
-                    pivco_enc_off[b+1] - pivco_enc_off[b],
-                    table, dec_buf + (size_t)b * BLK, &consumed);
+                pivco_decode_scalar(bench_dec_ctx(), table, pivco_enc_buf + pivco_enc_off[b], pivco_enc_off[b+1] - pivco_enc_off[b], dec_buf + (size_t)b * BLK, &consumed);
             }
         }, "pivco_s");
 

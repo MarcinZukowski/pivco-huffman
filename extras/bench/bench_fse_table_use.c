@@ -8,6 +8,7 @@
  * Usage: pivco_bench_fse_table_use PATH [PATH ...] */
 
 #include "pivco_huffman.h"
+#include "bench_ctx.h"
 
 #include <errno.h>
 #include <stdint.h>
@@ -43,13 +44,13 @@ static int run_one(const char *path)
     uint64_t freq[256] = {0};
     for (long i = 0; i < sz_used; i++) freq[buf[i]]++;
 
-    pivco_huffman_table_t table;
-    if (pivco_huffman_build_table(freq, &table) != PIVCO_OK) {
+    pivco_table_t table;
+    if (pivco_build_table(bench_cfg(), freq, &table) != PIVCO_OK) {
         fprintf(stderr, "build_table failed\n"); free(buf); return 1;
     }
 
-    pivco_huffman_set_fse_enabled(1);
-    pivco_huffman_fse_stats_reset();
+    bench_cfg()->fse_enabled = (1);
+    pivco_fse_stats_reset();
 
     int nblocks = (int)(sz_used / PIVCO_BLOCK_SIZE);
     uint8_t *enc = (uint8_t *)malloc((size_t)nblocks * (PIVCO_BLOCK_SIZE * 2 + 64));
@@ -57,9 +58,7 @@ static int run_one(const char *path)
     size_t cur = 0, total_enc = 0;
     for (int b = 0; b < nblocks; b++) {
         size_t out_len = 0;
-        int rc = pivco_huffman_encode(buf + (size_t)b * PIVCO_BLOCK_SIZE,
-                                       PIVCO_BLOCK_SIZE,
-                                       &table, enc + cur, &out_len);
+        int rc = pivco_encode(bench_enc_ctx(), &table, buf + (size_t)b * PIVCO_BLOCK_SIZE, PIVCO_BLOCK_SIZE, enc + cur, &out_len);
         if (rc != PIVCO_OK) { fprintf(stderr, "encode %d failed: %d\n", b, rc); break; }
         cur += out_len;
     }
@@ -69,7 +68,7 @@ static int run_one(const char *path)
     uint64_t attempt[PIVCO_FSE_STATS_SLOTS];
     uint64_t bin[PIVCO_FSE_STATS_SLOTS];
     uint64_t bout[PIVCO_FSE_STATS_SLOTS];
-    pivco_huffman_fse_stats_get(commit, attempt, bin, bout);
+    pivco_fse_stats_get(commit, attempt, bin, bout);
 
     uint64_t commit_total = 0, attempt_total = 0;
     uint64_t bin_total = 0, bout_total = 0;
@@ -116,7 +115,7 @@ static int run_one(const char *path)
     printf("\n");
 
     /* ---------- Root-node-per-block view ---------- */
-    int rn = pivco_huffman_fse_root_count();
+    int rn = pivco_fse_root_count();
     if (rn > 0) {
         printf("=== Root-node events (one per block, %d total) ===\n", rn);
         int hist[26]      = {0};   /* by committed table_id (slot 0 = no commit) */
@@ -124,8 +123,8 @@ static int run_one(const char *path)
         double pmax = 0, pmin = 1.0, psum = 0;
         int root_in = 0, root_out = 0;
         for (int i = 0; i < rn; i++) {
-            pivco_huffman_fse_root_event_t e;
-            pivco_huffman_fse_root_get(i, &e);
+            pivco_fse_root_event_t e;
+            pivco_fse_root_get(i, &e);
             if (e.committed) hist[e.table_id]++;
             else             hist[0]++;
             if (e.table_id) hist_attempt[e.table_id]++;
@@ -161,8 +160,8 @@ static int run_one(const char *path)
         /* Per-block timeline: which table did the root pick, block-by-block. */
         printf("Block-by-block root table_id timeline (. = no commit):\n");
         for (int i = 0; i < rn; i++) {
-            pivco_huffman_fse_root_event_t e;
-            pivco_huffman_fse_root_get(i, &e);
+            pivco_fse_root_event_t e;
+            pivco_fse_root_get(i, &e);
             if ((i % 32) == 0) printf("[%4d] ", i);
             if (!e.committed) putchar('.');
             else if (e.table_id < 10) putchar('0' + e.table_id);

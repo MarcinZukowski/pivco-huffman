@@ -21,6 +21,7 @@
  */
 
 #include "pivco_huffman.h"
+#include "bench_ctx.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -36,7 +37,7 @@ extern const uint64_t *bench_dist_freq(int idx);
  * metadata (flat_depth / flat_offset / flat_code_to_sym) rather than
  * recomputing flatness by descending the subtree -- since the flat-leaf-skip
  * build, flat roots have no materialized children to descend into. */
-static void collect_flat(const pivco_huffman_table_t *t,
+static void collect_flat(const pivco_table_t *t,
                           int16_t node_id,
                           const uint64_t *freq,
                           uint64_t *w_by_depth,  /* depth 0..15 */
@@ -65,9 +66,9 @@ static void analyze_distribution(int d)
     const char *name = bench_dist_name(d);
     const uint64_t *freq = bench_dist_freq(d);
 
-    pivco_huffman_table_t *t =
-        (pivco_huffman_table_t *)malloc(sizeof(pivco_huffman_table_t));
-    if (pivco_huffman_build_table(freq, t) != PIVCO_OK) {
+    pivco_table_t *t =
+        (pivco_table_t *)malloc(sizeof(pivco_table_t));
+    if (pivco_build_table(bench_cfg(), freq, t) != PIVCO_OK) {
         printf("%-14s | build_table failed\n", name);
         free(t);
         return;

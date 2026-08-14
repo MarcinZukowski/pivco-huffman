@@ -95,7 +95,7 @@ static inline int bitmap_bytes(int n)
  *
  * The "needs header" decision is a pure function of the tree topology and
  * matches across encoder and decoder via this shared helper. */
-static inline int kr_header_needed(const pivco_huffman_table_t *table,
+static inline int kr_header_needed(const pivco_table_t *table,
                                     int16_t node_id)
 {
     const pivco_tree_node_t *n = &table->tree[node_id];
@@ -106,5 +106,32 @@ static inline int kr_header_needed(const pivco_huffman_table_t *table,
 }
 
 #define KR_HEADER_BYTES 2  /* uint16 little-endian */
+
+/* Context-owned scratch (the former per-thread arenas).  Lives behind
+ * the public contexts' `internal` pointer; grown by the codec's ensure
+ * helpers, preallocated for PIVCO_WIRE_MAX_N at context create. */
+typedef struct {
+    uint8_t *enc; size_t enc_cap;      /* encode ranks + recursion tmp */
+    uint8_t *dec; size_t dec_cap;      /* decode ping-pong arena       */
+} pivco_scratch_t;
+
+#define PIVCO_ENC_SCRATCH_BYTES(N) \
+    ((size_t)(N) + 64 + (size_t)(N) * (PIVCO_MAX_CODE_LEN + 2) \
+     + PIVCO_PRIM_HIST_SCRATCH_MAX)
+#define PIVCO_PRIM_HIST_SCRATCH_MAX (4 * 16 * 1024 + 64)
+#define PIVCO_DEC_SCRATCH_BYTES(N) \
+    ((size_t)(N) * (PIVCO_MAX_CODE_LEN + 2) + 64)
+
+/* The decode arena's usable base is aligned to a 16 KiB boundary plus
+ * 64*39 bytes.  The in-place walk parks every nested child chain so it
+ * ends exactly at base + N; when that address sits within [-16, +256)
+ * of a 16 KiB page boundary, the merge tails' 16 B over-reads become
+ * page-split loads, ~25 cycles each on Apple M4 (page size == 16 KiB ==
+ * the block size, so a page-aligned allocation hits the band
+ * deterministically — dna_fasta PH -11% E2E).  The odd 64-aligned
+ * offset pins the chain end mid-page on every host.  Allocations must
+ * carry this much extra headroom (see decode_scratch_ensure). */
+#define DECODE_SCRATCH_ALIGN ((uintptr_t)16384)   /* Apple page size */
+#define DECODE_SCRATCH_SHIFT (64 * 39)
 
 #endif /* PIVCO_HUFFMAN_COMMON_H */

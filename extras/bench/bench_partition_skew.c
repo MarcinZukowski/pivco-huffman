@@ -13,6 +13,7 @@
  */
 
 #include "pivco_huffman.h"
+#include "bench_ctx.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -27,7 +28,7 @@ extern const uint64_t *bench_dist_freq(int idx);
 #define NBINS 11   /* 0-5, 5-10, 10-15, ..., 45-50 */
 
 /* Returns subtree freq, accumulates weight × bin into hist. */
-static double walk(const pivco_huffman_table_t *t, int16_t node,
+static double walk(const pivco_table_t *t, int16_t node,
                     const uint64_t *freq, double hist[NBINS])
 {
     const pivco_tree_node_t *n = &t->tree[node];
@@ -48,8 +49,8 @@ static double walk(const pivco_huffman_table_t *t, int16_t node,
 
 static void print_one(const char *name, const uint64_t *freq)
 {
-    pivco_huffman_table_t t;
-    if (pivco_huffman_build_table(freq, &t) != PIVCO_OK) {
+    pivco_table_t t;
+    if (pivco_build_table(bench_cfg(), freq, &t) != PIVCO_OK) {
         printf("%-15s  build_table failed\n", name);
         return;
     }

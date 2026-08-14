@@ -1,4 +1,4 @@
-/* pivco_huffman_neon_fused_1leaf.c — FAILED EXPERIMENT (kept for reference).
+/* pivco_neon_fused_1leaf.c — FAILED EXPERIMENT (kept for reference).
  *
  * Tried to fuse the partition + leaf-side scatter at non-prefill one-leaf
  * nodes: keep the TBL-compacted leaf indices IN REGISTER and drain them
@@ -25,7 +25,7 @@
  *
  * The code below is the Trick 2 (bucketed) version — the best of the
  * three variants.  It compiles standalone against the exported NEON
- * tables from pivco_huffman_neon.c but is not built or wired into the
+ * tables from pivco_neon.c but is not built or wired into the
  * library.  Encoded format matches the baseline neon encoder.
  */
 
@@ -36,7 +36,7 @@
 #ifdef PIVCO_HAS_NEON
 #include <arm_neon.h>
 
-/* Shared with pivco_huffman_neon.c */
+/* Shared with pivco_neon.c */
 extern uint8_t compress_tab[256][32];
 extern uint8_t compress_popcnt[256];
 extern void    init_compress_table(void);
@@ -191,7 +191,7 @@ void scatter_v_lanes(uint8_t *symbols, uint16x8_t idx, uint8_t sym, int v) {
 
 /* ---------- Decode ---------- */
 
-static void decode_node_neon_jt(const pivco_huffman_table_t *table,
+static void decode_node_neon_jt(const pivco_table_t *table,
                                  int16_t node_id,
                                  uint16_t *indices, int n,
                                  uint8_t *symbols,
@@ -412,10 +412,10 @@ static void decode_node_neon_jt(const pivco_huffman_table_t *table,
                         symbols, in_ptr, tmp + n_right, skip_node);
 }
 
-/* Root-level wrapper — mirrors pivco_huffman_decode_neon's root dispatch,
+/* Root-level wrapper — mirrors pivco_decode_neon's root dispatch,
  * only difference is it calls decode_node_neon_jt for subtree work. */
-int pivco_huffman_decode_neon_jt(const uint8_t *in, size_t in_len,
-                                  const pivco_huffman_table_t *table,
+int pivco_decode_neon_jt(const uint8_t *in, size_t in_len,
+                                  const pivco_table_t *table,
                                   uint8_t *symbols, size_t *consumed)
 {
     if (!in || !table || !symbols || !consumed) return PIVCO_ERR_NULL;

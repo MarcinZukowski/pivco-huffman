@@ -121,8 +121,9 @@ if(TARGET_ARCH STREQUAL "arm64" OR TARGET_ARCH STREQUAL "aarch64")
     list(APPEND PIVCO_SOURCES
         src/pivco_huffman_neon_tables.c)
     add_compile_definitions(PIVCO_HAS_NEON=1)
-    # Note: SVE backend exists (pivco_huffman_sve.c) but is disabled and
-    # stale (pre-unified-codec).  Empirically confirmed loss vs NEON at
+    # Note: an SVE backend existed (pivco_huffman_sve.c, removed 2026-08-14
+    # -- see git history) but was disabled and stale (pre-unified-codec).
+    # Empirically confirmed loss vs NEON at
     # BOTH 128-bit SVE (Graviton 4 / Neoverse V2) and 256-bit SVE
     # (Graviton 3 / Neoverse V1).  Partition microbench on c7g
     # (extras/sve_probe/partition_probe.c) measured SVE-256 at 0.26x

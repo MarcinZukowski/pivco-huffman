@@ -54,6 +54,8 @@ endif()
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
 
 # Dump distribution histograms as a JS-loadable data file for figures/tree_viz.html.
+include_directories(${CMAKE_SOURCE_DIR}/bench ${CMAKE_SOURCE_DIR}/src)
+
 add_executable(pivco_dump_distributions
     ${CMAKE_SOURCE_DIR}/extras/dump_distributions.c
     ${BENCH_DIST}

@@ -1,4 +1,4 @@
-/* pivco_huffman_neon_prefix.c — prefix-radix backend.
+/* pivco_neon_prefix.c — prefix-radix backend.
  *
  * Format: first M = table->min_len bits of every element's code are
  * packed as a contiguous per-element stream (LSB-first within bytes).
@@ -204,7 +204,7 @@ typedef struct {
     int16_t node_id;      /* tree node id landed at after M steps */
 } bin_info_t;
 
-static void precompute_bins(const pivco_huffman_table_t *t, int M,
+static void precompute_bins(const pivco_table_t *t, int M,
                              bin_info_t *bins)
 {
     int K = 1 << M;
@@ -253,8 +253,8 @@ static inline void scatter_sym(uint8_t *symbols,
 
 /* ---------- Encode ---------- */
 
-int pivco_huffman_encode_neon_prefix(const uint8_t *symbols,
-                                      const pivco_huffman_table_t *table,
+int pivco_encode_neon_prefix(const uint8_t *symbols,
+                                      const pivco_table_t *table,
                                       uint8_t *out, size_t *out_len)
 {
     if (!symbols || !table || !out || !out_len) return PIVCO_ERR_NULL;
@@ -409,8 +409,8 @@ int pivco_huffman_encode_neon_prefix(const uint8_t *symbols,
 
 /* ---------- Decode ---------- */
 
-int pivco_huffman_decode_neon_prefix(const uint8_t *in, size_t in_len,
-                                      const pivco_huffman_table_t *table,
+int pivco_decode_neon_prefix(const uint8_t *in, size_t in_len,
+                                      const pivco_table_t *table,
                                       uint8_t *symbols, size_t *consumed)
 {
     if (!in || !table || !symbols || !consumed) return PIVCO_ERR_NULL;

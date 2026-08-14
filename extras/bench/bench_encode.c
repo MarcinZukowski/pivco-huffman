@@ -2,8 +2,8 @@
  * loop and 5-runs-drop-2 methodology but times the encoders only.
  *
  * Backends timed:
- *   pivco_s_e   pivco_huffman_encode_scalar
- *   pivco_e     pivco_huffman_encode           (backend-specific)
+ *   pivco_s_e   pivco_encode_scalar
+ *   pivco_e     pivco_encode           (backend-specific)
  *   trad_4s_e   trad_huffman_encode_4s         (huf0-shape comparator)
  *   huf0_x2_e   HUF_compress                   (zstd huff0 4-stream)
  *   huf0_x1_e   HUF_compress1X                 (zstd huff0 1-stream)
@@ -12,6 +12,7 @@
  *          where ratio = pivco_e / huf0_x2_e.
  */
 #include "pivco_huffman.h"
+#include "bench_ctx.h"
 #include "mem.h"
 #define HUF_STATIC_LINKING_ONLY
 #include "huf.h"
@@ -134,9 +135,9 @@ int main(int argc, char **argv)
         const char *name = bench_dist_name(d);
         const uint64_t *freq = bench_dist_freq(d);
 
-        pivco_huffman_table_t *table =
-            (pivco_huffman_table_t *)malloc(sizeof(pivco_huffman_table_t));
-        if (pivco_huffman_build_table(freq, table) != PIVCO_OK) {
+        pivco_table_t *table =
+            (pivco_table_t *)malloc(sizeof(pivco_table_t));
+        if (pivco_build_table(bench_cfg(), freq, table) != PIVCO_OK) {
             printf("%-13s ERROR: build_table failed\n", name);
             free(table);
             continue;
@@ -151,17 +152,17 @@ int main(int argc, char **argv)
             uint8_t *enc = (uint8_t *)malloc(PIVCO_MAX_ENCODED_SIZE);
             uint8_t *dec = (uint8_t *)malloc(BLK);
             size_t len, consumed;
-            pivco_huffman_encode_scalar(symbols, BLK, table, enc, &len);
-            pivco_huffman_decode_scalar(enc, len, table, dec, &consumed);
+            pivco_encode_scalar(bench_enc_ctx(), table, symbols, BLK, enc, &len);
+            pivco_decode_scalar(bench_dec_ctx(), table, enc, len, dec, &consumed);
             if (memcmp(symbols, dec, BLK) != 0) {
                 fprintf(stderr, "  %s: pivco_s encode roundtrip FAILED\n", name);
                 free(enc); free(dec); goto skip;
             }
-            pivco_huffman_encode(symbols, BLK, table, enc, &len);
+            pivco_encode(bench_enc_ctx(), table, symbols, BLK, enc, &len);
             /* Cross-compare against scalar encoder's output. */
             uint8_t *enc_scalar = (uint8_t *)malloc(PIVCO_MAX_ENCODED_SIZE);
             size_t len_scalar;
-            pivco_huffman_encode_scalar(symbols, BLK, table, enc_scalar, &len_scalar);
+            pivco_encode_scalar(bench_enc_ctx(), table, symbols, BLK, enc_scalar, &len_scalar);
             if (len != len_scalar) {
                 fprintf(stderr, "  %s: enc len mismatch neon=%zu scalar=%zu\n",
                         name, len, len_scalar);
@@ -176,7 +177,7 @@ int main(int argc, char **argv)
                 }
             }
             free(enc_scalar);
-            pivco_huffman_decode_scalar(enc, len, table, dec, &consumed);
+            pivco_decode_scalar(bench_dec_ctx(), table, enc, len, dec, &consumed);
             if (memcmp(symbols, dec, BLK) != 0) {
                 fprintf(stderr, "  %s: pivco encode roundtrip FAILED\n", name);
                 free(enc); free(dec); goto skip;
@@ -206,18 +207,14 @@ int main(int argc, char **argv)
         BENCH_ENC(e_pivco_s, {
             for (int b = 0; b < NBLOCKS; b++) {
                 size_t len;
-                pivco_huffman_encode_scalar(
-                    symbols + (size_t)b * BLK, BLK, table,
-                    pivco_s_buf + (size_t)b * PIVCO_MAX_ENCODED_SIZE, &len);
+                pivco_encode_scalar(bench_enc_ctx(), table, symbols + (size_t)b * BLK, BLK, pivco_s_buf + (size_t)b * PIVCO_MAX_ENCODED_SIZE, &len);
             }
         }, "pivco_s");
 
         BENCH_ENC(e_pivco, {
             for (int b = 0; b < NBLOCKS; b++) {
                 size_t len;
-                pivco_huffman_encode(
-                    symbols + (size_t)b * BLK, BLK, table,
-                    pivco_buf + (size_t)b * PIVCO_MAX_ENCODED_SIZE, &len);
+                pivco_encode(bench_enc_ctx(), table, symbols + (size_t)b * BLK, BLK, pivco_buf + (size_t)b * PIVCO_MAX_ENCODED_SIZE, &len);
             }
         }, "pivco");
 

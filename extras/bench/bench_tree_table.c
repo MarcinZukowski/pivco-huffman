@@ -18,6 +18,7 @@
  *     for canonical Huffman; OPTIMIZED reshuffles preserve average depth.
  */
 #include "pivco_huffman.h"
+#include "bench_ctx.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -51,7 +52,7 @@ static double shannon_H(const uint64_t *freq) {
  * in tree[] (build_table absorbs them into flat_code_to_sym), so we
  * enumerate them via flat_offset / flat_code_to_sym.  All such leaves
  * share ops = depth+1 and Huffman depth = depth+D. */
-static void leaf_stats_walk(const pivco_huffman_table_t *t,
+static void leaf_stats_walk(const pivco_table_t *t,
                              int16_t node, int depth,
                              const uint64_t *freq,
                              uint64_t *out_total_freq,
@@ -90,7 +91,7 @@ static void leaf_stats_walk(const pivco_huffman_table_t *t,
 /* Count internal nodes that emit a merge primitive in the BU traversal.
  * Leaves produce constants — no op. A flat-D>=2 subtree root counts once
  * (its children are absorbed and not materialized in tree[]). */
-static int count_op_nodes(const pivco_huffman_table_t *t, int16_t node) {
+static int count_op_nodes(const pivco_table_t *t, int16_t node) {
     if (t->tree[node].symbol >= 0) return 0;        /* leaf */
     if (t->flat_depth[node] >= 2)  return 1;        /* flat root: 1 merge */
     int c = 1;
@@ -108,10 +109,10 @@ static mode_stats_t build_and_measure(pivco_tree_mode_t mode,
                                        const uint64_t *freq,
                                        double *out_weighted_code_len) {
     mode_stats_t st = {0};
-    pivco_huffman_set_tree_mode(mode);
+    bench_cfg()->tree_mode = (mode);
 
-    pivco_huffman_table_t *t = calloc(1, sizeof(*t));
-    if (pivco_huffman_build_table(freq, t) != PIVCO_OK) {
+    pivco_table_t *t = calloc(1, sizeof(*t));
+    if (pivco_build_table(bench_cfg(), freq, t) != PIVCO_OK) {
         fprintf(stderr, "build_table failed for mode %d\n", (int)mode);
         free(t);
         return st;

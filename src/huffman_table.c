@@ -216,13 +216,14 @@ static void limit_code_lengths(uint8_t *lengths, int n_symbols, int max_len)
  * (lengths come straight off the wire -- no heap needed).  Assumes `table` is
  * already zeroed and table->num_symbols is set; caller handles n_used <= 1. */
 static int build_table_finish(const uint8_t lengths[PIVCO_MAX_SYMBOLS],
-                              pivco_huffman_table_t *table);
+                              pivco_table_t *table,
+                              const pivco_cfg_t *cfg);
 
 /* Fill enc_init_aux from sym_to_rank: on x86 the 2tab merge hi table (rank<<8)
  * and point the aux at it; elsewhere leave the aux NULL.  Called by every build
  * path that finalizes sym_to_rank (build_table_finish and the single-symbol fast
  * path), so the x86 prim_enc_init never sees a NULL aux. */
-static void fill_enc_init_aux(pivco_huffman_table_t *table)
+static void fill_enc_init_aux(pivco_table_t *table)
 {
 #if defined(__x86_64__) || defined(__i386__)
     for (int s = 0; s < PIVCO_MAX_SYMBOLS; s++)
@@ -235,7 +236,7 @@ static void fill_enc_init_aux(pivco_huffman_table_t *table)
 
 /* Single-symbol degenerate tree: root -> two leaves of the same symbol.
  * Assumes `table` is zeroed. */
-static void build_single_symbol_table(int sym, pivco_huffman_table_t *table)
+static void build_single_symbol_table(int sym, pivco_table_t *table)
 {
     table->code[sym] = 0;
     table->code_len[sym] = 1;
@@ -264,10 +265,12 @@ static void build_single_symbol_table(int sym, pivco_huffman_table_t *table)
     fill_enc_init_aux(table);   /* sym_to_rank is all-zero (rank 0) here; aux must not stay NULL */
 }
 
-int pivco_huffman_build_table(const uint64_t freq[PIVCO_MAX_SYMBOLS],
-                              pivco_huffman_table_t *table)
+int pivco_build_table(const pivco_cfg_t *cfg,
+                              const uint64_t freq[PIVCO_MAX_SYMBOLS],
+                              pivco_table_t *table)
 {
     if (!freq || !table) return PIVCO_ERR_NULL;
+    if (!cfg) cfg = &pivco_cfg_default;
 
     memset(table, 0, sizeof(*table));
 
@@ -286,6 +289,7 @@ int pivco_huffman_build_table(const uint64_t freq[PIVCO_MAX_SYMBOLS],
 
     if (n_used == 1) {
         build_single_symbol_table(used[0], table);
+        table->fse_enabled = (uint8_t)(cfg->fse_enabled ? 1 : 0);
         return PIVCO_OK;
     }
 
@@ -300,10 +304,10 @@ int pivco_huffman_build_table(const uint64_t freq[PIVCO_MAX_SYMBOLS],
     /* Optional joint length/shape pass (encoder side only; the decoder
        rebuilds identically from the transmitted lengths).  Any internal
        reject keeps the plain Huffman lengths above. */
-    if (pivco_huffman_get_effort() != PIVCO_EFFORT_PLAIN)
-        (void)pivco_joint_optimize_lengths(freq, lengths);
+    if (cfg->effort != PIVCO_EFFORT_PLAIN)
+        (void)pivco_joint_optimize_lengths(freq, lengths, cfg);
 
-    return build_table_finish(lengths, table);
+    return build_table_finish(lengths, table, cfg);
 }
 
 /* partbyrank: assign each leaf its in-order rank (left-to-right leaf
@@ -315,7 +319,7 @@ int pivco_huffman_build_table(const uint64_t freq[PIVCO_MAX_SYMBOLS],
  *   split_rank[node]     = rank after left - 1  (max rank of the left subtree)
  * A flat subtree's leaves are enumerated in code order (== in-order) via
  * flat_code_to_sym, not the tree structure, so it does not recurse. */
-static uint16_t assign_inorder_ranks(pivco_huffman_table_t *table,
+static uint16_t assign_inorder_ranks(pivco_table_t *table,
                                      int16_t id, uint16_t rank)
 {
     const pivco_tree_node_t *n = &table->tree[id];
@@ -338,8 +342,10 @@ static uint16_t assign_inorder_ranks(pivco_huffman_table_t *table,
 }
 
 static int build_table_finish(const uint8_t lengths[PIVCO_MAX_SYMBOLS],
-                              pivco_huffman_table_t *table)
+                              pivco_table_t *table,
+                              const pivco_cfg_t *cfg)
 {
+    table->fse_enabled = (uint8_t)(cfg->fse_enabled ? 1 : 0);
     /* Copy lengths to table */
     for (int i = 0; i < PIVCO_MAX_SYMBOLS; i++) {
         table->code_len[i] = lengths[i];
@@ -422,7 +428,7 @@ static int build_table_finish(const uint8_t lengths[PIVCO_MAX_SYMBOLS],
     }
 
     /* Decompose each c_L into chunks.  Strategy depends on tree mode --
-       see pivco_huffman_set_tree_mode().  Default OPTIMIZED matches the
+       see pivco_cfg_t.tree_mode.  Default OPTIMIZED matches the
        original production behavior (decompose c_L by its set bits). */
     typedef struct {
         uint16_t L;
@@ -434,7 +440,7 @@ static int build_table_finish(const uint8_t lengths[PIVCO_MAX_SYMBOLS],
     } chunk_t;
     chunk_t chunks[PIVCO_MAX_SYMBOLS];   /* upper bound: one chunk per symbol */
     int n_chunks = 0;
-    pivco_tree_mode_t tree_mode = pivco_huffman_get_tree_mode();
+    pivco_tree_mode_t tree_mode = cfg->tree_mode;
 
     if (tree_mode == PIVCO_TREE_MODE_NAIVE) {
         /* Every symbol is its own D=0 chunk at depth L. */
@@ -619,7 +625,7 @@ static int build_table_finish(const uint8_t lengths[PIVCO_MAX_SYMBOLS],
     /* The 2^MAX_CODE_LEN flat decode table (decode_sym/decode_len) is used
      * ONLY by the traditional flat-table decoder (trad_huffman_decode*), never
      * by the production tree-walk path.  It is built on demand via
-     * pivco_huffman_build_traditional_table() so the normal build -- and the
+     * pivco_build_traditional_table() so the normal build -- and the
      * decode-side rebuild from code lengths -- don't pay for the 2 KB fill. */
 
 
@@ -784,18 +790,20 @@ static int build_table_finish(const uint8_t lengths[PIVCO_MAX_SYMBOLS],
  * and decoder reconstruct identical tables with no extra wire info.  Goes
  * straight to build_table_finish -- no synthetic frequencies, no Huffman
  * heap (the lengths are already final). */
-int pivco_huffman_build_table_from_code_lens(
+int pivco_build_table_from_code_lens(
+    const pivco_cfg_t *cfg,
     const uint8_t code_lens[PIVCO_MAX_SYMBOLS],
-    pivco_huffman_table_t *table)
+    pivco_table_t *table)
 {
     if (!code_lens || !table) return PIVCO_ERR_NULL;
+    if (!cfg) cfg = &pivco_cfg_default;
     /* Clear everything except the 4 KB decode_sym/decode_len pair: those are
-     * filled independently by pivco_huffman_build_traditional_table() and are
+     * filled independently by pivco_build_traditional_table() and are
      * never read by the bulk decoder, so zeroing them here is wasted work. */
     {
-        size_t skip_end = offsetof(pivco_huffman_table_t, decode_len)
+        size_t skip_end = offsetof(pivco_table_t, decode_len)
                         + sizeof(table->decode_len);
-        memset(table, 0, offsetof(pivco_huffman_table_t, decode_sym));
+        memset(table, 0, offsetof(pivco_table_t, decode_sym));
         memset((char *)table + skip_end, 0, sizeof(*table) - skip_end);
     }
 
@@ -807,16 +815,17 @@ int pivco_huffman_build_table_from_code_lens(
 
     if (n_used == 1) {
         build_single_symbol_table(last, table);
+        table->fse_enabled = (uint8_t)(cfg->fse_enabled ? 1 : 0);
         return PIVCO_OK;
     }
-    return build_table_finish(code_lens, table);
+    return build_table_finish(code_lens, table, cfg);
 }
 
 /* Fill the 2^MAX_CODE_LEN flat decode table (decode_sym/decode_len) read by
  * the traditional flat-table decoder (trad_huffman_decode*).  Call once after
  * the table is built; the production tree-walk decoder does not need it, so
- * pivco_huffman_build_table no longer fills it automatically. */
-void pivco_huffman_build_traditional_table(pivco_huffman_table_t *table)
+ * pivco_build_table no longer fills it automatically. */
+void pivco_build_traditional_table(pivco_table_t *table)
 {
     if (!table) return;
     /* Defensive base fill covers any gap for incomplete codes (single sym);

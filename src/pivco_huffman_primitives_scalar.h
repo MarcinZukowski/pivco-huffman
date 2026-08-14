@@ -1,10 +1,10 @@
-/* pivco_huffman_primitives_scalar.h — scalar implementations of the
- * codec-primitive interface (see pivco_huffman_primitives.h).
+/* pivco_primitives_scalar.h — scalar implementations of the
+ * codec-primitive interface (see pivco_primitives.h).
  *
  * Specialized names end in `_scalar`; the codec calls the aliases
  * `prim_*` defined at the bottom as always-inline wrappers.
  *
- * Internal header.  Included by pivco_huffman_primitives.h when
+ * Internal header.  Included by pivco_primitives.h when
  * PIVCO_BACKEND_SCALAR is defined.  Not part of the public API.
  */
 
@@ -157,7 +157,7 @@ PIVCO_PRIM_ALWAYS_INLINE void prim_codec_init(void)
 /* rank-based encode aliases (consumed by codec.c) */
 PIVCO_PRIM_ALWAYS_INLINE void prim_enc_init(uint8_t *ranks, int n,
                                              const uint8_t *symbols, const uint8_t *sym_to_rank,
-                                             const pivco_huffman_enc_init_aux_t *aux)
+                                             const pivco_enc_init_aux_t *aux)
 { (void)aux; enc_init_scalar(ranks, n, symbols, sym_to_rank); }
 PIVCO_PRIM_ALWAYS_INLINE int prim_enc_partition_full(uint8_t *ranks, int n,
                                              uint8_t thr, uint8_t *bm, uint8_t *right_out)

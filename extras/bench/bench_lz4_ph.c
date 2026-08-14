@@ -19,6 +19,7 @@
  */
 
 #include "pivco_huffman.h"
+#include "bench_ctx.h"
 #include "pivcohuf_file.h"
 #define HUF_STATIC_LINKING_ONLY
 #include "huf.h"
@@ -47,8 +48,8 @@ static double huff_ratio(const uint8_t *buf, size_t len)
     if (len == 0) return 0.0;
     uint64_t freq[256] = {0};
     for (size_t i = 0; i < len; i++) freq[buf[i]]++;
-    pivco_huffman_table_t table;
-    if (pivco_huffman_build_table(freq, &table) != PIVCO_OK) return 1.0;
+    pivco_table_t table;
+    if (pivco_build_table(bench_cfg(), freq, &table) != PIVCO_OK) return 1.0;
     uint64_t total_bits = 0;
     for (int s = 0; s < 256; s++) {
         if (freq[s] > 0)
@@ -952,7 +953,7 @@ int main(int argc, char **argv)
     /* ph FSE toggled per-variant: split (Huffman-only, apples-to-apples
      * with +ph/+huf columns) vs split-fse (FSE-enabled, the proper ph
      * config for entropy coding skewed streams like offsets/overflow). */
-    pivco_huffman_set_fse_enabled(0);
+    bench_cfg()->fse_enabled = (0);
 
     printf("# bench_lz4_ph — stacked codec prototype\n");
     printf("# LZ4 = LZ4_compress_HC(level=9).  zstd@N = ZSTD_compress(level=N).\n");
@@ -1000,16 +1001,16 @@ int main(int argc, char **argv)
         bench_result_t lzr   = bench_lz4_split_raw_lvl (src, src_len, iters, 9);
         bench_result_t lzr1  = bench_lz4_split_raw_lvl (src, src_len, iters, 1);
 
-        pivco_huffman_set_fse_enabled(0);
+        bench_cfg()->fse_enabled = (0);
         bench_result_t lzp   = bench_lz4_ph        (src, src_len, iters);
         bench_result_t lzh   = bench_lz4_huf0      (src, src_len, iters);
         bench_result_t lzsp  = bench_lz4_split_ph_lvl(src, src_len, iters, 9);
         bench_result_t lzsp1 = bench_lz4_split_ph_lvl(src, src_len, iters, 1);
 
-        pivco_huffman_set_fse_enabled(1);
+        bench_cfg()->fse_enabled = (1);
         bench_result_t lzsp_fse  = bench_lz4_split_ph_lvl(src, src_len, iters, 9);
         bench_result_t lzsp1_fse = bench_lz4_split_ph_lvl(src, src_len, iters, 1);
-        pivco_huffman_set_fse_enabled(0);
+        bench_cfg()->fse_enabled = (0);
 
         bench_result_t zs9   = bench_zstd_lvl      (src, src_len, iters, 9);
         bench_result_t zs3   = bench_zstd_lvl      (src, src_len, iters, 3);

@@ -1,4 +1,4 @@
-/* pivco_huffman_neon2b.c — 4-way fused partition, ping-pong/packed scratch.
+/* pivco_neon2b.c — 4-way fused partition, ping-pong/packed scratch.
  *
  * Idea: when both children of an internal node are also internal, read TWO
  * code bits per element (parent bit + grandparent bit) and partition into
@@ -30,7 +30,7 @@
 #ifdef PIVCO_HAS_NEON
 #include <arm_neon.h>
 
-/* Shared with pivco_huffman_neon.c */
+/* Shared with pivco_neon.c */
 extern uint8_t compress_tab[256][32];
 extern uint8_t compress_popcnt[256];
 extern void    init_compress_table(void);
@@ -222,7 +222,7 @@ static inline void partition_8_4way(const uint16_t *src, uint8_t b0, uint8_t b1,
 
 /* ---------- Encode ---------- */
 
-static void encode_node_neon2b(const pivco_huffman_table_t *table,
+static void encode_node_neon2b(const pivco_table_t *table,
                                 int16_t node_id,
                                 uint16_t *indices, int n,
                                 int depth,
@@ -348,8 +348,8 @@ static void encode_node_neon2b(const pivco_huffman_table_t *table,
                        depth + 1, codes, lens, out_ptr, tmp + n_right);
 }
 
-int pivco_huffman_encode_neon2b(const uint8_t *symbols,
-                                 const pivco_huffman_table_t *table,
+int pivco_encode_neon2b(const uint8_t *symbols,
+                                 const pivco_table_t *table,
                                  uint8_t *out, size_t *out_len)
 {
     if (!symbols || !table || !out || !out_len) return PIVCO_ERR_NULL;
@@ -383,7 +383,7 @@ int pivco_huffman_encode_neon2b(const uint8_t *symbols,
 
 /* ---------- Decode ---------- */
 
-static void decode_node_neon2b(const pivco_huffman_table_t *table,
+static void decode_node_neon2b(const pivco_table_t *table,
                                 int16_t node_id,
                                 uint16_t *indices, int n,
                                 uint8_t *symbols,
@@ -532,8 +532,8 @@ static void decode_node_neon2b(const pivco_huffman_table_t *table,
     }
 }
 
-int pivco_huffman_decode_neon2b(const uint8_t *in, size_t in_len,
-                                 const pivco_huffman_table_t *table,
+int pivco_decode_neon2b(const uint8_t *in, size_t in_len,
+                                 const pivco_table_t *table,
                                  uint8_t *symbols, size_t *consumed)
 {
     if (!in || !table || !symbols || !consumed) return PIVCO_ERR_NULL;

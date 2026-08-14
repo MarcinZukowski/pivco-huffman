@@ -15,6 +15,7 @@
  * per distribution, plus % bloat vs encoded block size.
  */
 #include "pivco_huffman.h"
+#include "bench_ctx.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -34,7 +35,7 @@ extern void           bench_generate_symbols(int dist_idx, uint8_t *symbols,
 #define ENC_SLOT (2 * PIVCO_BLOCK_SIZE)
 
 /* Sum histogram values for all leaves in the subtree rooted at node_id. */
-static int subtree_hist_sum(const pivco_huffman_table_t *t, int16_t node_id,
+static int subtree_hist_sum(const pivco_table_t *t, int16_t node_id,
                              const int *hist)
 {
     const pivco_tree_node_t *n = &t->tree[node_id];
@@ -58,8 +59,8 @@ typedef struct {
 
 /* Walk the dispatch tree, accumulate K_right sites and their K_right
  * values for this block.  Mirrors the popcount call-sites in
- * pivco_huffman_bu_x86.c. */
-static void walk_kr(const pivco_huffman_table_t *t, int16_t node_id, int K,
+ * pivco_bu_x86.c. */
+static void walk_kr(const pivco_table_t *t, int16_t node_id, int K,
                      const int *hist, stats_t *s)
 {
     if (K == 0) return;
@@ -92,7 +93,7 @@ static void walk_kr(const pivco_huffman_table_t *t, int16_t node_id, int K,
 
 /* Walk the dispatch tree, accumulate K_leaf sites (= leaves / skips /
  * flat-subtree terminals) and their K_leaf values for this block. */
-static void walk_kleaf(const pivco_huffman_table_t *t, int16_t node_id,
+static void walk_kleaf(const pivco_table_t *t, int16_t node_id,
                         const int *hist, stats_t *s)
 {
     const pivco_tree_node_t *n = &t->tree[node_id];
@@ -121,7 +122,7 @@ static void walk_kleaf(const pivco_huffman_table_t *t, int16_t node_id,
 }
 
 /* Count topology slots once (don't need hist). */
-static int count_kr_slots(const pivco_huffman_table_t *t, int16_t node_id)
+static int count_kr_slots(const pivco_table_t *t, int16_t node_id)
 {
     const pivco_tree_node_t *n = &t->tree[node_id];
     pivco_node_type_t type = (pivco_node_type_t)t->node_type[node_id];
@@ -137,7 +138,7 @@ static int count_kr_slots(const pivco_huffman_table_t *t, int16_t node_id)
     }
 }
 
-static int count_kleaf_slots(const pivco_huffman_table_t *t, int16_t node_id)
+static int count_kleaf_slots(const pivco_table_t *t, int16_t node_id)
 {
     const pivco_tree_node_t *n = &t->tree[node_id];
     pivco_node_type_t type = (pivco_node_type_t)t->node_type[node_id];
@@ -154,8 +155,8 @@ static void analyze_dist(int dist_idx, int blocks)
 {
     const char *name = bench_dist_name(dist_idx);
     const uint64_t *freq = bench_dist_freq(dist_idx);
-    pivco_huffman_table_t table;
-    if (pivco_huffman_build_table(freq, &table) != PIVCO_OK) {
+    pivco_table_t table;
+    if (pivco_build_table(bench_cfg(), freq, &table) != PIVCO_OK) {
         printf("%-13s | build_table failed\n", name); return;
     }
 
@@ -176,8 +177,7 @@ static void analyze_dist(int dist_idx, int blocks)
         for (int i = 0; i < BLK; i++) hist[symbols[b * BLK + i]]++;
 
         size_t enc_len;
-        if (pivco_huffman_encode(symbols + (size_t)b * BLK, BLK, &table,
-                                 enc, &enc_len) == PIVCO_OK) {
+        if (pivco_encode(bench_enc_ctx(), &table, symbols + (size_t)b * BLK, BLK, enc, &enc_len) == PIVCO_OK) {
             s.encoded_bytes += enc_len;
         }
         walk_kr(&table, table.tree_root, BLK, hist, &s);

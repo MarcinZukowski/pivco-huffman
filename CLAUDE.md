@@ -35,7 +35,7 @@ cmake --build build
 ## Architecture
 
 - **Backends**: scalar, NEON (ARM), x86 (SSE4.1 / AVX2), AVX-512 VBMI2 (Intel).  SVE is disabled (svcompact at 128-bit isn't competitive with NEON TBL).
-- **Codec framework**: one `pivco_huffman_codec.c` compiled per backend as an OBJECT library, each pulling in `primitives_<backend>.h` (the only file with SIMD intrinsics).  Runtime dispatcher in `src/pivco_huffman.c::resolve_impl` picks the best backend per host.
+- **Codec framework**: one `pivco_huffman_codec.c` compiled per backend as an OBJECT library, each pulling in `primitives_<backend>.h` (the only file with SIMD intrinsics).  `pivco_encode`/`pivco_decode` in `src/pivco_huffman.c` compile-time-dispatch to the best backend the build enabled (CMake detects the host tier).
 - **Block size**: 32K default, 16K on Apple Silicon (see `PIVCO_BLOCK_SIZE` in `include/pivco_huffman.h`)
 - **Wire format**: see `src/pivco_huffman_wire.h` for the canonical doc.  Post-order records: `[optional K_right:u16 LE at node entry][children's regions, larger-K child first][FSE marker:u8][bitmap or FSE payload]` — each bitmap sits where its merge consumes it.  Flat subtrees (D ≥ 2) skip the header and emit one N·D-bit packed region.
 - **Key data structures**:
@@ -83,7 +83,7 @@ five phases ending 2026-05-14; before that, each backend had its own
 .c file with a duplicated tree walk -- now all four share one.
 
 - `include/pivco_huffman.h` — public API + table struct
-- `src/huffman_table.c` — `pivco_huffman_build_table` + flat-subtree detection
+- `src/huffman_table.c` — `pivco_build_table` + flat-subtree detection
 - `src/joint_lengths.c` — joint code-length/flat-shape optimization: bends
   Huffman lengths toward fewer, larger flat subtrees under a guard
   (`pivco_effort_t` modes; encoder-side only, wire carries plain lengths)

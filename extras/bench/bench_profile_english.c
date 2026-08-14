@@ -2,7 +2,7 @@
  * an external sampler (sample/perf/xctrace) OR use the built-in
  * pivco_prof per-call-site instrumentation (PIVCO_PROF=1 build).
  *
- * Usage:   ./build/pivco_huffman_profile_english [dist_name]
+ * Usage:   ./build/pivco_profile_english [dist_name]
  *   dist_name defaults to "english" for back-compat; pass "prose_pride"
  *   etc. to profile a different distribution.
  *
@@ -13,6 +13,7 @@
  * ns/elem) at the end of the run — see include/pivco_prof.h. */
 
 #include "pivco_huffman.h"
+#include "bench_ctx.h"
 #include "pivco_prof.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -66,11 +67,11 @@ int main(int argc, char **argv)
      * PIVCO_PROFILE_FSE=1 to measure the ph+ANS path instead. */
     int fse_on = (getenv("PIVCO_PROFILE_FSE") &&
                   strcmp(getenv("PIVCO_PROFILE_FSE"), "1") == 0);
-    pivco_huffman_set_fse_enabled(fse_on);
+    bench_cfg()->fse_enabled = (fse_on);
     printf("FSE-on-bitmaps: %s\n", fse_on ? "ON (ph+ANS)" : "OFF (raw bitmaps)");
 
-    pivco_huffman_table_t table;
-    pivco_huffman_build_table(bench_dist_freq(dist_idx), &table);
+    pivco_table_t table;
+    pivco_build_table(bench_cfg(), bench_dist_freq(dist_idx), &table);
 
     /* Encode all blocks */
     /* English can exceed PIVCO_MAX_ENCODED_SIZE (deep tree, many nodes
@@ -84,7 +85,7 @@ int main(int argc, char **argv)
     enc_off[0] = 0;
     for (int b = 0; b < NBLOCKS; b++) {
         size_t elen;
-        pivco_huffman_encode(symbols + b * N, N, &table,
+        pivco_encode(bench_enc_ctx(), &table, symbols + b * N, N,
                              enc_buf + enc_off[b], &elen);
         enc_off[b + 1] = enc_off[b] + elen;
     }
@@ -97,9 +98,7 @@ int main(int argc, char **argv)
     {
         uint8_t *test = malloc(N);
         size_t consumed;
-        int rc = pivco_huffman_decode(enc_buf + enc_off[0],
-                                       enc_off[1] - enc_off[0],
-                                       &table, test, &consumed);
+        int rc = pivco_decode(bench_dec_ctx(), &table, enc_buf + enc_off[0], enc_off[1] - enc_off[0], test, &consumed);
         printf("Verify: rc=%d consumed=%zu match=%d\n",
                rc, consumed, memcmp(symbols, test, N) == 0);
         fflush(stdout);
@@ -147,7 +146,7 @@ int main(int argc, char **argv)
         for (int r = 0; r < REPS; r++) {
             for (int b = 0; b < NBLOCKS; b++) {
                 size_t elen;
-                pivco_huffman_encode(symbols + b * N, N, &table,
+                pivco_encode(bench_enc_ctx(), &table, symbols + b * N, N,
                                      enc_buf + enc_off[b], &elen);
             }
         }
@@ -160,22 +159,14 @@ int main(int argc, char **argv)
                 int rc;
                 if (use_bu) {
 #if defined(PIVCO_HAS_NEON)
-                    rc = pivco_huffman_decode_bu_neon(enc_buf + enc_off[b],
-                                                       enc_off[b + 1] - enc_off[b],
-                                                       &table, out + b * N, &consumed);
+                    rc = pivco_decode_bu_neon(bench_dec_ctx(), &table, enc_buf + enc_off[b], enc_off[b + 1] - enc_off[b], out + b * N, &consumed);
 #elif defined(PIVCO_HAS_SSE4)
-                    rc = pivco_huffman_decode_bu_x86(enc_buf + enc_off[b],
-                                                      enc_off[b + 1] - enc_off[b],
-                                                      &table, out + b * N, &consumed);
+                    rc = pivco_decode_bu_x86(bench_dec_ctx(), &table, enc_buf + enc_off[b], enc_off[b + 1] - enc_off[b], out + b * N, &consumed);
 #else
-                    rc = pivco_huffman_decode(enc_buf + enc_off[b],
-                                              enc_off[b + 1] - enc_off[b],
-                                              &table, out + b * N, &consumed);
+                    rc = pivco_decode(bench_dec_ctx(), &table, enc_buf + enc_off[b], enc_off[b + 1] - enc_off[b], out + b * N, &consumed);
 #endif
                 } else {
-                    rc = pivco_huffman_decode(enc_buf + enc_off[b],
-                                              enc_off[b + 1] - enc_off[b],
-                                              &table, out + b * N, &consumed);
+                    rc = pivco_decode(bench_dec_ctx(), &table, enc_buf + enc_off[b], enc_off[b + 1] - enc_off[b], out + b * N, &consumed);
                 }
                 if (r == 0 && b < 5) printf("    rc=%d consumed=%zu\n", rc, consumed);
                 if (consumed != enc_off[b + 1] - enc_off[b]) {

@@ -2,10 +2,10 @@
  * (pivco-huffman + FSE on) vs huff0 (zstd's) vs fse (Yann's TANS).
  *
  * Runs on the MAIN bench distributions (same data source as
- * pivco_huffman_bench), measures compression ratio + comp/decomp
+ * pivco_bench), measures compression ratio + comp/decomp
  * throughput for each codec.  Outputs a single clean table.
  *
- * Methodology mirrors pivco_huffman_bench: 4M symbols per
+ * Methodology mirrors pivco_bench: 4M symbols per
  * distribution, multi-run timing, drop slowest/fastest, report
  * median.  All codecs see the same input bytes.
  *
@@ -13,6 +13,7 @@
  * (MIN_THRESHOLD, MIN_RATIO, MIN_BITMAP_BYTES). */
 
 #include "pivco_huffman.h"
+#include "bench_ctx.h"
 #include "fse.h"
 #include "huf.h"
 
@@ -65,13 +66,13 @@ typedef struct {
 } codec_result_t;
 
 /* Encode/decode using pivco-huffman.  fse_enable = 0 or 1.  Output
- * format matches pivco_huffman_bench (per-block records). */
+ * format matches pivco_bench (per-block records). */
 static codec_result_t bench_pivco(const uint8_t *symbols, int total,
                                    int fse_enable,
-                                   pivco_huffman_table_t *table_in)
+                                   pivco_table_t *table_in)
 {
     codec_result_t r = {0};
-    pivco_huffman_set_fse_enabled(fse_enable);
+    bench_cfg()->fse_enabled = (fse_enable);
 
     int nblocks = total / BLK;
     uint8_t *enc = (uint8_t *)malloc((size_t)nblocks * (BLK * 2 + 64));
@@ -85,8 +86,7 @@ static codec_result_t bench_pivco(const uint8_t *symbols, int total,
         double t0 = now_sec();
         for (int b = 0; b < nblocks; b++) {
             size_t out_len = 0;
-            int rc = pivco_huffman_encode(symbols + (size_t)b * BLK, BLK,
-                                           table_in, enc + cur, &out_len);
+            int rc = pivco_encode(bench_enc_ctx(), table_in, symbols + (size_t)b * BLK, BLK, enc + cur, &out_len);
             if (rc != PIVCO_OK) { free(enc); free(off); return r; }
             off[b + 1] = cur + out_len;
             cur += out_len;
@@ -106,8 +106,7 @@ static codec_result_t bench_pivco(const uint8_t *symbols, int total,
         for (int b = 0; b < nblocks; b++) {
             size_t consumed = 0;
             size_t enc_len = off[b + 1] - off[b];
-            int rc = pivco_huffman_decode(enc + off[b], enc_len,
-                                           table_in, dec + (size_t)b * BLK,
+            int rc = pivco_decode(bench_dec_ctx(), table_in, enc + off[b], enc_len, dec + (size_t)b * BLK,
                                            &consumed);
             if (rc != PIVCO_OK) { free(enc); free(off); free(dec); return r; }
         }
@@ -269,8 +268,8 @@ static int run_file_mode(const char *path)
     uint64_t freq[256] = {0};
     for (long i = 0; i < sz; i++) freq[bytes[i]]++;
 
-    pivco_huffman_table_t table;
-    if (pivco_huffman_build_table(freq, &table) != PIVCO_OK) {
+    pivco_table_t table;
+    if (pivco_build_table(bench_cfg(), freq, &table) != PIVCO_OK) {
         fprintf(stderr, "build_table failed\n");
         free(bytes); return 1;
     }
@@ -350,7 +349,7 @@ int main(int argc, char **argv)
     uint8_t *symbols = (uint8_t *)malloc((size_t)total);
     if (!symbols) { fprintf(stderr, "OOM\n"); return 1; }
 
-    pivco_huffman_table_t table;
+    pivco_table_t table;
 
     printf("# 4-way codec comparison (4M symbols/distribution, %d runs each)\n", N_RUNS);
     printf("# ph  = pivco-huffman, FSE OFF        phe = pivco-huffman, FSE ON (current settings)\n");
@@ -373,11 +372,11 @@ int main(int argc, char **argv)
         const char *name = bench_dist_name(i);
         const uint64_t *freq = bench_dist_freq(i);
 
-        /* Generate the same 4M-symbol sequence as pivco_huffman_bench. */
+        /* Generate the same 4M-symbol sequence as pivco_bench. */
         bench_generate_symbols(i, symbols, total, 0xdeadbeef0bULL);
 
         /* Build the pivco table from the real distribution. */
-        if (pivco_huffman_build_table(freq, &table) != PIVCO_OK) {
+        if (pivco_build_table(bench_cfg(), freq, &table) != PIVCO_OK) {
             fprintf(stderr, "build_table failed on %s\n", name);
             continue;
         }

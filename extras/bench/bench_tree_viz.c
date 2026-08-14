@@ -12,6 +12,7 @@
  */
 
 #include "pivco_huffman.h"
+#include "bench_ctx.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -60,12 +61,12 @@ static int flat_D_at(const pivco_tree_node_t *tree, int16_t node)
 }
 
 /* ---------- Build canonical tree from code lengths ----------
- * Replicates the OLD pivco_huffman_build_table behaviour (sort symbols
+ * Replicates the OLD pivco_build_table behaviour (sort symbols
  * by (length, value), assign canonical codes, walk codes MSB-first).
  * `code_len[]` is taken from a freshly-built table — code lengths are
  * the same in both canonical and flat-aware variants. */
 static void build_canonical(const uint8_t *code_len,
-                             pivco_huffman_table_t *out)
+                             pivco_table_t *out)
 {
     memset(out, 0, sizeof(*out));
     memcpy(out->code_len, code_len, sizeof(out->code_len));
@@ -200,7 +201,7 @@ static void leaf_ops_walk(const pivco_tree_node_t *tree, int16_t node,
                    total_ops, n_leaves, freq, total_freq, total_freq_ops);
 }
 
-static void avg_ops_per_leaf(const pivco_huffman_table_t *t,
+static void avg_ops_per_leaf(const pivco_table_t *t,
                               const uint64_t *freq,
                               double *out_unweighted,
                               double *out_weighted)
@@ -252,7 +253,7 @@ static void collect_flat_boxes(const pivco_tree_node_t *tree, int16_t node,
 
 /* Render one tree at canvas offset (ox, oy).  Width = leaves * LEAF_W,
  * height = max_len * LEVEL_H + LEAF_R*2.  Returns total width drawn. */
-static double render_tree_panel(FILE *f, const pivco_huffman_table_t *t,
+static double render_tree_panel(FILE *f, const pivco_table_t *t,
                                  const uint64_t *freq,
                                  const char *title, double ox, double oy,
                                  double *out_panel_h)
@@ -337,13 +338,13 @@ static double render_distribution(FILE *f, const char *name,
                                    const uint64_t *freq, double oy,
                                    double *out_height)
 {
-    pivco_huffman_table_t t_opt;
-    if (pivco_huffman_build_table(freq, &t_opt) != PIVCO_OK) {
+    pivco_table_t t_opt;
+    if (pivco_build_table(bench_cfg(), freq, &t_opt) != PIVCO_OK) {
         fprintf(stderr, "build_table failed for %s\n", name);
         *out_height = 0;
         return 0;
     }
-    pivco_huffman_table_t t_canon;
+    pivco_table_t t_canon;
     build_canonical(t_opt.code_len, &t_canon);
 
     /* Distribution title. */
@@ -448,7 +449,7 @@ static void dot_emit_flat_clusters(FILE *f, const pivco_tree_node_t *tree,
 
 /* Render one named tree as a top-level DOT subgraph cluster (for the
  * "canonical vs flat-aware" side-by-side layout). */
-static void dot_emit_tree_cluster(FILE *f, const pivco_huffman_table_t *t,
+static void dot_emit_tree_cluster(FILE *f, const pivco_table_t *t,
                                    const char *cluster_name,
                                    const char *title)
 {
@@ -473,9 +474,9 @@ static void dot_emit_tree_cluster(FILE *f, const pivco_huffman_table_t *t,
 static void render_distribution_dot(FILE *f, const char *name,
                                      const uint64_t *freq)
 {
-    pivco_huffman_table_t t_opt;
-    if (pivco_huffman_build_table(freq, &t_opt) != PIVCO_OK) return;
-    pivco_huffman_table_t t_canon;
+    pivco_table_t t_opt;
+    if (pivco_build_table(bench_cfg(), freq, &t_opt) != PIVCO_OK) return;
+    pivco_table_t t_canon;
     build_canonical(t_opt.code_len, &t_canon);
 
     fprintf(f, "digraph %s {\n", name);
@@ -507,8 +508,8 @@ static void render_distribution_dot(FILE *f, const char *name,
 static void measure_distribution(const uint64_t *freq, double *out_w,
                                   double *out_h)
 {
-    pivco_huffman_table_t t_opt;
-    if (pivco_huffman_build_table(freq, &t_opt) != PIVCO_OK) {
+    pivco_table_t t_opt;
+    if (pivco_build_table(bench_cfg(), freq, &t_opt) != PIVCO_OK) {
         *out_w = 0; *out_h = 0; return;
     }
     int n_leaves = subtree_leaves(t_opt.tree, t_opt.tree_root);

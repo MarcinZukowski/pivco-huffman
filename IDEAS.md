@@ -147,6 +147,12 @@ region-offset index to skip without header walks.  Paper application
 section candidate.
 
 ### Encode scratch thread_local → encoder API context, 2026-07-01
+**RESOLVED by the context API v1**: pivco_encoder_t /
+pivco_decoder_t own both arenas (preallocated at create, freed at
+free), all thread_locals and the thread-death leak are gone, and the
+config globals folded into pivco_cfg_t consumed at table build.
+Original entry kept below for the record.
+
 The per-block encode scratch (the ranks buffer + the tree-walk's right-half recursion buffer) is a `__thread` growable arena — `g_encode_scratch` / `encode_scratch_ensure` in `pivco_huffman_codec.c`, mirroring the existing decode arena — reused across blocks so a block-loop encode no longer mallocs/frees per block.  This is a stopgap (marked `@todo` at the arena).
 
 **It leaks on thread death.**  `__thread` reclaims the *pointer* when a thread exits but never `free()`s the heap block it points at, so every thread that runs an encode and then terminates leaks its arena (up to ~`N*(MAX_CODE_LEN+2)` ≈ 750 KB at a 32 K block).  The **decode** arena (`g_decode_scratch`) has the identical bug — so the codec already leaks one buffer per codec-touching thread today.  Benign for single-threaded use (OS reclaims at exit) and for a fixed thread pool (allocated once, no churn), but it accumulates unboundedly in any process that repeatedly spawns-and-joins short-lived worker threads that touch the codec.

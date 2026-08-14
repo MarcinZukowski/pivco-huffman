@@ -1,4 +1,10 @@
 #include "pivco_huffman.h"
+static pivco_encoder_t *g_tenc;
+static pivco_decoder_t *g_tdec;
+static void t_ctx_init(void) {
+    if (!g_tenc) g_tenc = pivco_encoder_create();
+    if (!g_tdec) g_tdec = pivco_decoder_create();
+}
 #include "pivco_huffman_primitives.h"  /* prim_histogram_chunk (arch-selected) */
 #include <stdio.h>
 #include <stdlib.h>
@@ -34,8 +40,8 @@ static int test_table_build(void)
     freq[3] = 12;
     freq[4] = 6;
 
-    pivco_huffman_table_t table;
-    int rc = pivco_huffman_build_table(freq, &table);
+    pivco_table_t table;
+    int rc = pivco_build_table(NULL, freq, &table);
     if (rc != PIVCO_OK) FAIL("build_table returned %d", rc);
 
     /* Verify prefix-free property: no code is a prefix of another */
@@ -56,7 +62,7 @@ static int test_table_build(void)
         }
     }
 
-    pivco_huffman_build_traditional_table(&table);
+    pivco_build_traditional_table(&table);
     /* Verify decode table round-trips */
     for (int i = 0; i < PIVCO_MAX_SYMBOLS; i++) {
         if (table.code_len[i] == 0) continue;
@@ -84,8 +90,8 @@ static int test_single_symbol(void)
     uint64_t freq[PIVCO_MAX_SYMBOLS] = {0};
     freq[42] = 100;
 
-    pivco_huffman_table_t table;
-    pivco_huffman_build_table(freq, &table);
+    pivco_table_t table;
+    pivco_build_table(NULL, freq, &table);
 
     uint8_t symbols[PIVCO_BLOCK_SIZE];
     memset(symbols, 42, sizeof(symbols));
@@ -93,12 +99,12 @@ static int test_single_symbol(void)
     /* PIVCO roundtrip */
     uint8_t encoded[PIVCO_MAX_ENCODED_SIZE];
     size_t enc_len;
-    int rc = pivco_huffman_encode_scalar(symbols, PIVCO_BLOCK_SIZE, &table, encoded, &enc_len);
+    int rc = pivco_encode_scalar(g_tenc, &table, symbols, PIVCO_BLOCK_SIZE, encoded, &enc_len);
     if (rc != PIVCO_OK) FAIL("encode returned %d", rc);
 
     uint8_t decoded[PIVCO_BLOCK_SIZE];
     size_t consumed;
-    rc = pivco_huffman_decode_scalar(encoded, enc_len, &table, decoded, &consumed);
+    rc = pivco_decode_scalar(g_tdec, &table, encoded, enc_len, decoded, &consumed);
     if (rc != PIVCO_OK) FAIL("decode returned %d", rc);
 
     if (memcmp(symbols, decoded, PIVCO_BLOCK_SIZE) != 0) {
@@ -106,7 +112,7 @@ static int test_single_symbol(void)
     }
 
     /* Traditional roundtrip */
-    pivco_huffman_build_traditional_table(&table);
+    pivco_build_traditional_table(&table);
     uint8_t trad_enc[PIVCO_BLOCK_SIZE * 2];
     size_t trad_len, trad_bits;
     rc = trad_huffman_encode(symbols, PIVCO_BLOCK_SIZE, &table,
@@ -133,8 +139,8 @@ static int test_roundtrip_dist(const char *name, const uint64_t freq[PIVCO_MAX_S
 {
     printf("[test_roundtrip_%s] ", name);
 
-    pivco_huffman_table_t table;
-    int rc = pivco_huffman_build_table(freq, &table);
+    pivco_table_t table;
+    int rc = pivco_build_table(NULL, freq, &table);
     if (rc != PIVCO_OK) FAIL("build_table returned %d", rc);
 
     /* Build CDF for sampling */
@@ -159,12 +165,12 @@ static int test_roundtrip_dist(const char *name, const uint64_t freq[PIVCO_MAX_S
     /* PIVCO scalar roundtrip */
     uint8_t encoded[PIVCO_MAX_ENCODED_SIZE];
     size_t enc_len;
-    rc = pivco_huffman_encode_scalar(symbols, PIVCO_BLOCK_SIZE, &table, encoded, &enc_len);
+    rc = pivco_encode_scalar(g_tenc, &table, symbols, PIVCO_BLOCK_SIZE, encoded, &enc_len);
     if (rc != PIVCO_OK) FAIL("pivco encode returned %d", rc);
 
     uint8_t decoded[PIVCO_BLOCK_SIZE];
     size_t consumed;
-    rc = pivco_huffman_decode_scalar(encoded, enc_len, &table, decoded, &consumed);
+    rc = pivco_decode_scalar(g_tdec, &table, encoded, enc_len, decoded, &consumed);
     if (rc != PIVCO_OK) FAIL("pivco decode returned %d", rc);
 
     for (int i = 0; i < PIVCO_BLOCK_SIZE; i++) {
@@ -179,7 +185,7 @@ static int test_roundtrip_dist(const char *name, const uint64_t freq[PIVCO_MAX_S
     }
 
     /* Traditional roundtrip */
-    pivco_huffman_build_traditional_table(&table);
+    pivco_build_traditional_table(&table);
     uint8_t trad_enc[PIVCO_BLOCK_SIZE * 4];
     size_t trad_len, trad_bits;
     rc = trad_huffman_encode(symbols, PIVCO_BLOCK_SIZE, &table,
@@ -202,14 +208,13 @@ static int test_roundtrip_dist(const char *name, const uint64_t freq[PIVCO_MAX_S
     /* NEON encode + BU NEON decode roundtrip (the production path). */
     uint8_t neon_enc[PIVCO_MAX_ENCODED_SIZE];
     size_t neon_len;
-    rc = pivco_huffman_encode_neon(symbols, PIVCO_BLOCK_SIZE, &table, neon_enc, &neon_len);
+    rc = pivco_encode_neon(g_tenc, &table, symbols, PIVCO_BLOCK_SIZE, neon_enc, &neon_len);
     if (rc != PIVCO_OK) FAIL("neon encode returned %d", rc);
 
     {
         uint8_t bu_dec[PIVCO_BLOCK_SIZE];
         size_t bu_consumed;
-        rc = pivco_huffman_decode_bu_neon(neon_enc, neon_len, &table,
-                                           bu_dec, &bu_consumed);
+        rc = pivco_decode_bu_neon(g_tdec, &table, neon_enc, neon_len, bu_dec, &bu_consumed);
         if (rc != PIVCO_OK) FAIL("bu_neon decode returned %d", rc);
         for (int i = 0; i < PIVCO_BLOCK_SIZE; i++) {
             if (symbols[i] != bu_dec[i]) {
@@ -228,8 +233,7 @@ static int test_roundtrip_dist(const char *name, const uint64_t freq[PIVCO_MAX_S
     {
         uint8_t cross_dec[PIVCO_BLOCK_SIZE];
         size_t cross_consumed;
-        rc = pivco_huffman_decode_scalar(neon_enc, neon_len, &table,
-                                          cross_dec, &cross_consumed);
+        rc = pivco_decode_scalar(g_tdec, &table, neon_enc, neon_len, cross_dec, &cross_consumed);
         if (rc != PIVCO_OK) FAIL("neon-enc -> scalar-dec rc=%d", rc);
         for (int i = 0; i < PIVCO_BLOCK_SIZE; i++) {
             if (symbols[i] != cross_dec[i]) {
@@ -246,13 +250,12 @@ static int test_roundtrip_dist(const char *name, const uint64_t freq[PIVCO_MAX_S
     {
         uint8_t sse_enc[PIVCO_MAX_ENCODED_SIZE];
         size_t sse_len;
-        rc = pivco_huffman_encode_x86(symbols, PIVCO_BLOCK_SIZE, &table, sse_enc, &sse_len);
+        rc = pivco_encode_x86(g_tenc, &table, symbols, PIVCO_BLOCK_SIZE, sse_enc, &sse_len);
         if (rc != PIVCO_OK) FAIL("sse encode returned %d", rc);
 
         uint8_t bu_dec[PIVCO_BLOCK_SIZE];
         size_t bu_consumed;
-        rc = pivco_huffman_decode_bu_x86(sse_enc, sse_len, &table,
-                                          bu_dec, &bu_consumed);
+        rc = pivco_decode_bu_x86(g_tdec, &table, sse_enc, sse_len, bu_dec, &bu_consumed);
         if (rc != PIVCO_OK) FAIL("bu_x86 decode returned %d", rc);
         for (int i = 0; i < PIVCO_BLOCK_SIZE; i++) {
             if (symbols[i] != bu_dec[i]) {
@@ -375,7 +378,6 @@ static int test_joint_lengths(void)
         PIVCO_EFFORT_FASTEST_DECOMPRESS,
         PIVCO_EFFORT_FASTEST_COMPRESS,   /* == BALANCED at build level */
     };
-    const pivco_effort_t effort_prev = pivco_huffman_get_effort();
     uint64_t seed = 0x0DDC0FFEE0DDF00DULL;
 
     for (size_t d = 0; d < sizeof(dists) / sizeof(dists[0]); d++) {
@@ -386,10 +388,9 @@ static int test_joint_lengths(void)
 
         double base_bits = 0;
         for (size_t e = 0; e < sizeof(efforts) / sizeof(efforts[0]); e++) {
-            pivco_huffman_set_effort(efforts[e]);
-            pivco_huffman_table_t table;
-            int rc = pivco_huffman_build_table(freq, &table);
-            pivco_huffman_set_effort(effort_prev);
+            pivco_cfg_t ecfg = pivco_cfg_default; ecfg.effort = efforts[e];
+            pivco_table_t table;
+            int rc = pivco_build_table(&ecfg, freq, &table);
             if (rc != PIVCO_OK)
                 FAIL("%s effort %d: build_table returned %d",
                      dists[d].name, (int)efforts[e], rc);
@@ -427,8 +428,8 @@ static int test_joint_lengths(void)
 
             /* Wire contract: the decoder rebuilds the identical table
              * from the transmitted lengths alone (ghost codes and all). */
-            pivco_huffman_table_t dtable;
-            rc = pivco_huffman_build_table_from_code_lens(table.code_len,
+            pivco_table_t dtable;
+            rc = pivco_build_table_from_code_lens(NULL, table.code_len,
                                                           &dtable);
             if (rc != PIVCO_OK)
                 FAIL("%s effort %d: from_code_lens returned %d",
@@ -456,12 +457,12 @@ static int test_joint_lengths(void)
             uint8_t encoded[PIVCO_MAX_ENCODED_SIZE];
             uint8_t decoded[PIVCO_BLOCK_SIZE];
             size_t enc_len, consumed;
-            rc = pivco_huffman_encode(symbols, PIVCO_BLOCK_SIZE, &table,
-                                      encoded, &enc_len);
+            rc = pivco_encode(g_tenc, &table, symbols, PIVCO_BLOCK_SIZE,
+                              encoded, &enc_len);
             if (rc != PIVCO_OK)
                 FAIL("%s effort %d: encode returned %d",
                      dists[d].name, (int)efforts[e], rc);
-            rc = pivco_huffman_decode(encoded, enc_len, &dtable,
+            rc = pivco_decode(g_tdec, &dtable, encoded, enc_len,
                                       decoded, &consumed);
             if (rc != PIVCO_OK)
                 FAIL("%s effort %d: decode returned %d",
@@ -534,6 +535,7 @@ static int test_histogram(void)
 int test_roundtrip_all(void)
 {
     int failures = 0;
+    t_ctx_init();
 
     failures += test_table_build();
     failures += test_single_symbol();

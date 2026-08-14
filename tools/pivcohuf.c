@@ -206,6 +206,7 @@ static void usage(FILE *out) {
 
 int main(int argc, char **argv)
 {
+    pivco_cfg_t cli_cfg = { PIVCO_TREE_MODE_OPTIMIZED, PIVCO_EFFORT_PLAIN, 0 };
     int force = 0;
     int repeat = 1;
     int use_ans = 0;   /* -a / --ans : compress with #PHA (ANS-coded bitmaps) */
@@ -236,12 +237,12 @@ int main(int argc, char **argv)
             i++;
         } else if ((argv[i][0] == '-' && argv[i][1] == 'e' && argv[i][2] == '\0'
                     && i + 1 < argc)) {
-            pivco_huffman_set_effort((pivco_effort_t)atoi(argv[i + 1]));
+            cli_cfg.effort = (pivco_effort_t)atoi(argv[i + 1]);
             i++;   /* skip the N */
         } else if (strncmp(argv[i], "--effort=", 9) == 0) {
-            pivco_huffman_set_effort((pivco_effort_t)atoi(argv[i] + 9));
+            cli_cfg.effort = (pivco_effort_t)atoi(argv[i] + 9);
         } else if (strcmp(argv[i], "--effort") == 0 && i + 1 < argc) {
-            pivco_huffman_set_effort((pivco_effort_t)atoi(argv[i + 1]));
+            cli_cfg.effort = (pivco_effort_t)atoi(argv[i + 1]);
             i++;
         } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
             usage(stdout);
@@ -311,7 +312,8 @@ int main(int argc, char **argv)
         size_t out_len = bound;
         pivcohuf_timing_t tm;
         double t0 = now_sec();
-        int rc = pivcohuf_compress_blk(in_buf, in_len, out_buf, &out_len, use_ans, block_size, &tm);
+        cli_cfg.fse_enabled = use_ans;
+        int rc = pivcohuf_compress_cfg(in_buf, in_len, out_buf, &out_len, &cli_cfg, block_size, &tm);
         double t1 = now_sec();
         if (rc != PIVCOHUF_OK) {
             fprintf(stderr, "pivcohuf: compress failed: %s\n", err_msg(rc));
@@ -328,7 +330,7 @@ int main(int argc, char **argv)
             for (int r = 1; r < repeat; r++) {
                 size_t rep_out_len = bound;
                 double rt0 = now_sec();
-                pivcohuf_compress_blk(in_buf, in_len, out_buf, &rep_out_len, use_ans, block_size, NULL);
+                pivcohuf_compress_cfg(in_buf, in_len, out_buf, &rep_out_len, &cli_cfg, block_size, NULL);
                 double rt1 = now_sec();
                 int ms = (int)((rt1 - rt0) * 1000.0 + 0.5);
                 fprintf(stderr, "  iter %2d: comp:%dms  comp_bw in=%d MB/s out=%d MB/s\n",

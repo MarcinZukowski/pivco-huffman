@@ -52,6 +52,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include "pivco_huffman.h"   /* pivco_cfg_t */
 
 #ifdef __cplusplus
 extern "C" {
@@ -120,6 +121,14 @@ typedef struct {
     double codec_ns;   /* encode (compress) or decode (decompress) block loop */
     double malloc_ns;  /* internal scratch allocations */
 } pivcohuf_timing_t;
+
+/* Full-parameter compress: cfg (NULL = defaults; fse_enabled selects
+ * #PHA), explicit block size, optional timing. */
+int pivcohuf_compress_cfg(const uint8_t *in, size_t in_len,
+                          uint8_t *out, size_t *out_len,
+                          const pivco_cfg_t *cfg, size_t block_size,
+                          pivcohuf_timing_t *timing);
+
 
 /* As pivcohuf_compress_ex / pivcohuf_decompress, but fill *timing (nullable)
  * with the per-phase breakdown above.  The struct is zeroed on entry. */

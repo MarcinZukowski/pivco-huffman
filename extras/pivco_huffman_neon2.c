@@ -6,7 +6,7 @@
 #ifdef PIVCO_HAS_NEON
 #include <arm_neon.h>
 
-/* Reuse the combined shuffle table from pivco_huffman_neon.c.
+/* Reuse the combined shuffle table from pivco_neon.c.
    These are defined there and shared via linkage. */
 extern uint8_t compress_tab[256][32];
 extern uint8_t compress_popcnt[256];
@@ -111,7 +111,7 @@ static inline int partition_8(const uint16_t *src, uint8_t mask,
 
 /* ---------- Encode (Tree-Walk with 4-way fusion) ---------- */
 
-static void encode_node_neon2(const pivco_huffman_table_t *table,
+static void encode_node_neon2(const pivco_table_t *table,
                                int16_t node_id,
                                uint16_t *indices, int n,
                                int depth,
@@ -245,8 +245,8 @@ static void encode_node_neon2(const pivco_huffman_table_t *table,
     }
 }
 
-int pivco_huffman_encode_neon2(const uint8_t *symbols,
-                                const pivco_huffman_table_t *table,
+int pivco_encode_neon2(const uint8_t *symbols,
+                                const pivco_table_t *table,
                                 uint8_t *out, size_t *out_len)
 {
     if (!symbols || !table || !out || !out_len) return PIVCO_ERR_NULL;
@@ -280,7 +280,7 @@ int pivco_huffman_encode_neon2(const uint8_t *symbols,
 
 /* ---------- Decode (Tree-Walk with 4-way fusion) ---------- */
 
-static void decode_node_neon2(const pivco_huffman_table_t *table,
+static void decode_node_neon2(const pivco_table_t *table,
                                int16_t node_id,
                                uint16_t *indices, int n,
                                uint8_t *symbols,
@@ -392,8 +392,8 @@ static void decode_node_neon2(const pivco_huffman_table_t *table,
     }
 }
 
-int pivco_huffman_decode_neon2(const uint8_t *in, size_t in_len,
-                                const pivco_huffman_table_t *table,
+int pivco_decode_neon2(const uint8_t *in, size_t in_len,
+                                const pivco_table_t *table,
                                 uint8_t *symbols, size_t *consumed)
 {
     if (!in || !table || !symbols || !consumed) return PIVCO_ERR_NULL;

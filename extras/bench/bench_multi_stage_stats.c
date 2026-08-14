@@ -15,6 +15,7 @@
  */
 
 #include "pivco_huffman.h"
+#include "bench_ctx.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -26,7 +27,7 @@ extern const char  *bench_dist_name(int idx);
 extern const uint64_t *bench_dist_freq(int idx);
 
 /* Shortest leaf depth relative to this node, i.e. local_min. */
-static int compute_local_min(const pivco_huffman_table_t *t, int16_t node_id)
+static int compute_local_min(const pivco_table_t *t, int16_t node_id)
 {
     const pivco_tree_node_t *n = &t->tree[node_id];
     if (n->symbol >= 0) return 0;
@@ -37,7 +38,7 @@ static int compute_local_min(const pivco_huffman_table_t *t, int16_t node_id)
 
 /* Deepest leaf depth relative to this node. */
 __attribute__((unused))
-static int compute_local_max(const pivco_huffman_table_t *t, int16_t node_id)
+static int compute_local_max(const pivco_table_t *t, int16_t node_id)
 {
     const pivco_tree_node_t *n = &t->tree[node_id];
     if (n->symbol >= 0) return 0;
@@ -48,7 +49,7 @@ static int compute_local_max(const pivco_huffman_table_t *t, int16_t node_id)
 
 /* Walk M_top bits from the root following `prefix` (MSB-first, matching the
  * canonical code layout), return the resulting tree node id. */
-static int16_t walk_prefix(const pivco_huffman_table_t *t, uint32_t prefix, int M)
+static int16_t walk_prefix(const pivco_table_t *t, uint32_t prefix, int M)
 {
     int16_t node_id = t->tree_root;
     for (int b = M - 1; b >= 0; b--) {
@@ -65,9 +66,9 @@ static void analyze_distribution(int d)
     const char *name = bench_dist_name(d);
     const uint64_t *freq = bench_dist_freq(d);
 
-    pivco_huffman_table_t *t =
-        (pivco_huffman_table_t *)malloc(sizeof(pivco_huffman_table_t));
-    if (pivco_huffman_build_table(freq, t) != PIVCO_OK) {
+    pivco_table_t *t =
+        (pivco_table_t *)malloc(sizeof(pivco_table_t));
+    if (pivco_build_table(bench_cfg(), freq, t) != PIVCO_OK) {
         printf("%-14s | build_table failed\n", name);
         free(t);
         return;

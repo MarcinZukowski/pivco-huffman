@@ -16,6 +16,7 @@
  */
 
 #include "pivco_huffman.h"
+#include "bench_ctx.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -39,7 +40,7 @@ static void emit_path(const char *buf, int depth)
     else            fwrite(buf, 1, (size_t)depth, stdout);
 }
 
-static void walk(const pivco_huffman_table_t *T, int16_t node,
+static void walk(const pivco_table_t *T, int16_t node,
                  char *buf, int depth)
 {
     if (T->flat_depth[node] >= 2) {
@@ -76,8 +77,8 @@ int main(int argc, char **argv)
     if (d < 0) { fprintf(stderr, "unknown dist '%s'\n", argv[1]); return 2; }
 
     const uint64_t *f = bench_dist_freq(d);
-    pivco_huffman_table_t *T = malloc(sizeof *T);
-    if (!T || pivco_huffman_build_table(f, T) != PIVCO_OK) {
+    pivco_table_t *T = malloc(sizeof *T);
+    if (!T || pivco_build_table(bench_cfg(), f, T) != PIVCO_OK) {
         fprintf(stderr, "build_table failed\n");
         return 1;
     }

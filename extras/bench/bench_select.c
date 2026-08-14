@@ -15,6 +15,7 @@
  * arch-selected primitives router -- no wire or kernel replication.
  */
 #include "pivco_huffman.h"
+#include "bench_ctx.h"
 #include "pivco_huffman_primitives.h"
 #include "pivco_huffman_wire.h"
 #include <stdio.h>
@@ -83,7 +84,7 @@ static void skip_marker_bitmap(const uint8_t **p, int K) {
     uint16_t fse_len; memcpy(&fse_len, *p, 2); *p += 2 + fse_len;
 }
 
-static void skip_region(const pivco_huffman_table_t *t, int16_t id, int K,
+static void skip_region(const pivco_table_t *t, int16_t id, int K,
                         const uint8_t **p) {
     const pivco_tree_node_t *n = &t->tree[id];
     if (K == 0) return;
@@ -112,7 +113,7 @@ static void skip_region(const pivco_huffman_table_t *t, int16_t id, int K,
 
 /* ---- select walk ---- */
 typedef struct {
-    const pivco_huffman_table_t *t;
+    const pivco_table_t *t;
     uint8_t on_spine[PIVCO_MAX_TREE_NODES];   /* node is an ancestor of target */
     int16_t target;                            /* leaf node, or flat root      */
     uint8_t flat_mask_c2s[256];                /* for flat target: code->mask  */
@@ -123,7 +124,7 @@ typedef struct {
 /* returns mask of target occurrences among this node's K symbols in `out` */
 static void select_rec(const selq_t *q, int16_t id, int K,
                        uint8_t *out, uint8_t *tmp, const uint8_t **p) {
-    const pivco_huffman_table_t *t = q->t;
+    const pivco_table_t *t = q->t;
     const pivco_tree_node_t *n = &t->tree[id];
     if (K == 0) return;
     if (id == q->target) {
@@ -204,7 +205,7 @@ static int select_block(const selq_t *q, const uint8_t *enc,
  * merge with vec_vec -- the shared ancestors (root above all) are paid
  * once for the whole set. */
 typedef struct {
-    const pivco_huffman_table_t *t;
+    const pivco_table_t *t;
     uint8_t contains[PIVCO_MAX_TREE_NODES];   /* subtree holds >=1 target */
     uint8_t leaf_in_set[PIVCO_MAX_TREE_NODES];
     uint8_t flat_c2s[256];                    /* multi-entry membership   */
@@ -216,7 +217,7 @@ static uint8_t g_mbufL[16][65536], g_mbufR[16][65536];
 
 static void mselect_rec(const mselq_t *q, int16_t id, int K, int depth,
                         uint8_t *out, const uint8_t **p) {
-    const pivco_huffman_table_t *t = q->t;
+    const pivco_table_t *t = q->t;
     const pivco_tree_node_t *n = &t->tree[id];
     if (K == 0) return;
     if (n->symbol >= 0) { memset(out, q->leaf_in_set[id] ? 0xff : 0x00, (size_t)K); return; }
@@ -273,7 +274,7 @@ static void mselect_rec(const mselq_t *q, int16_t id, int K, int depth,
     }
 }
 
-static void mbuild(mselq_t *q, const pivco_huffman_table_t *t,
+static void mbuild(mselq_t *q, const pivco_table_t *t,
                    const int *syms, int nsym) {
     memset(q, 0, sizeof(*q));
     q->t = t;
@@ -297,7 +298,7 @@ static void mbuild(mselq_t *q, const pivco_huffman_table_t *t,
 }
 
 /* build spine[] by walking the code bits of sym from the root */
-static void build_spine(selq_t *q, const pivco_huffman_table_t *t, int sym) {
+static void build_spine(selq_t *q, const pivco_table_t *t, int sym) {
     memset(q->on_spine, 0, sizeof(q->on_spine));
     memset(q->flat_mask_c2s, 0, sizeof(q->flat_mask_c2s));
     q->t = t;
@@ -323,7 +324,7 @@ static volatile uint8_t g_sink;
 int main(void) {
     bench_init();
     prim_codec_init();                         /* merge shuffle tables */
-    pivco_huffman_set_fse_enabled(0);          /* PH mode: raw bitmaps */
+    bench_cfg()->fse_enabled = (0);          /* PH mode: raw bitmaps */
     static uint8_t zeros[BLK];
     printf("bench_select: %u MiB, %d-sym blocks, best of 5  (GB/s of input covered)\n",
            TOTAL >> 20, BLK);
@@ -332,8 +333,8 @@ int main(void) {
     int nd = bench_num_distributions();
     for (int di = 0; di < nd; di++) {
         const uint64_t *freq = bench_dist_freq(di);
-        static pivco_huffman_table_t t;
-        if (pivco_huffman_build_table(freq, &t) != PIVCO_OK) continue;
+        static pivco_table_t t;
+        if (pivco_build_table(bench_cfg(), freq, &t) != PIVCO_OK) continue;
         /* generate data */
         uint64_t tot = 0; for (int s = 0; s < 256; s++) tot += freq[s];
         uint8_t *data = malloc(TOTAL);
@@ -354,7 +355,7 @@ int main(void) {
         size_t *elen = malloc(sizeof(size_t) * nblk);
         for (int b = 0; b < nblk; b++) {
             enc[b] = malloc(2 * BLK + 64); elen[b] = 2 * BLK + 64;
-            if (pivco_huffman_encode(data + (size_t)b * BLK, BLK, &t, enc[b], &elen[b])) {
+            if (pivco_encode(bench_enc_ctx(), &t, data + (size_t)b * BLK, BLK, enc[b], &elen[b])) {
                 printf("%-14s encode failed\n", bench_dist_name(di)); nblk = 0; break;
             }
         }
@@ -362,7 +363,7 @@ int main(void) {
         /* wire-walk validation: skip_region and select must consume exactly
          * what decode consumes */
         {   size_t cons; static uint8_t d0[BLK];
-            pivco_huffman_decode(enc[0], elen[0], &t, d0, &cons);
+            pivco_decode(bench_dec_ctx(), &t, enc[0], elen[0], d0, &cons);
             const uint8_t *p = enc[0] + 2;
             skip_region(&t, t.tree_root, BLK, &p);
             if ((size_t)(p - enc[0]) != cons)
@@ -395,14 +396,14 @@ int main(void) {
                 t0 = now_ns();
                 for (int b = 0; b < nblk; b++) {
                     size_t cons;
-                    pivco_huffman_decode(enc[b], elen[b], &t, dec, &cons);
+                    pivco_decode(bench_dec_ctx(), &t, enc[b], elen[b], dec, &cons);
                     for (int i = 0; i < BLK; i++) ref[i] = (dec[i] == sym) ? 0xff : 0x00;
                     g_sink = ref[BLK - 1];
                 }
                 e = now_ns() - t0; if (e < t_dc) t_dc = e;
                 t0 = now_ns();
                 for (int b = 0; b < nblk; b++) { size_t cons;
-                    pivco_huffman_decode(enc[b], elen[b], &t, dec, &cons); }
+                    pivco_decode(bench_dec_ctx(), &t, enc[b], elen[b], dec, &cons); }
                 e = now_ns() - t0; if (e < t_dec) t_dec = e;
                 t0 = now_ns();
                 for (int b = 0; b < nblk; b++) {
@@ -414,7 +415,7 @@ int main(void) {
             /* verify on the last block */
             {   size_t cons;
                 select_block(&q, enc[nblk-1], mask, tmp);
-                pivco_huffman_decode(enc[nblk-1], elen[nblk-1], &t, dec, &cons);
+                pivco_decode(bench_dec_ctx(), &t, enc[nblk-1], elen[nblk-1], dec, &cons);
                 int non = 0, nref = 0, first = -1;
                 for (int i = 0; i < BLK; i++) {
                     if (mask[i]) non++;
@@ -439,8 +440,8 @@ int main(void) {
     for (int di = 0; di < nd; di++) {
         if (strcmp(bench_dist_name(di), "prose_pride")) continue;
         const uint64_t *freq = bench_dist_freq(di);
-        static pivco_huffman_table_t t;
-        if (pivco_huffman_build_table(freq, &t) != PIVCO_OK) break;
+        static pivco_table_t t;
+        if (pivco_build_table(bench_cfg(), freq, &t) != PIVCO_OK) break;
         uint64_t tot = 0; for (int s2 = 0; s2 < 256; s2++) tot += freq[s2];
         uint8_t *data = malloc(TOTAL);
         uint64_t rng = 0xfeedbeef;
@@ -459,7 +460,7 @@ int main(void) {
         size_t *elen = malloc(sizeof(size_t) * nblk);
         for (int b = 0; b < nblk; b++) {
             enc[b] = malloc(2 * BLK + 64); elen[b] = 2 * BLK + 64;
-            pivco_huffman_encode(data + (size_t)b * BLK, BLK, &t, enc[b], &elen[b]);
+            pivco_encode(bench_enc_ctx(), &t, data + (size_t)b * BLK, BLK, enc[b], &elen[b]);
         }
         int syms3[3] = {'m', 'y', 'k'};        /* semi-random mid-freq letters */
         double psum = 0;
@@ -498,7 +499,7 @@ int main(void) {
             e = now_ns() - t0; if (e < t_raw) t_raw = e;
             t0 = now_ns();
             for (int b = 0; b < nblk; b++) { size_t cons;
-                pivco_huffman_decode(enc[b], elen[b], &t, dec, &cons);
+                pivco_decode(bench_dec_ctx(), &t, enc[b], elen[b], dec, &cons);
                 simd_scan(dec, BLK, (uint8_t)syms3[0], ref);
                 simd_scan(dec, BLK, (uint8_t)syms3[1], m2);
                 for (int i2 = 0; i2 < BLK; i2++) ref[i2] |= m2[i2];
@@ -512,7 +513,7 @@ int main(void) {
         {   size_t cons;
             const uint8_t *p = enc[nblk-1]; uint16_t N; memcpy(&N, p, 2); p += 2;
             mselect_rec(&mq, t.tree_root, (int)N, 0, mask, &p);
-            pivco_huffman_decode(enc[nblk-1], elen[nblk-1], &t, dec, &cons);
+            pivco_decode(bench_dec_ctx(), &t, enc[nblk-1], elen[nblk-1], dec, &cons);
             for (int i2 = 0; i2 < BLK; i2++) {
                 uint8_t want = (dec[i2] == syms3[0] || dec[i2] == syms3[1]
                              || dec[i2] == syms3[2]) ? 0xff : 0x00;

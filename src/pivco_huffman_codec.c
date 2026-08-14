@@ -31,34 +31,27 @@
 #include <string.h>
 #include "pivco_check.h"
 
-/* Thread-local growable decode scratch arena.  Replaces the former fixed
- * `static __thread` array sized at PIVCO_BLOCK_SIZE so the block size is a
- * pure runtime parameter (the wire N header carries the per-block count).
- * Grows on demand and is reused across blocks; never shrinks.  One instance
- * per backend translation unit, which is exactly what we want. */
-static __thread uint8_t *g_decode_scratch     = NULL;
-static __thread size_t   g_decode_scratch_cap = 0;
+/* Decode scratch arena, owned by the caller's pivco_decoder_t (the
+ * pivco_scratch_t behind its `internal` pointer).  Preallocated at
+ * context create for PIVCO_WIRE_MAX_N and reused across blocks (the
+ * ensure below still grows it if ever needed; never shrinks) -- block
+ * size stays a pure runtime parameter (the wire N header carries the
+ * per-block count). */
 
-/* The returned base is aligned to a 16 KiB boundary plus 64*39 bytes.
- * The in-place walk parks every nested child chain so it ends exactly
- * at base + N; when that address sits within [-16, +256) of a 16 KiB
- * page boundary, the merge tails' 16 B over-reads become page-split
- * loads, ~25 cycles each on Apple M4 (page size == 16 KiB == the block
- * size, so a page-aligned allocation hits the band deterministically —
- * dna_fasta PH -11% E2E).  The odd 64-aligned offset pins the chain
- * end mid-page on every host. */
-#define DECODE_SCRATCH_ALIGN ((uintptr_t)16384)   /* Apple page size */
-#define DECODE_SCRATCH_SHIFT (64 * 39)
-static uint8_t *decode_scratch_ensure(size_t need)
+
+/* The returned base is aligned to a 16 KiB boundary plus 64*39 bytes —
+ * see DECODE_SCRATCH_ALIGN / DECODE_SCRATCH_SHIFT in
+ * pivco_huffman_common.h for the page-split rationale. */
+static uint8_t *decode_scratch_ensure(pivco_scratch_t *sc, size_t need)
 {
     need += DECODE_SCRATCH_ALIGN + DECODE_SCRATCH_SHIFT;
-    if (need > g_decode_scratch_cap) {
-        uint8_t *p = (uint8_t *)realloc(g_decode_scratch, need);
+    if (need > sc->dec_cap) {
+        uint8_t *p = (uint8_t *)realloc(sc->dec, need);
         if (!p) return NULL;
-        g_decode_scratch     = p;
-        g_decode_scratch_cap = need;
+        sc->dec     = p;
+        sc->dec_cap = need;
     }
-    uintptr_t p = (uintptr_t)g_decode_scratch;
+    uintptr_t p = (uintptr_t)sc->dec;
     p = ((p + DECODE_SCRATCH_ALIGN - 1) & ~(DECODE_SCRATCH_ALIGN - 1))
         + DECODE_SCRATCH_SHIFT;
     return (uint8_t *)p;
@@ -72,26 +65,24 @@ static uint8_t *decode_scratch_ensure(size_t need)
  * merge destination (writes are exact). */
 #define MERGE_OVERREAD ((size_t)PIVCO_PRIM_MERGE_OVERREAD)
 
-/* Thread-local growable encode scratch arena.  Mirrors the decode arena
- * above: holds the per-block ranks buffer + the tree-walk's right-half
- * recursion scratch, grown on demand and reused across blocks (never shrinks),
- * so a block-loop encode doesn't malloc/free per block.
- * @todo stopgap: this per-thread global should become part of an explicit
- * encoder API context (a pivco_huffman_encoder_t handle) so the scratch's
- * ownership and lifetime are caller-controlled rather than a hidden
- * thread_local.  See IDEAS.md. */
-static __thread uint8_t *g_encode_scratch     = NULL;
-static __thread size_t   g_encode_scratch_cap = 0;
+/* Growable encode scratch arena, owned by the caller's pivco_encoder_t
+ * (the pivco_scratch_t behind its `internal` pointer): holds the
+ * per-block ranks buffer + the tree-walk's right-half recursion
+ * scratch, preallocated at context create and reused across blocks
+ * (never shrinks), so a block-loop encode doesn't malloc/free per
+ * block.  The former thread_local stopgap (and its thread-death leak)
+ * is gone -- ownership and lifetime are the context's. */
 
-static uint8_t *encode_scratch_ensure(size_t need)
+
+static uint8_t *encode_scratch_ensure(pivco_scratch_t *sc, size_t need)
 {
-    if (need > g_encode_scratch_cap) {
-        uint8_t *p = (uint8_t *)realloc(g_encode_scratch, need);
+    if (need > sc->enc_cap) {
+        uint8_t *p = (uint8_t *)realloc(sc->enc, need);
         if (!p) return NULL;
-        g_encode_scratch     = p;
-        g_encode_scratch_cap = need;
+        sc->enc     = p;
+        sc->enc_cap = need;
     }
-    return g_encode_scratch;
+    return sc->enc;
 }
 
 /* ---------- FSE dispatch parameters ----------
@@ -121,17 +112,17 @@ extern uint64_t g_pivco_fse_bytes_out[PIVCO_FSE_STATS_SLOTS];
 /* ---------- Backend → entry-point name ---------- */
 
 #if defined(PIVCO_BACKEND_SCALAR)
-#  define CODEC_ENCODE_ENTRY pivco_huffman_encode_scalar
-#  define CODEC_DECODE_ENTRY pivco_huffman_decode_scalar
+#  define CODEC_ENCODE_ENTRY pivco_encode_scalar
+#  define CODEC_DECODE_ENTRY pivco_decode_scalar
 #elif defined(PIVCO_BACKEND_NEON)
-#  define CODEC_ENCODE_ENTRY pivco_huffman_encode_neon
-#  define CODEC_DECODE_ENTRY pivco_huffman_decode_bu_neon
+#  define CODEC_ENCODE_ENTRY pivco_encode_neon
+#  define CODEC_DECODE_ENTRY pivco_decode_bu_neon
 #elif defined(PIVCO_BACKEND_X86)
-#  define CODEC_ENCODE_ENTRY pivco_huffman_encode_x86
-#  define CODEC_DECODE_ENTRY pivco_huffman_decode_bu_x86
+#  define CODEC_ENCODE_ENTRY pivco_encode_x86
+#  define CODEC_DECODE_ENTRY pivco_decode_bu_x86
 #elif defined(PIVCO_BACKEND_AVX512)
-#  define CODEC_ENCODE_ENTRY pivco_huffman_encode_avx512
-#  define CODEC_DECODE_ENTRY pivco_huffman_decode_bu_avx512
+#  define CODEC_ENCODE_ENTRY pivco_encode_avx512
+#  define CODEC_DECODE_ENTRY pivco_decode_bu_avx512
 #else
 #  error "pivco_huffman_codec.c needs PIVCO_BACKEND_{SCALAR,NEON,X86,AVX512}"
 #endif
@@ -172,13 +163,13 @@ extern uint64_t g_pivco_fse_bytes_out[PIVCO_FSE_STATS_SLOTS];
  * On no-commit / no-attempt: stream and stats untouched.
  *
  * No-op when PIVCO_HAS_FSE is not defined. */
-static inline void codec_maybe_fse_attempt(uint8_t *marker_slot,
+static inline void codec_maybe_fse_attempt(int fse_on, uint8_t *marker_slot,
                                             uint8_t *bm, int nbytes,
                                             int n, int n_left, int n_right,
                                             int depth, uint8_t **out_ptr)
 {
 #ifdef PIVCO_HAS_FSE
-    if (!pivco_huffman_get_fse_enabled()) return;
+    if (!fse_on) return;
     if (nbytes < PIVCO_FSE_MIN_BITMAP_BYTES) return;
 
     int n_major = (n_left >= n_right) ? n_left : n_right;
@@ -237,7 +228,7 @@ static inline void codec_maybe_fse_attempt(uint8_t *marker_slot,
 #endif
 }
 
-static void codec_encode_node(const pivco_huffman_table_t *table,
+static void codec_encode_node(const pivco_table_t *table,
                                int16_t node_id,
                                uint8_t *ranks, int n,
                                int depth,
@@ -326,13 +317,11 @@ static void codec_encode_node(const pivco_huffman_table_t *table,
     uint8_t *bm = *out_ptr;
     memcpy(bm, bm_stage, (size_t)nbytes);
     *out_ptr += nbytes;
-    codec_maybe_fse_attempt(marker_slot, bm, nbytes,
+    codec_maybe_fse_attempt(table->fse_enabled, marker_slot, bm, nbytes,
                              n, n_left, n_right, depth, out_ptr);
 }
 
-int CODEC_ENCODE_ENTRY(const uint8_t *symbols, size_t n,
-                       const pivco_huffman_table_t *table,
-                       uint8_t *out, size_t *out_len)
+int CODEC_ENCODE_ENTRY(pivco_encoder_t *enc_ctx, const pivco_table_t *table, const uint8_t *symbols, size_t n, uint8_t *out, size_t *out_len)
 {
     if (!symbols || !table || !out || !out_len) return PIVCO_ERR_NULL;
     if (n == 0 || n > PIVCO_WIRE_MAX_N) return PIVCO_ERR_OVERFLOW;
@@ -352,7 +341,8 @@ int CODEC_ENCODE_ENTRY(const uint8_t *symbols, size_t n,
      * scratch holds one right-half per recursion level, hence (MAX_CODE_LEN+2)*N. */
     const size_t ranks_capacity = (size_t)N + 64;
     const size_t tmp_capacity   = (size_t)N * (PIVCO_MAX_CODE_LEN + 2);
-    uint8_t *ranks = encode_scratch_ensure(ranks_capacity + tmp_capacity);
+    uint8_t *ranks = encode_scratch_ensure((pivco_scratch_t *)enc_ctx->internal,
+                                       ranks_capacity + tmp_capacity);
     if (!ranks) return PIVCO_ERR_NULL;
     uint8_t *tmp = ranks + ranks_capacity;
 
@@ -409,7 +399,7 @@ int CODEC_ENCODE_ENTRY(const uint8_t *symbols, size_t n,
  *   INTERNAL_FULL   — both children internal: larger child in place,
  *                     smaller via the ping-pong partner, merge_vec_vec */
 
-static void codec_decode_subtree(const pivco_huffman_table_t *table,
+static void codec_decode_subtree(const pivco_table_t *table,
                                    int16_t node_id, int K,
                                    uint8_t *out, uint8_t *tmp,
                                    const uint8_t **in_ptr)
@@ -497,9 +487,7 @@ static void codec_decode_subtree(const pivco_huffman_table_t *table,
     }
 }
 
-int CODEC_DECODE_ENTRY(const uint8_t *in, size_t in_len,
-                       const pivco_huffman_table_t *table,
-                       uint8_t *symbols, size_t *consumed)
+int CODEC_DECODE_ENTRY(pivco_decoder_t *dec_ctx, const pivco_table_t *table, const uint8_t *in, size_t in_len, uint8_t *symbols, size_t *consumed)
 {
     if (!in || !table || !symbols || !consumed) return PIVCO_ERR_NULL;
     (void)in_len;
@@ -558,7 +546,7 @@ int CODEC_DECODE_ENTRY(const uint8_t *in, size_t in_len,
      * in its out buffer's tail and prefix and the merges read their
      * sources with up-to-MERGE_OVERREAD slack past the end — guarantees
      * the caller's `symbols` doesn't offer.  So the root's children
-     * decode into the thread-local arena (grown on demand, reused
+     * decode into the context's arena (preallocated, reused
      * across blocks) and only the root's own merge, whose writes are
      * exact, targets `symbols`.
      *
@@ -578,7 +566,7 @@ int CODEC_DECODE_ENTRY(const uint8_t *in, size_t in_len,
          * space after it as ping-pong partner; the cst_vec merge fills
          * symbols. */
         int K_right = wire_read_kr_header(table, table->tree_root, &ptr);
-        uint8_t *scratch = decode_scratch_ensure(need);
+        uint8_t *scratch = decode_scratch_ensure((pivco_scratch_t *)dec_ctx->internal, need);
         if (!scratch) return PIVCO_ERR_NULL;
         codec_decode_subtree(table, root->right, K_right,
                               scratch, scratch + K_right, &ptr);
@@ -602,7 +590,7 @@ int CODEC_DECODE_ENTRY(const uint8_t *in, size_t in_len,
      * fresh partner beyond N. */
     int K_right = wire_read_kr_header(table, table->tree_root, &ptr);
     int K_left  = N - K_right;
-    uint8_t *scratch = decode_scratch_ensure(need);
+    uint8_t *scratch = decode_scratch_ensure((pivco_scratch_t *)dec_ctx->internal, need);
     if (!scratch) return PIVCO_ERR_NULL;
 
     uint8_t *buf_left, *buf_right;

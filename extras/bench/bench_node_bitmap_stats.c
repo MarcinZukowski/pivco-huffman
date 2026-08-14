@@ -13,6 +13,7 @@
  * Usage: ./pivco_node_bitmap_stats [--all]   (default: the main dist set)
  */
 #include "pivco_huffman.h"
+#include "bench_ctx.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -40,7 +41,7 @@ typedef struct {
 
 /* Build the node's bitmap words from ranks, accumulate stats, partition,
  * recurse.  Mirrors the encode walk; scalar throughout (analysis tool). */
-static void walk(const pivco_huffman_table_t *t, int node,
+static void walk(const pivco_table_t *t, int node,
                  uint8_t *ranks, int n, uint8_t *tmp, stats_t *s)
 {
     pivco_node_type_t nt = (pivco_node_type_t)t->node_type[node];
@@ -106,8 +107,8 @@ int main(int argc, char **argv)
         uint64_t freq[PIVCO_MAX_SYMBOLS];
         memset(freq, 0, sizeof(freq));
         for (int i = 0; i < n; i++) freq[sym[i]]++;
-        pivco_huffman_table_t *table = malloc(sizeof(*table));
-        if (pivco_huffman_build_table(freq, table) != 0) {
+        pivco_table_t *table = malloc(sizeof(*table));
+        if (pivco_build_table(bench_cfg(), freq, table) != 0) {
             printf("%-14s (build_table failed)\n", bench_dist_name(d));
             free(sym); free(table); continue;
         }

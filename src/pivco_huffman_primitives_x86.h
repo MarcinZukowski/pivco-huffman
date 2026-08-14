@@ -1283,7 +1283,7 @@ PIVCO_PRIM_ALWAYS_INLINE void prim_codec_init(void)
 PIVCO_PRIM_ALWAYS_INLINE void prim_enc_init(uint8_t *restrict ranks, int n,
                                               const uint8_t *restrict symbols,
                                               const uint8_t *sym_to_rank,
-                                              const pivco_huffman_enc_init_aux_t *aux)
+                                              const pivco_enc_init_aux_t *aux)
 {
     PIVCO_CHECK(aux && aux->s2r_hi);
     const uint16_t *restrict hi = aux->s2r_hi;

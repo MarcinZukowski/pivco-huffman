@@ -46,7 +46,7 @@ typedef enum {
     PROF_FLAT_DECODE_SCATTER,
     PROF_FLAT_DECODE_DIRECT,
 
-    /* Bottom-up decoder (pivco_huffman_bu_{neon,x86}.c) per-primitive
+    /* Bottom-up decoder (pivco_bu_{neon,x86}.c) per-primitive
      * timings.  Elements = bytes processed at this call. */
     PROF_BU_MERGE_VEC_VEC,             /* general 2-buffer merge */
     PROF_BU_MERGE_CST_VEC,  /* left side broadcast constant */
@@ -60,7 +60,7 @@ typedef enum {
     PROF_WIRE_BITMAP_RAW,           /* marker==0: raw bitmap, pointer + advance */
     PROF_WIRE_BITMAP_FSE,           /* marker!=0: FSE-decompress bitmap body */
 
-    /* Encoder (pivco_huffman_encode_neon / encode_node_neon).  Mirrors
+    /* Encoder (pivco_encode_neon / encode_node_neon).  Mirrors
      * the decode side: per-primitive timing of the work done inside a
      * node body (not the recursion itself), plus the per-block setup. */
     PROF_ENC_INIT,                  /* codes[]/lens[]/indices[] setup, per block */
@@ -77,7 +77,7 @@ typedef enum {
     PROF_DECODE_NODE,
     PROF_DECODE_ENTRY,
     PROF_ENC_NODE_VISIT,            /* count-only: calls to encode_node_neon */
-    PROF_ENC_ENTRY,                 /* count-only: calls to pivco_huffman_encode_neon */
+    PROF_ENC_ENTRY,                 /* count-only: calls to pivco_encode_neon */
 
     /* File-codec layer (pivcohuf_file.c).  Wraps the entire file-level
      * pipeline so the CLI can show where time goes outside the
@@ -88,8 +88,8 @@ typedef enum {
     PROF_FILE_BODY_CSUM,            /* XXH32 over body (currently disabled) */
     PROF_FILE_HDR,                  /* header parse / write */
     PROF_FILE_PAD,                  /* trailing-block prep (memcpy + memset) */
-    PROF_FILE_BLOCK_ENCODE,         /* per-block pivco_huffman_encode call */
-    PROF_FILE_BLOCK_DECODE,         /* per-block pivco_huffman_decode call */
+    PROF_FILE_BLOCK_ENCODE,         /* per-block pivco_encode call */
+    PROF_FILE_BLOCK_DECODE,         /* per-block pivco_decode call */
     PROF_FILE_BLOCK_PROLOGUE,       /* per-block length prefix + offset math */
 
     /* FSE per-node entropy coding (v0.2 wire format). */
