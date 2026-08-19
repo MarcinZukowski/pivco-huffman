@@ -248,6 +248,19 @@ table.node-table tr.in-flat { color: #b45309; }
             <input type="checkbox" id="max-skew">
             max-skew (ANS)
         </label>
+        <label class="toggle" title="Joint code-length/flat-shape optimization (src/joint_lengths.c) at the given effort, run as the REAL library code compiled to WASM — not a JS port. Replaces the plain Huffman lengths when the adoption guard accepts the shaped set; the status line reports adopted vs kept-plain. Forces the library's max-len (11). Overridden by max-skew.">
+            joint:
+            <select id="joint-effort">
+                <option value="0" selected>off</option>
+                <option value="1">1 balanced</option>
+                <option value="2">2 faster-dec</option>
+                <option value="3">3 fastest-dec</option>
+            </select>
+        </label>
+        <label class="toggle" title="Model the per-node FSE bitmap coding (PHA) inside the joint guard's cost model. Off = PH pricing (raw bitmaps).">
+            <input type="checkbox" id="joint-fse" checked>
+            joint-fse
+        </label>
         <label class="toggle">
             <input type="checkbox" id="show-flat" checked>
             flat-subtrees
@@ -394,6 +407,8 @@ table.node-table tr.in-flat { color: #b45309; }
 <div class="tooltip" id="tooltip"></div>
 
 <script src="tree_viz_data.js"></script>
+<script src="tree_viz_wasm.js"></script> <!-- optional: real joint_lengths.c as wasm (extras/tree_viz_wasm) -->
+
 <script src="https://d3js.org/d3.v7.min.js"></script>
 <script>
 // ============================================================
@@ -1233,6 +1248,7 @@ function nodeTooltipHtml(n, totalN) {
 
 let svg, gWorld, zoom, currentTree, currentMeta;
 let currentCodes = null, currentRawTree = null;
+let _jointNote = '';   /* status-line suffix from the wasm joint run */
 let _nodeById = new Map();
 /* Per-flat-subtree-root *analysis* override.  An "unflatten" entry
  * means "treat this node as a regular internal node, not a flat
@@ -2859,6 +2875,8 @@ function refreshFromFreqs() {
     if (!_freqs) return;
     const phOpt = document.getElementById('ph-opt').checked;
     const maxSkew = document.getElementById('max-skew').checked;
+    const jointEffort = parseInt(document.getElementById('joint-effort').value, 10);
+    const jointFse = document.getElementById('joint-fse').checked;
     const showFlat = document.getElementById('show-flat').checked;
     const condenseFlat = document.getElementById('condense-flat').checked;
     const noOverlap = document.getElementById('no-overlap').checked;
@@ -2885,6 +2903,7 @@ function refreshFromFreqs() {
     const t0 = performance.now();
 
     let tree, codes;
+    _jointNote = '';
     if (maxSkew) {
         /* Max-skew topology (same code lengths, leans left by frequency).
          * Derive the per-symbol code array from the built tree (path =
@@ -2898,7 +2917,23 @@ function refreshFromFreqs() {
             collect(n.right, (code << 1) | 1,   len + 1);
         })(tree, 0, 0);
     } else {
-        const lens = buildHuffmanLengths(_freqs, maxLen);
+        /* Joint shaping: the real joint_lengths.c via wasm.  When active
+         * (and the module is loaded), it supplies the length set the
+         * library would adopt -- including the guard's kept-plain
+         * verdict -- instead of the JS plain-Huffman build.  The
+         * library length-limits at its own PIVCO_MAX_CODE_LEN. */
+        let lens = null;
+        if (jointEffort > 0) {
+            if (window.PIVCO_WASM_API) {
+                const r = window.PIVCO_WASM_API.jointLengths(_freqs, jointEffort, jointFse);
+                lens = Array.from(r.lengths);
+                _jointNote = ` · joint e${jointEffort}${jointFse ? '+fse' : ''}: ` +
+                             (r.adopted ? 'shaped set ADOPTED' : 'guard kept plain');
+            } else {
+                _jointNote = ' · joint: wasm not loaded, plain lengths';
+            }
+        }
+        if (!lens) lens = buildHuffmanLengths(_freqs, maxLen);
         codes = phOpt ?
             assignPhFlatCodes(lens, _freqs, keysSort) :
             assignCanonicalCodes(lens);
@@ -2974,7 +3009,7 @@ function refreshFromFreqs() {
     renderStats(tree, meta, meta.stats);
 
     const dt = (performance.now() - t0).toFixed(0);
-    status.textContent = `built in ${dt} ms · ${codes.length} symbols`;
+    status.textContent = `built in ${dt} ms · ${codes.length} symbols` + (_jointNote || '');
     /* Keep the filename placeholder in sync — it depends on the
      * currently-selected data source and a couple of toggles. */
     syncFilenamePlaceholder();
@@ -3089,6 +3124,17 @@ function setupToggles() {
     };
     document.getElementById('ph-opt').addEventListener('change', refreshClearAndUrl);
     document.getElementById('max-skew').addEventListener('change', refreshClearAndUrl);
+    document.getElementById('joint-effort').addEventListener('change', refreshClearAndUrl);
+    document.getElementById('joint-fse').addEventListener('change', refreshClearAndUrl);
+    /* The wasm joint module loads async; re-render once it's ready so a
+     * joint= permalink shows shaped lengths instead of the fallback. */
+    if (window.PIVCO_WASM) {
+        window.PIVCO_WASM.then((api) => {
+            window.PIVCO_WASM_API = api;
+            if (document.getElementById('joint-effort').value !== '0')
+                refreshClearAndUrl();
+        }).catch((e) => console.warn('tree_viz_wasm failed to load:', e));
+    }
     document.getElementById('show-flat').addEventListener('change', refreshClearAndUrl);
     document.getElementById('condense-flat').addEventListener('change', refreshClearAndUrl);
     document.getElementById('no-overlap').addEventListener('change', refreshAndUrl);
@@ -3185,6 +3231,12 @@ const URL_PARAM_MAP = [
     { kind: 'bool', param: 'max-skew',       id: 'max-skew',
       desc: 'Experimental <b>max-skew topology for ANS</b>.  Keeps the optimal Huffman <i>code lengths</i> (ratio unchanged), but rebuilds the tree bottom-up: at each level, sort nodes by combined frequency descending and merge left-to-right, so the heavier child is always on the left.<br><br>' +
             'The tree "leans left" by frequency rather than by subtree size, pushing each internal node\'s bitmap toward maximum skew (better for an ANS/FSE bitmap coder).  Overrides ph-optimize and within-tier order.',
+      values: '1 | 0' },
+    { kind: 'str',  param: 'joint',          id: 'joint-effort',
+      desc: 'Joint code-length/flat-shape optimization (<code>src/joint_lengths.c</code>) at the given <code>pivco_effort_t</code> — run as the <b>real library code compiled to WASM</b> (extras/tree_viz_wasm), not a JS port, so the shown shape is exactly what <code>pivco_build_table</code> adopts (bit-identical to the glibc-built library; last-ulp libm differences can flip guard-edge ties vs macOS builds).  The adoption-guard verdict (shaped set adopted vs plain lengths kept) shows in the status line.  Forces the library\'s max-len (11); overridden by max-skew.',
+      values: '0 (off) | 1 (balanced) | 2 (faster-decompress) | 3 (fastest-decompress)' },
+    { kind: 'bool', param: 'joint-fse',      id: 'joint-fse',
+      desc: 'Include the per-node FSE bitmap-coding tax (PHA mode) in the joint guard\'s cost model.  Off = PH pricing (raw bitmaps).',
       values: '1 | 0' },
     { kind: 'bool', param: 'show-flat',      id: 'show-flat',
       desc: 'Highlight detected flat subtrees (uniform-depth, fast-path candidates). When primitives are shown, flat-subtree roots render as <b>SFx</b> in top-down (scatter to non-contiguous output) or <b>MFx</b> in bottom-up (expand into contiguous buffer), both skipping x partition/merge levels.',
