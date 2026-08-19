@@ -124,6 +124,7 @@ const pivco_cfg_t pivco_cfg_default = {
     .tree_mode   = PIVCO_TREE_MODE_OPTIMIZED,
     .effort      = PIVCO_EFFORT_PLAIN,
     .fse_enabled = 1,
+    .fse_dynamic = 1,
     .flat_layout = PIVCO_FLAT_VERTICAL,
 };
 

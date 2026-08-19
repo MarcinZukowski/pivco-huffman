@@ -159,6 +159,7 @@ typedef struct {
     uint8_t  min_len;
     uint16_t num_symbols;
     uint8_t  fse_enabled;      /* baked from pivco_cfg_t at build */
+    uint8_t  fse_dynamic;      /* baked from pivco_cfg_t at build */
     uint8_t  flat_layout;      /* baked from pivco_cfg_t at build */
 
     /* Flat-subtree fast path: per-node, if flat_depth[i] >= 2 then node i
@@ -293,6 +294,13 @@ typedef struct {
     pivco_tree_mode_t   tree_mode;    /* default PIVCO_TREE_MODE_OPTIMIZED */
     pivco_effort_t      effort;       /* default PIVCO_EFFORT_PLAIN */
     int                 fse_enabled;  /* default 1: per-node FSE attempts */
+    /* default 1: let a per-node FSE attempt also try the dynamic nibble
+     * table (PIVCO_FSE_DYNAMIC_ID) alongside the static schedule, and
+     * take whichever is smaller.  Encoder-side only -- the decoder
+     * always understands the dynamic marker, so clearing this just
+     * stops the encoder from ever emitting it.  Ignored when
+     * fse_enabled is 0. */
+    int                 fse_dynamic;
     pivco_flat_layout_t flat_layout;  /* default PIVCO_FLAT_VERTICAL */
 } pivco_cfg_t;
 
@@ -354,10 +362,11 @@ int pivco_joint_optimize_lengths(const uint64_t freq[PIVCO_MAX_SYMBOLS],
  *
  * Per-table-id counters incremented inside the encoder every time an
  * FSE-coded bitmap is committed.  Slot 0 = "FSE attempted but did not
- * commit"; slots 1..PIVCO_FSE_NUM_TABLES = pivco_fse_freq[] table picked.
- * MUST be >= PIVCO_FSE_NUM_TABLES + 1 (static-asserted in pivco_fse.c).
+ * commit"; slots 1..PIVCO_FSE_NUM_TABLES = pivco_fse_freq[] table picked;
+ * slot PIVCO_FSE_DYNAMIC_ID = the dynamic nibble table.
+ * MUST be >= PIVCO_FSE_DYNAMIC_ID + 1 (static-asserted in pivco_fse.c).
  * Not thread-safe; intended for single-threaded analysis runs. */
-#define PIVCO_FSE_STATS_SLOTS 51
+#define PIVCO_FSE_STATS_SLOTS 52
 void pivco_fse_stats_reset(void);
 void pivco_fse_stats_get(uint64_t commit_count[PIVCO_FSE_STATS_SLOTS],
                                  uint64_t attempt_count[PIVCO_FSE_STATS_SLOTS],

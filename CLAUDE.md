@@ -110,6 +110,9 @@ five phases ending 2026-05-14; before that, each backend had its own
 - `extras/bench/bench_flat_subtree_stats.c` — flat-subtree applicability analyzer
 - `extras/bench/bench_partition_skew.c` — per-distribution partition-skewness histogram
 - `extras/bench/bench_multicore.c` — multi-threaded decode scaling vs huf0_x2
+- `extras/bench/bench_chunk_sizes.c` — per-chunk header-inclusive size comparison
+  over arbitrary files: pivco / pivco+static-ANS / pivco+dynamic-ANS / fse,
+  all measured against a summed per-chunk order-0 entropy floor
 - `extras/bench/bench_coalesce.c` + `bench_coalesce_avx512.c` — store-coalescing experiments (all losers)
 - `extras/profile_m4.sh` + `profile_xctrace_parse.py` — one-line xctrace Time Profiler capture + per-source-line aggregator
 - `README.md` — benchmark results, analysis, primary project doc

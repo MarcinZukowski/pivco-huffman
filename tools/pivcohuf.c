@@ -210,8 +210,17 @@ static void usage(FILE *out) {
 
 int main(int argc, char **argv)
 {
-    pivco_cfg_t cli_cfg = { PIVCO_TREE_MODE_OPTIMIZED, PIVCO_EFFORT_PLAIN, 0,
-                            PIVCO_FLAT_VERTICAL };
+    /* Designated, not positional: pivco_cfg_t gains fields over time and a
+     * positional list silently shifts them (it did once, when fse_dynamic
+     * landed between fse_enabled and flat_layout).  fse_enabled starts off
+     * here; -a / --ans turns it on. */
+    pivco_cfg_t cli_cfg = {
+        .tree_mode   = PIVCO_TREE_MODE_OPTIMIZED,
+        .effort      = PIVCO_EFFORT_PLAIN,
+        .fse_enabled = 0,
+        .fse_dynamic = 1,
+        .flat_layout = PIVCO_FLAT_VERTICAL,
+    };
     int force = 0;
     int repeat = 1;
     int use_ans = 0;   /* -a / --ans : compress with #PHA (ANS-coded bitmaps) */
