@@ -37,6 +37,12 @@ extern const uint64_t *bench_dist_freq(int idx);
  * metadata (flat_depth / flat_offset / flat_code_to_sym) rather than
  * recomputing flatness by descending the subtree -- since the flat-leaf-skip
  * build, flat roots have no materialized children to descend into. */
+/* Individual maximal flat regions, for the per-block-size gate analysis. */
+#define MAX_REGIONS 4096
+typedef struct { int D; uint64_t w; } flat_region_t;
+static flat_region_t regions[MAX_REGIONS];
+static int n_regions;
+
 static void collect_flat(const pivco_table_t *t,
                           int16_t node_id,
                           const uint64_t *freq,
@@ -54,11 +60,40 @@ static void collect_flat(const pivco_table_t *t,
         int off = t->flat_offset[node_id];
         for (int k = 0; k < (1 << D); k++) w += freq[t->flat_code_to_sym[off + k]];
         w_by_depth[d] += w;
+        if (n_regions < MAX_REGIONS) {
+            regions[n_regions].D = D;
+            regions[n_regions].w = w;
+            n_regions++;
+        }
         return;  /* maximal flat subtree — don't descend further */
     }
 
     collect_flat(t, n->left,  freq, w_by_depth, count_by_depth);
     collect_flat(t, n->right, freq, w_by_depth, count_by_depth);
+}
+
+/* Vertical-gate classification: for a block of B elements, a flat region
+ * with weight fraction p receives (in expectation) n = p*B of the block's
+ * elements.  Multinomial concentration makes the expectation a good proxy
+ * for n >= 512-ish thresholds.  Buckets: expected n >= 512 (eligible for
+ * 512-value/64-lane blocks), 128 <= n < 512 (128-value blocks only),
+ * n < 128 (natural layout).  D=8 regions are excluded — that layout is an
+ * identity memcpy and never goes vertical. */
+static void gate_split(uint64_t total_freq, int B,
+                       double *pct512, double *pct128, double *pct_nat)
+{
+    double e512 = 0, e128 = 0, enat = 0;
+    for (int i = 0; i < n_regions; i++) {
+        if (regions[i].D < 2 || regions[i].D > 7) continue;
+        double p = (double)regions[i].w / (double)total_freq;
+        double en = p * (double)B;
+        if (en >= 512)      e512 += p;
+        else if (en >= 128) e128 += p;
+        else                enat += p;
+    }
+    *pct512 = 100.0 * e512;
+    *pct128 = 100.0 * e128;
+    *pct_nat = 100.0 * enat;
 }
 
 static void analyze_distribution(int d)
@@ -87,6 +122,7 @@ static void analyze_distribution(int d)
     /* Special-case the root: if the whole tree is flat, we report it as
      * "root flat" and do not descend into the flat-subtree tally (the
      * existing full-tree flat path already handles this). */
+    n_regions = 0;
     if (!root_flat) {
         collect_flat(t, t->tree_root, freq, w_by_depth, c_by_depth);
     }
@@ -98,7 +134,9 @@ static void analyze_distribution(int d)
 
     printf("%-14s | min=%d max=%d ", name, min_len, max_len);
     if (root_flat) {
-        printf("| ROOT FLAT (handled by full-tree fast path)\n");
+        printf("| ROOT FLAT (handled by full-tree fast path)%s\n",
+               (min_len >= 2 && min_len <= 7) ?
+               " -- vertical: 100% of elems in >=512 blocks" : "");
         free(t);
         return;
     }
@@ -114,6 +152,16 @@ static void analyze_distribution(int d)
         printf("D=%d(%d,%5.2f%%) ", D, c_by_depth[D], pct);
     }
     printf("\n");
+    {
+        double p512, p128, pnat;
+        printf("%-14s |", "");
+        gate_split(total_freq, 16384, &p512, &p128, &pnat);
+        printf(" vert gates 16K: >=512 %5.1f%%  128..511 %4.1f%%  <128 %4.1f%%",
+               p512, p128, pnat);
+        gate_split(total_freq, 32768, &p512, &p128, &pnat);
+        printf("   32K: >=512 %5.1f%%  128..511 %4.1f%%  <128 %4.1f%%\n",
+               p512, p128, pnat);
+    }
     free(t);
 }
 

@@ -8,6 +8,9 @@
 ### CONSIDERED — open / parked / research direction
 
 **General**
+- [Vertical flat regions: layout defaults, mid-band forms, text trims](#vertical-flat-regions-layout-defaults-mid-band-forms-text-trims-2026-08-17)
+- [Composed c2s tables for vertical D=2/4 steps](#composed-c2s-tables-for-vertical-d24-steps-2026-08-18)
+- [Generalized flat regions: level-wise bits + late translation for depth≤6 subtrees](#generalized-flat-regions-level-wise-bits--late-translation-for-depth6-subtrees-2026-08-19)
 - [Bulk select: value-position queries on the wire format](#bulk-select-value-position-queries-on-the-wire-format-2026-07-27)
 - [Encode scratch thread_local → encoder API context](#encode-scratch-thread_local--encoder-api-context-2026-07-01)
 - [4-way root merge (top 2 levels in one pass)](#4-way-root-merge-top-2-levels-in-one-pass-2026-06-19)
@@ -124,6 +127,80 @@
 ## CONSIDERED
 
 **General**
+
+### Vertical flat regions: layout defaults, mid-band forms, text trims, 2026-08-17
+The vertical layouts landed runtime-selectable (cfg.flat_layout:
+natural / vertical-128 / hybrid-512+128, pivcohuf FLAGS bits0-1) with
+hybrid as the uniform default.  The 11-host x 30-dist x dec+enc matrix
+(results/2026-08-17-flat-layout-3arm-*) says the true per-arch optima
+differ: Graviton 2..5 want VERTICAL_128 (decode +2..5% median over
+hybrid, english +10% on G4; the 512-span quarter walk is the cost),
+Zen + M4 want hybrid, Intel AVX-512 edges natural on decode by ~1%
+median but prefers hybrid on encode.  Open follow-ups: (a) per-backend
+encode DEFAULTS (non-Apple NEON → VERTICAL_128, rest → hybrid) —
+measured, just not wired; (b) make the NEON 512-quarter walk
+competitive with the 128 path (step-outer/quarter-inner loop order for
+contiguous 64 B stores?) which would let ARM keep the hybrid and
+un-split the defaults.  Kernel diet leftovers: the wide 128-block x86
+forms (ymm two-block merge/pack, zmm-128 srlv/ms merges + vendor
+split) were deleted — resurrect from git @ 87da7ed if the 128..511
+mid-band (≤ 4% of elements at 32K, measured ≤ 0.5% E2E on c8i) ever
+matters; the mid-band now runs the shared xmm cores on all x86 tiers.
+If binary size matters more instead: loop the 512-form merges over
+steps (table-driven shifts) to roughly halve their text — perf cost
+unmeasured; encoding natural (wire-legal via the FLAGS byte) also
+sidesteps every vertical kernel.  Pre-diet cost of vertical for scale:
++23.5 KB codec_x86 TU / +22.1 KB codec_avx512 TU (~3.8K src lines);
+the diet removed ~1.5K lines, roughly half the text.
+
+### Composed c2s tables for vertical D=2/4 steps, 2026-08-18
+Port the NEON natural-D=2 trick (TL[n]=c2s[n&3], TH[n]=c2s[(n>>2)&3]
+— fold the bit-extraction into prepped lookup tables so raw nibbles
+map straight to symbols) into the vertical merge kernels.  Applies to
+the steps whose codes don't straddle a nibble, i.e. D=2 (offsets
+0/2/4/6) and D=4 (offsets 0/4): today each vertical step is
+shift → AND → TBL (3 ops per 16 outputs); with per-offset composed
+tables T_off[n]=c2s[(n>>off)&mask] it becomes AND-0x0F → TBL or
+SHR-4 → TBL (2 ops).  D=3/5/6/7 straddle nibble/byte boundaries and
+don't fit directly — but D=3 can borrow the OTHER natural trick
+(merge_flat_d3_neon): extract a 6-bit window per lane covering TWO
+steps at once, then let the map split the pair (lo = &7 via one TBL,
+hi = >>3 via a doubled junk-tolerant table), amortizing one
+shift/AND over two step-rows.  Expectation: ~1/3 fewer
+non-load/non-store ops on the NEON and SSE xmm cores at D=2/4 — the
+already-fastest cells, so prim-level single digits, well under 1%
+E2E.  Caveat from the
+adjacent no-AND experiment (2026-07-29, AVX-512): op-count wins in
+this family don't always survive the timing modes (the removed AND
+acted as a chain spacer at D=5).  Prototype as prim_variants rows
+before touching production.  zmm forms don't need it (vpermb ignores
+index bits 6-7; replicated-table no-AND already shipped there).
+
+### Generalized flat regions: level-wise bits + late translation for depth≤6 subtrees, 2026-08-19
+Relax the flat-region rule "every element has exactly D bits" to
+"every element has ≤6 bits": declare ANY depth≤6 subtree one wire
+region storing its routing bits LEVEL-WISE (BFS-concatenated per
+level, ≤K bits per level, elements stop contributing once they hit a
+leaf), decode by accumulating per-element code bytes one level at a
+time, translate once at the end via a 64-entry table with each leaf's
+symbol replicated over its unused suffix bits (short codes and
+never-occurring patterns are don't-care) — fusable into the last
+level's blend, so no extra pass.  Merging code bytes instead of
+literals costs the same routing (the interleave/rank machinery is
+unchanged) plus shift+OR per level, so as a drop-in it strictly
+loses; the win is everything AROUND the merges: per-node K_right
+headers and FSE markers inside the region vanish (markers alone are
+0.06–1.6% of stream size), and up-to-63 node records / kernel
+dispatches collapse to ≤6 level passes (walk layer priced at ~1
+cyc/node ≈ 0.1% E2E → maybe 1–3% on bushy trees).  Cost: a second
+region format on the wire, and per-level bit delivery needs
+prefix-match masks + byte expand (vpexpandb — AVX-512-only; NEON
+emulation is where quad's 4-way merge already lost).  Precedents
+pointing down: prefix-radix retired (BU on the 2-way wire beat it
+everywhere), TD retired, quad parked.  The one upside scenario:
+level-wise accumulators are bit-planes, i.e. the input format of the
+parked bit-sliced AVX-512 flat decode (1.5–6×) — the combination is
+the paper-flavored version.  Discussion only, nothing measured.
 
 ### Bulk select: value-position queries on the wire format, 2026-07-27
 Wavelet-tree "select all occurrences of v" as a bulk SIMD op (Marcin's

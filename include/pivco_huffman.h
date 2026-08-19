@@ -71,6 +71,7 @@ extern "C" {
 #define PIVCO_ERR_OVERFLOW  (-2)
 #define PIVCO_ERR_CORRUPT   (-3)
 #define PIVCO_ERR_EMPTY     (-4)
+#define PIVCO_ERR_BAD_CFG   (-5)
 
 /* ---------- Huffman tree node (for PIVCO tree-walk) ---------- */
 
@@ -158,6 +159,7 @@ typedef struct {
     uint8_t  min_len;
     uint16_t num_symbols;
     uint8_t  fse_enabled;      /* baked from pivco_cfg_t at build */
+    uint8_t  flat_layout;      /* baked from pivco_cfg_t at build */
 
     /* Flat-subtree fast path: per-node, if flat_depth[i] >= 2 then node i
        is the root of a MAXIMAL flat subtree of depth D = flat_depth[i]
@@ -252,6 +254,34 @@ typedef enum {
                                              treats it as BALANCED */
 } pivco_effort_t;
 
+/* ---------- Flat-region wire layout (build-time) ----------
+ *
+ * How a flat subtree's N*D packed bits are laid out in the stream.
+ *
+ *   NATURAL       codes packed sequentially, LSB-first: element i's D
+ *                 bits at bit offset i*D.
+ *   VERTICAL      hybrid byte-column-major blocks: pivco_vert_n512(n)
+ *                 elements in 512-value/64-lane blocks, then
+ *                 pivco_vert_n of the remainder in 128-value/16-lane
+ *                 blocks, natural tail (see
+ *                 src/pivco_huffman_vertical.h).  The default: best or
+ *                 near-best on every x86 tier and Apple Silicon, and
+ *                 never last anywhere.
+ *   VERTICAL_128  128-value/16-lane blocks only + natural tail (no
+ *                 512 span).  The fastest layout on ARM servers
+ *                 (Graviton 2..5: decode +2..5% median over VERTICAL),
+ *                 at the price of large decode losses on wide x86.
+ *
+ * Set via pivco_cfg_t.flat_layout at table build.  Raw block API: both
+ * sides must build tables with the same value (like tree_mode, the
+ * per-block wire does not carry it).  The pivcohuf file container
+ * records it in its FLAGS byte, so files decode with any layout. */
+typedef enum {
+    PIVCO_FLAT_NATURAL      = 0,
+    PIVCO_FLAT_VERTICAL     = 1,
+    PIVCO_FLAT_VERTICAL_128 = 2,
+} pivco_flat_layout_t;
+
 /* ---------- Build configuration ----------
  *
  * The one user-settable configuration object.  Consumed only by the
@@ -260,9 +290,10 @@ typedef enum {
  * build -- encode/decode read everything they need from the table.
  * Pass NULL to a build to get pivco_cfg_default. */
 typedef struct {
-    pivco_tree_mode_t tree_mode;    /* default PIVCO_TREE_MODE_OPTIMIZED */
-    pivco_effort_t    effort;       /* default PIVCO_EFFORT_PLAIN */
-    int               fse_enabled;  /* default 1: per-node FSE attempts */
+    pivco_tree_mode_t   tree_mode;    /* default PIVCO_TREE_MODE_OPTIMIZED */
+    pivco_effort_t      effort;       /* default PIVCO_EFFORT_PLAIN */
+    int                 fse_enabled;  /* default 1: per-node FSE attempts */
+    pivco_flat_layout_t flat_layout;  /* default PIVCO_FLAT_VERTICAL */
 } pivco_cfg_t;
 
 extern const pivco_cfg_t pivco_cfg_default;

@@ -138,7 +138,8 @@ static void select_rec(const selq_t *q, int16_t id, int K,
                 for (int i = 0; i < K; i++)
                     out[i] = (bm[i] == sym) ? 0xff : 0x00;
             } else {
-                prim_merge_flat(out, K, bm, D, q->flat_mask_c2s);
+                prim_merge_flat(out, K, bm, D, q->flat_mask_c2s,
+                                t->flat_layout);
             }
         } else {
             memset(out, 0xff, (size_t)K);      /* the leaf itself */
@@ -225,7 +226,7 @@ static void mselect_rec(const mselq_t *q, int16_t id, int K, int depth,
         int D = t->flat_depth[id];
         const uint8_t *bm = *p; *p += (K * D + 7) >> 3;
         if (D == 8) { for (int i = 0; i < K; i++) out[i] = q->in_set[bm[i]]; }
-        else        prim_merge_flat(out, K, bm, D, q->flat_c2s);
+        else        prim_merge_flat(out, K, bm, D, q->flat_c2s, t->flat_layout);
         return;
     }
     uint8_t bm_scratch[(size_t)bitmap_bytes(BLK) + 16];

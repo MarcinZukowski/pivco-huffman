@@ -2,6 +2,7 @@
 #define PIVCO_HUFFMAN_COMMON_H
 
 #include "pivco_huffman.h"
+#include "pivco_huffman_vertical.h"
 #include <string.h>
 
 /* ---------- Bitmap utilities ---------- */

@@ -162,6 +162,15 @@ elseif(TARGET_ARCH STREQUAL "x86_64" OR TARGET_ARCH STREQUAL "amd64")
                         OUTPUT_VARIABLE CPU_HAS_AVX2 OUTPUT_STRIP_TRAILING_WHITESPACE
                         ERROR_QUIET)
     endif()
+    # Vendor-split kernel picks (all x86 tiers): zmm vertical D=3 merge
+    # (Intel srlv vs AMD multishift; c6i/c7i/c8i vs c7a/c8a, 2026-07-30)
+    # and AVX2 512-block D=7 pack (Intel ymm vs Zen 3 xmm quarters).
+    execute_process(COMMAND grep -m1 vendor_id /proc/cpuinfo
+                    OUTPUT_VARIABLE CPU_VENDOR OUTPUT_STRIP_TRAILING_WHITESPACE
+                    ERROR_QUIET)
+    if(CPU_VENDOR MATCHES "GenuineIntel")
+        add_compile_definitions(PIVCO_X86_INTEL=1)
+    endif()
     if(COMPILER_HAS_AVX512_VBMI2 AND CPU_HAS_AVX512 AND NOT CPU_HAS_AVX512 STREQUAL "0")
         message(STATUS "x86_64 detected — enabling AVX-512 VBMI2 + AVX2 + SSE4.1")
         list(APPEND PIVCO_SOURCES

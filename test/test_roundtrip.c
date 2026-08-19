@@ -482,6 +482,97 @@ static int test_joint_lengths(void)
 }
 
 
+/* ---------- Test: flat-region wire layouts (cfg.flat_layout) ---------- */
+
+/* For each layout x flat-heavy distribution: bake the layout into the
+ * table, roundtrip a block through the production dispatch
+ * encode/decode, with the decode side rebuilt from the transmitted
+ * lengths under the same cfg (the raw-API contract: layout travels
+ * with the build cfg, not the block wire). */
+static int test_flat_layouts(void)
+{
+    printf("[test_flat_layouts] ");
+
+    typedef void (*make_fn)(uint64_t[PIVCO_MAX_SYMBOLS]);
+    static const struct { const char *name; make_fn make; } dists[] = {
+        {"uniform",   make_uniform},     /* root flat, D=8 */
+        {"english",   make_english},
+        {"zipfian",   make_zipfian},
+        {"sparse_16", make_sparse_16},   /* root flat, D=4 */
+        {"geometric", make_geometric},
+    };
+    static const pivco_flat_layout_t layouts[] = {
+        PIVCO_FLAT_NATURAL,
+        PIVCO_FLAT_VERTICAL,
+        PIVCO_FLAT_VERTICAL_128,
+    };
+    uint64_t seed = 0xF1A75EEDF1A75EEDULL;
+
+    for (size_t d = 0; d < sizeof(dists) / sizeof(dists[0]); d++) {
+        uint64_t freq[PIVCO_MAX_SYMBOLS];
+        dists[d].make(freq);
+        uint64_t total = 0;
+        for (int i = 0; i < PIVCO_MAX_SYMBOLS; i++) total += freq[i];
+
+        for (size_t l = 0; l < sizeof(layouts) / sizeof(layouts[0]); l++) {
+            pivco_cfg_t cfg = pivco_cfg_default;
+            cfg.flat_layout = layouts[l];
+            pivco_table_t table;
+            int rc = pivco_build_table(&cfg, freq, &table);
+            if (rc != PIVCO_OK)
+                FAIL("%s layout %d: build_table returned %d",
+                     dists[d].name, (int)layouts[l], rc);
+            if (table.flat_layout != (uint8_t)layouts[l])
+                FAIL("%s layout %d: table baked flat_layout %d",
+                     dists[d].name, (int)layouts[l], table.flat_layout);
+
+            pivco_table_t dtable;
+            rc = pivco_build_table_from_code_lens(&cfg, table.code_len,
+                                                          &dtable);
+            if (rc != PIVCO_OK)
+                FAIL("%s layout %d: from_code_lens returned %d",
+                     dists[d].name, (int)layouts[l], rc);
+
+            uint8_t symbols[PIVCO_BLOCK_SIZE];
+            uint64_t rng = seed++;
+            for (int i = 0; i < PIVCO_BLOCK_SIZE; i++) {
+                uint64_t r = xorshift64(&rng) % total;
+                uint64_t cum = 0;
+                int sym;
+                for (sym = 0; sym < PIVCO_MAX_SYMBOLS; sym++) {
+                    cum += freq[sym];
+                    if (r < cum) break;
+                }
+                symbols[i] = (uint8_t)sym;
+            }
+            uint8_t encoded[PIVCO_MAX_ENCODED_SIZE];
+            uint8_t decoded[PIVCO_BLOCK_SIZE];
+            size_t enc_len, consumed;
+            rc = pivco_encode(g_tenc, &table, symbols, PIVCO_BLOCK_SIZE,
+                              encoded, &enc_len);
+            if (rc != PIVCO_OK)
+                FAIL("%s layout %d: encode returned %d",
+                     dists[d].name, (int)layouts[l], rc);
+            rc = pivco_decode(g_tdec, &dtable, encoded, enc_len,
+                                      decoded, &consumed);
+            if (rc != PIVCO_OK)
+                FAIL("%s layout %d: decode returned %d",
+                     dists[d].name, (int)layouts[l], rc);
+            if (consumed != enc_len)
+                FAIL("%s layout %d: consumed %zu of %zu bytes",
+                     dists[d].name, (int)layouts[l], consumed, enc_len);
+            for (int i = 0; i < PIVCO_BLOCK_SIZE; i++)
+                if (symbols[i] != decoded[i])
+                    FAIL("%s layout %d: mismatch at %d",
+                         dists[d].name, (int)layouts[l], i);
+        }
+    }
+
+    printf("PASS\n");
+    return 0;
+}
+
+
 /* ---- histogram primitive: dispatched vs naive, edges + alignment ---- */
 static int test_histogram(void)
 {
@@ -540,6 +631,7 @@ int test_roundtrip_all(void)
     failures += test_table_build();
     failures += test_single_symbol();
     failures += test_joint_lengths();
+    failures += test_flat_layouts();
     failures += test_histogram();
 
     uint64_t freq[PIVCO_MAX_SYMBOLS];

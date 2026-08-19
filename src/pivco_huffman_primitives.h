@@ -150,12 +150,16 @@
  *    inputs (english) are flat.
  *
  *  void prim_enc_pack_dN(const uint8_t *ranks, int n, int D, uint8_t base,
- *                     uint8_t *out_packed);
+ *                     uint8_t *out_packed, int vertical);
  *
  *    Flat-subtree path.  In a flat subtree (all 2^D leaves at the same depth),
  *    the in-subtree local code is `ranks[i] - base`, already a D-bit value
  *    (base = table->flat_base_rank[node] = the min rank in the subtree).  Pack
- *    those local codes LSB-first into out_packed[ceil(n*D/8)] bytes.
+ *    those local codes into out_packed[ceil(n*D/8)] bytes, laid out per the
+ *    pivco_flat_layout_t value in `vertical`: LSB-first natural (0), hybrid
+ *    vertical (1: 512- then 128-lane blocks + natural tail), or 128-only
+ *    vertical (2) — see pivco_huffman_vertical.h.  Callers pass
+ *    table->flat_layout.
  *
  *    Because (rank - base) is already an 8-bit value in the low bits, the
  *    packers read straight from the u8 rank array — no u16 load + shift +
@@ -167,10 +171,11 @@
  *
  *  void prim_merge_flat(uint8_t *out, int n,
  *                                   const uint8_t *bm, int D,
- *                                   const uint8_t *c2s);
+ *                                   const uint8_t *c2s, int vertical);
  *
  *    Unpack n D-bit codes from bm[], look each up in c2s[2^D], write
- *    the resulting symbols to out[0..n).  bm is `ceil(n*D/8)` bytes.
+ *    the resulting symbols to out[0..n).  bm is `ceil(n*D/8)` bytes,
+ *    laid out per `vertical` (must match the encode-side value).
  *
  *  void prim_merge_cst_cst(const uint8_t *bm, int K,
  *                              uint8_t left_sym, uint8_t right_sym,

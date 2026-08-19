@@ -271,6 +271,8 @@ int pivco_build_table(const pivco_cfg_t *cfg,
 {
     if (!freq || !table) return PIVCO_ERR_NULL;
     if (!cfg) cfg = &pivco_cfg_default;
+    if ((unsigned)cfg->flat_layout > PIVCO_FLAT_VERTICAL_128)
+        return PIVCO_ERR_BAD_CFG;
 
     memset(table, 0, sizeof(*table));
 
@@ -290,6 +292,7 @@ int pivco_build_table(const pivco_cfg_t *cfg,
     if (n_used == 1) {
         build_single_symbol_table(used[0], table);
         table->fse_enabled = (uint8_t)(cfg->fse_enabled ? 1 : 0);
+        table->flat_layout = (uint8_t)cfg->flat_layout;
         return PIVCO_OK;
     }
 
@@ -346,6 +349,7 @@ static int build_table_finish(const uint8_t lengths[PIVCO_MAX_SYMBOLS],
                               const pivco_cfg_t *cfg)
 {
     table->fse_enabled = (uint8_t)(cfg->fse_enabled ? 1 : 0);
+    table->flat_layout = (uint8_t)cfg->flat_layout;
     /* Copy lengths to table */
     for (int i = 0; i < PIVCO_MAX_SYMBOLS; i++) {
         table->code_len[i] = lengths[i];
@@ -797,6 +801,8 @@ int pivco_build_table_from_code_lens(
 {
     if (!code_lens || !table) return PIVCO_ERR_NULL;
     if (!cfg) cfg = &pivco_cfg_default;
+    if ((unsigned)cfg->flat_layout > PIVCO_FLAT_VERTICAL_128)
+        return PIVCO_ERR_BAD_CFG;
     /* Clear everything except the 4 KB decode_sym/decode_len pair: those are
      * filled independently by pivco_build_traditional_table() and are
      * never read by the bulk decoder, so zeroing them here is wasted work. */
@@ -816,6 +822,7 @@ int pivco_build_table_from_code_lens(
     if (n_used == 1) {
         build_single_symbol_table(last, table);
         table->fse_enabled = (uint8_t)(cfg->fse_enabled ? 1 : 0);
+        table->flat_layout = (uint8_t)cfg->flat_layout;
         return PIVCO_OK;
     }
     return build_table_finish(code_lens, table, cfg);

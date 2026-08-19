@@ -198,6 +198,10 @@ static void usage(FILE *out) {
         "                        3 fastest-decompress, 4 fastest-compress\n"
         "                        (simplest under 256 KiB, else balanced).\n"
         "                        wire-compatible; decompress needs no flag.\n"
+        "  --flat MODE           flat-region layout: vertical (default; hybrid\n"
+        "                        512+128 blocks), v128 (128 blocks only; fastest\n"
+        "                        on ARM servers), or natural.  recorded in the\n"
+        "                        stream (FLAGS byte); decompress reads it back.\n"
         "  -f                    overwrite OUT if it exists\n"
         "  -r N                  re-run codec N times into the same buffer\n"
         "                        (no extra I/O); reports per-iter timing\n"
@@ -206,7 +210,8 @@ static void usage(FILE *out) {
 
 int main(int argc, char **argv)
 {
-    pivco_cfg_t cli_cfg = { PIVCO_TREE_MODE_OPTIMIZED, PIVCO_EFFORT_PLAIN, 0 };
+    pivco_cfg_t cli_cfg = { PIVCO_TREE_MODE_OPTIMIZED, PIVCO_EFFORT_PLAIN, 0,
+                            PIVCO_FLAT_VERTICAL };
     int force = 0;
     int repeat = 1;
     int use_ans = 0;   /* -a / --ans : compress with #PHA (ANS-coded bitmaps) */
@@ -244,6 +249,20 @@ int main(int argc, char **argv)
         } else if (strcmp(argv[i], "--effort") == 0 && i + 1 < argc) {
             cli_cfg.effort = (pivco_effort_t)atoi(argv[i + 1]);
             i++;
+        } else if (strncmp(argv[i], "--flat=", 7) == 0
+                   || (strcmp(argv[i], "--flat") == 0 && i + 1 < argc)) {
+            const char *mode = argv[i][6] == '=' ? argv[i] + 7 : argv[++i];
+            if (strcmp(mode, "natural") == 0) {
+                cli_cfg.flat_layout = PIVCO_FLAT_NATURAL;
+            } else if (strcmp(mode, "vertical") == 0) {
+                cli_cfg.flat_layout = PIVCO_FLAT_VERTICAL;
+            } else if (strcmp(mode, "v128") == 0) {
+                cli_cfg.flat_layout = PIVCO_FLAT_VERTICAL_128;
+            } else {
+                fprintf(stderr, "pivcohuf: bad --flat mode '%s' "
+                        "(use natural, vertical, or v128)\n", mode);
+                return 1;
+            }
         } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
             usage(stdout);
             return 0;

@@ -377,6 +377,105 @@ static int test_fse_length_sweep(void)
 }
 #endif  /* PIVCO_HAS_FSE */
 
+/* ---------- flat-layout FLAGS byte in the pivcohuf container ---------- */
+
+/* The container records cfg.flat_layout in the body FLAGS byte, so
+ * decompress needs no matching cfg; unknown FLAGS bits are refused;
+ * and a v0.8 stream (no FLAGS byte, natural flat regions) still
+ * decodes -- synthesized here from a v0.9 natural stream by dropping
+ * the byte, since natural v0.9 bodies are otherwise byte-identical. */
+static int test_flat_layout_file(void)
+{
+    printf("[flat_layout_file] ");
+    enum { N = 200000, FLAGS_OFF = PIVCOHUF_HEADER_SIZE + 10 };
+    uint8_t *in = malloc(N);
+    if (!in) FAIL("oom in");
+    uint64_t rng = 0xF1A6BEEF00D5EEDULL;
+    for (size_t i = 0; i < N; i++) {
+        uint64_t x = xorshift64(&rng);
+        in[i] = (uint8_t)(x % 3 ? x % 16 : x % 256);   /* flat-heavy mix */
+    }
+
+    size_t cap = pivcohuf_compress_bound(N);
+    uint8_t *enc = malloc(cap), *dec = malloc(N);
+    if (!enc || !dec) { free(in); free(enc); free(dec); FAIL("oom bufs"); }
+
+    static const struct { pivco_flat_layout_t layout; uint8_t flags; } arms[] = {
+        { PIVCO_FLAT_NATURAL,      0x00 },
+        { PIVCO_FLAT_VERTICAL,     0x01 },
+        { PIVCO_FLAT_VERTICAL_128, 0x02 },
+    };
+    size_t nat_len = 0;
+    for (size_t a = 0; a < sizeof(arms) / sizeof(arms[0]); a++) {
+        pivco_cfg_t cfg = pivco_cfg_default;
+        cfg.flat_layout = arms[a].layout;
+        size_t enc_len = cap;
+        int rc = pivcohuf_compress_cfg(in, N, enc, &enc_len, &cfg,
+                                       PIVCO_BLOCK_SIZE, NULL);
+        if (rc != PIVCOHUF_OK) FAIL("layout %d: compress rc=%d",
+                                    (int)arms[a].layout, rc);
+        if (enc[FLAGS_OFF] != arms[a].flags)
+            FAIL("layout %d: FLAGS byte %02x, want %02x",
+                 (int)arms[a].layout, enc[FLAGS_OFF], arms[a].flags);
+        size_t dec_len = N;
+        rc = pivcohuf_decompress(enc, enc_len, dec, &dec_len);
+        if (rc != PIVCOHUF_OK) FAIL("layout %d: decompress rc=%d",
+                                    (int)arms[a].layout, rc);
+        if (dec_len != N || memcmp(in, dec, N) != 0)
+            FAIL("layout %d: roundtrip diff", (int)arms[a].layout);
+
+        /* Strictness: any unknown set FLAGS bit is a refusal.  Checksums
+         * are currently disabled, so the byte can be patched in place. */
+        enc[FLAGS_OFF] |= PIVCOHUF_FLAG_QUAD_NODES;
+        dec_len = N;
+        rc = pivcohuf_decompress(enc, enc_len, dec, &dec_len);
+        if (rc != PIVCOHUF_ERR_BAD_VERSION)
+            FAIL("layout %d: unknown FLAGS bit gave rc=%d, want BAD_VERSION",
+                 (int)arms[a].layout, rc);
+        enc[FLAGS_OFF] = arms[a].flags;
+        if (arms[a].layout == PIVCO_FLAT_NATURAL) nat_len = enc_len;
+
+        /* The reserved layout value (3) is a refusal too. */
+        enc[FLAGS_OFF] = 0x03;
+        dec_len = N;
+        rc = pivcohuf_decompress(enc, enc_len, dec, &dec_len);
+        if (rc != PIVCOHUF_ERR_BAD_VERSION)
+            FAIL("layout %d: reserved layout 3 gave rc=%d, want BAD_VERSION",
+                 (int)arms[a].layout, rc);
+        enc[FLAGS_OFF] = arms[a].flags;
+    }
+
+    /* Synthetic v0.8: re-create the natural stream, drop the FLAGS byte,
+     * relabel the minor, shrink BODY_LENGTH. */
+    {
+        pivco_cfg_t cfg = pivco_cfg_default;
+        cfg.flat_layout = PIVCO_FLAT_NATURAL;
+        size_t enc_len = cap;
+        int rc = pivcohuf_compress_cfg(in, N, enc, &enc_len, &cfg,
+                                       PIVCO_BLOCK_SIZE, NULL);
+        if (rc != PIVCOHUF_OK || enc_len != nat_len)
+            FAIL("v0.8 synth: re-compress rc=%d len %zu vs %zu",
+                 rc, enc_len, nat_len);
+        memmove(enc + FLAGS_OFF, enc + FLAGS_OFF + 1,
+                enc_len - FLAGS_OFF - 1);
+        enc_len -= 1;
+        enc[9] = 8;                            /* MINOR_VERSION */
+        uint64_t bl = 0;
+        for (int b = 7; b >= 0; b--) bl = (bl << 8) | enc[10 + b];
+        bl -= 1;
+        for (int b = 0; b < 8; b++) enc[10 + b] = (uint8_t)(bl >> (8 * b));
+        size_t dec_len = N;
+        rc = pivcohuf_decompress(enc, enc_len, dec, &dec_len);
+        if (rc != PIVCOHUF_OK) FAIL("v0.8 synth: decompress rc=%d", rc);
+        if (dec_len != N || memcmp(in, dec, N) != 0)
+            FAIL("v0.8 synth: roundtrip diff");
+    }
+
+    free(in); free(enc); free(dec);
+    printf("PASS\n");
+    return 0;
+}
+
 /* ---------- entry point ---------- */
 
 int test_edge_cases_all(void)
@@ -394,6 +493,8 @@ int test_edge_cases_all(void)
     fails += test_adversarial();
     printf("\n--- FSE dispatch (v0.2 wire format) ---\n");
     fails += test_fse_dispatch();
+    printf("\n--- flat-layout FLAGS byte ---\n");
+    fails += test_flat_layout_file();
 #ifdef PIVCO_HAS_FSE
     printf("\n--- FSE length sweep ---\n");
     fails += test_fse_length_sweep();

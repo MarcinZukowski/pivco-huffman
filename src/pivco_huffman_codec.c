@@ -246,7 +246,8 @@ static void codec_encode_node(const pivco_table_t *table,
         int D = table->flat_depth[node_id];
         int total_bytes = (n * D + 7) >> 3;
         PROF_TIC();
-        prim_enc_pack_dN(ranks, n, D, table->flat_base_rank[node_id], *out_ptr);
+        prim_enc_pack_dN(ranks, n, D, table->flat_base_rank[node_id], *out_ptr,
+                         table->flat_layout);
         PROF_TOC(PROF_ENC_FLAT, n);
         *out_ptr += total_bytes;
         return;
@@ -423,7 +424,7 @@ static void codec_decode_subtree(const pivco_table_t *table,
         *in_ptr += total_bytes;
         const uint8_t *c2s =
             &table->flat_code_to_sym[table->flat_offset[node_id]];
-        prim_merge_flat(out, K, bm, D, c2s);
+        prim_merge_flat(out, K, bm, D, c2s, table->flat_layout);
         return;
     }
 
@@ -537,7 +538,8 @@ int CODEC_DECODE_ENTRY(pivco_decoder_t *dec_ctx, const pivco_table_t *table, con
         const uint8_t *bm = ptr;
         ptr += total_bytes;
         prim_merge_flat(symbols, N, bm, D,
-                        &table->flat_code_to_sym[table->flat_offset[table->tree_root]]);
+                        &table->flat_code_to_sym[table->flat_offset[table->tree_root]],
+                        table->flat_layout);
         *consumed = (size_t)(ptr - in);
         return PIVCO_OK;
     }

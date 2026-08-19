@@ -59,7 +59,10 @@
  *
  * Flat-subtree nodes do NOT use the per-node record — they emit n·D
  * packed bits directly (they have no children, so pre- and post-order
- * coincide).  See pivco_huffman.h:flat_depth.
+ * coincide).  The bit layout inside the region follows
+ * table->flat_layout — natural, hybrid vertical, or 128-only vertical
+ * (see pivco_huffman_vertical.h); the region byte size is the same in
+ * every layout.  See pivco_huffman.h:flat_depth.
  *
  * Internal header, not part of the public API.
  */

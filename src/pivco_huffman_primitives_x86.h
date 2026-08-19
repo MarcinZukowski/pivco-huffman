@@ -33,6 +33,7 @@
 #include "pivco_huffman_common.h"
 #include "pivco_huffman_x86_tables.h"   /* compress_tab*, expand_tab* */
 #include "pivco_huffman_x86_flat.h"     /* flat_d{2,3,4,5,6}_unpack_x86 */
+#include "pivco_huffman_x86_vertical.h"
 #ifdef PIVCO_HAS_AVX2
 #include "pivco_huffman_avx2_pack.h"    /* pack_d{2,3,5,6,7}_avx2_x86 (ryg pack) */
 #endif
@@ -1329,15 +1330,42 @@ PIVCO_PRIM_ALWAYS_INLINE int prim_enc_partition_none(uint8_t *ranks,
                                                      uint8_t *bm)
 { return part_core_x86(ranks, n, thr, bm, NULL, 0); }
 
-PIVCO_PRIM_ALWAYS_INLINE void prim_enc_pack_dN(const uint8_t *ranks,
-                                             int n, int D, uint8_t base,
-                                             uint8_t *out_packed)
+/* Natural-layout kernels exposed for bench_prim's ST_PACK/ST_MERGE_FLAT
+ * rows (the prim_ entries below produce the layout `vertical` selects:
+ * the hybrid vertical wire, or natural when 0). */
+PIVCO_PRIM_ALWAYS_INLINE void prim_enc_pack_dN_natural(const uint8_t *ranks,
+                                             int n, int D, uint8_t base, uint8_t *out_packed)
 { pack_dN_x86(out_packed, ranks, n, D, base); }
-
-PIVCO_PRIM_ALWAYS_INLINE void prim_merge_flat(uint8_t *out, int n,
+PIVCO_PRIM_ALWAYS_INLINE void prim_merge_flat_natural(uint8_t *out, int n,
                                                           const uint8_t *bm, int D,
                                                           const uint8_t *c2s)
 { merge_flat_x86(out, n, bm, D, c2s); }
+PIVCO_PRIM_ALWAYS_INLINE void prim_enc_pack_dN(const uint8_t *ranks,
+                                             int n, int D, uint8_t base, uint8_t *out_packed,
+                                             int vertical)
+{
+    int n5 = vertical == PIVCO_FLAT_VERTICAL ? pivco_vert_n512(n, D) : 0;
+    if (n5) vert512_pack_x86_best(out_packed, ranks, n5, D, base);
+    int r = n - n5, nv = vertical ? pivco_vert_n(r, D) : 0;
+    uint8_t *o1 = out_packed + (((size_t)n5 * D) >> 3);
+    if (nv) vert_pack_x86_best(o1, ranks + n5, nv, D, base);
+    if (r > nv) pack_dN_x86(o1 + (((size_t)nv * D) >> 3),
+                             ranks + n5 + nv, r - nv, D, base);
+}
+
+PIVCO_PRIM_ALWAYS_INLINE void prim_merge_flat(uint8_t *out, int n,
+                                                          const uint8_t *bm, int D,
+                                                          const uint8_t *c2s,
+                                                          int vertical)
+{
+    int n5 = vertical == PIVCO_FLAT_VERTICAL ? pivco_vert_n512(n, D) : 0;
+    if (n5) vert512_merge_x86_best(out, n5, bm, D, c2s);
+    int r = n - n5, nv = vertical ? pivco_vert_n(r, D) : 0;
+    const uint8_t *bm1 = bm + (((size_t)n5 * D) >> 3);
+    if (nv) vert_merge_x86_best(out + n5, nv, bm1, D, c2s);
+    if (r > nv) merge_flat_x86(out + n5 + nv, r - nv,
+                                bm1 + (((size_t)nv * D) >> 3), D, c2s);
+}
 
 PIVCO_PRIM_ALWAYS_INLINE void prim_merge_cst_cst(const uint8_t *bm, int K,
                                                       uint8_t left_sym,

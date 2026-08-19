@@ -124,7 +124,7 @@ size_t pivcohuf_compress_bound_blk(size_t in_len, size_t block_size)
     if (nblocks == 0) nblocks = 1;  /* zero-byte input still produces one header */
     size_t worst_per_block = 4 /* length prefix */ + 2 * B + 64;
     return PIVCOHUF_HEADER_SIZE      /* header */
-         + 8 + 2 + 128                /* body header: usize + blk + code-len nibbles */
+         + 8 + 2 + 1 + 128            /* body header: usize + blk + flags + code-len nibbles */
          + nblocks * worst_per_block;
 }
 
@@ -194,6 +194,10 @@ static int pivcohuf_compress_impl(pivco_encoder_t *enc_ctx,
 
     /* BLOCK_SIZE (uint16, 1024..65535). */
     put_u16(p, (uint16_t)B); p += 2;
+
+    /* FLAGS (v0.9): bits0-1 = flat-region layout, from the build cfg
+     * (already validated by the table build above). */
+    put_u8(p, (uint8_t)cfg->flat_layout); p += 1;
 
     /* CODE_LENGTHS packed as 4-bit nibbles, sym 2i in low nibble. */
     for (int i = 0; i < 128; i++) {
@@ -335,15 +339,23 @@ int pivcohuf_compress_timed(const uint8_t *in, size_t in_len,
  * peek + decompress
  * ============================================================ */
 
-static int parse_header(const uint8_t *in, size_t in_len, uint64_t *body_len)
+/* Oldest minor this decoder still reads.  v0.8 bodies have no FLAGS
+ * byte and natural flat regions; anything older is a hard break. */
+#define PIVCOHUF_MIN_DECODE_MINOR 8
+
+static int parse_header(const uint8_t *in, size_t in_len, uint64_t *body_len,
+                        uint8_t *minor)
 {
     if (in_len < PIVCOHUF_HEADER_SIZE) return PIVCOHUF_ERR_TOO_SHORT;
     if (memcmp(in, PIVCOHUF_MAGIC, 8) != 0) return PIVCOHUF_ERR_BAD_MAGIC;
-    if (in[8] != PIVCOHUF_VERSION_MAJOR || in[9] != PIVCOHUF_VERSION_MINOR)
+    if (in[8] != PIVCOHUF_VERSION_MAJOR
+        || in[9] < PIVCOHUF_MIN_DECODE_MINOR
+        || in[9] > PIVCOHUF_VERSION_MINOR)
         return PIVCOHUF_ERR_BAD_VERSION;
     /* HEADER_CHECKSUM verification disabled (2026-05-12) -- bytes are
      * still in the format at offset 22..25, currently always zero. */
     *body_len = get_u64(in + 10);
+    *minor = in[9];
     return PIVCOHUF_OK;
 }
 
@@ -352,7 +364,8 @@ int pivcohuf_peek_uncompressed_size(const uint8_t *in, size_t in_len,
 {
     if (!in || !uncompressed_size) return PIVCOHUF_ERR_NULL;
     uint64_t body_len;
-    int rc = parse_header(in, in_len, &body_len);
+    uint8_t minor;
+    int rc = parse_header(in, in_len, &body_len, &minor);
     if (rc != PIVCOHUF_OK) return rc;
     if (in_len < PIVCOHUF_HEADER_SIZE + 8) return PIVCOHUF_ERR_TOO_SHORT;
     *uncompressed_size = (size_t)get_u64(in + PIVCOHUF_HEADER_SIZE);
@@ -366,7 +379,8 @@ static int pivcohuf_decompress_impl(pivco_decoder_t *dec_ctx,
 {
     if (!in || !out || !out_len) return PIVCOHUF_ERR_NULL;
     uint64_t body_len_u64;
-    int rc = parse_header(in, in_len, &body_len_u64);
+    uint8_t minor;
+    int rc = parse_header(in, in_len, &body_len_u64, &minor);
     if (rc != PIVCOHUF_OK) return rc;
     if (in_len < PIVCOHUF_HEADER_SIZE + body_len_u64)
         return PIVCOHUF_ERR_TOO_SHORT;
@@ -374,10 +388,22 @@ static int pivcohuf_decompress_impl(pivco_decoder_t *dec_ctx,
     const uint8_t *body = in + PIVCOHUF_HEADER_SIZE;
     /* BODY_CHECKSUM verification disabled (2026-05-12). */
 
-    /* Parse body header: UNCOMPRESSED_SIZE(8) + BLOCK_SIZE(2) + nibbles(128). */
-    if (body_len < 8 + 2 + 128) return PIVCOHUF_ERR_TOO_SHORT;
+    /* Parse body header: UNCOMPRESSED_SIZE(8) + BLOCK_SIZE(2) +
+     * FLAGS(1, v0.9+) + nibbles(128). */
+    size_t flags_size = (minor >= 9) ? 1 : 0;
+    if (body_len < 8 + 2 + flags_size + 128) return PIVCOHUF_ERR_TOO_SHORT;
     size_t uncomp_size = (size_t)get_u64(body);
     uint16_t file_blk = get_u16(body + 8);
+    uint8_t flags = 0;
+    if (flags_size) {
+        flags = get_u8(body + 10);
+        /* Strict: any layout value or set bit this decoder does not
+         * implement (including the reserved QUAD_NODES bit) is a
+         * refusal, not a guess. */
+        if ((flags & PIVCOHUF_FLAGS_LAYOUT_MASK) > PIVCO_FLAT_VERTICAL_128
+            || (flags & (uint8_t)~PIVCOHUF_FLAGS_LAYOUT_MASK))
+            return PIVCOHUF_ERR_BAD_VERSION;
+    }
     /* The block size is read from the file, not fixed at compile time: the
      * codec sizes its scratch dynamically off the per-block wire N header,
      * so any block size the encoder could write is decodable here.  Only a
@@ -387,17 +413,22 @@ static int pivcohuf_decompress_impl(pivco_decoder_t *dec_ctx,
 
     if (*out_len < uncomp_size) return PIVCOHUF_ERR_OUTPUT_TOO_SMALL;
 
-    /* Reconstruct Huffman table from code lengths. */
+    /* Reconstruct Huffman table from code lengths.  The build cfg follows
+     * the stream, not this build's defaults: v0.8 streams and v0.9 streams
+     * without the flag have natural flat regions. */
     uint8_t code_lens[256];
-    const uint8_t *nibbles = body + 10;
+    const uint8_t *nibbles = body + 10 + flags_size;
     for (int i = 0; i < 128; i++) {
         code_lens[2*i]     = nibbles[i] & 0x0F;
         code_lens[2*i + 1] = (nibbles[i] >> 4) & 0x0F;
     }
 
+    pivco_cfg_t cfg = pivco_cfg_default;
+    cfg.flat_layout = (pivco_flat_layout_t)(flags & PIVCOHUF_FLAGS_LAYOUT_MASK);
+
     pivco_table_t table;
     { PROF_TIC(); double _t = TIC(tm);
-      if (pivco_build_table_from_code_lens(NULL, code_lens, &table) != PIVCO_OK)
+      if (pivco_build_table_from_code_lens(&cfg, code_lens, &table) != PIVCO_OK)
           return PIVCOHUF_ERR_INTERNAL;
       PROF_TOC(PROF_FILE_BUILD_TABLE_SYN, 1); TOC(tm, build_ns, _t); }
     /* Sanity check: rebuilt code lengths must match. */
@@ -413,7 +444,7 @@ static int pivcohuf_decompress_impl(pivco_decoder_t *dec_ctx,
     uint8_t *block_buf = (uint8_t *)malloc(B);
     TOC(tm, malloc_ns, _tm);
     if (!block_buf) return PIVCOHUF_ERR_INTERNAL;
-    const uint8_t *p = body + 10 + 128;
+    const uint8_t *p = body + 10 + flags_size + 128;
     const uint8_t *body_end = body + body_len;
     size_t written = 0;
     int err = 0;

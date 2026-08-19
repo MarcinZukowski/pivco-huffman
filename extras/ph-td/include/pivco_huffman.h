@@ -158,6 +158,15 @@ typedef struct {
 typedef pivco_huffman_table_t pivco_table_t;
 typedef pivco_huffman_enc_init_aux_t pivco_enc_init_aux_t;
 
+/* Flat-region layout names, referenced by the PRODUCTION primitive
+ * headers this snapshot #includes (the ph-td walk itself is
+ * natural-only).  Mirrors include/pivco_huffman.h. */
+typedef enum {
+    PIVCO_FLAT_NATURAL      = 0,
+    PIVCO_FLAT_VERTICAL     = 1,
+    PIVCO_FLAT_VERTICAL_128 = 2,
+} pivco_flat_layout_t;
+
 /* ---------- Implementation selection ---------- */
 
 typedef enum {

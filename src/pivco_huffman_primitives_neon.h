@@ -1179,14 +1179,577 @@ PIVCO_PRIM_ALWAYS_INLINE int prim_enc_partition_right(uint8_t *ranks, int n,
 PIVCO_PRIM_ALWAYS_INLINE int prim_enc_partition_none(uint8_t *ranks, int n,
                                              uint8_t thr, uint8_t *bm)
 { return part_core_neon(ranks, n, thr, bm, NULL, 0); }
-PIVCO_PRIM_ALWAYS_INLINE void prim_enc_pack_dN(const uint8_t *ranks,
+
+/* ---------- vertical-128 flat kernels (see pivco_huffman_vertical.h) ----------
+ *
+ * Fused decode of the vertical prefix: per block, load the D byte-columns
+ * (16 B each), then for each of the 8 steps extract one D-bit field from
+ * every lane with uniform shifts (compile-time constants after per-D
+ * instantiation), map through c2s, store 16 consecutive symbols. */
+#define PIVCO_VERT_MERGE_NEON_BODY(DV, MAPEXPR, BLK, O, CS, OS)               \
+    do {                                                                       \
+        uint8x16_t cols[8];                                                    \
+        for (int j = 0; j < DV; j++) cols[j] = vld1q_u8((BLK) + (CS) * j);     \
+        for (int s = 0; s < 8; s++) {                                          \
+            int bit = s * DV, j = bit >> 3, off = bit & 7;                     \
+            uint8x16_t w = vshlq_u8(cols[j], vdupq_n_s8((int8_t)-off));        \
+            if (off + DV > 8)                                                  \
+                w = vorrq_u8(w, vshlq_u8(cols[j + 1],                          \
+                                         vdupq_n_s8((int8_t)(8 - off))));      \
+            uint8x16_t codes = vandq_u8(w, maskv);                             \
+            vst1q_u8((O) + (OS) * s, MAPEXPR);                                 \
+        }                                                                      \
+    } while (0)
+#define PIVCO_VERT_MERGE_NEON(DV, SETUP, MAPEXPR)                              \
+static void vert_merge_neon_d##DV(uint8_t *out, int n_v, const uint8_t *bm,    \
+                                  const uint8_t *c2s)                          \
+{                                                                              \
+    SETUP                                                                      \
+    const uint8x16_t maskv = vdupq_n_u8((uint8_t)((1u << DV) - 1));            \
+    for (int b = 0; b < n_v >> 7; b++)                                         \
+        PIVCO_VERT_MERGE_NEON_BODY(DV, MAPEXPR,                                \
+                                   bm + (size_t)b * 16 * DV,                   \
+                                   out + ((size_t)b << 7), 16, 16);            \
+}                                                                              \
+static void vert512_merge_neon_d##DV(uint8_t *out, int n_v, const uint8_t *bm, \
+                                     const uint8_t *c2s)                       \
+{                                                                              \
+    SETUP                                                                      \
+    const uint8x16_t maskv = vdupq_n_u8((uint8_t)((1u << DV) - 1));            \
+    for (int b = 0; b < n_v >> 9; b++)                                         \
+        for (int qt = 0; qt < 4; qt++)                                         \
+            PIVCO_VERT_MERGE_NEON_BODY(DV, MAPEXPR,                            \
+                                       bm + (size_t)b * 64 * DV + 16 * qt,     \
+                                       out + ((size_t)b << 9) + 16 * qt,       \
+                                       64, 64);                                \
+}
+PIVCO_VERT_MERGE_NEON(2, const uint8x16_t t = vld1q_u8(c2s);, vqtbl1q_u8(t, codes))
+PIVCO_VERT_MERGE_NEON(3, const uint8x16_t t = vld1q_u8(c2s);, vqtbl1q_u8(t, codes))
+PIVCO_VERT_MERGE_NEON(4, const uint8x16_t t = vld1q_u8(c2s);, vqtbl1q_u8(t, codes))
+PIVCO_VERT_MERGE_NEON(5,
+    uint8x16x2_t t; t.val[0] = vld1q_u8(c2s); t.val[1] = vld1q_u8(c2s + 16);,
+    vqtbl2q_u8(t, codes))
+PIVCO_VERT_MERGE_NEON(6,
+    uint8x16x4_t t; t.val[0] = vld1q_u8(c2s);      t.val[1] = vld1q_u8(c2s + 16);
+                    t.val[2] = vld1q_u8(c2s + 32); t.val[3] = vld1q_u8(c2s + 48);,
+    vqtbl4q_u8(t, codes))
+PIVCO_VERT_MERGE_NEON(7,
+    uint8x16x4_t lo; lo.val[0] = vld1q_u8(c2s);      lo.val[1] = vld1q_u8(c2s + 16);
+                     lo.val[2] = vld1q_u8(c2s + 32); lo.val[3] = vld1q_u8(c2s + 48);
+    uint8x16x4_t hi; hi.val[0] = vld1q_u8(c2s + 64); hi.val[1] = vld1q_u8(c2s + 80);
+                     hi.val[2] = vld1q_u8(c2s + 96); hi.val[3] = vld1q_u8(c2s + 112);
+    const uint8x16_t s64 = vdupq_n_u8(64);,
+    vorrq_u8(vqtbl4q_u8(lo, codes), vqtbl4q_u8(hi, vsubq_u8(codes, s64))))
+#undef PIVCO_VERT_MERGE_NEON
+#undef PIVCO_VERT_MERGE_NEON_BODY
+
+static inline void vert_merge_neon(uint8_t *out, int n_v, const uint8_t *bm,
+                                   int D, const uint8_t *c2s)
+{
+    switch (D) {
+    case 2: vert_merge_neon_d2(out, n_v, bm, c2s); break;
+    case 3: vert_merge_neon_d3(out, n_v, bm, c2s); break;
+    case 4: vert_merge_neon_d4(out, n_v, bm, c2s); break;
+    case 5: vert_merge_neon_d5(out, n_v, bm, c2s); break;
+    case 6: vert_merge_neon_d6(out, n_v, bm, c2s); break;
+    default: vert_merge_neon_d7(out, n_v, bm, c2s); break;
+    }
+}
+
+static inline void vert512_merge_neon(uint8_t *out, int n_v, const uint8_t *bm,
+                                      int D, const uint8_t *c2s)
+{
+    switch (D) {
+    case 2: vert512_merge_neon_d2(out, n_v, bm, c2s); break;
+    case 3: vert512_merge_neon_d3(out, n_v, bm, c2s); break;
+    case 4: vert512_merge_neon_d4(out, n_v, bm, c2s); break;
+    case 5: vert512_merge_neon_d5(out, n_v, bm, c2s); break;
+    case 6: vert512_merge_neon_d6(out, n_v, bm, c2s); break;
+    default: vert512_merge_neon_d7(out, n_v, bm, c2s); break;
+    }
+}
+
+/* Encoder mirror, fully unrolled per D: VSLI/VSRI fuse the shift+OR
+ * accumulate into one op, and each column's first touch is a plain
+ * move/shift (no zero-init pass).  Chronological step order makes the
+ * insert semantics safe: within a column, offsets only grow, so VSLI's
+ * preserved-low-bits / VSRI's preserved-high-bits never clobber prior
+ * contributions.  Relies on ranks - base < 2^D (no masking), like the
+ * natural packs.  The group core packs one 16-lane sub-block at runtime
+ * column/output strides: (16,16) walks 128-value blocks, (64,64) walks
+ * the four interleaved quarters of a 512-value block. */
+static void vert_pack_neon_d2(uint8_t *out, const uint8_t *ranks,
+                                int n_v, uint8_t base)
+{
+    const uint8x16_t basev = vdupq_n_u8(base);
+    for (int b = 0; b < n_v >> 7; b++) {
+        uint8_t *blk = out + (size_t)b * 16 * 2;
+        const uint8_t *r = ranks + ((size_t)b << 7);
+        uint8x16_t c0, c1;
+        uint8x16_t v0 = vsubq_u8(vld1q_u8(r + 0), basev);
+        c0 = v0;
+        uint8x16_t v1 = vsubq_u8(vld1q_u8(r + 16), basev);
+        c0 = vsliq_n_u8(c0, v1, 2);
+        uint8x16_t v2 = vsubq_u8(vld1q_u8(r + 32), basev);
+        c0 = vsliq_n_u8(c0, v2, 4);
+        uint8x16_t v3 = vsubq_u8(vld1q_u8(r + 48), basev);
+        c0 = vsliq_n_u8(c0, v3, 6);
+        uint8x16_t v4 = vsubq_u8(vld1q_u8(r + 64), basev);
+        c1 = v4;
+        uint8x16_t v5 = vsubq_u8(vld1q_u8(r + 80), basev);
+        c1 = vsliq_n_u8(c1, v5, 2);
+        uint8x16_t v6 = vsubq_u8(vld1q_u8(r + 96), basev);
+        c1 = vsliq_n_u8(c1, v6, 4);
+        uint8x16_t v7 = vsubq_u8(vld1q_u8(r + 112), basev);
+        c1 = vsliq_n_u8(c1, v7, 6);
+        vst1q_u8(blk + 0, c0);
+        vst1q_u8(blk + 16, c1);
+    }
+}
+static void vert512_pack_neon_d2(uint8_t *out, const uint8_t *ranks,
+                                   int n_v, uint8_t base)
+{
+    const uint8x16_t basev = vdupq_n_u8(base);
+    for (int b = 0; b < n_v >> 9; b++) {
+        for (int qt = 0; qt < 4; qt++) {
+            uint8_t *blk = out + (size_t)b * 64 * 2 + 16 * qt;
+            const uint8_t *r = ranks + ((size_t)b << 9) + 16 * qt;
+            uint8x16_t c0, c1;
+            uint8x16_t v0 = vsubq_u8(vld1q_u8(r + 0), basev);
+            c0 = v0;
+            uint8x16_t v1 = vsubq_u8(vld1q_u8(r + 64), basev);
+            c0 = vsliq_n_u8(c0, v1, 2);
+            uint8x16_t v2 = vsubq_u8(vld1q_u8(r + 128), basev);
+            c0 = vsliq_n_u8(c0, v2, 4);
+            uint8x16_t v3 = vsubq_u8(vld1q_u8(r + 192), basev);
+            c0 = vsliq_n_u8(c0, v3, 6);
+            uint8x16_t v4 = vsubq_u8(vld1q_u8(r + 256), basev);
+            c1 = v4;
+            uint8x16_t v5 = vsubq_u8(vld1q_u8(r + 320), basev);
+            c1 = vsliq_n_u8(c1, v5, 2);
+            uint8x16_t v6 = vsubq_u8(vld1q_u8(r + 384), basev);
+            c1 = vsliq_n_u8(c1, v6, 4);
+            uint8x16_t v7 = vsubq_u8(vld1q_u8(r + 448), basev);
+            c1 = vsliq_n_u8(c1, v7, 6);
+            vst1q_u8(blk + 0, c0);
+            vst1q_u8(blk + 64, c1);
+        }
+    }
+}
+static void vert_pack_neon_d3(uint8_t *out, const uint8_t *ranks,
+                                int n_v, uint8_t base)
+{
+    const uint8x16_t basev = vdupq_n_u8(base);
+    for (int b = 0; b < n_v >> 7; b++) {
+        uint8_t *blk = out + (size_t)b * 16 * 3;
+        const uint8_t *r = ranks + ((size_t)b << 7);
+        uint8x16_t c0, c1, c2;
+        uint8x16_t v0 = vsubq_u8(vld1q_u8(r + 0), basev);
+        c0 = v0;
+        uint8x16_t v1 = vsubq_u8(vld1q_u8(r + 16), basev);
+        c0 = vsliq_n_u8(c0, v1, 3);
+        uint8x16_t v2 = vsubq_u8(vld1q_u8(r + 32), basev);
+        c0 = vsliq_n_u8(c0, v2, 6);
+        c1 = vshrq_n_u8(v2, 2);
+        uint8x16_t v3 = vsubq_u8(vld1q_u8(r + 48), basev);
+        c1 = vsliq_n_u8(c1, v3, 1);
+        uint8x16_t v4 = vsubq_u8(vld1q_u8(r + 64), basev);
+        c1 = vsliq_n_u8(c1, v4, 4);
+        uint8x16_t v5 = vsubq_u8(vld1q_u8(r + 80), basev);
+        c1 = vsliq_n_u8(c1, v5, 7);
+        c2 = vshrq_n_u8(v5, 1);
+        uint8x16_t v6 = vsubq_u8(vld1q_u8(r + 96), basev);
+        c2 = vsliq_n_u8(c2, v6, 2);
+        uint8x16_t v7 = vsubq_u8(vld1q_u8(r + 112), basev);
+        c2 = vsliq_n_u8(c2, v7, 5);
+        vst1q_u8(blk + 0, c0);
+        vst1q_u8(blk + 16, c1);
+        vst1q_u8(blk + 32, c2);
+    }
+}
+static void vert512_pack_neon_d3(uint8_t *out, const uint8_t *ranks,
+                                   int n_v, uint8_t base)
+{
+    const uint8x16_t basev = vdupq_n_u8(base);
+    for (int b = 0; b < n_v >> 9; b++) {
+        for (int qt = 0; qt < 4; qt++) {
+            uint8_t *blk = out + (size_t)b * 64 * 3 + 16 * qt;
+            const uint8_t *r = ranks + ((size_t)b << 9) + 16 * qt;
+            uint8x16_t c0, c1, c2;
+            uint8x16_t v0 = vsubq_u8(vld1q_u8(r + 0), basev);
+            c0 = v0;
+            uint8x16_t v1 = vsubq_u8(vld1q_u8(r + 64), basev);
+            c0 = vsliq_n_u8(c0, v1, 3);
+            uint8x16_t v2 = vsubq_u8(vld1q_u8(r + 128), basev);
+            c0 = vsliq_n_u8(c0, v2, 6);
+            c1 = vshrq_n_u8(v2, 2);
+            uint8x16_t v3 = vsubq_u8(vld1q_u8(r + 192), basev);
+            c1 = vsliq_n_u8(c1, v3, 1);
+            uint8x16_t v4 = vsubq_u8(vld1q_u8(r + 256), basev);
+            c1 = vsliq_n_u8(c1, v4, 4);
+            uint8x16_t v5 = vsubq_u8(vld1q_u8(r + 320), basev);
+            c1 = vsliq_n_u8(c1, v5, 7);
+            c2 = vshrq_n_u8(v5, 1);
+            uint8x16_t v6 = vsubq_u8(vld1q_u8(r + 384), basev);
+            c2 = vsliq_n_u8(c2, v6, 2);
+            uint8x16_t v7 = vsubq_u8(vld1q_u8(r + 448), basev);
+            c2 = vsliq_n_u8(c2, v7, 5);
+            vst1q_u8(blk + 0, c0);
+            vst1q_u8(blk + 64, c1);
+            vst1q_u8(blk + 128, c2);
+        }
+    }
+}
+static void vert_pack_neon_d4(uint8_t *out, const uint8_t *ranks,
+                                int n_v, uint8_t base)
+{
+    const uint8x16_t basev = vdupq_n_u8(base);
+    for (int b = 0; b < n_v >> 7; b++) {
+        uint8_t *blk = out + (size_t)b * 16 * 4;
+        const uint8_t *r = ranks + ((size_t)b << 7);
+        uint8x16_t c0, c1, c2, c3;
+        uint8x16_t v0 = vsubq_u8(vld1q_u8(r + 0), basev);
+        c0 = v0;
+        uint8x16_t v1 = vsubq_u8(vld1q_u8(r + 16), basev);
+        c0 = vsliq_n_u8(c0, v1, 4);
+        uint8x16_t v2 = vsubq_u8(vld1q_u8(r + 32), basev);
+        c1 = v2;
+        uint8x16_t v3 = vsubq_u8(vld1q_u8(r + 48), basev);
+        c1 = vsliq_n_u8(c1, v3, 4);
+        uint8x16_t v4 = vsubq_u8(vld1q_u8(r + 64), basev);
+        c2 = v4;
+        uint8x16_t v5 = vsubq_u8(vld1q_u8(r + 80), basev);
+        c2 = vsliq_n_u8(c2, v5, 4);
+        uint8x16_t v6 = vsubq_u8(vld1q_u8(r + 96), basev);
+        c3 = v6;
+        uint8x16_t v7 = vsubq_u8(vld1q_u8(r + 112), basev);
+        c3 = vsliq_n_u8(c3, v7, 4);
+        vst1q_u8(blk + 0, c0);
+        vst1q_u8(blk + 16, c1);
+        vst1q_u8(blk + 32, c2);
+        vst1q_u8(blk + 48, c3);
+    }
+}
+static void vert512_pack_neon_d4(uint8_t *out, const uint8_t *ranks,
+                                   int n_v, uint8_t base)
+{
+    const uint8x16_t basev = vdupq_n_u8(base);
+    for (int b = 0; b < n_v >> 9; b++) {
+        for (int qt = 0; qt < 4; qt++) {
+            uint8_t *blk = out + (size_t)b * 64 * 4 + 16 * qt;
+            const uint8_t *r = ranks + ((size_t)b << 9) + 16 * qt;
+            uint8x16_t c0, c1, c2, c3;
+            uint8x16_t v0 = vsubq_u8(vld1q_u8(r + 0), basev);
+            c0 = v0;
+            uint8x16_t v1 = vsubq_u8(vld1q_u8(r + 64), basev);
+            c0 = vsliq_n_u8(c0, v1, 4);
+            uint8x16_t v2 = vsubq_u8(vld1q_u8(r + 128), basev);
+            c1 = v2;
+            uint8x16_t v3 = vsubq_u8(vld1q_u8(r + 192), basev);
+            c1 = vsliq_n_u8(c1, v3, 4);
+            uint8x16_t v4 = vsubq_u8(vld1q_u8(r + 256), basev);
+            c2 = v4;
+            uint8x16_t v5 = vsubq_u8(vld1q_u8(r + 320), basev);
+            c2 = vsliq_n_u8(c2, v5, 4);
+            uint8x16_t v6 = vsubq_u8(vld1q_u8(r + 384), basev);
+            c3 = v6;
+            uint8x16_t v7 = vsubq_u8(vld1q_u8(r + 448), basev);
+            c3 = vsliq_n_u8(c3, v7, 4);
+            vst1q_u8(blk + 0, c0);
+            vst1q_u8(blk + 64, c1);
+            vst1q_u8(blk + 128, c2);
+            vst1q_u8(blk + 192, c3);
+        }
+    }
+}
+static void vert_pack_neon_d5(uint8_t *out, const uint8_t *ranks,
+                                int n_v, uint8_t base)
+{
+    const uint8x16_t basev = vdupq_n_u8(base);
+    for (int b = 0; b < n_v >> 7; b++) {
+        uint8_t *blk = out + (size_t)b * 16 * 5;
+        const uint8_t *r = ranks + ((size_t)b << 7);
+        uint8x16_t c0, c1, c2, c3, c4;
+        uint8x16_t v0 = vsubq_u8(vld1q_u8(r + 0), basev);
+        c0 = v0;
+        uint8x16_t v1 = vsubq_u8(vld1q_u8(r + 16), basev);
+        c0 = vsliq_n_u8(c0, v1, 5);
+        c1 = vshrq_n_u8(v1, 3);
+        uint8x16_t v2 = vsubq_u8(vld1q_u8(r + 32), basev);
+        c1 = vsliq_n_u8(c1, v2, 2);
+        uint8x16_t v3 = vsubq_u8(vld1q_u8(r + 48), basev);
+        c1 = vsliq_n_u8(c1, v3, 7);
+        c2 = vshrq_n_u8(v3, 1);
+        uint8x16_t v4 = vsubq_u8(vld1q_u8(r + 64), basev);
+        c2 = vsliq_n_u8(c2, v4, 4);
+        c3 = vshrq_n_u8(v4, 4);
+        uint8x16_t v5 = vsubq_u8(vld1q_u8(r + 80), basev);
+        c3 = vsliq_n_u8(c3, v5, 1);
+        uint8x16_t v6 = vsubq_u8(vld1q_u8(r + 96), basev);
+        c3 = vsliq_n_u8(c3, v6, 6);
+        c4 = vshrq_n_u8(v6, 2);
+        uint8x16_t v7 = vsubq_u8(vld1q_u8(r + 112), basev);
+        c4 = vsliq_n_u8(c4, v7, 3);
+        vst1q_u8(blk + 0, c0);
+        vst1q_u8(blk + 16, c1);
+        vst1q_u8(blk + 32, c2);
+        vst1q_u8(blk + 48, c3);
+        vst1q_u8(blk + 64, c4);
+    }
+}
+static void vert512_pack_neon_d5(uint8_t *out, const uint8_t *ranks,
+                                   int n_v, uint8_t base)
+{
+    const uint8x16_t basev = vdupq_n_u8(base);
+    for (int b = 0; b < n_v >> 9; b++) {
+        for (int qt = 0; qt < 4; qt++) {
+            uint8_t *blk = out + (size_t)b * 64 * 5 + 16 * qt;
+            const uint8_t *r = ranks + ((size_t)b << 9) + 16 * qt;
+            uint8x16_t c0, c1, c2, c3, c4;
+            uint8x16_t v0 = vsubq_u8(vld1q_u8(r + 0), basev);
+            c0 = v0;
+            uint8x16_t v1 = vsubq_u8(vld1q_u8(r + 64), basev);
+            c0 = vsliq_n_u8(c0, v1, 5);
+            c1 = vshrq_n_u8(v1, 3);
+            uint8x16_t v2 = vsubq_u8(vld1q_u8(r + 128), basev);
+            c1 = vsliq_n_u8(c1, v2, 2);
+            uint8x16_t v3 = vsubq_u8(vld1q_u8(r + 192), basev);
+            c1 = vsliq_n_u8(c1, v3, 7);
+            c2 = vshrq_n_u8(v3, 1);
+            uint8x16_t v4 = vsubq_u8(vld1q_u8(r + 256), basev);
+            c2 = vsliq_n_u8(c2, v4, 4);
+            c3 = vshrq_n_u8(v4, 4);
+            uint8x16_t v5 = vsubq_u8(vld1q_u8(r + 320), basev);
+            c3 = vsliq_n_u8(c3, v5, 1);
+            uint8x16_t v6 = vsubq_u8(vld1q_u8(r + 384), basev);
+            c3 = vsliq_n_u8(c3, v6, 6);
+            c4 = vshrq_n_u8(v6, 2);
+            uint8x16_t v7 = vsubq_u8(vld1q_u8(r + 448), basev);
+            c4 = vsliq_n_u8(c4, v7, 3);
+            vst1q_u8(blk + 0, c0);
+            vst1q_u8(blk + 64, c1);
+            vst1q_u8(blk + 128, c2);
+            vst1q_u8(blk + 192, c3);
+            vst1q_u8(blk + 256, c4);
+        }
+    }
+}
+static void vert_pack_neon_d6(uint8_t *out, const uint8_t *ranks,
+                                int n_v, uint8_t base)
+{
+    const uint8x16_t basev = vdupq_n_u8(base);
+    for (int b = 0; b < n_v >> 7; b++) {
+        uint8_t *blk = out + (size_t)b * 16 * 6;
+        const uint8_t *r = ranks + ((size_t)b << 7);
+        uint8x16_t c0, c1, c2, c3, c4, c5;
+        uint8x16_t v0 = vsubq_u8(vld1q_u8(r + 0), basev);
+        c0 = v0;
+        uint8x16_t v1 = vsubq_u8(vld1q_u8(r + 16), basev);
+        c0 = vsliq_n_u8(c0, v1, 6);
+        c1 = vshrq_n_u8(v1, 2);
+        uint8x16_t v2 = vsubq_u8(vld1q_u8(r + 32), basev);
+        c1 = vsliq_n_u8(c1, v2, 4);
+        c2 = vshrq_n_u8(v2, 4);
+        uint8x16_t v3 = vsubq_u8(vld1q_u8(r + 48), basev);
+        c2 = vsliq_n_u8(c2, v3, 2);
+        uint8x16_t v4 = vsubq_u8(vld1q_u8(r + 64), basev);
+        c3 = v4;
+        uint8x16_t v5 = vsubq_u8(vld1q_u8(r + 80), basev);
+        c3 = vsliq_n_u8(c3, v5, 6);
+        c4 = vshrq_n_u8(v5, 2);
+        uint8x16_t v6 = vsubq_u8(vld1q_u8(r + 96), basev);
+        c4 = vsliq_n_u8(c4, v6, 4);
+        c5 = vshrq_n_u8(v6, 4);
+        uint8x16_t v7 = vsubq_u8(vld1q_u8(r + 112), basev);
+        c5 = vsliq_n_u8(c5, v7, 2);
+        vst1q_u8(blk + 0, c0);
+        vst1q_u8(blk + 16, c1);
+        vst1q_u8(blk + 32, c2);
+        vst1q_u8(blk + 48, c3);
+        vst1q_u8(blk + 64, c4);
+        vst1q_u8(blk + 80, c5);
+    }
+}
+static void vert512_pack_neon_d6(uint8_t *out, const uint8_t *ranks,
+                                   int n_v, uint8_t base)
+{
+    const uint8x16_t basev = vdupq_n_u8(base);
+    for (int b = 0; b < n_v >> 9; b++) {
+        for (int qt = 0; qt < 4; qt++) {
+            uint8_t *blk = out + (size_t)b * 64 * 6 + 16 * qt;
+            const uint8_t *r = ranks + ((size_t)b << 9) + 16 * qt;
+            uint8x16_t c0, c1, c2, c3, c4, c5;
+            uint8x16_t v0 = vsubq_u8(vld1q_u8(r + 0), basev);
+            c0 = v0;
+            uint8x16_t v1 = vsubq_u8(vld1q_u8(r + 64), basev);
+            c0 = vsliq_n_u8(c0, v1, 6);
+            c1 = vshrq_n_u8(v1, 2);
+            uint8x16_t v2 = vsubq_u8(vld1q_u8(r + 128), basev);
+            c1 = vsliq_n_u8(c1, v2, 4);
+            c2 = vshrq_n_u8(v2, 4);
+            uint8x16_t v3 = vsubq_u8(vld1q_u8(r + 192), basev);
+            c2 = vsliq_n_u8(c2, v3, 2);
+            uint8x16_t v4 = vsubq_u8(vld1q_u8(r + 256), basev);
+            c3 = v4;
+            uint8x16_t v5 = vsubq_u8(vld1q_u8(r + 320), basev);
+            c3 = vsliq_n_u8(c3, v5, 6);
+            c4 = vshrq_n_u8(v5, 2);
+            uint8x16_t v6 = vsubq_u8(vld1q_u8(r + 384), basev);
+            c4 = vsliq_n_u8(c4, v6, 4);
+            c5 = vshrq_n_u8(v6, 4);
+            uint8x16_t v7 = vsubq_u8(vld1q_u8(r + 448), basev);
+            c5 = vsliq_n_u8(c5, v7, 2);
+            vst1q_u8(blk + 0, c0);
+            vst1q_u8(blk + 64, c1);
+            vst1q_u8(blk + 128, c2);
+            vst1q_u8(blk + 192, c3);
+            vst1q_u8(blk + 256, c4);
+            vst1q_u8(blk + 320, c5);
+        }
+    }
+}
+static void vert_pack_neon_d7(uint8_t *out, const uint8_t *ranks,
+                                int n_v, uint8_t base)
+{
+    const uint8x16_t basev = vdupq_n_u8(base);
+    for (int b = 0; b < n_v >> 7; b++) {
+        uint8_t *blk = out + (size_t)b * 16 * 7;
+        const uint8_t *r = ranks + ((size_t)b << 7);
+        uint8x16_t c0, c1, c2, c3, c4, c5, c6;
+        uint8x16_t v0 = vsubq_u8(vld1q_u8(r + 0), basev);
+        c0 = v0;
+        uint8x16_t v1 = vsubq_u8(vld1q_u8(r + 16), basev);
+        c0 = vsliq_n_u8(c0, v1, 7);
+        c1 = vshrq_n_u8(v1, 1);
+        uint8x16_t v2 = vsubq_u8(vld1q_u8(r + 32), basev);
+        c1 = vsliq_n_u8(c1, v2, 6);
+        c2 = vshrq_n_u8(v2, 2);
+        uint8x16_t v3 = vsubq_u8(vld1q_u8(r + 48), basev);
+        c2 = vsliq_n_u8(c2, v3, 5);
+        c3 = vshrq_n_u8(v3, 3);
+        uint8x16_t v4 = vsubq_u8(vld1q_u8(r + 64), basev);
+        c3 = vsliq_n_u8(c3, v4, 4);
+        c4 = vshrq_n_u8(v4, 4);
+        uint8x16_t v5 = vsubq_u8(vld1q_u8(r + 80), basev);
+        c4 = vsliq_n_u8(c4, v5, 3);
+        c5 = vshrq_n_u8(v5, 5);
+        uint8x16_t v6 = vsubq_u8(vld1q_u8(r + 96), basev);
+        c5 = vsliq_n_u8(c5, v6, 2);
+        c6 = vshrq_n_u8(v6, 6);
+        uint8x16_t v7 = vsubq_u8(vld1q_u8(r + 112), basev);
+        c6 = vsliq_n_u8(c6, v7, 1);
+        vst1q_u8(blk + 0, c0);
+        vst1q_u8(blk + 16, c1);
+        vst1q_u8(blk + 32, c2);
+        vst1q_u8(blk + 48, c3);
+        vst1q_u8(blk + 64, c4);
+        vst1q_u8(blk + 80, c5);
+        vst1q_u8(blk + 96, c6);
+    }
+}
+static void vert512_pack_neon_d7(uint8_t *out, const uint8_t *ranks,
+                                   int n_v, uint8_t base)
+{
+    const uint8x16_t basev = vdupq_n_u8(base);
+    for (int b = 0; b < n_v >> 9; b++) {
+        for (int qt = 0; qt < 4; qt++) {
+            uint8_t *blk = out + (size_t)b * 64 * 7 + 16 * qt;
+            const uint8_t *r = ranks + ((size_t)b << 9) + 16 * qt;
+            uint8x16_t c0, c1, c2, c3, c4, c5, c6;
+            uint8x16_t v0 = vsubq_u8(vld1q_u8(r + 0), basev);
+            c0 = v0;
+            uint8x16_t v1 = vsubq_u8(vld1q_u8(r + 64), basev);
+            c0 = vsliq_n_u8(c0, v1, 7);
+            c1 = vshrq_n_u8(v1, 1);
+            uint8x16_t v2 = vsubq_u8(vld1q_u8(r + 128), basev);
+            c1 = vsliq_n_u8(c1, v2, 6);
+            c2 = vshrq_n_u8(v2, 2);
+            uint8x16_t v3 = vsubq_u8(vld1q_u8(r + 192), basev);
+            c2 = vsliq_n_u8(c2, v3, 5);
+            c3 = vshrq_n_u8(v3, 3);
+            uint8x16_t v4 = vsubq_u8(vld1q_u8(r + 256), basev);
+            c3 = vsliq_n_u8(c3, v4, 4);
+            c4 = vshrq_n_u8(v4, 4);
+            uint8x16_t v5 = vsubq_u8(vld1q_u8(r + 320), basev);
+            c4 = vsliq_n_u8(c4, v5, 3);
+            c5 = vshrq_n_u8(v5, 5);
+            uint8x16_t v6 = vsubq_u8(vld1q_u8(r + 384), basev);
+            c5 = vsliq_n_u8(c5, v6, 2);
+            c6 = vshrq_n_u8(v6, 6);
+            uint8x16_t v7 = vsubq_u8(vld1q_u8(r + 448), basev);
+            c6 = vsliq_n_u8(c6, v7, 1);
+            vst1q_u8(blk + 0, c0);
+            vst1q_u8(blk + 64, c1);
+            vst1q_u8(blk + 128, c2);
+            vst1q_u8(blk + 192, c3);
+            vst1q_u8(blk + 256, c4);
+            vst1q_u8(blk + 320, c5);
+            vst1q_u8(blk + 384, c6);
+        }
+    }
+}
+static inline void vert_pack_neon(uint8_t *out, const uint8_t *ranks,
+                                  int n_v, int D, uint8_t base)
+{
+    switch (D) {
+    case 2: vert_pack_neon_d2(out, ranks, n_v, base); break;
+    case 3: vert_pack_neon_d3(out, ranks, n_v, base); break;
+    case 4: vert_pack_neon_d4(out, ranks, n_v, base); break;
+    case 5: vert_pack_neon_d5(out, ranks, n_v, base); break;
+    case 6: vert_pack_neon_d6(out, ranks, n_v, base); break;
+    default: vert_pack_neon_d7(out, ranks, n_v, base); break;
+    }
+}
+
+static inline void vert512_pack_neon(uint8_t *out, const uint8_t *ranks,
+                                     int n_v, int D, uint8_t base)
+{
+    switch (D) {
+    case 2: vert512_pack_neon_d2(out, ranks, n_v, base); break;
+    case 3: vert512_pack_neon_d3(out, ranks, n_v, base); break;
+    case 4: vert512_pack_neon_d4(out, ranks, n_v, base); break;
+    case 5: vert512_pack_neon_d5(out, ranks, n_v, base); break;
+    case 6: vert512_pack_neon_d6(out, ranks, n_v, base); break;
+    default: vert512_pack_neon_d7(out, ranks, n_v, base); break;
+    }
+}
+
+/* Natural-layout kernels exposed for bench_prim's ST_PACK/ST_MERGE_FLAT
+ * rows (the prim_ entries below produce the layout `vertical` selects:
+ * the hybrid vertical wire, or natural when 0). */
+PIVCO_PRIM_ALWAYS_INLINE void prim_enc_pack_dN_natural(const uint8_t *ranks,
                                              int n, int D, uint8_t base, uint8_t *out_packed)
 { pack_dN_neon(out_packed, ranks, n, D, base); }
-
-PIVCO_PRIM_ALWAYS_INLINE void prim_merge_flat(uint8_t *out, int n,
+PIVCO_PRIM_ALWAYS_INLINE void prim_merge_flat_natural(uint8_t *out, int n,
                                                           const uint8_t *bm, int D,
                                                           const uint8_t *c2s)
 { merge_flat_neon(out, n, bm, D, c2s); }
+PIVCO_PRIM_ALWAYS_INLINE void prim_enc_pack_dN(const uint8_t *ranks,
+                                             int n, int D, uint8_t base, uint8_t *out_packed,
+                                             int vertical)
+{
+    int n5 = vertical == PIVCO_FLAT_VERTICAL ? pivco_vert_n512(n, D) : 0;
+    if (n5) vert512_pack_neon(out_packed, ranks, n5, D, base);
+    int r = n - n5, nv = vertical ? pivco_vert_n(r, D) : 0;
+    uint8_t *o1 = out_packed + (((size_t)n5 * D) >> 3);
+    if (nv) vert_pack_neon(o1, ranks + n5, nv, D, base);
+    if (r > nv) pack_dN_neon(o1 + (((size_t)nv * D) >> 3),
+                             ranks + n5 + nv, r - nv, D, base);
+}
+
+PIVCO_PRIM_ALWAYS_INLINE void prim_merge_flat(uint8_t *out, int n,
+                                                          const uint8_t *bm, int D,
+                                                          const uint8_t *c2s,
+                                                          int vertical)
+{
+    int n5 = vertical == PIVCO_FLAT_VERTICAL ? pivco_vert_n512(n, D) : 0;
+    if (n5) vert512_merge_neon(out, n5, bm, D, c2s);
+    int r = n - n5, nv = vertical ? pivco_vert_n(r, D) : 0;
+    const uint8_t *bm1 = bm + (((size_t)n5 * D) >> 3);
+    if (nv) vert_merge_neon(out + n5, nv, bm1, D, c2s);
+    if (r > nv) merge_flat_neon(out + n5 + nv, r - nv,
+                                bm1 + (((size_t)nv * D) >> 3), D, c2s);
+}
 
 PIVCO_PRIM_ALWAYS_INLINE void prim_merge_cst_cst(const uint8_t *bm, int K,
                                                       uint8_t left_sym,

@@ -85,10 +85,22 @@ int main(int argc, char **argv)
             tdbu_only = 1;
         } else if (strcmp(argv[i], "--no-fse") == 0) {
             bench_cfg()->fse_enabled = (0);
+        } else if (strcmp(argv[i], "--flat=natural") == 0) {
+            bench_cfg()->flat_layout = PIVCO_FLAT_NATURAL;
+        } else if (strcmp(argv[i], "--flat=vertical") == 0) {
+            bench_cfg()->flat_layout = PIVCO_FLAT_VERTICAL;
+        } else if (strcmp(argv[i], "--flat=v128") == 0) {
+            bench_cfg()->flat_layout = PIVCO_FLAT_VERTICAL_128;
+        } else if (strncmp(argv[i], "--flat=", 7) == 0) {
+            /* Reject typos loudly: a silently ignored layout flag would
+             * mislabel a whole A/B arm. */
+            fprintf(stderr, "bad --flat mode '%s' (use natural, vertical,"
+                    " or v128)\n", argv[i] + 7);
+            return 1;
         } else if (strncmp(argv[i], "--effort=", 9) == 0) {
             bench_cfg()->effort = ((pivco_effort_t)atoi(argv[i] + 9));
         } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
-            printf("Usage: %s [repeats] [--all] [--tdbu] [--no-fse] [--effort=N]\n"
+            printf("Usage: %s [repeats] [--all] [--tdbu] [--no-fse] [--flat=MODE] [--effort=N]\n"
                    "  repeats   passes over 4M symbols per timed run (default %d)\n"
                    "  --all     run every distribution AND every comparator\n"
                    "            (default MAIN: 9 distributions; pivco_s/n/bu,\n"
@@ -99,6 +111,9 @@ int main(int argc, char **argv)
                    "            A/B without paying for trad / huf0 timing.\n"
                    "  --no-fse  disable the encoder's FSE dispatch at runtime\n"
                    "            (still v0.2+ wire format; marker stays 0).\n"
+                   "  --flat=MODE  flat-region wire layout: vertical (default;\n"
+                   "            hybrid 512+128 blocks), v128 (128 blocks only),\n"
+                   "            or natural.  Both sides build with the same cfg.\n"
                    "  --effort=N  table-build shaping effort (pivco_effort_t):\n"
                    "            0 simplest (plain Huffman), 1 balanced (default),\n"
                    "            2 faster-decompress, 3 fastest-decompress.\n",
@@ -127,10 +142,12 @@ int main(int argc, char **argv)
 
     printf("=== PIVCO-Huffman Benchmarks%s (PIVCO_MAX_CODE_LEN=%d) ===\n",
            quick ? " (QUICK)" : "", PIVCO_MAX_CODE_LEN);
-    printf("Sequence: %dM, Repeats: %d (%dM/run), Block: %d, Runs: %d (drop %d)\n",
+    static const char *flat_names[] = { "natural", "vertical", "v128" };
+    printf("Sequence: %dM, Repeats: %d (%dM/run), Block: %d, Runs: %d (drop %d), Flat: %s\n",
            TOTAL_SYMBOLS / (1024*1024), repeats,
            (int)((size_t)TOTAL_SYMBOLS * repeats / (1024*1024)),
-           BLK, runs, drop_worst);
+           BLK, runs, drop_worst,
+           flat_names[bench_cfg()->flat_layout]);
     printf("Distribution set: %s%s\n\n",
            run_all ? "ALL (29 distributions)"
                    : "MAIN (9 distributions; pass --all for full sweep)",
@@ -164,8 +181,8 @@ int main(int argc, char **argv)
         printf("%-13s | %7s\n", "DECODE M/s", "pivco_n");
         printf("--------------|--------\n");
     } else if (tdbu_only) {
-        printf("%-13s | %7s %7s\n", "DECODE M/s", "pivco_n", "pivco_bu");
-        printf("--------------|-----------------\n");
+        printf("%-13s | %7s %7s | %7s\n", "DEC/ENC M/s", "pivco_n", "pivco_bu", "enc_n");
+        printf("--------------|-----------------|--------\n");
     } else if (run_all) {
         printf("%-13s | %7s %7s %7s | %7s %7s | %7s %7s %7s | %7s\n",
                "DECODE M/s", "pivco_s", "pivco_n", "pivco_bu",
@@ -344,6 +361,7 @@ int main(int argc, char **argv)
 } while(0)
 
         double p_dec_s = 0, p_dec_n = 0, p_dec_pfx = 0, p_dec_bu = 0;
+        double p_enc_n = 0;
         double t_dec_1s = 0, t_dec_4s = 0;
         double h_dec_1s = 0, h_dec_4s = 0, h_dec_x2 = 0;
 
@@ -387,6 +405,32 @@ int main(int argc, char **argv)
 #endif
             }
         }, "pivco_bu");
+
+        /* Timed encode (production dispatch), --tdbu only: same
+         * runs/median methodology as the decode rows.  Re-encodes into
+         * the pre-encode buffer at the recorded offsets (deterministic:
+         * same table, same input) and cross-checks the bytes against
+         * the pre-encode pass. */
+        if (tdbu_only) {
+            uint64_t enc_cksum_ref = fnv1a(neon_enc_buf, neon_enc_off[NBLOCKS]);
+            snprintf(label, sizeof(label), "%s/%s", name, "enc_n");
+            for (int r = 0; r < runs; r++) {
+                double e0 = now_sec();
+                for (int rep = 0; rep < repeats; rep++) {
+                    for (int b = 0; b < NBLOCKS; b++) {
+                        size_t len;
+                        pivco_encode(bench_enc_ctx(), table, symbols + (size_t)b * BLK, BLK, neon_enc_buf + neon_enc_off[b], &len);
+                    }
+                }
+                double e1 = now_sec();
+                runs_arr[r] = (double)TOTAL_SYMBOLS * repeats / (e1 - e0) / 1e6;
+            }
+            if (fnv1a(neon_enc_buf, neon_enc_off[NBLOCKS]) != enc_cksum_ref) {
+                fprintf(stderr, "  ERROR: %s re-encode bytes differ from pre-encode!\n", label);
+                g_cksum_errors++;
+            }
+            p_enc_n = stable_median(runs_arr, runs, drop_worst, label);
+        }
 #endif
 
       if (!quick && !tdbu_only) {
@@ -475,7 +519,7 @@ int main(int argc, char **argv)
             printf("%-13s | %7.0f\n", name, p_dec_n);
         } else if (tdbu_only) {
             (void)ratio;
-            printf("%-13s | %7.0f %7.0f\n", name, p_dec_n, p_dec_bu);
+            printf("%-13s | %7.0f %7.0f | %7.0f\n", name, p_dec_n, p_dec_bu, p_enc_n);
         } else if (run_all) {
             printf("%-13s | %7.0f %7.0f %7.0f %7.0f | %7.0f %7.0f | %7.0f %7.0f %7.0f | %5.2fx\n",
                    name, p_dec_s, p_dec_n, p_dec_bu, p_dec_pfx, t_dec_1s, t_dec_4s,

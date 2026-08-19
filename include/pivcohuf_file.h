@@ -19,9 +19,19 @@
  *      0-7   UNCOMPRESSED_SIZE (uint64) -- total bytes the decoder produces
  *      8-9   BLOCK_SIZE (uint16) -- codec block size in symbols; valid range
  *            [1024, 65535].  Decoder rejects if it can't handle this size.
- *     10-137 CODE_LENGTHS[256] packed as 4-bit nibbles, LSB first
+ *     10     FLAGS (uint8, v0.9+) -- format feature bits:
+ *              bits0-1  FLAT_LAYOUT (pivco_flat_layout_t): 0 = natural,
+ *                       1 = hybrid vertical (512- then 128-lane blocks
+ *                       + natural tail), 2 = 128-lane vertical only,
+ *                       3 = reserved (rejected)
+ *              bit2     QUAD_NODES: reserved, must be 0
+ *              bits3..7 reserved, must be 0
+ *            The decoder rejects any value or set bit it does not
+ *            implement (BAD_VERSION), so reserved bits are assignable
+ *            later without risking silent mis-decode.
+ *     11-138 CODE_LENGTHS[256] packed as 4-bit nibbles, LSB first
  *            (symbol 2i in low nibble of byte i, symbol 2i+1 in high nibble)
- *     138... Concatenated per-block records:
+ *     139... Concatenated per-block records:
  *               4 bytes ENCODED_LEN (uint32)
  *               ENCODED_LEN bytes encoded block (pivco-Huffman stream)
  *
@@ -42,6 +52,12 @@
  *   unaligned FSE bitmaps switch format, so earlier decoders mis-decode
  *   unaligned FSE streams -- hence the minor bump.
  *
+ *   v0.9 vs v0.8: inserts the FLAGS byte at body offset 10 (shifting the
+ *   code-length nibbles and block records by one) and introduces the
+ *   selectable flat-region layout (FLAGS bits0-1; default hybrid
+ *   vertical, see pivco_cfg_t.flat_layout).  Decode still accepts v0.8
+ *   streams: no FLAGS byte, flat regions natural.
+ *
  *   The final block may have fewer than BLOCK_SIZE input symbols.  The
  *   encoder pads the input to BLOCK_SIZE with the file's first byte
  *   (always present in the alphabet); the decoder truncates output
@@ -60,8 +76,14 @@ extern "C" {
 
 #define PIVCOHUF_MAGIC          "PIVCOHUF"
 #define PIVCOHUF_VERSION_MAJOR  0
-#define PIVCOHUF_VERSION_MINOR  8
+#define PIVCOHUF_VERSION_MINOR  9
 #define PIVCOHUF_HEADER_SIZE    26
+
+/* BODY FLAGS byte (v0.9+).  Bits0-1 carry the pivco_flat_layout_t value
+ * (3 is reserved); any bit outside the layout field (including the
+ * reserved QUAD_NODES bit) makes the decoder return BAD_VERSION. */
+#define PIVCOHUF_FLAGS_LAYOUT_MASK   0x03u  /* bits0-1: flat layout */
+#define PIVCOHUF_FLAG_QUAD_NODES     0x04u  /* bit2: reserved, must be 0 */
 
 typedef enum {
     PIVCOHUF_OK = 0,
