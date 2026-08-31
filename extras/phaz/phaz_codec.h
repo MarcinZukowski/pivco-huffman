@@ -62,10 +62,10 @@ extern size_t ZSTD_phazDecode(void *dst, size_t dstCap,
     const unsigned *blkNs, const unsigned *blkTl, const unsigned char *blkCf, size_t nblk);
 
 /* Run zstd's compressor with the capture hook, (re)allocating + filling the
- * g_phaz_* globals.  want_stock!=0 also does a plain compress and returns the
- * stock zstd size; else returns 0.  Returns (size_t)-1 on error.  Frees any
- * globals from a previous call first, so it is safe to call repeatedly. */
-size_t phaz_capture_run(const unsigned char *src, size_t n, int level, int want_stock);
+ * g_phaz_* globals.  Returns the stock zstd compressed size (the capture
+ * rides the stock run), or (size_t)-1 on error.  Frees any globals from a
+ * previous call first, so it is safe to call repeatedly. */
+size_t phaz_capture_run(const unsigned char *src, size_t n, int level);
 
 /* Free + null the g_phaz_* globals (idempotent). */
 void phaz_capture_free(void);

@@ -95,7 +95,7 @@ static int cmd_d(const char *in, const char *out){
 
 static int cmd_stats(const char *in, int level){
     size_t n; unsigned char *src=rd_file(in,&n);
-    size_t zsize=phaz_capture_run(src,n,level,1);
+    size_t zsize=phaz_capture_run(src,n,level);
     if(zsize==(size_t)-1){fprintf(stderr,"phaz: capture failed\n");return 2;}
     size_t nseq=g_phaz_nseq, lits=g_phaz_lits;
     size_t s_ll,s_ml,s_of,s_lit;
@@ -156,7 +156,7 @@ static int cmd_stats(const char *in, int level){
 
 static int cmd_dump(const char *in, const char *dir, int level){
     size_t n; unsigned char *src=rd_file(in,&n);
-    size_t zsize=phaz_capture_run(src,n,level,1);
+    size_t zsize=phaz_capture_run(src,n,level);
     if(zsize==(size_t)-1){fprintf(stderr,"phaz: capture failed\n");return 2;}
     char p[1024];
 #define WR(nm,d,len) do{ snprintf(p,sizeof p,"%s/%s",dir,nm); \

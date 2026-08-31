@@ -37,17 +37,13 @@ void phaz_capture_free(void) {
     g_phaz_blk_cf = NULL;
 }
 
-size_t phaz_capture_run(const unsigned char *src, size_t n, int level, int want_stock) {
+size_t phaz_capture_run(const unsigned char *src, size_t n, int level) {
     phaz_capture_free();                       /* drop any previous run's buffers */
     size_t bound = ZSTD_compressBound(n);
     unsigned char *c = malloc(bound);
     if (!c) return (size_t)-1;
 
     size_t zsize = 0;
-    if (want_stock) {
-        zsize = ZSTD_compress(c, bound, src, n, level);
-        if (ZSTD_isError(zsize)) { free(c); return (size_t)-1; }
-    }
 
     size_t sb = ZSTD_sequenceBound(n);
     g_phaz_llc = malloc(sb); g_phaz_mlc = malloc(sb); g_phaz_ofc = malloc(sb);
@@ -63,18 +59,14 @@ size_t phaz_capture_run(const unsigned char *src, size_t n, int level, int want_
     g_phaz_nseq = 0; g_phaz_lits = 0; g_phaz_extrabits = 0;
     g_phaz_xbpos = 0; g_phaz_nblk = 0; g_phaz_dump = 1;
 
-    /* phaz re-codes literals itself, so skip zstd's HUF on the (discarded)
-     * literal section -- recovers ~9 ms.  The parse is unchanged at the lazy
-     * strategies; at btopt levels (>=16) disabling literal compression shifts
-     * the parser's cost model, so the captured parse differs slightly from a
-     * stock zstd compress (still byte-exact, just a different parse). */
-    ZSTD_CCtx *cc = ZSTD_createCCtx();
-    ZSTD_CCtx_setParameter(cc, ZSTD_c_compressionLevel, level);
-    ZSTD_CCtx_setParameter(cc, ZSTD_c_literalCompressionMode, ZSTD_lcm_uncompressed);
-    size_t z2 = ZSTD_compress2(cc, c, bound, src, n);
+    /* Stock-configured compress with the capture riding it: the captured
+     * parse must be exactly the parse zstd ships.  Any parameter drift
+     * changes the parse at the btopt levels (literal pricing feeds the
+     * optimal parser's cost model) and breaks phaz-vs-zstd attribution. */
+    zsize = ZSTD_compress(c, bound, src, n, level);
     g_phaz_dump = 0;
-    ZSTD_freeCCtx(cc); free(c);
-    if (ZSTD_isError(z2)) { phaz_capture_free(); return (size_t)-1; }
+    free(c);
+    if (ZSTD_isError(zsize)) { phaz_capture_free(); return (size_t)-1; }
     return zsize;
 }
 
@@ -149,7 +141,7 @@ size_t phaz_compress(const void *src_, size_t n, void *dst_, size_t cap,
     unsigned char *dst = dst_, *cur = dst, *end = dst + cap;
 
     double t0 = now();
-    if (phaz_capture_run(src, n, level, 0) == (size_t)-1) return 0;
+    if (phaz_capture_run(src, n, level) == (size_t)-1) return 0;
     if (st) st->capture_ms = (now() - t0) * 1e3;
 
     uint64_t hdr[5] = { (uint64_t)n, (uint64_t)g_phaz_nseq, (uint64_t)g_phaz_lits,
