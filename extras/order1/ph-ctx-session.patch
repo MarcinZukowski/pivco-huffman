@@ -1,0 +1,1942 @@
+diff -urN '--exclude=build' '--exclude=.git*' '--exclude=ext' '--exclude=*.pvh' '--exclude=*.dSYM' '--exclude=.DS_Store' '--exclude=phaz' e1stage/CMakeLists.txt pr30tree/CMakeLists.txt
+--- e1stage/CMakeLists.txt	2026-08-19 19:00:50.000000000 -0700
++++ pr30tree/CMakeLists.txt	2026-08-20 21:47:30.002742279 -0700
+@@ -106,6 +106,7 @@
+     add_compile_definitions(PIVCO_HAS_FSE=1)
+     list(APPEND PIVCO_SOURCES
+         src/pivco_fse.c
++        src/pivco_ctx.c
+         ext/fse/lib/fse_compress.c
+         ext/fse/lib/fse_decompress.c
+         ext/fse/lib/entropy_common.c
+diff -urN '--exclude=build' '--exclude=.git*' '--exclude=ext' '--exclude=*.pvh' '--exclude=*.dSYM' '--exclude=.DS_Store' '--exclude=phaz' e1stage/extras/bench/bench_chunk_sizes.c pr30tree/extras/bench/bench_chunk_sizes.c
+--- e1stage/extras/bench/bench_chunk_sizes.c	2026-08-19 19:00:50.000000000 -0700
++++ pr30tree/extras/bench/bench_chunk_sizes.c	2026-08-20 21:47:30.003107112 -0700
+@@ -56,6 +56,7 @@
+ 
+ #include "pivco_huffman.h"
+ #include "pivco_fse.h"
++#include "pivco_ctx.h"
+ #include "bench_ctx.h"
+ #include "fse.h"
+ 
+@@ -73,10 +74,10 @@
+ /* Per-chunk block-type tag (CODED / RAW / RLE). */
+ #define BLOCK_TAG_BYTES 1
+ 
+-enum { C_PIVCO = 0, C_PIVCO_SANS, C_PIVCO_DANS, C_FSE, N_CODECS };
++enum { C_PIVCO = 0, C_PIVCO_SANS, C_PIVCO_DANS, C_PIVCO_CTX, C_FSE, N_CODECS };
+ 
+ static const char *codec_name[N_CODECS] = {
+-    "pivco", "pivco+sANS", "pivco+dANS", "fse",
++    "pivco", "pivco+sANS", "pivco+dANS", "pivco+ctx", "fse",
+ };
+ 
+ static pivco_flat_layout_t g_flat_layout = PIVCO_FLAT_VERTICAL;
+@@ -160,12 +161,13 @@
+  * rebuild from its code lengths alone -- the decoder only ever sees the
+  * lengths, so the encoder must use the table they reconstruct. */
+ static int pivco_make_table(const uint64_t freq[PIVCO_MAX_SYMBOLS],
+-                            int fse_enabled, int fse_dynamic,
++                            int fse_enabled, int fse_dynamic, int ctx_enabled,
+                             pivco_table_t *out)
+ {
+     pivco_cfg_t cfg = pivco_cfg_default;
+     cfg.fse_enabled = fse_enabled;
+     cfg.fse_dynamic = fse_dynamic;
++    cfg.ctx_enabled = ctx_enabled;
+     cfg.flat_layout = g_flat_layout;
+ 
+     pivco_table_t real_table;
+@@ -296,17 +298,18 @@
+      * being measured.  Default is nonetheless per-chunk, matching what
+      * FSE_compress does (a fresh table per chunk) so both sides adapt at
+      * the same rate; --table per-file shows the container's policy. */
+-    struct { int fse, dyn; } variant[3] = { {0, 0}, {1, 0}, {1, 1} };
+-    pivco_table_t file_table[3];
++    struct { int fse, dyn, ctx; } variant[4] =
++        { {0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {1, 1, 1} };
++    pivco_table_t file_table[4];
+     size_t per_chunk_hdr = 0;   /* set per chunk when tables are per-chunk */
+     if (g_per_file_table) {
+         uint64_t freq[PIVCO_MAX_SYMBOLS] = {0};
+         if (pivco_histogram(bench_enc_ctx(), buf, len, freq) != PIVCO_OK) {
+             free(enc); free(dec); free(buf); return 1;
+         }
+-        for (int v = 0; v < 3; v++) {
++        for (int v = 0; v < 4; v++) {
+             if (!pivco_make_table(freq, variant[v].fse, variant[v].dyn,
+-                                  &file_table[v])) {
++                                  variant[v].ctx, &file_table[v])) {
+                 fprintf(stderr, "%s: table build failed\n", path);
+                 free(enc); free(dec); free(buf); return 1;
+             }
+@@ -327,7 +330,7 @@
+             continue;
+         }
+ 
+-        for (int v = 0; v < 3; v++) {
++        for (int v = 0; v < 4; v++) {
+             /* Reset per chunk so the dynamic-commit count is attributable
+              * to this variant alone. */
+             pivco_fse_stats_reset();
+@@ -337,7 +340,7 @@
+                 uint64_t freq[PIVCO_MAX_SYMBOLS] = {0};
+                 if (pivco_histogram(bench_enc_ctx(), src, n, freq) != PIVCO_OK ||
+                     !pivco_make_table(freq, variant[v].fse, variant[v].dyn,
+-                                      &chunk_table)) {
++                                      variant[v].ctx, &chunk_table)) {
+                     fprintf(stderr, "%s: table build failed at offset %zu\n",
+                             path, off);
+                     failed = 1;
+@@ -357,11 +360,16 @@
+             }
+             tot[v].bytes += sz;
+             tot[v].raw_chunks += (uint64_t)stored;
+-            if (v == C_PIVCO_DANS) {
++            if (v == C_PIVCO_DANS || v == C_PIVCO_CTX) {
+                 uint64_t commit[PIVCO_FSE_STATS_SLOTS], attempt[PIVCO_FSE_STATS_SLOTS];
+                 uint64_t bin[PIVCO_FSE_STATS_SLOTS], bout[PIVCO_FSE_STATS_SLOTS];
+                 pivco_fse_stats_get(commit, attempt, bin, bout);
+                 tot[v].dyn_commits += commit[PIVCO_FSE_DYNAMIC_ID];
++                if (v == C_PIVCO_CTX)
++                    tot[v].dyn_commits += commit[PIVCO_CTX2_ID] + commit[PIVCO_CTX4_ID]
++                                        + commit[PIVCO_QUAD_RAW_ID]
++                                        + commit[PIVCO_QUAD_CTX1_ID]
++                                        + commit[PIVCO_QUAD_CTX2_ID];
+             }
+         }
+         if (failed) break;
+diff -urN '--exclude=build' '--exclude=.git*' '--exclude=ext' '--exclude=*.pvh' '--exclude=*.dSYM' '--exclude=.DS_Store' '--exclude=phaz' e1stage/include/pivco_huffman.h pr30tree/include/pivco_huffman.h
+--- e1stage/include/pivco_huffman.h	2026-08-19 19:00:50.000000000 -0700
++++ pr30tree/include/pivco_huffman.h	2026-08-24 12:57:50.204512123 -0700
+@@ -160,6 +160,7 @@
+     uint16_t num_symbols;
+     uint8_t  fse_enabled;      /* baked from pivco_cfg_t at build */
+     uint8_t  fse_dynamic;      /* baked from pivco_cfg_t at build */
++    uint8_t  ctx_enabled;      /* baked from pivco_cfg_t at build */
+     uint8_t  flat_layout;      /* baked from pivco_cfg_t at build */
+ 
+     /* Flat-subtree fast path: per-node, if flat_depth[i] >= 2 then node i
+@@ -301,6 +302,10 @@
+      * stops the encoder from ever emitting it.  Ignored when
+      * fse_enabled is 0. */
+     int                 fse_dynamic;
++    /* default 0: per-node static context-model rANS attempts (bit-context
++     * on bitmaps and natural flats, pair-context on fused quad nodes;
++     * see src/pivco_ctx.h).  Encoder-side only, like fse_dynamic. */
++    int                 ctx_enabled;
+     pivco_flat_layout_t flat_layout;  /* default PIVCO_FLAT_VERTICAL */
+ } pivco_cfg_t;
+ 
+@@ -366,13 +371,48 @@
+  * slot PIVCO_FSE_DYNAMIC_ID = the dynamic nibble table.
+  * MUST be >= PIVCO_FSE_DYNAMIC_ID + 1 (static-asserted in pivco_fse.c).
+  * Not thread-safe; intended for single-threaded analysis runs. */
+-#define PIVCO_FSE_STATS_SLOTS 52
++#define PIVCO_FSE_STATS_SLOTS 57
+ void pivco_fse_stats_reset(void);
+ void pivco_fse_stats_get(uint64_t commit_count[PIVCO_FSE_STATS_SLOTS],
+                                  uint64_t attempt_count[PIVCO_FSE_STATS_SLOTS],
+                                  uint64_t bytes_in[PIVCO_FSE_STATS_SLOTS],
+                                  uint64_t bytes_out[PIVCO_FSE_STATS_SLOTS]);
+ 
++/* ---------- Per-tree-level winner stats (PIVCO_LVL_STATS) ----------
++ *
++ * Census of every bitmap record by node depth (root = 0): which
++ * commit-if-smaller candidate won and how many bytes it saved vs the
++ * raw region.  Winner class: 0 = stayed raw, 1 = static FSE (ids
++ * 1..50), 2 = dynamic nibble (id 51), 3 = ctx (ids 52..53).  Flat
++ * regions are keyed by their start depth; d_sum accumulates the levels
++ * each record covers (1 for per-node bitmaps, D for flat regions).
++ * Not thread-safe; analysis runs only. */
++#define PIVCO_LVL_MAX 24
++typedef struct {
++    uint64_t nodes, n_sum, raw_bytes, d_sum;
++    uint64_t wins[4];
++    uint64_t saved[4];
++} pivco_lvl_stat_t;
++extern pivco_lvl_stat_t g_pivco_lvl[PIVCO_LVL_MAX];
++extern pivco_lvl_stat_t g_pivco_lvl_flat[PIVCO_LVL_MAX];
++extern uint64_t g_pivco_lvl_symbols;
++
++/* Wire-category byte census (PIVCO_WIRE_STATS): every byte of the PH
++ * block wire attributed to a category.  Encode-side, FSE-enabled runs
++ * only (PH-mode nodes skip the counting site). */
++typedef struct {
++    uint64_t blocks;         /* codec encode calls (2 B N header each) */
++    uint64_t kr_bytes;       /* K_right headers */
++    uint64_t marker_bytes;   /* marker bytes, node + flat records */
++    uint64_t bm_raw_bytes;   /* node bitmaps left raw on the wire */
++    uint64_t bm_pad_bits;    /* their byte-padding waste */
++    uint64_t flat_raw_bytes; /* flat regions left raw */
++    uint64_t flat_pad_bits;
++    uint64_t fse_bytes;      /* committed [len:2][payload], node + flat */
++} pivco_ws_t;
++extern pivco_ws_t g_pivco_ws;
++void pivco_lvl_stats_dump(void);   /* stderr, one LVL line per level */
++
+ /* Per-root-event log: one entry per block's root-node visit.
+  * Captures table_id chosen (0 if below threshold / no table), the
+  * observed p_major, whether the FSE commit succeeded, and byte counts.
+diff -urN '--exclude=build' '--exclude=.git*' '--exclude=ext' '--exclude=*.pvh' '--exclude=*.dSYM' '--exclude=.DS_Store' '--exclude=phaz' e1stage/src/huffman_table.c pr30tree/src/huffman_table.c
+--- e1stage/src/huffman_table.c	2026-08-19 19:00:50.000000000 -0700
++++ pr30tree/src/huffman_table.c	2026-08-20 21:40:56.666596495 -0700
+@@ -293,6 +293,7 @@
+         build_single_symbol_table(used[0], table);
+         table->fse_enabled = (uint8_t)(cfg->fse_enabled ? 1 : 0);
+         table->fse_dynamic = (uint8_t)(cfg->fse_dynamic ? 1 : 0);
++        table->ctx_enabled = (uint8_t)(cfg->ctx_enabled ? 1 : 0);
+         table->flat_layout = (uint8_t)cfg->flat_layout;
+         return PIVCO_OK;
+     }
+@@ -351,6 +352,7 @@
+ {
+     table->fse_enabled = (uint8_t)(cfg->fse_enabled ? 1 : 0);
+     table->fse_dynamic = (uint8_t)(cfg->fse_dynamic ? 1 : 0);
++        table->ctx_enabled = (uint8_t)(cfg->ctx_enabled ? 1 : 0);
+     table->flat_layout = (uint8_t)cfg->flat_layout;
+     /* Copy lengths to table */
+     for (int i = 0; i < PIVCO_MAX_SYMBOLS; i++) {
+@@ -825,6 +827,7 @@
+         build_single_symbol_table(last, table);
+         table->fse_enabled = (uint8_t)(cfg->fse_enabled ? 1 : 0);
+         table->fse_dynamic = (uint8_t)(cfg->fse_dynamic ? 1 : 0);
++        table->ctx_enabled = (uint8_t)(cfg->ctx_enabled ? 1 : 0);
+         table->flat_layout = (uint8_t)cfg->flat_layout;
+         return PIVCO_OK;
+     }
+diff -urN '--exclude=build' '--exclude=.git*' '--exclude=ext' '--exclude=*.pvh' '--exclude=*.dSYM' '--exclude=.DS_Store' '--exclude=phaz' e1stage/src/pivco_ctx.c pr30tree/src/pivco_ctx.c
+--- e1stage/src/pivco_ctx.c	1969-12-31 16:00:00.000000000 -0800
++++ pr30tree/src/pivco_ctx.c	2026-08-24 11:31:56.067325003 -0700
+@@ -0,0 +1,621 @@
++/* Static context-model coders, tANS implementation.  See pivco_ctx.h.
++ *
++ * Both coders (binary order-k over bits, 4-ary order-q over route
++ * pairs) are realized by ONE mechanism: an order-c carry-indexed tANS
++ * over BYTES, c = k or 2q context bits.  A bitmap's payload is coded
++ * byte-at-a-time; the fused route stream is packed 4 pairs/byte first
++ * (tail pairs raw).  The per-carry distribution over the 256 byte
++ * values is derived by the chain rule from the transmitted per-context
++ * probabilities, so the wire params are unchanged from the rANS
++ * prototype; only the payload encoding differs.
++ *
++ * Decode hot loop: e = D[carry][state]; emit e.sym (8 bits);
++ * carry = e.sym >> (8-c); state = e.base + readBits(e.nbBits).
++ *
++ * Tables are expanded per parameter set (2^c tables x 2^L states) and
++ * cached process-wide keyed by (mode, params); typical streams reuse a
++ * handful of parameter sets, so builds amortize.
++ *
++ * Bit stream: encoder walks symbols backward pushing bits LSB-first
++ * forward; a terminator 1-bit marks the end; the decoder locates it
++ * and reads the bit string backward by absolute position. */
++
++#include "pivco_ctx.h"
++
++#include <math.h>
++#include <time.h>
++#include <stdlib.h>
++#include <string.h>
++
++#define CTX_L        11              /* max; 16-param modes use 10 */
++#define CTX_TSIZE    (1 << CTX_L)
++
++/* Per-mode state-space size: the 16-param modes (bin k=4, quad q=2)
++ * build 16 carry tables per set, so they get a half-size table --
++ * halves build cost, negligible ratio cost at a 256-value alphabet. */
++static int mode_L(int mode)
++{
++    return (mode == PIVCO_CTX4_ID || mode == PIVCO_QUAD_CTX2_ID) ? 10 : 11;
++}
++
++/* ---- probability grids (wire format; must not change) ---- */
++static const uint16_t PTAB[16] = {
++      64,  128,  256,  512,  768, 1024, 1536, 2048,
++    2560, 3072, 3328, 3584, 3840, 3968, 4032, 4064,
++};
++static const uint16_t WTAB[16] = {
++    1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64, 96, 128, 192, 256,
++};
++
++/* ---- model expansion: per-(carry, byte) probability ---- */
++
++/* Binary order-k: p1[ctx] = P(bit=1 | last k bits), k in {2,4}. */
++static void bin_byte_probs(int k, const uint8_t *pidx,
++                           int carry, double out[256])
++{
++    int nctx = 1 << k;
++    uint32_t cmask = (uint32_t)nctx - 1;
++    for (int v = 0; v < 256; v++) {
++        double pr = 1.0;
++        uint32_t c = (uint32_t)carry;
++        for (int j = 0; j < 8; j++) {
++            int bit = (v >> j) & 1;
++            double p1 = (double)PTAB[pidx[c]] / 4096.0;
++            pr *= bit ? p1 : 1.0 - p1;
++            c = ((c << 1) | (uint32_t)bit) & cmask;
++        }
++        out[v] = pr;
++    }
++}
++
++/* 4-ary order-q: per-context 4-way weights, q in {1,2}; a byte holds
++ * 4 pairs (LSB-first). */
++static void quad_byte_probs(int q, const uint8_t widx[][4],
++                            int carry, double out[256])
++{
++    int nctx = 1 << (2 * q);
++    uint32_t cmask = (uint32_t)nctx - 1;
++    for (int v = 0; v < 256; v++) {
++        double pr = 1.0;
++        uint32_t c = (uint32_t)carry;
++        for (int j = 0; j < 4; j++) {
++            int s = (v >> (2 * j)) & 3;
++            uint32_t w[4], sum = 0;
++            for (int t = 0; t < 4; t++) { w[t] = WTAB[widx[c][t] & 15]; sum += w[t]; }
++            pr *= (double)w[s] / (double)sum;
++            c = ((c << 2) | (uint32_t)s) & cmask;
++        }
++        out[v] = pr;
++    }
++}
++
++/* ---- tANS table build (per carry) ---- */
++
++/* Alphabet is 257: byte values 0..255 plus ESC (256).  Bytes whose
++ * model probability rounds to zero slots are coded as ESC followed by
++ * the raw byte (8 bits); their aggregated mass prices ESC. */
++#define CTX_ESC 256
++
++typedef struct { uint16_t base; uint16_t sym; uint8_t nbBits; } dent_t;
++typedef struct { uint32_t deltaNbBits; int32_t deltaFindState; } stt_t;
++
++typedef struct {
++    dent_t d[CTX_TSIZE];       /* decode entries */
++    stt_t  tt[257];            /* encode per-symbol transform */
++    uint16_t st[CTX_TSIZE];    /* encode state table */
++} ctab_t;
++
++static int highbit(uint32_t v) { return 31 - __builtin_clz(v); }
++
++/* Normalize probs to freqs summing 2^L.  Zero frequencies are ALLOWED
++ * (a byte value the model considers negligible gets no slot); the
++ * encoder rejects the whole candidate if such a byte actually occurs,
++ * and commit-if-smaller falls back.  Forcing every value >= 1 was
++ * measured to tax skewed tables up to ~12% (256/2048 of the mass).
++ * Deterministic: floor + largest-remainder, ties by symbol index. */
++static void normalize(const double p[256], uint16_t f[257], int tsize)
++{
++    double sum = 0;
++    for (int v = 0; v < 256; v++) sum += p[v];
++    int32_t used = 0;
++    double rem[257];
++    double esc = 0;
++    for (int v = 0; v < 256; v++) {
++        double share = p[v] / sum * (double)(tsize - 1);
++        uint32_t fs = (uint32_t)share;
++        if (fs == 0) { f[v] = 0; rem[v] = -3.0; esc += share; continue; }
++        f[v] = (uint16_t)fs;
++        rem[v] = share - (double)fs;
++        used += (int32_t)fs;
++    }
++    f[CTX_ESC] = (uint16_t)(1 + (uint32_t)esc);   /* >= 1 always */
++    rem[CTX_ESC] = esc - (double)(uint32_t)esc;
++    used += (int32_t)f[CTX_ESC];
++    int32_t left = (int32_t)tsize - used;
++    /* leftover goes to the largest-frequency symbol (FSE's fast-path
++     * policy): O(256), and the entropy distortion is negligible since
++     * the largest bucket dominates whenever leftover is sizable */
++    int big = CTX_ESC;
++    for (int v = 0; v < 256; v++)
++        if (f[v] > f[big]) big = v;
++    f[big] = (uint16_t)(f[big] + left);
++    (void)rem;
++}
++
++static void build_ctab(const double p[256], ctab_t *t, int L,
++                       int want_enc, int want_dec)
++{
++    int tsize = 1 << L;
++    uint16_t f[257];
++    normalize(p, f, tsize);
++
++    /* spread (FSE-style) */
++    static uint16_t tsym[CTX_TSIZE];
++    {
++        uint32_t step = ((uint32_t)tsize >> 1) + ((uint32_t)tsize >> 3) + 3;
++        uint32_t pos = 0;
++        for (int s = 0; s <= 256; s++)
++            for (int i = 0; i < f[s]; i++) {
++                tsym[pos] = (uint16_t)s;
++                pos = (pos + step) & ((uint32_t)tsize - 1);
++            }
++    }
++
++    /* decode entries */
++    if (want_dec) {
++        uint16_t next[257];
++        memcpy(next, f, sizeof(next));
++        for (int x = 0; x < tsize; x++) {
++            int s = tsym[x];
++            uint32_t X = next[s]++;
++            int nb = L - highbit(X);
++            t->d[x].sym    = (uint16_t)s;
++            t->d[x].nbBits = (uint8_t)nb;
++            t->d[x].base   = (uint16_t)((X << nb) - (uint32_t)tsize);
++        }
++    }
++
++    /* encode tables */
++    if (want_enc) {
++        uint32_t cumul = 0;
++        for (int s = 0; s <= 256; s++) {
++            if (f[s] == 0) {               /* coded via ESC instead */
++                t->tt[s].deltaNbBits = 0xFFFFFFFFu;   /* sentinel */
++                t->tt[s].deltaFindState = 0;
++                continue;
++            }
++            int maxBits = L - highbit((uint32_t)f[s] == 1 ? 1 : (uint32_t)f[s] - 1);
++            if (f[s] == 1) maxBits = L;        /* freq-1: always flush L bits */
++            t->tt[s].deltaNbBits    = ((uint32_t)maxBits << 16) - ((uint32_t)f[s] << maxBits);
++            t->tt[s].deltaFindState = (int32_t)cumul - (int32_t)f[s];
++            cumul += f[s];
++        }
++        uint16_t fill[257];
++        fill[0] = 0;
++        for (int s = 0; s < 256; s++) fill[s + 1] = (uint16_t)(fill[s] + f[s]);
++        for (int x = 0; x < tsize; x++) {
++            int s = tsym[x];
++            t->st[fill[s]++] = (uint16_t)((uint32_t)tsize + x);
++        }
++    }
++}
++
++/* ---- table cache (process-wide, single-threaded use) ---- */
++
++#define CACHE_WAYS 512
++typedef struct {
++    int      valid;
++    int      mode;             /* wire id */
++    int      has_enc, has_dec;
++    uint8_t  params[32];
++    size_t   plen;
++    int      nc;               /* number of carries = 2^c */
++    ctab_t  *tabs;             /* nc tables */
++    uint64_t stamp;
++} centry_t;
++static centry_t g_cache[CACHE_WAYS];
++static uint64_t g_stamp;
++uint64_t pivco_ctx_cache_hits, pivco_ctx_cache_misses;
++uint64_t pivco_ctx_ns_build, pivco_ctx_ns_dec;
++static uint64_t now_ns(void) {
++    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
++    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
++}
++
++static const ctab_t *cache_get(int mode, const uint8_t *params, size_t plen,
++                               int want_enc, int want_dec)
++{
++    for (int i = 0; i < CACHE_WAYS; i++) {
++        centry_t *e = &g_cache[i];
++        if (e->valid && e->mode == mode && e->plen == plen &&
++            memcmp(e->params, params, plen) == 0) {
++            if ((want_enc && !e->has_enc) || (want_dec && !e->has_dec))
++                continue;   /* other half only; fall through to a rebuild */
++            e->stamp = ++g_stamp;
++            pivco_ctx_cache_hits++;
++            return e->tabs;
++        }
++    }
++    /* miss: evict LRU */
++    pivco_ctx_cache_misses++;
++    uint64_t t0 = now_ns();
++    int victim = 0;
++    for (int i = 1; i < CACHE_WAYS; i++)
++        if (!g_cache[i].valid ||
++            (g_cache[victim].valid && g_cache[i].stamp < g_cache[victim].stamp))
++            victim = i;
++    centry_t *e = &g_cache[victim];
++    int cbits = (mode == PIVCO_CTX2_ID) ? 2 :
++                (mode == PIVCO_CTX4_ID) ? 4 :
++                (mode == PIVCO_QUAD_CTX1_ID) ? 2 : 4;
++    int nc = 1 << cbits;
++    if (!e->tabs || e->nc < nc) {
++        free(e->tabs);
++        e->tabs = (ctab_t *)malloc(sizeof(ctab_t) * (size_t)nc);
++        if (!e->tabs) { e->valid = 0; return NULL; }
++    }
++    e->valid = 1; e->mode = mode; e->plen = plen; e->nc = nc;
++    e->has_enc = want_enc; e->has_dec = want_dec;
++    memcpy(e->params, params, plen);
++    e->stamp = ++g_stamp;
++
++    double probs[256];
++    if (mode == PIVCO_CTX2_ID || mode == PIVCO_CTX4_ID) {
++        int k = (mode == PIVCO_CTX2_ID) ? 2 : 4;
++        uint8_t pidx[16];
++        for (size_t i = 0; i < plen; i++) {
++            pidx[2 * i]     = (uint8_t)(params[i] & 0x0F);
++            pidx[2 * i + 1] = (uint8_t)(params[i] >> 4);
++        }
++        for (int c = 0; c < nc; c++) {
++            bin_byte_probs(k, pidx, c, probs);
++            build_ctab(probs, &e->tabs[c], mode_L(mode), want_enc, want_dec);
++        }
++    } else {
++        int q = (mode == PIVCO_QUAD_CTX1_ID) ? 1 : 2;
++        uint8_t widx[16][4];
++        int nctx = 1 << (2 * q);
++        for (int c = 0; c < nctx; c++) {
++            widx[c][0] = (uint8_t)(params[2 * c] & 0x0F);
++            widx[c][1] = (uint8_t)(params[2 * c] >> 4);
++            widx[c][2] = (uint8_t)(params[2 * c + 1] & 0x0F);
++            widx[c][3] = (uint8_t)(params[2 * c + 1] >> 4);
++        }
++        for (int c = 0; c < nc; c++) {
++            quad_byte_probs(q, widx, c, probs);
++            build_ctab(probs, &e->tabs[c], mode_L(mode), want_enc, want_dec);
++        }
++    }
++    pivco_ctx_ns_build += now_ns() - t0;
++    return e->tabs;
++}
++
++/* ---- bit IO ----
++ * Encoder: LSB-first pushes, bytes appended forward.
++ * Decoder: reads the bit string backward by absolute position. */
++
++typedef struct { uint64_t acc; int cnt; uint8_t *p, *end; } bw_t;
++
++static int bw_push(bw_t *w, uint32_t v, int n)
++{
++    w->acc |= (uint64_t)v << w->cnt;
++    w->cnt += n;
++    while (w->cnt >= 8) {
++        if (w->p >= w->end) return -1;
++        *w->p++ = (uint8_t)(w->acc & 0xFF);
++        w->acc >>= 8;
++        w->cnt -= 8;
++    }
++    return 0;
++}
++
++static inline uint32_t br_read(const uint8_t *base, size_t *bitpos, int n)
++{
++    *bitpos -= (size_t)n;
++    uint64_t win;
++    memcpy(&win, base + (*bitpos >> 3), 8);
++    return (uint32_t)(win >> (*bitpos & 7)) & ((1u << n) - 1u);
++}
++
++/* Encoder-side param snapping: if a cached parameter set of the same
++ * mode is within +-1 of every 4-bit param, adopt it (it goes on the
++ * wire verbatim), so later nodes converge onto already-built tables
++ * and the decoder's cache hits.  The model shift is at most one grid
++ * step per context, and commit-if-smaller still prices the result. */
++/* Max distinct param sets per mode (per process): the ratio/decode-
++ * speed dial.  Every distinct set costs one table build on each side;
++ * PIVCO_CTX_DICT overrides (prototype knob). */
++static int dict_cap(void)
++{
++    static int cap = -1;
++    if (cap < 0) {
++        const char *e = getenv("PIVCO_CTX_DICT");
++        cap = e ? atoi(e) : 48;
++        if (cap < 1) cap = 1;
++        if (cap > CACHE_WAYS / 4) cap = CACHE_WAYS / 4;
++    }
++    return cap;
++}
++static void cache_snap(int mode, uint8_t *params, size_t plen)
++{
++    /* PIVCO_CTX_FREE: analysis knob — no dictionary, every node keeps
++     * its own params (the pre-cap coder; encoder-side only). */
++    static int free_mode = -1;
++    if (free_mode < 0) free_mode = getenv("PIVCO_CTX_FREE") != NULL;
++    if (free_mode) return;
++    /* pass 1: exact-or-close (+-1 every nibble) adoption */
++    int count = 0;
++    for (int i = 0; i < CACHE_WAYS; i++) {
++        centry_t *e = &g_cache[i];
++        if (!e->valid || e->mode != mode || e->plen != plen) continue;
++        count++;
++        int ok = 1;
++        for (size_t b = 0; b < plen && ok; b++) {
++            int lo_a = params[b] & 0x0F,  lo_b = e->params[b] & 0x0F;
++            int hi_a = params[b] >> 4,    hi_b = e->params[b] >> 4;
++            if (lo_a - lo_b > 1 || lo_b - lo_a > 1 ||
++                hi_a - hi_b > 1 || hi_b - hi_a > 1) ok = 0;
++        }
++        if (ok) { memcpy(params, e->params, plen); return; }
++    }
++    if (count < dict_cap()) return; /* room: keep own params, seed the dict */
++    /* dictionary full: adopt the nearest set outright.  A bad fit codes
++     * bigger and commit-if-smaller falls back to sANS/dANS/raw. */
++    int best = -1; int bd = 1 << 30;
++    for (int i = 0; i < CACHE_WAYS; i++) {
++        centry_t *e = &g_cache[i];
++        if (!e->valid || e->mode != mode || e->plen != plen) continue;
++        int d = 0;
++        for (size_t b = 0; b < plen; b++) {
++            int lo = (params[b] & 0x0F) - (e->params[b] & 0x0F);
++            int hi = (params[b] >> 4)   - (e->params[b] >> 4);
++            d += (lo < 0 ? -lo : lo) + (hi < 0 ? -hi : hi);
++        }
++        if (d < bd) { bd = d; best = i; }
++    }
++    if (best >= 0) memcpy(params, g_cache[best].params, plen);
++}
++
++/* ---- carry maps ----
++ * The rolling context keeps the NEWEST bit (or pair) in its low
++ * position, while a byte's chronologically-last bits are its HIGH
++ * bits, so carry = reversed top bits.  Consulting the tables under
++ * the raw top bits is consistent between encode and decode (round-
++ * trips fine) but silently prices with permuted context labels. */
++static const uint8_t CMAP_BIN2[4]   = { 0, 2, 1, 3 };
++static const uint8_t CMAP_BIN4[16]  = { 0, 8, 4, 12, 2, 10, 6, 14,
++                                        1, 9, 5, 13, 3, 11, 7, 15 };
++static const uint8_t CMAP_QUAD1[4]  = { 0, 1, 2, 3 };
++static const uint8_t CMAP_QUAD2[16] = { 0, 4, 8, 12, 1, 5, 9, 13,
++                                        2, 6, 10, 14, 3, 7, 11, 15 };
++
++static const uint8_t *carry_map(int mode)
++{
++    switch (mode) {
++    case PIVCO_CTX2_ID:      return CMAP_BIN2;
++    case PIVCO_CTX4_ID:      return CMAP_BIN4;
++    case PIVCO_QUAD_CTX1_ID: return CMAP_QUAD1;
++    default:                 return CMAP_QUAD2;
++    }
++}
++
++/* ---- core coder: order-c carry tANS over bytes ---- */
++
++static int ctx_encode_bytes(int mode, const uint8_t *params, size_t plen,
++                            const uint8_t *syms, size_t n, int cbits,
++                            uint8_t *dst, size_t dst_cap, size_t *out_len)
++{
++    const ctab_t *tabs = cache_get(mode, params, plen, 1, 0);
++    if (!tabs) return -1;
++    if (dst_cap < plen) return -1;
++    const uint8_t *cmap = carry_map(mode);
++    memcpy(dst, params, plen);
++    bw_t w = { 0, 0, dst + plen, dst + dst_cap };
++
++    const int L = mode_L(mode);
++    uint32_t state = 1u << L;                /* any valid start */
++    for (size_t j = n; j-- > 0; ) {
++        int carry = j ? cmap[syms[j - 1] >> (8 - cbits)] : 0;
++        const ctab_t *t = &tabs[carry];
++        int s = syms[j];
++        int is_esc = (t->tt[s].deltaNbBits == 0xFFFFFFFFu);
++        int cs = is_esc ? CTX_ESC : s;
++        uint32_t nb = (state + t->tt[cs].deltaNbBits) >> 16;
++        if (bw_push(&w, state & ((1u << nb) - 1u), (int)nb) != 0) return -1;
++        state = t->st[(state >> nb) + (uint32_t)t->tt[cs].deltaFindState];
++        if (is_esc && bw_push(&w, (uint32_t)s, 8) != 0) return -1;
++    }
++    if (bw_push(&w, state - (1u << L), L) != 0) return -1;
++    if (bw_push(&w, 1, 1) != 0) return -1;   /* terminator */
++    if (w.cnt > 0) {                          /* pad to byte */
++        if (w.p >= w.end) return -1;
++        *w.p++ = (uint8_t)(w.acc & 0xFF);
++    }
++    *out_len = (size_t)(w.p - dst);
++    return 0;
++}
++
++static int ctx_decode_bytes(int mode, const uint8_t *src, size_t src_len,
++                            size_t plen, int cbits,
++                            uint8_t *dst, size_t n)
++{
++    if (src_len < plen + 2) return -1;
++    const ctab_t *tabs = cache_get(mode, src, plen, 0, 1);
++    if (!tabs) return -1;
++
++    /* copy the payload into padded scratch: br_read does unaligned
++     * 8-byte loads that may touch up to 7 bytes below the read point */
++    const uint8_t *pl = src + plen;
++    size_t pl_len = src_len - plen;
++    uint8_t stack_buf[4096 + 16];
++    uint8_t *buf = pl_len + 16 <= sizeof(stack_buf)
++                   ? stack_buf : (uint8_t *)malloc(pl_len + 16);
++    if (!buf) return -1;
++    memset(buf, 0, 8);
++    memcpy(buf + 8, pl, pl_len);
++
++    /* locate terminator: highest set bit of last byte */
++    uint8_t last = buf[8 + pl_len - 1];
++    if (last == 0) { if (buf != stack_buf) free(buf); return -1; }
++    size_t bitpos = 8 * 8 + (pl_len - 1) * 8 + (size_t)highbit(last);
++
++    const uint8_t *cmap = carry_map(mode);
++    const int L = mode_L(mode);
++    uint64_t td = now_ns();
++    uint32_t state = br_read(buf, &bitpos, L);
++    int carry = 0;
++    for (size_t j = 0; j < n; j++) {
++        const dent_t *e = &tabs[carry].d[state];
++        uint32_t b = e->sym;
++        if (b == CTX_ESC) b = br_read(buf, &bitpos, 8);
++        dst[j] = (uint8_t)b;
++        carry = cmap[b >> (8 - cbits)];
++        state = e->base + br_read(buf, &bitpos, e->nbBits);
++    }
++    pivco_ctx_ns_dec += now_ns() - td;
++    if (buf != stack_buf) free(buf);
++    return 0;
++}
++
++/* ---- public API (signatures unchanged from the rANS prototype) ---- */
++
++int pivco_ctx_bin_compress(int order, const uint8_t *src, size_t nbytes,
++                           uint8_t *dst, size_t dst_cap, size_t *out_len)
++{
++    int nctx = 1 << order;
++    uint32_t cmask = (uint32_t)nctx - 1;
++    size_t nbits = nbytes * 8;
++    size_t params_bytes = (size_t)nctx / 2;
++
++    /* estimate + quantize (identical to the rANS prototype) */
++    uint32_t cnt[16][2];
++    memset(cnt, 0, sizeof(uint32_t) * (size_t)nctx * 2);
++    uint32_t ctx = 0;
++    for (size_t i = 0; i < nbits; i++) {
++        int b = (src[i >> 3] >> (i & 7)) & 1;
++        cnt[ctx][b]++;
++        ctx = ((ctx << 1) | (uint32_t)b) & cmask;
++    }
++    uint8_t pidx[16];
++    for (int c = 0; c < nctx; c++) {
++        double best = 0; int bi = 0;
++        for (int k = 0; k < 16; k++) {
++            double p1 = (double)PTAB[k] / 4096.0;
++            double cost = -( (double)cnt[c][1] * log2(p1) +
++                             (double)cnt[c][0] * log2(1.0 - p1) );
++            if (k == 0 || cost < best) { best = cost; bi = k; }
++        }
++        pidx[c] = (uint8_t)bi;
++    }
++    uint8_t params[8];
++    for (size_t i = 0; i < params_bytes; i++)
++        params[i] = (uint8_t)(pidx[2 * i] | (pidx[2 * i + 1] << 4));
++
++    int mode = (order == 2) ? PIVCO_CTX2_ID : PIVCO_CTX4_ID;
++    cache_snap(mode, params, params_bytes);
++    return ctx_encode_bytes(mode, params, params_bytes, src, nbytes,
++                            order, dst, dst_cap, out_len);
++}
++
++int pivco_ctx_bin_decompress(int order, const uint8_t *src, size_t src_len,
++                             uint8_t *dst, size_t nbytes)
++{
++    int mode = (order == 2) ? PIVCO_CTX2_ID : PIVCO_CTX4_ID;
++    size_t params_bytes = (size_t)(1 << order) / 2;
++    return ctx_decode_bytes(mode, src, src_len, params_bytes, order,
++                            dst, nbytes);
++}
++
++int pivco_ctx_quad_compress(int order_q, const uint8_t *syms, size_t nsyms,
++                            uint8_t *dst, size_t dst_cap, size_t *out_len)
++{
++    int nctx = 1 << (2 * order_q);
++    uint32_t cmask = (uint32_t)nctx - 1;
++    size_t params_bytes = (size_t)nctx * 2;
++
++    uint32_t cnt[16][4];
++    memset(cnt, 0, sizeof(uint32_t) * (size_t)nctx * 4);
++    uint32_t ctx = 0;
++    for (size_t i = 0; i < nsyms; i++) {
++        cnt[ctx][syms[i] & 3]++;
++        ctx = ((ctx << 2) | (uint32_t)(syms[i] & 3)) & cmask;
++    }
++    uint8_t widx[16][4];
++    for (int c = 0; c < nctx; c++) {
++        uint32_t tot = cnt[c][0] + cnt[c][1] + cnt[c][2] + cnt[c][3];
++        for (int s = 0; s < 4; s++) {
++            double target = tot ? 256.0 * ((double)cnt[c][s] + 0.5) /
++                                    ((double)tot + 2.0)
++                                : 64.0;
++            double lt = log(target);
++            int bi = 0; double bd = 0;
++            for (int k = 0; k < 16; k++) {
++                double d = fabs(log((double)WTAB[k]) - lt);
++                if (k == 0 || d < bd) { bd = d; bi = k; }
++            }
++            widx[c][s] = (uint8_t)bi;
++        }
++    }
++    uint8_t params[32];
++    for (int c = 0; c < nctx; c++) {
++        params[2 * c]     = (uint8_t)(widx[c][0] | (widx[c][1] << 4));
++        params[2 * c + 1] = (uint8_t)(widx[c][2] | (widx[c][3] << 4));
++    }
++
++    /* pack 4 pairs/byte; tail pairs go raw after the coded payload */
++    size_t nfull = nsyms / 4;
++    size_t ntail = nsyms - nfull * 4;
++    uint8_t *packed = (uint8_t *)malloc(nfull ? nfull : 1);
++    if (!packed) return -1;
++    for (size_t j = 0; j < nfull; j++)
++        packed[j] = (uint8_t)( (syms[4 * j]     & 3)
++                             | ((syms[4 * j + 1] & 3) << 2)
++                             | ((syms[4 * j + 2] & 3) << 4)
++                             | ((syms[4 * j + 3] & 3) << 6));
++
++    int mode = (order_q == 1) ? PIVCO_QUAD_CTX1_ID : PIVCO_QUAD_CTX2_ID;
++    cache_snap(mode, params, params_bytes);
++    size_t body = 0;
++    int rc = ctx_encode_bytes(mode, params, params_bytes, packed, nfull,
++                              2 * order_q, dst, dst_cap, &body);
++    free(packed);
++    if (rc != 0) return -1;
++    if (ntail) {                              /* raw tail byte */
++        if (body + 1 > dst_cap) return -1;
++        uint8_t tb = 0;
++        for (size_t i = 0; i < ntail; i++)
++            tb |= (uint8_t)((syms[nfull * 4 + i] & 3) << (2 * i));
++        dst[body++] = tb;
++    }
++    *out_len = body;
++    return 0;
++}
++
++int pivco_ctx_quad_decompress(int order_q, const uint8_t *src, size_t src_len,
++                              uint8_t *syms, size_t nsyms)
++{
++    int mode = (order_q == 1) ? PIVCO_QUAD_CTX1_ID : PIVCO_QUAD_CTX2_ID;
++    size_t params_bytes = (size_t)(1 << (2 * order_q)) * 2;
++    size_t nfull = nsyms / 4;
++    size_t ntail = nsyms - nfull * 4;
++    size_t body_len = src_len - (ntail ? 1 : 0);
++
++    uint8_t *packed = (uint8_t *)malloc(nfull ? nfull : 1);
++    if (!packed) return -1;
++    int rc = ctx_decode_bytes(mode, src, body_len, params_bytes,
++                              2 * order_q, packed, nfull);
++    if (rc != 0) { free(packed); return -1; }
++    for (size_t j = 0; j < nfull; j++) {
++        syms[4 * j]     = (uint8_t)( packed[j]       & 3);
++        syms[4 * j + 1] = (uint8_t)((packed[j] >> 2) & 3);
++        syms[4 * j + 2] = (uint8_t)((packed[j] >> 4) & 3);
++        syms[4 * j + 3] = (uint8_t)((packed[j] >> 6) & 3);
++    }
++    free(packed);
++    if (ntail) {
++        uint8_t tb = src[src_len - 1];
++        for (size_t i = 0; i < ntail; i++)
++            syms[nfull * 4 + i] = (uint8_t)((tb >> (2 * i)) & 3);
++    }
++    return 0;
++}
+diff -urN '--exclude=build' '--exclude=.git*' '--exclude=ext' '--exclude=*.pvh' '--exclude=*.dSYM' '--exclude=.DS_Store' '--exclude=phaz' e1stage/src/pivco_ctx.h pr30tree/src/pivco_ctx.h
+--- e1stage/src/pivco_ctx.h	1969-12-31 16:00:00.000000000 -0800
++++ pr30tree/src/pivco_ctx.h	2026-08-20 21:37:29.643259490 -0700
+@@ -0,0 +1,69 @@
++/* Static context-model rANS coders for pivco-huffman's per-node records.
++ *
++ * Two coders, both "transmit quantized params, expand, code statically":
++ *
++ *   binary / order-o   P(bit | previous o bits).  2^o contexts, each a
++ *                      4-bit index into a fixed 16-entry probability
++ *                      grid.  Used on partition bitmaps and (natural-
++ *                      packed) flat regions.  Wire ids PIVCO_CTX2_ID
++ *                      (o=2) and PIVCO_CTX4_ID (o=4).
++ *
++ *   4-ary / order-q    P(pair | previous q pairs) over the fused
++ *                      parent+child route stream of a quad node.  4^q
++ *                      contexts, each four 4-bit weight indexes
++ *                      normalized to the rANS scale.  Wire ids
++ *                      PIVCO_QUAD_CTX1_ID (q=1) / PIVCO_QUAD_CTX2_ID
++ *                      (q=2); PIVCO_QUAD_RAW_ID is the packed-raw form.
++ *
++ * Payload layout (both coders):
++ *   [params][initial rANS state: u32 LE][rANS bytes in decode order]
++ * params are 2^o * 4 bits (binary) or 4^q * 16 bits (4-ary).
++ *
++ * rANS: 32-bit state, 12-bit scale (PIVCO_CTX_PSCALE), byte renorm.
++ * Encoder walks the symbols backward; decoder forward.  Bit order in
++ * byte buffers is LSB-first, matching the wire bitmaps. */
++
++#ifndef PIVCO_CTX_H
++#define PIVCO_CTX_H
++
++#include <stddef.h>
++#include <stdint.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++#define PIVCO_CTX_PSCALE_BITS 12
++#define PIVCO_CTX_PSCALE      (1u << PIVCO_CTX_PSCALE_BITS)
++
++/* Wire ids (extend the FSE marker id space; see pivco_fse.h). */
++#define PIVCO_CTX2_ID      52   /* binary, o=2 */
++#define PIVCO_CTX4_ID      53   /* binary, o=4 */
++#define PIVCO_QUAD_RAW_ID  54   /* fused route stream, packed raw 2 bits/elem */
++#define PIVCO_QUAD_CTX1_ID 55   /* fused, 4-ary ctx q=1 */
++#define PIVCO_QUAD_CTX2_ID 56   /* fused, 4-ary ctx q=2 */
++
++/* Binary order-o coder over src's nbytes*8 bits (LSB-first per byte).
++ * order must be 2 or 4.  Returns 0 on success and sets *out_len; -1 if
++ * the output would not fit dst_cap. */
++int pivco_ctx_bin_compress(int order, const uint8_t *src, size_t nbytes,
++                           uint8_t *dst, size_t dst_cap, size_t *out_len);
++
++/* Inverse.  Decodes exactly nbytes bytes.  Returns 0 on success, -1 on
++ * malformed input (truncated). */
++int pivco_ctx_bin_decompress(int order, const uint8_t *src, size_t src_len,
++                             uint8_t *dst, size_t nbytes);
++
++/* 4-ary order-q coder over nsyms 2-bit symbols, given unpacked one
++ * symbol per byte (values 0..3).  order_q must be 1 or 2. */
++int pivco_ctx_quad_compress(int order_q, const uint8_t *syms, size_t nsyms,
++                            uint8_t *dst, size_t dst_cap, size_t *out_len);
++
++int pivco_ctx_quad_decompress(int order_q, const uint8_t *src, size_t src_len,
++                              uint8_t *syms, size_t nsyms);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* PIVCO_CTX_H */
+diff -urN '--exclude=build' '--exclude=.git*' '--exclude=ext' '--exclude=*.pvh' '--exclude=*.dSYM' '--exclude=.DS_Store' '--exclude=phaz' e1stage/src/pivco_fse.c pr30tree/src/pivco_fse.c
+--- e1stage/src/pivco_fse.c	2026-08-19 19:00:50.000000000 -0700
++++ pr30tree/src/pivco_fse.c	2026-08-20 21:41:15.099195821 -0700
+@@ -1,5 +1,6 @@
+ #define FSE_STATIC_LINKING_ONLY
+ #include "pivco_fse.h"
++#include "pivco_ctx.h"
+ #include "pivco_fse_tables.h"
+ 
+ #include "fse.h"
+@@ -235,6 +236,15 @@
+     if (table_id == PIVCO_FSE_DYNAMIC_ID)
+         return pivco_fse_decompress_dynamic(src, src_len, dst, dst_cap,
+                                              dst_expected, out_len);
++    if (table_id == PIVCO_CTX2_ID || table_id == PIVCO_CTX4_ID) {
++        if (dst_cap < dst_expected) return PIVCO_FSE_ERR_DST_FULL;
++        int order = (table_id == PIVCO_CTX2_ID) ? 2 : 4;
++        if (pivco_ctx_bin_decompress(order, (const uint8_t *)src, src_len,
++                                     (uint8_t *)dst, dst_expected) != 0)
++            return PIVCO_FSE_ERR_BAD_INPUT;
++        *out_len = dst_expected;
++        return PIVCO_FSE_OK;
++    }
+ 
+     pivco_fse_init();
+     if (!g_init_ok) return PIVCO_FSE_ERR_INTERNAL;
+diff -urN '--exclude=build' '--exclude=.git*' '--exclude=ext' '--exclude=*.pvh' '--exclude=*.dSYM' '--exclude=.DS_Store' '--exclude=phaz' e1stage/src/pivco_huffman_codec.c pr30tree/src/pivco_huffman_codec.c
+--- e1stage/src/pivco_huffman_codec.c	2026-08-19 19:00:50.000000000 -0700
++++ pr30tree/src/pivco_huffman_codec.c	2026-08-24 12:58:36.239903055 -0700
+@@ -25,6 +25,7 @@
+ #include "pivco_prof.h"
+ #ifdef PIVCO_HAS_FSE
+ #include "pivco_fse.h"
++#include "pivco_ctx.h"
+ #endif
+ 
+ #include <stdlib.h>
+@@ -208,6 +209,7 @@
+  *
+  * No-op when PIVCO_HAS_FSE is not defined. */
+ static inline void codec_maybe_fse_attempt(int fse_on, int dyn_on,
++                                            int ctx_on,
+                                             uint8_t *marker_slot,
+                                             uint8_t *bm, int nbytes,
+                                             int n, int n_left, int n_right,
+@@ -216,6 +218,20 @@
+ #ifdef PIVCO_HAS_FSE
+     if (!fse_on) return;
+ 
++    static double env_ratio = -1.0, env_thresh = -1.0;
++    static int env_minb = -1;
++    if (env_minb < 0) {
++        const char *e;
++        env_ratio  = (e = getenv("PIVCO_FSE_RATIO"))  ? atof(e) : (double)PIVCO_FSE_MIN_RATIO;
++        env_thresh = (e = getenv("PIVCO_FSE_THRESH")) ? atof(e) : (double)PIVCO_FSE_MIN_THRESHOLD;
++        env_minb   = (e = getenv("PIVCO_FSE_MINB"))   ? atoi(e) : PIVCO_FSE_MIN_BITMAP_BYTES;
++    }
++    int lvl = depth < PIVCO_LVL_MAX ? depth : PIVCO_LVL_MAX - 1;
++    g_pivco_lvl[lvl].nodes++;
++    g_pivco_lvl[lvl].n_sum     += (uint64_t)n;
++    g_pivco_lvl[lvl].raw_bytes += (uint64_t)nbytes;
++    g_pivco_lvl[lvl].d_sum++;
++
+     int     best_id  = 0;
+     int     best_xor = 0;
+     size_t  best_len = 0;
+@@ -228,10 +244,10 @@
+      * pivco_fse_freq[1] and modelling a near-50/50 bitmap with it costs
+      * more than it saves.  Also size-gated: below MIN_BITMAP_BYTES the
+      * attempt is not worth the encoder time. */
+-    int static_id = (nbytes >= PIVCO_FSE_MIN_BITMAP_BYTES &&
++    int static_id = (nbytes >= env_minb &&
+                      n > 0 &&
+                      (double)((n_left >= n_right) ? n_left : n_right) /
+-                       (double)n >= PIVCO_FSE_MIN_THRESHOLD)
++                       (double)n >= env_thresh)
+                       ? pivco_fse_select_table(
+                             (double)((n_left >= n_right) ? n_left : n_right) /
+                               (double)n)
+@@ -262,7 +278,7 @@
+         double fse_frac = (double)(len + 2) * 8.0 / (double)n;
+         double codeword_ratio = ((double)depth + fse_frac) /
+                                   ((double)depth + 1.0);
+-        if (rc == PIVCO_FSE_OK && codeword_ratio <= (double)PIVCO_FSE_MIN_RATIO) {
++        if (rc == PIVCO_FSE_OK && codeword_ratio <= env_ratio) {
+             best_id  = static_id;
+             best_xor = xor_flag;
+             best_len = len;
+@@ -301,14 +317,49 @@
+         }
+     }
+ 
++    /* ---- candidates 3+4: static bit-context rANS (order 2, 4) ----
++     * Transmitted quantized per-context bit probabilities + rANS
++     * payload (see pivco_ctx.h).  Pure size gate, like the dynamic
++     * candidate. */
++    if (ctx_on && nbytes >= 16) {
++        for (int oi = 0; oi < 2; oi++) {
++            int order = oi ? 4 : 2;
++            int t_id  = oi ? PIVCO_CTX4_ID : PIVCO_CTX2_ID;
++            uint8_t ctx_out[(size_t)nbytes + 64];
++            size_t ctx_len = 0;
++            g_pivco_fse_attempt[t_id]++;
++            if (pivco_ctx_bin_compress(order, bm, (size_t)nbytes,
++                                       ctx_out, sizeof(ctx_out),
++                                       &ctx_len) == 0 &&
++                ctx_len + 2 < (size_t)nbytes &&
++                (best_id < 1 || ctx_len < best_len)) {
++                best_id  = t_id;
++                best_xor = 0;
++                best_len = ctx_len;
++                memcpy(best_out, ctx_out, ctx_len);
++            }
++        }
++    }
++
++    g_pivco_ws.marker_bytes += 1;
+     if (best_id < 1) {
++        g_pivco_ws.bm_raw_bytes += (uint64_t)nbytes;
++        g_pivco_ws.bm_pad_bits  += (uint64_t)nbytes * 8 - (uint64_t)n;
++        g_pivco_lvl[lvl].wins[0]++;
+         g_pivco_fse_commit[0]++;     /* slot 0 = attempted, rejected */
+         return;
+     }
++    g_pivco_ws.fse_bytes += 2 + (uint64_t)best_len;
++    {
++        int cls = best_id == PIVCO_FSE_DYNAMIC_ID ? 2 :
++                  (best_id >= PIVCO_CTX2_ID ? 3 : 1);
++        g_pivco_lvl[lvl].wins[cls]++;
++        g_pivco_lvl[lvl].saved[cls] += (uint64_t)nbytes - 2 - best_len;
++    }
+     codec_fse_commit(marker_slot, bm, nbytes, best_id, best_xor,
+                       best_out, best_len, out_ptr);
+ #else
+-    (void)fse_on; (void)dyn_on; (void)marker_slot; (void)bm; (void)nbytes;
++    (void)fse_on; (void)dyn_on; (void)ctx_on; (void)marker_slot; (void)bm; (void)nbytes;
+     (void)n; (void)n_left; (void)n_right; (void)depth; (void)out_ptr;
+ #endif
+ }
+@@ -321,7 +372,8 @@
+ {
+ #ifdef PIVCO_HAS_FSE
+     /* Below ~8 bytes a 16-symbol NCount cannot pay for itself. */
+-    return table->fse_enabled && table->fse_dynamic && nbytes >= 8;
++    return table->fse_enabled && (table->fse_dynamic || table->ctx_enabled)
++           && nbytes >= 8;
+ #else
+     (void)table; (void)nbytes;
+     return 0;
+@@ -356,8 +408,10 @@
+  *
+  * No-op when PIVCO_HAS_FSE is not defined -- the marker byte is still
+  * written by the caller, so the wire layout does not depend on it. */
+-static inline int codec_maybe_fse_flat(uint8_t *marker_slot,
++static inline int codec_maybe_fse_flat(int dyn_on, int ctx_on,
++                                        uint8_t *marker_slot,
+                                         uint8_t *body, int nbytes,
++                                        int n, int depth, int D,
+                                         uint8_t **out_ptr)
+ {
+ #ifdef PIVCO_HAS_FSE
+@@ -365,33 +419,227 @@
+      * 32 KiB, so the 2*nbytes staging would be a 64 KiB stack frame. */
+     size_t cap = 2 * (size_t)nbytes + 64;
+     uint8_t *dyn_out = (uint8_t *)malloc(cap);
+-    if (!dyn_out) return 0;
+-    size_t dyn_len = 0;
+-    pivco_fse_status_t rc = pivco_fse_compress_dynamic(body, (size_t)nbytes,
+-                                                        dyn_out, cap, &dyn_len);
+-    g_pivco_fse_attempt[PIVCO_FSE_DYNAMIC_ID]++;
+-    /* Raw record costs 1 + nbytes, coded costs 3 + dyn_len. */
+-    if (rc != PIVCO_FSE_OK || dyn_len + 2 >= (size_t)nbytes) {
++    uint8_t *try_out = (uint8_t *)malloc(cap);
++    if (!dyn_out || !try_out) { free(dyn_out); free(try_out); return 0; }
++    int lvl = depth < PIVCO_LVL_MAX ? depth : PIVCO_LVL_MAX - 1;
++    g_pivco_lvl_flat[lvl].nodes++;
++    g_pivco_lvl_flat[lvl].n_sum     += (uint64_t)n;
++    g_pivco_lvl_flat[lvl].raw_bytes += (uint64_t)nbytes;
++    g_pivco_lvl_flat[lvl].d_sum     += (uint64_t)D;
++    int best_id = 0;
++    size_t best_len = 0;
++    if (dyn_on) {
++        size_t dyn_len = 0;
++        pivco_fse_status_t rc = pivco_fse_compress_dynamic(body, (size_t)nbytes,
++                                                            try_out, cap, &dyn_len);
++        g_pivco_fse_attempt[PIVCO_FSE_DYNAMIC_ID]++;
++        if (rc == PIVCO_FSE_OK && dyn_len + 2 < (size_t)nbytes) {
++            best_id = PIVCO_FSE_DYNAMIC_ID;
++            best_len = dyn_len;
++            memcpy(dyn_out, try_out, dyn_len);
++        }
++    }
++    if (ctx_on && nbytes >= 16) {
++        for (int oi = 0; oi < 2; oi++) {
++            int order = oi ? 4 : 2;
++            int t_id  = oi ? PIVCO_CTX4_ID : PIVCO_CTX2_ID;
++            size_t ctx_len = 0;
++            g_pivco_fse_attempt[t_id]++;
++            if (pivco_ctx_bin_compress(order, body, (size_t)nbytes,
++                                       try_out, cap, &ctx_len) == 0 &&
++                ctx_len + 2 < (size_t)nbytes &&
++                (best_id < 1 || ctx_len < best_len)) {
++                best_id = t_id;
++                best_len = ctx_len;
++                memcpy(dyn_out, try_out, ctx_len);
++            }
++        }
++    }
++    /* Raw record costs 1 + nbytes, coded costs 3 + best_len. */
++    g_pivco_ws.marker_bytes += 1;
++    if (best_id < 1) {
++        g_pivco_ws.flat_raw_bytes += (uint64_t)nbytes;
++        g_pivco_ws.flat_pad_bits  += (uint64_t)nbytes * 8 - (uint64_t)n * (uint64_t)D;
++        g_pivco_lvl_flat[lvl].wins[0]++;
+         g_pivco_fse_commit[0]++;
+-        free(dyn_out);
++        free(dyn_out); free(try_out);
+         return 0;
+     }
+-    codec_fse_commit(marker_slot, body, nbytes, PIVCO_FSE_DYNAMIC_ID, 0,
+-                      dyn_out, dyn_len, out_ptr);
+-    free(dyn_out);
++    g_pivco_ws.fse_bytes += 2 + (uint64_t)best_len;
++    {
++        int cls = best_id == PIVCO_FSE_DYNAMIC_ID ? 2 :
++                  (best_id >= PIVCO_CTX2_ID ? 3 : 1);
++        g_pivco_lvl_flat[lvl].wins[cls]++;
++        g_pivco_lvl_flat[lvl].saved[cls] += (uint64_t)nbytes - 2 - best_len;
++    }
++    codec_fse_commit(marker_slot, body, nbytes, best_id, 0,
++                      dyn_out, best_len, out_ptr);
++    free(dyn_out); free(try_out);
+     return 1;
+ #else
++    (void)dyn_on; (void)ctx_on;
+     (void)marker_slot; (void)body; (void)nbytes; (void)out_ptr;
++    (void)n; (void)depth; (void)D;
+     return 0;
+ #endif
+ }
+ 
++/* ---- ctx-fused (quad) node records ----
++ *
++ * An INTERNAL_FULL node with two non-flat internal children may fold
++ * its own bitmap and both children's bitmaps into one 4-ary "route"
++ * stream (element i's pair = went-right bit, then the bit it takes in
++ * that child), coded with the pair-context rANS of pivco_ctx.h or
++ * stored 2-bit packed.  The wire record keeps the node's K_right
++ * header (bit 15 flags the fused form) and each child's region minus
++ * its tail: [kr|0x8000][child1 region sans tail][child2 region sans
++ * tail][marker: QUAD_*][len:u16][payload].
++ *
++ * Nested fusion is not representable (cutting a fused child's tail
++ * would drop grandchild data), so a node whose parent is considering
++ * fusion (cap != NULL below) encodes plain. */
++typedef struct {
++    uint8_t *bm;            /* parent-provided: raw bitmap copy   */
++    int      nbytes;
++    int      n;
++    uint8_t *region_start;  /* set by the parent before the call  */
++    uint8_t *tail_ptr;      /* this node's [marker] position      */
++    int      filled;
++} codec_cap_t;
++
+ static void codec_encode_node(const pivco_table_t *table,
+                                int16_t node_id,
+                                uint8_t *ranks, int n,
+                                int depth,
+                                uint8_t **out_ptr,
+-                               uint8_t *tmp)
++                               uint8_t *tmp,
++                               codec_cap_t *cap);
++
++static inline int codec_bit(const uint8_t *b, int i)
++{ return (b[i >> 3] >> (i & 7)) & 1; }
++
++/* Try the fused form.  Children (and the node's own plain tail) are
++ * encoded into a temp buffer first; commit-if-smaller decides which
++ * form reaches the real stream.  Returns 1 when it emitted (either
++ * form), 0 when the caller should encode plain (allocation failure). */
++static int codec_encode_fused(const pivco_table_t *table,
++                              const pivco_tree_node_t *node,
++                              uint8_t *ranks, uint8_t *tmp,
++                              int n, int n_left, int n_right, int depth,
++                              const uint8_t *bm_stage, int nbytes,
++                              uint8_t *kr_slot, uint8_t **out_ptr)
++{
++    size_t tcap = (size_t)PIVCO_MAX_ENCODED_SIZE;
++    uint8_t *tempb = (uint8_t *)malloc(tcap);
++    codec_cap_t capL, capR;
++    memset(&capL, 0, sizeof(capL));
++    memset(&capR, 0, sizeof(capR));
++    capL.bm = (uint8_t *)malloc((size_t)bitmap_bytes(n_left) + 16);
++    capR.bm = (uint8_t *)malloc((size_t)bitmap_bytes(n_right) + 16);
++    uint8_t *pairs = (uint8_t *)malloc((size_t)n);
++    uint8_t *fbuf  = (uint8_t *)malloc((size_t)n + 64);
++    uint8_t *fbest = (uint8_t *)malloc((size_t)n + 64);
++    if (!tempb || !capL.bm || !capR.bm || !pairs || !fbuf || !fbest) {
++        free(tempb); free(capL.bm); free(capR.bm);
++        free(pairs); free(fbuf); free(fbest);
++        return 0;
++    }
++
++    uint8_t *tptr = tempb;
++    if (n_right > n_left) {
++        capR.region_start = tptr;
++        codec_encode_node(table, node->right, tmp,   n_right, depth + 1,
++                          &tptr, tmp + n_right, &capR);
++        capL.region_start = tptr;
++        codec_encode_node(table, node->left,  ranks, n_left,  depth + 1,
++                          &tptr, tmp + n_right, &capL);
++    } else {
++        capL.region_start = tptr;
++        codec_encode_node(table, node->left,  ranks, n_left,  depth + 1,
++                          &tptr, tmp + n_right, &capL);
++        capR.region_start = tptr;
++        codec_encode_node(table, node->right, tmp,   n_right, depth + 1,
++                          &tptr, tmp + n_right, &capR);
++    }
++    PIVCO_CHECK(capL.filled && capR.filled);
++
++    /* the node's own plain tail, into temp (reused verbatim on decline) */
++    uint8_t *ptail = tptr;
++    *tptr++ = 0;
++    uint8_t *pbm = tptr;
++    memcpy(pbm, bm_stage, (size_t)nbytes);
++    tptr += nbytes;
++    codec_maybe_fse_attempt(table->fse_enabled, table->fse_dynamic,
++                            table->ctx_enabled, ptail, pbm, nbytes,
++                            n, n_left, n_right, depth, &tptr);
++    size_t unfused_len = (size_t)(tptr - tempb);
++    PIVCO_CHECK(unfused_len <= tcap);
++
++    /* fused route stream (bit 1 = right, LSB-first; see part_core) */
++    int z = 0, o = 0;
++    for (int i = 0; i < n; i++) {
++        int b1 = codec_bit(bm_stage, i);
++        int b2 = b1 ? codec_bit(capR.bm, o++) : codec_bit(capL.bm, z++);
++        pairs[i] = (uint8_t)((b1 << 1) | b2);
++    }
++    PIVCO_CHECK(z == n_left && o == n_right);
++
++    int best_id = PIVCO_QUAD_RAW_ID;
++    size_t best_len = ((size_t)2 * (size_t)n + 7) >> 3;
++    memset(fbest, 0, best_len);
++    for (int i = 0; i < n; i++)
++        fbest[(size_t)i >> 2] |= (uint8_t)(pairs[i] << ((i & 3) * 2));
++    for (int q = 1; q <= 2; q++) {
++        int t_id = (q == 1) ? PIVCO_QUAD_CTX1_ID : PIVCO_QUAD_CTX2_ID;
++        size_t flen = 0;
++        g_pivco_fse_attempt[t_id]++;
++        if (pivco_ctx_quad_compress(q, pairs, (size_t)n, fbuf,
++                                    (size_t)n + 64, &flen) == 0 &&
++            flen < best_len) {
++            best_id  = t_id;
++            best_len = flen;
++            memcpy(fbest, fbuf, flen);
++        }
++    }
++
++    uint8_t *r1s, *r1t, *r2s, *r2t;
++    if (n_right > n_left) { r1s = capR.region_start; r1t = capR.tail_ptr;
++                            r2s = capL.region_start; r2t = capL.tail_ptr; }
++    else                  { r1s = capL.region_start; r1t = capL.tail_ptr;
++                            r2s = capR.region_start; r2t = capR.tail_ptr; }
++    size_t pre1 = (size_t)(r1t - r1s);
++    size_t pre2 = (size_t)(r2t - r2s);
++    size_t fused_total = pre1 + pre2 + 1 + 2 + best_len;
++
++    if (fused_total < unfused_len) {
++        kr_slot[1] |= 0x80;                       /* fused flag (bit 15) */
++        uint8_t *w = *out_ptr;
++        memcpy(w, r1s, pre1); w += pre1;
++        memcpy(w, r2s, pre2); w += pre2;
++        *w++ = (uint8_t)best_id;
++        *w++ = (uint8_t)(best_len & 0xFF);
++        *w++ = (uint8_t)((best_len >> 8) & 0xFF);
++        memcpy(w, fbest, best_len); w += best_len;
++        *out_ptr = w;
++        g_pivco_fse_commit[best_id]++;
++        g_pivco_fse_bytes_in [best_id] += (uint64_t)(unfused_len - pre1 - pre2);
++        g_pivco_fse_bytes_out[best_id] += (uint64_t)(3 + best_len);
++    } else {
++        memcpy(*out_ptr, tempb, unfused_len);
++        *out_ptr += unfused_len;
++    }
++    free(tempb); free(capL.bm); free(capR.bm);
++    free(pairs); free(fbuf); free(fbest);
++    return 1;
++}
++
++static void codec_encode_node(const pivco_table_t *table,
++                               int16_t node_id,
++                               uint8_t *ranks, int n,
++                               int depth,
++                               uint8_t **out_ptr,
++                               uint8_t *tmp,
++                               codec_cap_t *cap)
+ {
+     if (n == 0) return;
+     PROF_COUNT_ONLY(PROF_ENC_NODE_VISIT, n);
+@@ -420,6 +668,12 @@
+          * re-pack in the configured layout over the same bytes, which
+          * costs an extra pack only on regions FSE declined. */
+         int try_fse = codec_flat_fse_eligible(table, total_bytes);
++        if (!try_fse) {
++            g_pivco_ws.marker_bytes += 1;
++            g_pivco_ws.flat_raw_bytes += (uint64_t)total_bytes;
++            g_pivco_ws.flat_pad_bits  += (uint64_t)total_bytes * 8
++                                       - (uint64_t)n * (uint64_t)D;
++        }
+         PROF_TIC();
+         if (try_fse) prim_enc_pack_dN_natural(ranks, n, D, base, body);
+         else         prim_enc_pack_dN(ranks, n, D, base, body,
+@@ -427,7 +681,9 @@
+         PROF_TOC(PROF_ENC_FLAT, n);
+ 
+         if (try_fse) {
+-            if (codec_maybe_fse_flat(marker_slot, body, total_bytes, out_ptr))
++            if (codec_maybe_fse_flat(table->fse_dynamic, table->ctx_enabled,
++                                     marker_slot, body, total_bytes,
++                                     n, depth, D, out_ptr))
+                 return;                     /* committed, natural-packed */
+             if (table->flat_layout != PIVCO_FLAT_NATURAL) {
+                 PROF_TIC();
+@@ -472,8 +728,27 @@
+     /* One K_right header per recursion site, consumed by the decoder
+      * at node entry so it can size both children before their regions
+      * arrive. */
++    uint8_t *kr_slot = *out_ptr;
+     wire_write_kr_header(table, node_id, out_ptr, n_right);
+ 
++#ifdef PIVCO_HAS_FSE
++    /* ctx-fused (quad) candidate — see codec_encode_fused. */
++    static int lvl_nofuse = -1;
++    if (lvl_nofuse < 0) lvl_nofuse = getenv("PIVCO_NOFUSE") != NULL;
++    if (cap == NULL && !lvl_nofuse && table->ctx_enabled &&
++        (pivco_node_type_t)table->node_type[node_id]
++            == PIVCO_NODE_INTERNAL_FULL &&
++        table->flat_depth[node->left] < 2 &&
++        table->flat_depth[node->right] < 2 &&
++        n_left > 0 && n_right > 0 && n >= 128) {
++        if (codec_encode_fused(table, node, ranks, tmp, n, n_left, n_right,
++                               depth, bm_stage, nbytes, kr_slot, out_ptr))
++            return;
++    }
++#else
++    (void)kr_slot;
++#endif
++
+     /* Emit the larger-K child's region first: the decoder can then
+      * decode it into scratch that the smaller, not-yet-decoded
+      * sibling's buffer overlaps (hole-reuse), shrinking the arena
+@@ -484,19 +759,26 @@
+      * the decoder reorders. */
+     if (n_right > n_left) {
+         codec_encode_node(table, node->right, tmp,   n_right, depth + 1,
+-                           out_ptr, tmp + n_right);
++                           out_ptr, tmp + n_right, NULL);
+         codec_encode_node(table, node->left,  ranks, n_left,  depth + 1,
+-                           out_ptr, tmp + n_right);
++                           out_ptr, tmp + n_right, NULL);
+     } else {
+         codec_encode_node(table, node->left,  ranks, n_left,  depth + 1,
+-                           out_ptr, tmp + n_right);
++                           out_ptr, tmp + n_right, NULL);
+         codec_encode_node(table, node->right, tmp,   n_right, depth + 1,
+-                           out_ptr, tmp + n_right);
++                           out_ptr, tmp + n_right, NULL);
+     }
+ 
+     /* Emit this node's record: marker + staged bitmap.  The FSE attempt
+      * may rewrite marker+bm in place with [fse_len][payload] and pull
+      * *out_ptr back to the payload end.  No-op otherwise. */
++    if (cap) {
++        cap->tail_ptr = *out_ptr;
++        memcpy(cap->bm, bm_stage, (size_t)nbytes);
++        cap->nbytes = nbytes;
++        cap->n = n;
++        cap->filled = 1;
++    }
+     uint8_t *marker_slot = *out_ptr;
+     *marker_slot = 0;
+     *out_ptr += 1;
+@@ -504,6 +786,7 @@
+     memcpy(bm, bm_stage, (size_t)nbytes);
+     *out_ptr += nbytes;
+     codec_maybe_fse_attempt(table->fse_enabled, table->fse_dynamic,
++                             table->ctx_enabled,
+                              marker_slot, bm, nbytes,
+                              n, n_left, n_right, depth, out_ptr);
+ }
+@@ -539,7 +822,9 @@
+     prim_enc_init(ranks, N, symbols, table->sym_to_rank, &table->enc_init_aux);
+     PROF_TOC(PROF_ENC_INIT, N);
+ 
+-    codec_encode_node(table, table->tree_root, ranks, N, 0, &ptr, tmp);
++    g_pivco_lvl_symbols += (uint64_t)N;
++    g_pivco_ws.blocks++;
++    codec_encode_node(table, table->tree_root, ranks, N, 0, &ptr, tmp, NULL);
+ 
+     *out_len = (size_t)(ptr - out);
+     return PIVCO_OK;
+@@ -589,6 +874,131 @@
+ static void codec_decode_subtree(const pivco_table_t *table,
+                                    int16_t node_id, int K,
+                                    uint8_t *out, uint8_t *tmp,
++                                   const uint8_t **in_ptr);
++
++/* Decode one ctx-fused node record (K_right bit 15 — see
++ * codec_encode_fused).  Reference-speed path: grandchild subtrees
++ * decode into heap buffers, the fused route stream is expanded, the
++ * three bitmaps are rebuilt and the normal merge primitives replay
++ * the two levels.  Children are guaranteed unfused by the encoder. */
++static void codec_decode_fused_node(const pivco_table_t *table,
++                                    int16_t node_id, int K, int K_right,
++                                    uint8_t *out, const uint8_t **in_ptr)
++{
++    const pivco_tree_node_t *node = &table->tree[node_id];
++    int K_left = K - K_right;
++    struct { int16_t id; int K; uint8_t *g1, *g2; } ch[2];
++    int firstR = K_right > K_left;
++    ch[0].id = firstR ? node->right : node->left;
++    ch[0].K  = firstR ? K_right : K_left;
++    ch[1].id = firstR ? node->left : node->right;
++    ch[1].K  = firstR ? K_left : K_right;
++
++    for (int i = 0; i < 2; i++) {
++        ch[i].g1 = ch[i].g2 = NULL;
++        const pivco_tree_node_t *cn = &table->tree[ch[i].id];
++        switch ((pivco_node_type_t)table->node_type[ch[i].id]) {
++        case PIVCO_NODE_BOTH_LEAVES:
++            break;
++        case PIVCO_NODE_LEAF_LEFT: {
++            int kr = wire_read_kr_header(table, ch[i].id, in_ptr);
++            uint8_t *t = (uint8_t *)malloc((size_t)kr + 64);
++            ch[i].g2 = (uint8_t *)malloc((size_t)kr + 64);
++            PIVCO_CHECK(t && ch[i].g2);
++            codec_decode_subtree(table, cn->right, kr, ch[i].g2, t, in_ptr);
++            free(t);
++            break;
++        }
++        case PIVCO_NODE_INTERNAL_FULL: {
++            int kr = wire_read_kr_header(table, ch[i].id, in_ptr);
++            int kl = ch[i].K - kr;
++            ch[i].g1 = (uint8_t *)malloc((size_t)kl + 64);
++            ch[i].g2 = (uint8_t *)malloc((size_t)kr + 64);
++            uint8_t *t = (uint8_t *)malloc((size_t)ch[i].K + 64);
++            PIVCO_CHECK(ch[i].g1 && ch[i].g2 && t);
++            if (kr > kl) {
++                codec_decode_subtree(table, cn->right, kr, ch[i].g2, t, in_ptr);
++                codec_decode_subtree(table, cn->left,  kl, ch[i].g1, t, in_ptr);
++            } else {
++                codec_decode_subtree(table, cn->left,  kl, ch[i].g1, t, in_ptr);
++                codec_decode_subtree(table, cn->right, kr, ch[i].g2, t, in_ptr);
++            }
++            free(t);
++            break;
++        }
++        default:
++            pivco_check_fail("fused child has unexpected node type",
++                             __FILE__, __LINE__);
++        }
++    }
++
++    /* fused record */
++    uint8_t marker = **in_ptr;
++    *in_ptr += 1;
++    uint16_t flen;
++    memcpy(&flen, *in_ptr, 2);
++    *in_ptr += 2;
++    uint8_t *pairs = (uint8_t *)malloc((size_t)K);
++    PIVCO_CHECK(pairs);
++    if (marker == PIVCO_QUAD_RAW_ID) {
++        const uint8_t *pk = *in_ptr;
++        for (int i = 0; i < K; i++)
++            pairs[i] = (uint8_t)((pk[(size_t)i >> 2] >> ((i & 3) * 2)) & 3);
++    } else {
++        PIVCO_CHECK(marker == PIVCO_QUAD_CTX1_ID ||
++                    marker == PIVCO_QUAD_CTX2_ID);
++        int q = (marker == PIVCO_QUAD_CTX1_ID) ? 1 : 2;
++        PIVCO_CHECK(pivco_ctx_quad_decompress(q, *in_ptr, (size_t)flen,
++                                              pairs, (size_t)K) == 0);
++    }
++    *in_ptr += flen;
++
++    /* direct 4-way merge: pair value = (went_right << 1) | grandchild
++     * bit, so slots are {left.left, left.right, right.left, right.right}.
++     * Leaf grandchildren become constant-filled source buffers, which
++     * keeps the merge loop uniform (one indexed cursor bump per elem). */
++    uint8_t *constbuf[4] = { NULL, NULL, NULL, NULL };
++    const uint8_t *srcp[4];
++    for (int i = 0; i < 2; i++) {
++        int base = (ch[i].id == node->right) ? 2 : 0;
++        const pivco_tree_node_t *cn = &table->tree[ch[i].id];
++        switch ((pivco_node_type_t)table->node_type[ch[i].id]) {
++        case PIVCO_NODE_BOTH_LEAVES:
++            constbuf[base]     = (uint8_t *)malloc((size_t)ch[i].K + 64);
++            constbuf[base + 1] = (uint8_t *)malloc((size_t)ch[i].K + 64);
++            PIVCO_CHECK(constbuf[base] && constbuf[base + 1]);
++            memset(constbuf[base],     table->tree[cn->left].symbol,
++                   (size_t)ch[i].K);
++            memset(constbuf[base + 1], table->tree[cn->right].symbol,
++                   (size_t)ch[i].K);
++            srcp[base]     = constbuf[base];
++            srcp[base + 1] = constbuf[base + 1];
++            break;
++        case PIVCO_NODE_LEAF_LEFT:
++            constbuf[base] = (uint8_t *)malloc((size_t)ch[i].K + 64);
++            PIVCO_CHECK(constbuf[base]);
++            memset(constbuf[base], table->tree[cn->left].symbol,
++                   (size_t)ch[i].K);
++            srcp[base]     = constbuf[base];
++            srcp[base + 1] = ch[i].g2;
++            break;
++        default:
++            srcp[base]     = ch[i].g1;
++            srcp[base + 1] = ch[i].g2;
++            break;
++        }
++    }
++    for (int i = 0; i < K; i++)
++        out[i] = *srcp[pairs[i]]++;
++
++    free(pairs);
++    free(constbuf[0]); free(constbuf[1]); free(constbuf[2]); free(constbuf[3]);
++    free(ch[0].g1); free(ch[0].g2); free(ch[1].g1); free(ch[1].g2);
++}
++
++static void codec_decode_subtree(const pivco_table_t *table,
++                                   int16_t node_id, int K,
++                                   uint8_t *out, uint8_t *tmp,
+                                    const uint8_t **in_ptr)
+ {
+     if (K == 0) return;
+@@ -654,7 +1064,12 @@
+         /* Both children internal.  Stream order == decode order ==
+          * larger first (strict >, ties left-first — must match the
+          * encoder). */
+-        int K_right = wire_read_kr_header(table, node_id, in_ptr);
++        int fused = 0;
++        int K_right = wire_read_kr_flagged(table, node_id, in_ptr, &fused);
++        if (fused) {
++            codec_decode_fused_node(table, node_id, K, K_right, out, in_ptr);
++            return;
++        }
+         int K_left  = K - K_right;
+         uint8_t *left_buf, *right_buf;
+         if (K_right > K_left) {
+@@ -789,7 +1204,14 @@
+      * outgrows that slot, the partner writes spill past N into fresh
+      * arena.  The smaller root child then decodes into its slot with a
+      * fresh partner beyond N. */
+-    int K_right = wire_read_kr_header(table, table->tree_root, &ptr);
++    int root_fused = 0;
++    int K_right = wire_read_kr_flagged(table, table->tree_root, &ptr, &root_fused);
++    if (root_fused) {
++        codec_decode_fused_node(table, table->tree_root, N, K_right,
++                                symbols, &ptr);
++        *consumed = (size_t)(ptr - in);
++        return PIVCO_OK;
++    }
+     int K_left  = N - K_right;
+     uint8_t *scratch = decode_scratch_ensure((pivco_scratch_t *)dec_ctx->internal, need);
+     if (!scratch) return PIVCO_ERR_NULL;
+diff -urN '--exclude=build' '--exclude=.git*' '--exclude=ext' '--exclude=*.pvh' '--exclude=*.dSYM' '--exclude=.DS_Store' '--exclude=phaz' e1stage/src/pivco_huffman_wire.h pr30tree/src/pivco_huffman_wire.h
+--- e1stage/src/pivco_huffman_wire.h	2026-08-19 19:00:50.000000000 -0700
++++ pr30tree/src/pivco_huffman_wire.h	2026-08-24 12:58:36.239607428 -0700
+@@ -148,6 +148,7 @@
+                                          uint8_t **out_ptr, int n_right)
+ {
+     if (!kr_header_needed(table, node_id)) return;
++    g_pivco_ws.kr_bytes += KR_HEADER_BYTES;
+     (*out_ptr)[0] = (uint8_t)(n_right & 0xFF);
+     (*out_ptr)[1] = (uint8_t)((n_right >> 8) & 0xFF);
+     *out_ptr += KR_HEADER_BYTES;
+@@ -185,6 +186,28 @@
+     return (int)v;
+ }
+ 
++/* Flag-aware K_right read for INTERNAL_FULL nodes: bit 15 of the u16
++ * marks a ctx-fused node record (see codec_encode_node).  A legitimate
++ * kr of 32768 (0x8000) has zero low bits, and a fused kr is never 0,
++ * so the flag is bit15 AND nonzero low bits. */
++static inline int wire_read_kr_flagged(const pivco_table_t *table,
++                                        int16_t node_id,
++                                        const uint8_t **in_ptr,
++                                        int *fused)
++{
++    PIVCO_CHECK_DEBUG(kr_header_needed(table, node_id));
++    (void)table; (void)node_id;
++    uint16_t v;
++    memcpy(&v, *in_ptr, 2);
++    *in_ptr += 2;
++    if ((v & 0x8000u) && (v & 0x7FFFu)) {
++        *fused = 1;
++        return (int)(v & 0x7FFFu);
++    }
++    *fused = 0;
++    return (int)v;
++}
++
+ /* Read the per-node bitmap body (marker + payload).  Returns a pointer
+  * to the usable n-bit bitmap (either pointing into the input stream
+  * for marker==0, or into the caller-provided `scratch` for the FSE
+diff -urN '--exclude=build' '--exclude=.git*' '--exclude=ext' '--exclude=*.pvh' '--exclude=*.dSYM' '--exclude=.DS_Store' '--exclude=phaz' e1stage/src/pivco_huffman.c pr30tree/src/pivco_huffman.c
+--- e1stage/src/pivco_huffman.c	2026-08-19 19:00:50.000000000 -0700
++++ pr30tree/src/pivco_huffman.c	2026-08-24 12:57:50.204992126 -0700
+@@ -33,6 +33,33 @@
+ uint64_t g_pivco_fse_bytes_in [PIVCO_FSE_STATS_SLOTS];
+ uint64_t g_pivco_fse_bytes_out[PIVCO_FSE_STATS_SLOTS];
+ 
++pivco_ws_t g_pivco_ws;
++pivco_lvl_stat_t g_pivco_lvl[PIVCO_LVL_MAX];
++pivco_lvl_stat_t g_pivco_lvl_flat[PIVCO_LVL_MAX];
++uint64_t g_pivco_lvl_symbols;
++
++void pivco_lvl_stats_dump(void)
++{
++    fprintf(stderr, "LVLSYM %llu\n", (unsigned long long)g_pivco_lvl_symbols);
++    for (int k = 0; k < 2; k++) {
++        const pivco_lvl_stat_t *arr = k ? g_pivco_lvl_flat : g_pivco_lvl;
++        for (int d = 0; d < PIVCO_LVL_MAX; d++) {
++            const pivco_lvl_stat_t *s = &arr[d];
++            if (!s->nodes) continue;
++            fprintf(stderr,
++                "LVL %s %d nodes %llu n %llu rawB %llu D %llu"
++                " w %llu %llu %llu %llu sv %llu %llu %llu\n",
++                k ? "flat" : "node", d,
++                (unsigned long long)s->nodes, (unsigned long long)s->n_sum,
++                (unsigned long long)s->raw_bytes, (unsigned long long)s->d_sum,
++                (unsigned long long)s->wins[0], (unsigned long long)s->wins[1],
++                (unsigned long long)s->wins[2], (unsigned long long)s->wins[3],
++                (unsigned long long)s->saved[1], (unsigned long long)s->saved[2],
++                (unsigned long long)s->saved[3]);
++        }
++    }
++}
++
+ #define PIVCO_FSE_ROOT_LOG_MAX 65536
+ pivco_fse_root_event_t g_pivco_fse_root_log[PIVCO_FSE_ROOT_LOG_MAX];
+ int g_pivco_fse_root_n;
+@@ -44,6 +71,10 @@
+     memset(g_pivco_fse_bytes_in,  0, sizeof(g_pivco_fse_bytes_in));
+     memset(g_pivco_fse_bytes_out, 0, sizeof(g_pivco_fse_bytes_out));
+     g_pivco_fse_root_n = 0;
++    memset(&g_pivco_ws,      0, sizeof(g_pivco_ws));
++    memset(g_pivco_lvl,      0, sizeof(g_pivco_lvl));
++    memset(g_pivco_lvl_flat, 0, sizeof(g_pivco_lvl_flat));
++    g_pivco_lvl_symbols = 0;
+ }
+ 
+ void pivco_fse_stats_get(uint64_t commit[PIVCO_FSE_STATS_SLOTS],
+@@ -125,6 +156,7 @@
+     .effort      = PIVCO_EFFORT_PLAIN,
+     .fse_enabled = 1,
+     .fse_dynamic = 1,
++    .ctx_enabled = 0,
+     .flat_layout = PIVCO_FLAT_VERTICAL,
+ };
+ 
+diff -urN '--exclude=build' '--exclude=.git*' '--exclude=ext' '--exclude=*.pvh' '--exclude=*.dSYM' '--exclude=.DS_Store' '--exclude=phaz' e1stage/src/pivcohuf_file.c pr30tree/src/pivcohuf_file.c
+--- e1stage/src/pivcohuf_file.c	2026-08-19 19:00:50.000000000 -0700
++++ pr30tree/src/pivcohuf_file.c	2026-08-24 14:01:54.615168821 -0700
+@@ -110,6 +110,34 @@
+  * compress_bound + compress
+  * ============================================================ */
+ 
++/* ---- Per-block table ring (prototype; PIVCO_BLKTAB=K on the encoder,
++ * flags bit 2 on the wire).  Each block either reuses one of the last
++ * K INTRODUCED tables (1-byte id, 1 = newest) or introduces a new one
++ * (id 0 + 128 B of code-length nibbles).  The file-global table seeds
++ * the ring.  Both sides maintain introduction order identically; the
++ * decoder always keeps the max capacity (8), which resolves any K<=8. */
++#define PIVCOHUF_FLAG_BLKTAB 0x04
++#define PIVCOHUF_RING_MAX    8
++typedef struct {
++    pivco_table_t tab[PIVCOHUF_RING_MAX];
++    uint8_t       len[PIVCOHUF_RING_MAX][256];
++    int           order[PIVCOHUF_RING_MAX];   /* slot ids, newest first */
++    int           n;                          /* live entries */
++} pivcohuf_ring_t;
++
++/* Returns the slot index the new table should be built into, updating
++ * order[] and n.  cap = window size (encoder K, decoder RING_MAX). */
++static int ring_introduce_slot(pivcohuf_ring_t *r, int cap)
++{
++    int slot;
++    if (r->n < cap) { slot = r->n; r->n++; }
++    else            { slot = r->order[cap - 1]; }
++    { int m = (r->n < cap ? r->n : cap) - 1;
++      memmove(r->order + 1, r->order, (size_t)m * sizeof(int)); }
++    r->order[0] = slot;
++    return slot;
++}
++
+ size_t pivcohuf_compress_bound_blk(size_t in_len, size_t block_size)
+ {
+     /* Per-block worst case is the full block size (no compression) plus
+@@ -122,7 +150,7 @@
+     const size_t B = block_size;
+     size_t nblocks = (in_len + B - 1) / B;
+     if (nblocks == 0) nblocks = 1;  /* zero-byte input still produces one header */
+-    size_t worst_per_block = 4 /* length prefix */ + 2 * B + 64;
++    size_t worst_per_block = 4 /* length prefix */ + 1 + 128 /* blktab id + lens */ + 2 * B + 64;
+     return PIVCOHUF_HEADER_SIZE      /* header */
+          + 8 + 2 + 1 + 128            /* body header: usize + blk + flags + code-len nibbles */
+          + nblocks * worst_per_block;
+@@ -196,8 +224,14 @@
+     put_u16(p, (uint16_t)B); p += 2;
+ 
+     /* FLAGS (v0.9): bits0-1 = flat-region layout, from the build cfg
+-     * (already validated by the table build above). */
+-    put_u8(p, (uint8_t)cfg->flat_layout); p += 1;
++     * (already validated by the table build above).  Bit 2 = per-block
++     * table ring (prototype knob). */
++    int blktab_k = 0;
++    { const char *e = getenv("PIVCO_BLKTAB");
++      if (e) { blktab_k = atoi(e);
++               if (blktab_k < 1) blktab_k = 0;
++               if (blktab_k > PIVCOHUF_RING_MAX) blktab_k = PIVCOHUF_RING_MAX; } }
++    put_u8(p, (uint8_t)cfg->flat_layout | (blktab_k ? PIVCOHUF_FLAG_BLKTAB : 0)); p += 1;
+ 
+     /* CODE_LENGTHS packed as 4-bit nibbles, sym 2i in low nibble. */
+     for (int i = 0; i < 128; i++) {
+@@ -213,12 +247,24 @@
+     uint8_t *block_buf = (uint8_t *)malloc(B);
+     TOC(tm, malloc_ns, _tm);
+     if (!block_buf) return PIVCOHUF_ERR_INTERNAL;
++    pivcohuf_ring_t *ring = NULL;
++    pivco_table_t *fresh_tab = NULL;
++    if (blktab_k) {
++        ring = (pivcohuf_ring_t *)malloc(sizeof(*ring));
++        fresh_tab = (pivco_table_t *)malloc(sizeof(*fresh_tab));
++        if (!ring || !fresh_tab) { free(ring); free(fresh_tab); free(block_buf); return PIVCOHUF_ERR_INTERNAL; }
++        ring->n = 0;
++        { int slot = ring_introduce_slot(ring, blktab_k);
++          memcpy(&ring->tab[slot], &table, sizeof(table));
++          memcpy(ring->len[slot], table.code_len, 256); }
++    }
+     double _te = TIC(tm);
+     while (off < in_len) {
+         size_t blk_in = in_len - off;
+         size_t this_n;
+         const uint8_t *blk_src;
+         uint8_t *len_field;
++        const pivco_table_t *use_tab = &table;
+         { PROF_TIC();
+           if (blk_in >= B) {
+               blk_src = in + off;
+@@ -234,13 +280,57 @@
+               off = in_len;
+           }
+           (void)pad_byte; (void)block_buf;  /* padding path retired */
++          if (blktab_k) {
++              uint64_t bfreq[256];
++              memset(bfreq, 0, sizeof(bfreq));
++              if (pivco_histogram(enc_ctx, blk_src, this_n, bfreq) != PIVCO_OK) {
++                  free(ring); free(fresh_tab); free(block_buf);
++                  return PIVCOHUF_ERR_INTERNAL;
++              }
++              uint64_t best_bits = UINT64_MAX; int best_k = -1;
++              for (int k = 0; k < ring->n; k++) {
++                  const uint8_t *L = ring->len[ring->order[k]];
++                  uint64_t bits = 0; int ok = 1;
++                  for (int s2 = 0; s2 < 256; s2++) {
++                      if (!bfreq[s2]) continue;
++                      if (!L[s2]) { ok = 0; break; }
++                      bits += bfreq[s2] * L[s2];
++                  }
++                  if (ok && bits < best_bits) { best_bits = bits; best_k = k; }
++              }
++              uint64_t fresh_bits = UINT64_MAX;
++              int have_fresh = pivco_build_table(cfg, bfreq, fresh_tab) == PIVCO_OK;
++              if (have_fresh) {
++                  fresh_bits = 8 * 128;      /* nibble transmission */
++                  for (int s2 = 0; s2 < 256; s2++)
++                      fresh_bits += bfreq[s2] * fresh_tab->code_len[s2];
++              }
++              if (have_fresh && fresh_bits < best_bits) {
++                  *p++ = 0;
++                  for (int i = 0; i < 128; i++)
++                      p[i] = (uint8_t)((fresh_tab->code_len[2*i] & 0x0F)
++                            | ((fresh_tab->code_len[2*i+1] & 0x0F) << 4));
++                  p += 128;
++                  int slot = ring_introduce_slot(ring, blktab_k);
++                  if (pivco_build_table_from_code_lens(cfg, fresh_tab->code_len,
++                                                       &ring->tab[slot]) != PIVCO_OK) {
++                      free(ring); free(fresh_tab); free(block_buf);
++                      return PIVCOHUF_ERR_INTERNAL;
++                  }
++                  memcpy(ring->len[slot], ring->tab[slot].code_len, 256);
++                  use_tab = &ring->tab[slot];
++              } else {
++                  *p++ = (uint8_t)(best_k + 1);
++                  use_tab = &ring->tab[ring->order[best_k]];
++              }
++          }
+           len_field = p; p += 4;
+           PROF_TOC(PROF_FILE_BLOCK_PROLOGUE, (uint64_t)this_n); }
+ 
+         { PROF_TIC();
+           size_t enc_len = 0;
+-          if (pivco_encode(enc_ctx, &table, blk_src, this_n, p, &enc_len) != PIVCO_OK) {
+-              free(block_buf);
++          if (pivco_encode(enc_ctx, use_tab, blk_src, this_n, p, &enc_len) != PIVCO_OK) {
++              free(ring); free(fresh_tab); free(block_buf);
+               return PIVCOHUF_ERR_INTERNAL;
+           }
+           put_u32(len_field, (uint32_t)enc_len);
+@@ -248,6 +338,7 @@
+           PROF_TOC(PROF_FILE_BLOCK_ENCODE, (uint64_t)this_n); }
+     }
+     TOC(tm, codec_ns, _te);
++    free(ring); free(fresh_tab);
+     free(block_buf);
+ 
+     size_t body_len = (size_t)(p - body);
+@@ -278,6 +369,13 @@
+     if (tm) memset(tm, 0, sizeof(*tm));
+     pivco_cfg_t cfg = cfg_in ? *cfg_in : pivco_cfg_default;
+     cfg.fse_enabled = use_ans;
++    /* Prototype knob: PIVCO_CTX=1 turns on the static context-model
++     * coders (encoder-side only; the decoder always understands the
++     * markers).  Env-gated so A/B arms share one binary. */
++    if (use_ans && getenv("PIVCO_CTX"))
++        cfg.ctx_enabled = 1;
++    if (getenv("PIVCO_NODYN"))
++        cfg.fse_dynamic = 0;
+     /* FASTEST_COMPRESS is the one effort mode the bare table build
+      * cannot resolve (it needs the input size): below 256 KiB plain
+      * Huffman lengths encode fastest; above, a flatter tree ENCODES
+@@ -290,6 +388,24 @@
+     if (!enc_ctx) return PIVCOHUF_ERR_INTERNAL;
+     int r = pivcohuf_compress_impl(enc_ctx, &cfg, in, in_len, out, out_len,
+                                    block_size, tm);
++    if (getenv("PIVCO_LVL_STATS")) pivco_lvl_stats_dump();
++    if (getenv("PIVCO_WIRE_STATS")) {
++        const pivco_ws_t *w = &g_pivco_ws;
++        fprintf(stderr, "WS total %zu blocks %llu nhdr %llu blkpfx %llu"
++                " filehdr 26 bodyhdr 139 kr %llu marker %llu bm %llu"
++                " bmpad %llu flat %llu flatpad %llu fse %llu\n",
++                *out_len,
++                (unsigned long long)w->blocks,
++                (unsigned long long)(2 * w->blocks),
++                (unsigned long long)(4 * w->blocks),
++                (unsigned long long)w->kr_bytes,
++                (unsigned long long)w->marker_bytes,
++                (unsigned long long)w->bm_raw_bytes,
++                (unsigned long long)w->bm_pad_bits,
++                (unsigned long long)w->flat_raw_bytes,
++                (unsigned long long)w->flat_pad_bits,
++                (unsigned long long)w->fse_bytes);
++    }
+     pivco_encoder_free(enc_ctx);
+     return r;
+ }
+@@ -401,7 +517,7 @@
+          * implement (including the reserved QUAD_NODES bit) is a
+          * refusal, not a guess. */
+         if ((flags & PIVCOHUF_FLAGS_LAYOUT_MASK) > PIVCO_FLAT_VERTICAL_128
+-            || (flags & (uint8_t)~PIVCOHUF_FLAGS_LAYOUT_MASK))
++            || (flags & (uint8_t)~(PIVCOHUF_FLAGS_LAYOUT_MASK | PIVCOHUF_FLAG_BLKTAB)))
+             return PIVCOHUF_ERR_BAD_VERSION;
+     }
+     /* The block size is read from the file, not fixed at compile time: the
+@@ -440,10 +556,20 @@
+ 
+     /* Decode blocks.  block_buf is on heap (avoids large stack frames; also
+      * sized B which is read from the file). */
++    int blktab = (flags & PIVCOHUF_FLAG_BLKTAB) != 0;
++    pivcohuf_ring_t *ring = NULL;
++    if (blktab) {
++        ring = (pivcohuf_ring_t *)malloc(sizeof(*ring));
++        if (!ring) return PIVCOHUF_ERR_INTERNAL;
++        ring->n = 0;
++        { int slot = ring_introduce_slot(ring, PIVCOHUF_RING_MAX);
++          memcpy(&ring->tab[slot], &table, sizeof(table));
++          memcpy(ring->len[slot], table.code_len, 256); }
++    }
+     double _tm = TIC(tm);
+     uint8_t *block_buf = (uint8_t *)malloc(B);
+     TOC(tm, malloc_ns, _tm);
+-    if (!block_buf) return PIVCOHUF_ERR_INTERNAL;
++    if (!block_buf) { free(ring); return PIVCOHUF_ERR_INTERNAL; }
+     const uint8_t *p = body + 10 + flags_size + 128;
+     const uint8_t *body_end = body + body_len;
+     size_t written = 0;
+@@ -453,6 +579,30 @@
+         uint32_t blk_enc_len;
+         uint8_t *blk_out;
+         size_t blk_remaining;
++        const pivco_table_t *use_tab = &table;
++        if (blktab) {
++            if (p + 1 > body_end) { err = PIVCOHUF_ERR_TOO_SHORT; break; }
++            uint8_t tid = *p++;
++            if (tid == 0) {
++                if (p + 128 > body_end) { err = PIVCOHUF_ERR_TOO_SHORT; break; }
++                uint8_t cl[256];
++                for (int i = 0; i < 128; i++) {
++                    cl[2*i]     = p[i] & 0x0F;
++                    cl[2*i + 1] = (p[i] >> 4) & 0x0F;
++                }
++                p += 128;
++                int slot = ring_introduce_slot(ring, PIVCOHUF_RING_MAX);
++                if (pivco_build_table_from_code_lens(&cfg, cl,
++                                                     &ring->tab[slot]) != PIVCO_OK) {
++                    err = PIVCOHUF_ERR_BAD_VERSION; break;
++                }
++                memcpy(ring->len[slot], ring->tab[slot].code_len, 256);
++                use_tab = &ring->tab[slot];
++            } else {
++                if ((int)tid > ring->n) { err = PIVCOHUF_ERR_BAD_VERSION; break; }
++                use_tab = &ring->tab[ring->order[tid - 1]];
++            }
++        }
+         { PROF_TIC();
+           if (p + 4 > body_end) { err = PIVCOHUF_ERR_TOO_SHORT; break; }
+           blk_enc_len = get_u32(p); p += 4;
+@@ -463,7 +613,7 @@
+ 
+         { PROF_TIC();
+           size_t consumed = 0;
+-          if (pivco_decode(dec_ctx, &table, p, blk_enc_len,
++          if (pivco_decode(dec_ctx, use_tab, p, blk_enc_len,
+                                    blk_out, &consumed) != PIVCO_OK) {
+               err = PIVCOHUF_ERR_INTERNAL; break;
+           }
+@@ -477,6 +627,7 @@
+         p += blk_enc_len;
+     }
+     TOC(tm, codec_ns, _td);
++    free(ring);
+     free(block_buf);
+     if (err) return err;
+ 
