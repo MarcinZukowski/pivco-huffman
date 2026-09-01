@@ -134,6 +134,19 @@ lv2, chinese peaks lv7).  ctx's increment (+33%) has the SAME level
 shape as id 51 — the remembered top-level concentration is quad
 fusion's (75–95%), a different sub-mechanism.  Don't depth-gate.
 
+## The k1-catalog arc (2026-08-31 .. 09-01, ledger §3.1–3.4)
+
+Streaming (no-reuse) ctx measured to the floor: builds 77–93% of
+decode, ratio ceiling −10.83% vs static (dict-48 leaves 3.47%).
+X4 within-record 4-stream interleave: loop 4.5 → 1.3 ns/ctx-byte
+(3.4×, realizes the lanes lever, no planning pass).  k-ladder: k=1
+(one param byte, 256 enumerable recipes → COMPLETE prebuilt catalog,
+zero builds) keeps 55–90% of ctx's win on post-LZ streams.  E2E phaz:
+static +2.2%/1.55× zstd-19 → +k1+X4 = +1.2%/1.14× — half the gap
+closed, still faster than zstd.  New knobs in the patch:
+PIVCO_CTX_{NOCACHE,DP,L,W4,X4,K1,K2,MAXD}, PIVCO_NIB2.  Negatives:
+bit-k1 on fused streams, W4-under-cache, position-split nibbles.
+
 ## OpenZL joint-token measurement (Nick, 2026-08-22)
 
 token = min(ll,15) | min(ml−3,15)<<4 (+2 rep bits variant): for

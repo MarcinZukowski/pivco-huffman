@@ -223,8 +223,8 @@ streams ── entropy layer ──▶  container    zstd: order-0 FSE/Huffman �
   Confirmed. Adopt id 51 as the dynamic baseline — it is the arm every ctx number in this ledger is
   measured against. Review asks before merge: fse_dynamic off by default, the Apple block-size guard in
   the harness, NCount repeat-mode, nibble tableLog 10 → 7 (§1.2). The carry-context coder (§2) and its parameter dictionary ride on top
-  as the next increment; the companion OpenZL issue with Nick's cross-corpus results is incoming
-  (announced for ~2026-08-21).</div>
+  as the next increment; the companion OpenZL issue with Nick's cross-corpus results was announced
+  for ~2026-08-21 and had not appeared as of 2026-08-31.</div>
   <h3>1.1 · Where in the tree it wins — the per-level census (2026-08-24)</h3>
   <p><b>The question.</b> Per tree level: how many bitmaps, how many where the dynamic coder kicked
   in, and that level's savings amortized to bits per file symbol. The plausible theory: only the top
@@ -289,9 +289,13 @@ streams ── entropy layer ──▶  container    zstd: order-0 FSE/Huffman �
   </ul>
   <div class="verdict"><b>Verdict</b>
   Set PIVCO_FSE_NIB_TABLELOG = 7: a one-line define, ratio-neutral-to-better, decode +7–14% on
-  dynamic-heavy inputs, old streams unaffected. Joins §1's review asks. M4-only so far — a
-  Graviton/x86 spot-check is the remaining gate, since the build-vs-lookup balance is
-  uarch-dependent.</div>
+  dynamic-heavy inputs, old streams unaffected. Joins §1's review asks.
+  Fleet gate PASSED (2026-08-31, Graviton 4 / Zen 5 / Granite Rapids, outputs byte-identical
+  across hosts): decode +16–23% on the L19 streams and +31–41% on the standard synthetic
+  distributions (two_sym_90/10 up to 2.7×, proba02 up to 2.6×), encode +4–7%; size wash
+  (streams −0.002%, synthetics +0.018% — worst cell two_sym_90/10 +0.93%, the L=7 resolution
+  tax on extreme skew). Server cores gain more than M4: the O(2^L) build is a larger share of
+  their decode.</div>
 </section>
 
 <section id="s2">
@@ -413,24 +417,114 @@ streams ── entropy layer ──▶  container    zstd: order-0 FSE/Huffman �
   711.8 ms against 38.5 ms of actual decode loop — an 18:1 ratio even with the dictionary cap. Encoder side:
   169,777 candidate encode passes for 19,892 commits (8.5×).</p>
   <ul class="lessons">
-    <li><b>DP build factorization — LANDED</b> (diff in explore/build_dp/): nibble-DP probability expansion,
-    1.09–1.30× full-build (quad modes gain most), 3.3–8× on the probs phase, wire-identical tables verified
-    on 20,200 random parameter sets per mode, roundtrip green. The naive single-prefactor form flips
-    normalize() floors on 1e-4..1.7e-3 of quad sets — the shipped variant keeps the high half bit-exact.
-    Float probs: no speed gain, ~1% of quad sets drift — rejected as wire drift.</li>
+    <li><b>DP build factorization</b> (PIVCO_CTX_DP, in ph-ctx-session.patch): expand each recipe's
+    byte probabilities from per-set nibble partial products — two multiplies per byte value instead of
+    an 8-step chain. 1.09–1.30× full-build (quad modes gain most), 3.3–8× on the probs phase, +10–13%
+    decode in the no-reuse runs; wire-identical tables verified on 20,200 random parameter sets per
+    mode, roundtrip green. Rejected variants: the single-prefactor form (flips normalize() floors on
+    1e-4..1.7e-3 of quad sets) and float probs (no speed gain, ~1% of quad sets drift the wire).</li>
     <li><b>Canonical parameter-set catalog</b>: 1-byte set ids (saves ~26 KB corpus wire) or a
     spec-predefined catalog (~39 KB, zero per-file builds, process-lifetime tables) — the structural fix for
-    the 18:1 build ratio, extending §5's canonical p-levels and the pooled context maps.</li>
-    <li><b>G-lane lockstep decode</b>: the ctx loop runs 5.6–6.8 ns/sym against the ~1.4 ns dependent-lookup
-    floor — latency-bound, far under the M4 IPC wall. 4 lanes project 2.5–3×; navigates the old multi-cursor
-    negative correctly (that loss was the bitmap walk, not ANS chains). Projected, not yet measured.</li>
+    the 18:1 build ratio, extending §5's canonical p-levels and the pooled context maps. Realized
+    COMPLETE at k=1 (256 recipes — §3.3); the curated form remains open for the k=2/4 tier.</li>
+    <li><b>Lane-interleaved decode</b>: the ctx loop is latency-bound (dependent lookup chain), far under
+    the M4 IPC wall — the loss that killed the old multi-cursor experiment was the bitmap walk, not ANS
+    chains. Measured in its within-record form (4 interleaved segments per record): 4.5 → 1.3 ns per ctx
+    byte, 3.4×, at the dependent-lookup floor — §3.2. Cross-record lanes remain relevant only as mop-up
+    for the small-record tail.</li>
     <li><b>Encoder gating by closed-form pricing</b>: histogram-priced candidates, real encode only for the
     argmin — cuts ctx compress ~5–8× (today ~10× PHA cost, attempt-dominated).</li>
   </ul>
-  <div class="verdict"><b>Verdict</b>
-  Catalog + lanes is the credible path from 0.6–0.9× to ~1× zstd-19 decode at unchanged ratio; the DP build
-  is banked. id51 side notes: 6,412 nodes pay 13.7 B NCount each (107 KB line, repeat-mode plausible) and a
+  <div class="verdict"><b>Verdict (updated 2026-09-01)</b>
+  All three decode levers now have measured forms: the DP build is landed (see above), the lanes
+  projection is achieved within-record by X4 (3.4×, §3.2), and the catalog exists COMPLETE at k=1
+  (§3.3), carrying phaz to +1.2% of zstd-19 at 1.14× its decode (§3.4). The k=2/4 + dictionary tier
+  remains the escalation path for xml-class structure. id51 side notes: 6,412 nodes pay 13.7 B NCount each (107 KB line, repeat-mode plausible) and a
   per-node calloc + nibble-repack pass (fusable, est. 1–3 ms+ on mozilla).</div>
+
+  <h3>3.1 · The no-reuse bound (2026-08-31) — streaming ctx, measured to the floor</h3>
+  <p><b>The question.</b> Can ctx decode without table reuse — every record's tables built from its wire
+  params, id-51-style — if the build is made as cheap as legitimately possible (free params, DP
+  expansion, tableLog sweep)? Knobs: PIVCO_CTX_NOCACHE / _FREE / _DP / _L.</p>
+  <div class="tablewrap"><table>
+    <caption>12 silesia raw + 6 L19 streams · static-FSE baseline arm · all roundtrip-verified</caption>
+    <tr><th>arm</th><th>size vs static</th><th>vs ctx-dict-48</th><th>enc MB/s</th><th>dec MB/s</th></tr>
+    <tr><td>ctx today (cache + dict-48, L=11)</td><td>−7.62%</td><td>—</td><td>39.5</td><td>351</td></tr>
+    <tr><td class="a">no-reuse, free params, L=11</td><td class="w">−10.83%</td><td>−3.47%</td><td>8.6</td><td class="l">44</td></tr>
+    <tr><td>no-reuse, L=9 / L=8</td><td>−10.02% / −9.72%</td><td>—</td><td>11.5 / 14.0</td><td>80 / 94</td></tr>
+  </table></div>
+  <ul class="lessons">
+    <li><b>Builds are 77–93% of no-reuse decode</b> (~10 µs/record at W8-L11 vs a 4.5 ns/byte loop);
+    loop-only would run 0.3–1.2 GB/s. The L lever exhausts: each step halves the build but the share
+    barely moves, and the 257-symbol alphabet's resolution floor bites from L=8 (xml +5.9% at L=7).</li>
+    <li><b>Reuse is ctx's viability condition, not an optimization</b> — a per-record-model coder is
+    only fast if models repeat; ctx quantizes params precisely to manufacture repeats.</li>
+    <li><b>The free-params arm sets ctx's true ratio ceiling: −10.83% vs static</b> — dict-48 leaves
+    3.47% of ctx output on the table; that number is the catalog design's target.</li>
+    <li>Per-level census of the builds: tables get built at levels 6–9 (xml: 320/124/118/30) saving
+    ~10 B each — deep commits are the ≥16 B spine outliers of nearly-drained levels (within-level size
+    spread 65–108×; "heavier is never deeper" bounds nothing horizontally). Gate by record size, never
+    by depth.</li>
+  </ul>
+
+  <h3>3.2 · Width and streams — W4 tables, X4 interleave (2026-08-31)</h3>
+  <p><b>Two levers on the same loop.</b> W4 (PIVCO_CTX_W4): nibble-wide symbols, same bit model, L=7
+  at unchanged 8×-alphabet headroom. X4 (PIVCO_CTX_X4): split each record into 4 contiguous segments —
+  own carry chain and ANS state each, carry reset at segment starts — ops interleaved FSE-style in one
+  shared bitstream.</p>
+  <ul class="lessons">
+    <li><b>W4</b>: build ÷3–4 (a dedicated 17-symbol build would add ~2–4× more — the prototype reuses
+    the 257-alphabet structures), loop ×1.9 per ctx byte — measured per-byte after correcting a timing
+    artifact that first hid it. A streaming/cold-path tool only: under a cache it is strictly worse.</li>
+    <li><b>X4</b>: loop 4.5 → 1.29–1.44 ns per ctx byte (3.4×, at the dependent-lookup floor).
+    Cost = 3 extra L-bit state flushes + context resets: +0.04–0.24% on big records — size-gate the
+    split below ~1 KB. This REALIZES §3's lanes lever within one record, with no planning pass; the
+    cross-record form remains only for the small-record tail. Note the model's carry chain cannot be
+    broken by interleaving states over one sequence — only by cutting the data.</li>
+  </ul>
+
+  <h3>3.3 · The k-ladder and the complete catalog (2026-08-31)</h3>
+  <p><b>The question that started as a joke.</b> How much of ctx's win does each context order carry —
+  down to k=1, two probabilities, one param byte?</p>
+  <div class="tablewrap"><table>
+    <caption>Gain vs no-ctx (static-FSE arm, fusion off, full tree) · streaming free-params arms</caption>
+    <tr><th>stream</th><th>k=1</th><th>k=2</th><th>k={2,4}</th><th>k=1 captures</th></tr>
+    <tr><td>mozilla ll / ml / of</td><td>−5.3 / −4.9 / −4.2%</td><td>−7.2 / −7.5 / −5.5%</td><td>−8.3 / −9.0 / −6.2%</td><td>54–68%</td></tr>
+    <tr><td>x-ray ll / ml / of</td><td>−3.0 / −2.2 / −1.9%</td><td>−3.3 / −3.4 / −2.1%</td><td>−3.4 / −4.0 / −2.1%</td><td>55–89%</td></tr>
+    <tr><td>lit streams (moz/samba/x-ray)</td><td>−0.7 / −0.8 / −1.7%</td><td>−0.9 / −1.0 / −2.1%</td><td>−1.0 / −1.3 / −2.3%</td><td>63–74%</td></tr>
+    <tr><td>xml (raw file)</td><td>−6.0%</td><td>−10.6%</td><td class="w">−16.0%</td><td class="l">38%</td></tr>
+  </table></div>
+  <ul class="lessons">
+    <li><b>Run-persistence is most of the pot on post-LZ streams</b>: k=1 keeps 55–90%; k=2 keeps
+    84–99%. Dropping k=4 entirely costs lit streams +0.1–0.3% but xml +6.4% — its value is
+    concentrated exactly where deep bit structure lives (xml 62% k=4 wins, ml codes 54%).</li>
+    <li><b>k=1 is the one order whose model space is enumerable</b>: two 4-bit indices = 256 possible
+    recipes = a COMPLETE catalog (~4 MB of prebuilt table pairs, compiled in, warmed in ~2 ms). Zero
+    builds, no dictionary, no cache policy, no curation risk — the §3 catalog lever with the selection
+    problem solved by exhaustion. Lineage: the 50 static density tables are k=0 of the same design;
+    §5's audit killed k=0 on literal trees (no marginal bias) — k=1 is the same discipline moved to
+    where the serial value lives. (k=2's space is 65,536 recipes ≈ 2 GB — curation territory.)</li>
+  </ul>
+
+  <h3>3.4 · End-to-end: static + k1-catalog + X4 in phaz (2026-09-01)</h3>
+  <div class="tablewrap"><table>
+    <caption>phaz vs stock zstd-19 · L19 silesia · M4 · "× zstd" = decode-speed multiple vs zstd itself
+    · k1 arm = cache-warm free-params k=1 (behaviorally the complete catalog; warmup ≈ 2 ms)</caption>
+    <tr><th>arm</th><th>size vs zstd-19</th><th>decode vs zstd-19</th></tr>
+    <tr><td>static PHA only</td><td>+2.2%</td><td class="w">1.55×</td></tr>
+    <tr><td>+ k1 catalog</td><td class="w">+1.1%</td><td class="l">0.75×</td></tr>
+    <tr><td class="a">+ k1 catalog + X4</td><td class="w">+1.2%</td><td class="w">1.14×</td></tr>
+  </table></div>
+  <ul class="lessons">
+    <li>Per-file: xml +5.6 → +3.7% (1.03×), mozilla +4.0 → +2.4% (1.08×), nci −0.5% and x-ray −0.0%
+    outright; samba the one sub-parity file (0.91×, heaviest ctx byte density). X4's flushes cost
+    +0.13% of output corpus-wide for −34% decode time — the size-gated split reclaims most of it.</li>
+    <li><b>Half the gap to zstd-19 closed while staying 1.14× faster</b>, from 256 prebuilt tables,
+    one param byte per committed record, four interleaved states, and commit-if-smaller. Against the
+    market rate (1% ≈ 10–15% decode) the point is slightly above market — but with no dictionary, no
+    builds, and ~100 lines of mechanism, it is the simplest ctx configuration measured to date.
+    Remaining gates: size-gated X, fleet validation. Roundtrips green throughout.</li>
+  </ul>
 </section>
 
 <section id="s4">
@@ -904,7 +998,7 @@ decode:
   (a) global o0, (b) global + context, (c) per-block o0, (d) per-block + context; contexts merged at n/256,
   each (block × context) table charged min(alphabet·6, 200) bits; KT column as the adaptive bound.</p>
   <div class="tablewrap"><table>
-    <caption>Headline cells · full 12-cell tables in the workflow journal</caption>
+    <caption>Headline cells · the full 12-cell grid was session-only and is not archived</caption>
     <tr><th>finding</th><th>evidence</th></tr>
     <tr><td class="a">(d) combined is the best model</td><td>10/12 cells, both header-charged and KT pricing</td></tr>
     <tr><td>context retention inside blocks (raw)</td><td>0.80–2.24, median 1.29 — usually LARGER than global</td></tr>
@@ -1236,6 +1330,14 @@ decode walk (pair context, chain identical to order-0):
     ≈ 0.01% of output, 8-cursor decode. Dead on applicability.</li>
     <li><b>Fusion for order-0 nibble coding</b> (§4.2): +1.63% worse corpus (lit x-ray +7.0%) —
     fusion's gain is all context, unreachable without carry-indexed tables.</li>
+    <li><b>Bit-granular k=1 on fused route streams</b> (2026-09-01): +3.9…+12.6% worse than k=1 on the
+    SEPARATE bitmaps — interleaving pushes run persistence to lag 2 and phase-mixes the two bit roles;
+    fusion's gain is reachable only through symbol-aligned context (extends §4's order-0 identity).</li>
+    <li><b>Position-split nibble tables for id 51</b> (2026-08-31): low/high nibbles with separate
+    tables wins only on mozilla (−174 KB; D=8 flats where a byte is one leaf code), ≈0 on 47 other
+    inputs — single-file win, declined; would want a marker id, not a selector byte, if ever revived.</li>
+    <li><b>W4 nibble-wide ctx under a table cache</b>: strictly worse — ×1.9 loop for a build saving
+    the cache already amortizes. Streaming/cold-path only (§3.2).</li>
   </ul>
 </section>
 </main>

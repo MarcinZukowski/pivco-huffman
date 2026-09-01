@@ -1,6 +1,6 @@
-diff -urN '--exclude=build' '--exclude=.git*' '--exclude=ext' '--exclude=*.pvh' '--exclude=*.dSYM' '--exclude=.DS_Store' '--exclude=phaz' e1stage/CMakeLists.txt pr30tree/CMakeLists.txt
+diff -urN '--exclude=build' '--exclude=.git*' '--exclude=ext' '--exclude=*.pvh' '--exclude=*.dSYM' '--exclude=.DS_Store' '--exclude=phaz' '--exclude=build-l*' e1stage/CMakeLists.txt ctxwt/CMakeLists.txt
 --- e1stage/CMakeLists.txt	2026-08-19 19:00:50.000000000 -0700
-+++ pr30tree/CMakeLists.txt	2026-08-20 21:47:30.002742279 -0700
++++ ctxwt/CMakeLists.txt	2026-08-31 19:29:11.398702858 -0700
 @@ -106,6 +106,7 @@
      add_compile_definitions(PIVCO_HAS_FSE=1)
      list(APPEND PIVCO_SOURCES
@@ -9,9 +9,9 @@ diff -urN '--exclude=build' '--exclude=.git*' '--exclude=ext' '--exclude=*.pvh' 
          ext/fse/lib/fse_compress.c
          ext/fse/lib/fse_decompress.c
          ext/fse/lib/entropy_common.c
-diff -urN '--exclude=build' '--exclude=.git*' '--exclude=ext' '--exclude=*.pvh' '--exclude=*.dSYM' '--exclude=.DS_Store' '--exclude=phaz' e1stage/extras/bench/bench_chunk_sizes.c pr30tree/extras/bench/bench_chunk_sizes.c
+diff -urN '--exclude=build' '--exclude=.git*' '--exclude=ext' '--exclude=*.pvh' '--exclude=*.dSYM' '--exclude=.DS_Store' '--exclude=phaz' '--exclude=build-l*' e1stage/extras/bench/bench_chunk_sizes.c ctxwt/extras/bench/bench_chunk_sizes.c
 --- e1stage/extras/bench/bench_chunk_sizes.c	2026-08-19 19:00:50.000000000 -0700
-+++ pr30tree/extras/bench/bench_chunk_sizes.c	2026-08-20 21:47:30.003107112 -0700
++++ ctxwt/extras/bench/bench_chunk_sizes.c	2026-08-31 19:29:11.399247777 -0700
 @@ -56,6 +56,7 @@
  
  #include "pivco_huffman.h"
@@ -107,9 +107,9 @@ diff -urN '--exclude=build' '--exclude=.git*' '--exclude=ext' '--exclude=*.pvh' 
              }
          }
          if (failed) break;
-diff -urN '--exclude=build' '--exclude=.git*' '--exclude=ext' '--exclude=*.pvh' '--exclude=*.dSYM' '--exclude=.DS_Store' '--exclude=phaz' e1stage/include/pivco_huffman.h pr30tree/include/pivco_huffman.h
+diff -urN '--exclude=build' '--exclude=.git*' '--exclude=ext' '--exclude=*.pvh' '--exclude=*.dSYM' '--exclude=.DS_Store' '--exclude=phaz' '--exclude=build-l*' e1stage/include/pivco_huffman.h ctxwt/include/pivco_huffman.h
 --- e1stage/include/pivco_huffman.h	2026-08-19 19:00:50.000000000 -0700
-+++ pr30tree/include/pivco_huffman.h	2026-08-24 12:57:50.204512123 -0700
++++ ctxwt/include/pivco_huffman.h	2026-08-31 21:11:40.947215989 -0700
 @@ -160,6 +160,7 @@
      uint16_t num_symbols;
      uint8_t  fse_enabled;      /* baked from pivco_cfg_t at build */
@@ -129,7 +129,7 @@ diff -urN '--exclude=build' '--exclude=.git*' '--exclude=ext' '--exclude=*.pvh' 
      pivco_flat_layout_t flat_layout;  /* default PIVCO_FLAT_VERTICAL */
  } pivco_cfg_t;
  
-@@ -366,13 +371,48 @@
+@@ -366,13 +371,49 @@
   * slot PIVCO_FSE_DYNAMIC_ID = the dynamic nibble table.
   * MUST be >= PIVCO_FSE_DYNAMIC_ID + 1 (static-asserted in pivco_fse.c).
   * Not thread-safe; intended for single-threaded analysis runs. */
@@ -153,6 +153,7 @@ diff -urN '--exclude=build' '--exclude=.git*' '--exclude=ext' '--exclude=*.pvh' 
 +#define PIVCO_LVL_MAX 24
 +typedef struct {
 +    uint64_t nodes, n_sum, raw_bytes, d_sum;
++    uint64_t n_min, n_max;
 +    uint64_t wins[4];
 +    uint64_t saved[4];
 +} pivco_lvl_stat_t;
@@ -179,9 +180,9 @@ diff -urN '--exclude=build' '--exclude=.git*' '--exclude=ext' '--exclude=*.pvh' 
  /* Per-root-event log: one entry per block's root-node visit.
   * Captures table_id chosen (0 if below threshold / no table), the
   * observed p_major, whether the FSE commit succeeded, and byte counts.
-diff -urN '--exclude=build' '--exclude=.git*' '--exclude=ext' '--exclude=*.pvh' '--exclude=*.dSYM' '--exclude=.DS_Store' '--exclude=phaz' e1stage/src/huffman_table.c pr30tree/src/huffman_table.c
+diff -urN '--exclude=build' '--exclude=.git*' '--exclude=ext' '--exclude=*.pvh' '--exclude=*.dSYM' '--exclude=.DS_Store' '--exclude=phaz' '--exclude=build-l*' e1stage/src/huffman_table.c ctxwt/src/huffman_table.c
 --- e1stage/src/huffman_table.c	2026-08-19 19:00:50.000000000 -0700
-+++ pr30tree/src/huffman_table.c	2026-08-20 21:40:56.666596495 -0700
++++ ctxwt/src/huffman_table.c	2026-08-31 19:29:11.400535115 -0700
 @@ -293,6 +293,7 @@
          build_single_symbol_table(used[0], table);
          table->fse_enabled = (uint8_t)(cfg->fse_enabled ? 1 : 0);
@@ -206,10 +207,10 @@ diff -urN '--exclude=build' '--exclude=.git*' '--exclude=ext' '--exclude=*.pvh' 
          table->flat_layout = (uint8_t)cfg->flat_layout;
          return PIVCO_OK;
      }
-diff -urN '--exclude=build' '--exclude=.git*' '--exclude=ext' '--exclude=*.pvh' '--exclude=*.dSYM' '--exclude=.DS_Store' '--exclude=phaz' e1stage/src/pivco_ctx.c pr30tree/src/pivco_ctx.c
+diff -urN '--exclude=build' '--exclude=.git*' '--exclude=ext' '--exclude=*.pvh' '--exclude=*.dSYM' '--exclude=.DS_Store' '--exclude=phaz' '--exclude=build-l*' e1stage/src/pivco_ctx.c ctxwt/src/pivco_ctx.c
 --- e1stage/src/pivco_ctx.c	1969-12-31 16:00:00.000000000 -0800
-+++ pr30tree/src/pivco_ctx.c	2026-08-24 11:31:56.067325003 -0700
-@@ -0,0 +1,621 @@
++++ ctxwt/src/pivco_ctx.c	2026-08-31 21:53:43.470981252 -0700
+@@ -0,0 +1,849 @@
 +/* Static context-model coders, tANS implementation.  See pivco_ctx.h.
 + *
 + * Both coders (binary order-k over bits, 4-ary order-q over route
@@ -247,7 +248,62 @@ diff -urN '--exclude=build' '--exclude=.git*' '--exclude=ext' '--exclude=*.pvh' 
 + * halves build cost, negligible ratio cost at a 256-value alphabet. */
 +static int mode_L(int mode)
 +{
-+    return (mode == PIVCO_CTX4_ID || mode == PIVCO_QUAD_CTX2_ID) ? 10 : 11;
++    /* PIVCO_CTX_L: base table log for the 4-param modes (default 11);
++     * 16-param modes use base-1.  Both sides must agree (env knob). */
++    static int base = -1;
++    if (base < 0) {
++        const char *e = getenv("PIVCO_CTX_L");
++        base = e ? atoi(e) : 11;
++        if (base < 7)  base = 7;
++        if (base > 12) base = 12;
++    }
++    return (mode == PIVCO_CTX4_ID || mode == PIVCO_QUAD_CTX2_ID) ? base - 1 : base;
++}
++
++static int ctx_dp(void)
++{
++    static int v = -1;
++    if (v < 0) { const char *e = getenv("PIVCO_CTX_DP"); v = e ? atoi(e) : 0; }
++    return v;
++}
++static int ctx_w4(void)
++{
++    /* PIVCO_CTX_W4=1: nibble-wide coding (4-bit symbols, L can drop to
++     * 7 at unchanged model).  Both sides must agree.  Bin modes only —
++     * run with fusion off. */
++    static int v = -1;
++    if (v < 0) v = getenv("PIVCO_CTX_W4") != NULL;
++    return v;
++}
++/* exact carry chain for W4: E[c][nib] = history after emitting nib from c
++ * (filled at build; points into the served cache entry) */
++static const uint8_t (*g_ctx_w4E)[16];
++
++static int ctx_k1(void)
++{
++    /* PIVCO_CTX_K1=1: run the id-52 slot as order-1 (two histories,
++     * one param byte).  Env-consistent both sides; experiment only. */
++    static int v = -1;
++    if (v < 0) v = getenv("PIVCO_CTX_K1") != NULL;
++    return v;
++}
++
++static int ctx_x4(void)
++{
++    /* PIVCO_CTX_X4=1: split each record into 4 contiguous segments,
++     * each its own carry chain + ANS state, ops interleaved in one
++     * bitstream (FSE-style) so the decode loop hides chain latency.
++     * Segment starts reset the carry.  Both sides must agree. */
++    static int v = -1;
++    if (v < 0) v = getenv("PIVCO_CTX_X4") != NULL;
++    return v;
++}
++
++static int ctx_nocache(void)
++{
++    static int v = -1;
++    if (v < 0) v = getenv("PIVCO_CTX_NOCACHE") != NULL;
++    return v;
 +}
 +
 +/* ---- probability grids (wire format; must not change) ---- */
@@ -298,6 +354,58 @@ diff -urN '--exclude=build' '--exclude=.git*' '--exclude=ext' '--exclude=*.pvh' 
 +            c = ((c << 2) | (uint32_t)s) & cmask;
 +        }
 +        out[v] = pr;
++    }
++}
++
++/* ---- DP build (PIVCO_CTX_DP=1): per-set nibble partial products,
++ * then two multiplies per byte value instead of an 8-step chain.
++ * T[c][n] = model probability of nibble n starting from history c;
++ * E[c][n] = the history after emitting it. */
++static void bin_nib_tabs(int k, const uint8_t *pidx,
++                         double T[][16], uint8_t E[][16])
++{
++    int nctx = 1 << k;
++    uint32_t cmask = (uint32_t)nctx - 1;
++    for (int c0 = 0; c0 < nctx; c0++) {
++        for (int n = 0; n < 16; n++) {
++            double pr = 1.0;
++            uint32_t c = (uint32_t)c0;
++            for (int j = 0; j < 4; j++) {
++                int bit = (n >> j) & 1;
++                double p1 = (double)PTAB[pidx[c]] / 4096.0;
++                pr *= bit ? p1 : 1.0 - p1;
++                c = ((c << 1) | (uint32_t)bit) & cmask;
++            }
++            T[c0][n] = pr; E[c0][n] = (uint8_t)c;
++        }
++    }
++}
++static void quad_nib_tabs(int q, const uint8_t widx[][4],
++                          double T[][16], uint8_t E[][16])
++{
++    int nctx = 1 << (2 * q);
++    uint32_t cmask = (uint32_t)nctx - 1;
++    for (int c0 = 0; c0 < nctx; c0++) {
++        for (int n = 0; n < 16; n++) {
++            double pr = 1.0;
++            uint32_t c = (uint32_t)c0;
++            for (int j = 0; j < 2; j++) {
++                int s2 = (n >> (2 * j)) & 3;
++                uint32_t w[4], sum = 0;
++                for (int t = 0; t < 4; t++) { w[t] = WTAB[widx[c][t] & 15]; sum += w[t]; }
++                pr *= (double)w[s2] / (double)sum;
++                c = ((c << 2) | (uint32_t)s2) & cmask;
++            }
++            T[c0][n] = pr; E[c0][n] = (uint8_t)c;
++        }
++    }
++}
++static void nib_byte_probs(const double T[][16], const uint8_t E[][16],
++                           int carry, double out[256])
++{
++    for (int v = 0; v < 256; v++) {
++        int lo = v & 15;
++        out[v] = T[carry][lo] * T[E[carry][lo]][v >> 4];
 +    }
 +}
 +
@@ -423,12 +531,14 @@ diff -urN '--exclude=build' '--exclude=.git*' '--exclude=ext' '--exclude=*.pvh' 
 +    size_t   plen;
 +    int      nc;               /* number of carries = 2^c */
 +    ctab_t  *tabs;             /* nc tables */
++    uint8_t  nibE[16][16];     /* W4: carry transitions */
 +    uint64_t stamp;
 +} centry_t;
 +static centry_t g_cache[CACHE_WAYS];
 +static uint64_t g_stamp;
 +uint64_t pivco_ctx_cache_hits, pivco_ctx_cache_misses;
 +uint64_t pivco_ctx_ns_build, pivco_ctx_ns_dec;
++uint64_t pivco_ctx_bytes_dec;
 +static uint64_t now_ns(void) {
 +    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
 +    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
@@ -437,27 +547,36 @@ diff -urN '--exclude=build' '--exclude=.git*' '--exclude=ext' '--exclude=*.pvh' 
 +static const ctab_t *cache_get(int mode, const uint8_t *params, size_t plen,
 +                               int want_enc, int want_dec)
 +{
-+    for (int i = 0; i < CACHE_WAYS; i++) {
-+        centry_t *e = &g_cache[i];
-+        if (e->valid && e->mode == mode && e->plen == plen &&
-+            memcmp(e->params, params, plen) == 0) {
-+            if ((want_enc && !e->has_enc) || (want_dec && !e->has_dec))
-+                continue;   /* other half only; fall through to a rebuild */
-+            e->stamp = ++g_stamp;
-+            pivco_ctx_cache_hits++;
-+            return e->tabs;
++    if (!ctx_nocache()) {
++        for (int i = 0; i < CACHE_WAYS; i++) {
++            centry_t *e = &g_cache[i];
++            if (e->valid && e->mode == mode && e->plen == plen &&
++                memcmp(e->params, params, plen) == 0) {
++                if ((want_enc && !e->has_enc) || (want_dec && !e->has_dec))
++                    continue;   /* other half only; fall through to a rebuild */
++                e->stamp = ++g_stamp;
++                pivco_ctx_cache_hits++;
++                g_ctx_w4E = (const uint8_t (*)[16])e->nibE;
++                return e->tabs;
++            }
 +        }
 +    }
-+    /* miss: evict LRU */
++    /* miss: evict LRU (nocache: a private scratch entry, rebuilt every call) */
 +    pivco_ctx_cache_misses++;
 +    uint64_t t0 = now_ns();
-+    int victim = 0;
-+    for (int i = 1; i < CACHE_WAYS; i++)
-+        if (!g_cache[i].valid ||
-+            (g_cache[victim].valid && g_cache[i].stamp < g_cache[victim].stamp))
-+            victim = i;
-+    centry_t *e = &g_cache[victim];
-+    int cbits = (mode == PIVCO_CTX2_ID) ? 2 :
++    centry_t *e;
++    if (ctx_nocache()) {
++        static centry_t scratch;
++        e = &scratch;
++    } else {
++        int victim = 0;
++        for (int i = 1; i < CACHE_WAYS; i++)
++            if (!g_cache[i].valid ||
++                (g_cache[victim].valid && g_cache[i].stamp < g_cache[victim].stamp))
++                victim = i;
++        e = &g_cache[victim];
++    }
++    int cbits = (mode == PIVCO_CTX2_ID) ? (ctx_k1() ? 1 : 2) :
 +                (mode == PIVCO_CTX4_ID) ? 4 :
 +                (mode == PIVCO_QUAD_CTX1_ID) ? 2 : 4;
 +    int nc = 1 << cbits;
@@ -473,14 +592,25 @@ diff -urN '--exclude=build' '--exclude=.git*' '--exclude=ext' '--exclude=*.pvh' 
 +
 +    double probs[256];
 +    if (mode == PIVCO_CTX2_ID || mode == PIVCO_CTX4_ID) {
-+        int k = (mode == PIVCO_CTX2_ID) ? 2 : 4;
++        int k = (mode == PIVCO_CTX2_ID) ? (ctx_k1() ? 1 : 2) : 4;
 +        uint8_t pidx[16];
 +        for (size_t i = 0; i < plen; i++) {
 +            pidx[2 * i]     = (uint8_t)(params[i] & 0x0F);
 +            pidx[2 * i + 1] = (uint8_t)(params[i] >> 4);
 +        }
++        double T[16][16]; uint8_t E[16][16];
++        if (ctx_dp() || ctx_w4()) bin_nib_tabs(k, pidx, T, E);
++        if (ctx_w4()) {
++            memcpy(e->nibE, E, sizeof(e->nibE));
++            for (int c = 0; c < nc; c++) {
++                memset(probs, 0, sizeof(double) * 256);
++                for (int nn = 0; nn < 16; nn++) probs[nn] = T[c][nn];
++                build_ctab(probs, &e->tabs[c], mode_L(mode), want_enc, want_dec);
++            }
++        } else
 +        for (int c = 0; c < nc; c++) {
-+            bin_byte_probs(k, pidx, c, probs);
++            if (ctx_dp()) nib_byte_probs(T, E, c, probs);
++            else          bin_byte_probs(k, pidx, c, probs);
 +            build_ctab(probs, &e->tabs[c], mode_L(mode), want_enc, want_dec);
 +        }
 +    } else {
@@ -493,12 +623,16 @@ diff -urN '--exclude=build' '--exclude=.git*' '--exclude=ext' '--exclude=*.pvh' 
 +            widx[c][2] = (uint8_t)(params[2 * c + 1] & 0x0F);
 +            widx[c][3] = (uint8_t)(params[2 * c + 1] >> 4);
 +        }
++        double T[16][16]; uint8_t E[16][16];
++        if (ctx_dp()) quad_nib_tabs(q, widx, T, E);
 +        for (int c = 0; c < nc; c++) {
-+            quad_byte_probs(q, widx, c, probs);
++            if (ctx_dp()) nib_byte_probs(T, E, c, probs);
++            else          quad_byte_probs(q, widx, c, probs);
 +            build_ctab(probs, &e->tabs[c], mode_L(mode), want_enc, want_dec);
 +        }
 +    }
 +    pivco_ctx_ns_build += now_ns() - t0;
++    g_ctx_w4E = (const uint8_t (*)[16])e->nibE;
 +    return e->tabs;
 +}
 +
@@ -626,8 +760,62 @@ diff -urN '--exclude=build' '--exclude=.git*' '--exclude=ext' '--exclude=*.pvh' 
 +
 +    const int L = mode_L(mode);
 +    uint32_t state = 1u << L;                /* any valid start */
++    if (ctx_x4()) {
++        size_t q = (n + 3) / 4;
++        uint32_t st[4] = { 1u << L, 1u << L, 1u << L, 1u << L };
++        for (size_t i = q; i-- > 0; ) {
++            for (int sg = 3; sg >= 0; sg--) {
++                size_t j = (size_t)sg * q + i;
++                if (j >= n) continue;
++                int carry = i ? (cbits == 1 ? (syms[j - 1] >> 7)
++                                  : cmap[syms[j - 1] >> (8 - cbits)]) : 0;
++                const ctab_t *t = &tabs[carry];
++                int sy = syms[j];
++                int is_esc = (t->tt[sy].deltaNbBits == 0xFFFFFFFFu);
++                int cs = is_esc ? CTX_ESC : sy;
++                uint32_t nb = (st[sg] + t->tt[cs].deltaNbBits) >> 16;
++                if (bw_push(&w, st[sg] & ((1u << nb) - 1u), (int)nb) != 0) return -1;
++                st[sg] = t->st[(st[sg] >> nb) + (uint32_t)t->tt[cs].deltaFindState];
++                if (is_esc && bw_push(&w, (uint32_t)sy, 8) != 0) return -1;
++            }
++        }
++        for (int sg = 3; sg >= 0; sg--)
++            if (bw_push(&w, st[sg] - (1u << L), L) != 0) return -1;
++        if (bw_push(&w, 1, 1) != 0) return -1;   /* terminator */
++        if (w.cnt > 0) {
++            if (w.p >= w.end) return -1;
++            *w.p++ = (uint8_t)(w.acc & 0xFF);
++        }
++        *out_len = (size_t)(w.p - dst);
++        return 0;
++    }
++    if (ctx_w4()) {
++        const uint8_t (*E)[16] = g_ctx_w4E;
++        size_t nsy = 2 * n;
++        uint8_t *nib = (uint8_t *)malloc(nsy ? 2 * nsy : 2);
++        if (!nib) return -1;
++        uint8_t *car = nib + nsy;
++        uint8_t c = 0;
++        for (size_t j = 0; j < n; j++) {
++            nib[2 * j]     = (uint8_t)(syms[j] & 0x0F);
++            nib[2 * j + 1] = (uint8_t)(syms[j] >> 4);
++        }
++        for (size_t i = 0; i < nsy; i++) { car[i] = c; c = E[c][nib[i]]; }
++        for (size_t i = nsy; i-- > 0; ) {
++            const ctab_t *t = &tabs[car[i]];
++            int s = nib[i];
++            int is_esc = (t->tt[s].deltaNbBits == 0xFFFFFFFFu);
++            int cs = is_esc ? CTX_ESC : s;
++            uint32_t nb = (state + t->tt[cs].deltaNbBits) >> 16;
++            if (bw_push(&w, state & ((1u << nb) - 1u), (int)nb) != 0) { free(nib); return -1; }
++            state = t->st[(state >> nb) + (uint32_t)t->tt[cs].deltaFindState];
++            if (is_esc && bw_push(&w, (uint32_t)s, 4) != 0) { free(nib); return -1; }
++        }
++        free(nib);
++    } else
 +    for (size_t j = n; j-- > 0; ) {
-+        int carry = j ? cmap[syms[j - 1] >> (8 - cbits)] : 0;
++        int carry = j ? (cbits == 1 ? (syms[j - 1] >> 7)
++                          : cmap[syms[j - 1] >> (8 - cbits)]) : 0;
 +        const ctab_t *t = &tabs[carry];
 +        int s = syms[j];
 +        int is_esc = (t->tt[s].deltaNbBits == 0xFFFFFFFFu);
@@ -674,14 +862,53 @@ diff -urN '--exclude=build' '--exclude=.git*' '--exclude=ext' '--exclude=*.pvh' 
 +    const uint8_t *cmap = carry_map(mode);
 +    const int L = mode_L(mode);
 +    uint64_t td = now_ns();
++    pivco_ctx_bytes_dec += n;
++    if (ctx_x4()) {
++        pivco_ctx_bytes_dec += n;
++        uint64_t td4 = now_ns();
++        size_t q = (n + 3) / 4;
++        uint32_t st[4]; int cr[4] = { 0, 0, 0, 0 };
++        for (int sg = 0; sg < 4; sg++) st[sg] = br_read(buf, &bitpos, L);
++        for (size_t i = 0; i < q; i++) {
++            for (int sg = 0; sg < 4; sg++) {
++                size_t j = (size_t)sg * q + i;
++                if (j >= n) continue;
++                const dent_t *e = &tabs[cr[sg]].d[st[sg]];
++                uint32_t b = e->sym;
++                if (b == CTX_ESC) b = br_read(buf, &bitpos, 8);
++                dst[j] = (uint8_t)b;
++                cr[sg] = cbits == 1 ? (int)(b >> 7) : cmap[b >> (8 - cbits)];
++                st[sg] = e->base + br_read(buf, &bitpos, e->nbBits);
++            }
++        }
++        pivco_ctx_ns_dec += now_ns() - td4;
++        if (buf != stack_buf) free(buf);
++        return 0;
++    }
 +    uint32_t state = br_read(buf, &bitpos, L);
 +    int carry = 0;
++    if (ctx_w4()) {
++        const uint8_t (*E)[16] = g_ctx_w4E;
++        for (size_t j = 0; j < n; j++) {
++            const dent_t *e = &tabs[carry].d[state];
++            uint32_t lo = e->sym;
++            if (lo == CTX_ESC) lo = br_read(buf, &bitpos, 4);
++            carry = E[carry][lo];
++            state = e->base + br_read(buf, &bitpos, e->nbBits);
++            e = &tabs[carry].d[state];
++            uint32_t hi = e->sym;
++            if (hi == CTX_ESC) hi = br_read(buf, &bitpos, 4);
++            carry = E[carry][hi];
++            state = e->base + br_read(buf, &bitpos, e->nbBits);
++            dst[j] = (uint8_t)(lo | (hi << 4));
++        }
++    } else
 +    for (size_t j = 0; j < n; j++) {
 +        const dent_t *e = &tabs[carry].d[state];
 +        uint32_t b = e->sym;
 +        if (b == CTX_ESC) b = br_read(buf, &bitpos, 8);
 +        dst[j] = (uint8_t)b;
-+        carry = cmap[b >> (8 - cbits)];
++        carry = cbits == 1 ? (int)(b >> 7) : cmap[b >> (8 - cbits)];
 +        state = e->base + br_read(buf, &bitpos, e->nbBits);
 +    }
 +    pivco_ctx_ns_dec += now_ns() - td;
@@ -694,6 +921,7 @@ diff -urN '--exclude=build' '--exclude=.git*' '--exclude=ext' '--exclude=*.pvh' 
 +int pivco_ctx_bin_compress(int order, const uint8_t *src, size_t nbytes,
 +                           uint8_t *dst, size_t dst_cap, size_t *out_len)
 +{
++    if (ctx_k1() && order == 2) order = 1;
 +    int nctx = 1 << order;
 +    uint32_t cmask = (uint32_t)nctx - 1;
 +    size_t nbits = nbytes * 8;
@@ -723,7 +951,7 @@ diff -urN '--exclude=build' '--exclude=.git*' '--exclude=ext' '--exclude=*.pvh' 
 +    for (size_t i = 0; i < params_bytes; i++)
 +        params[i] = (uint8_t)(pidx[2 * i] | (pidx[2 * i + 1] << 4));
 +
-+    int mode = (order == 2) ? PIVCO_CTX2_ID : PIVCO_CTX4_ID;
++    int mode = (order == 4) ? PIVCO_CTX4_ID : PIVCO_CTX2_ID;
 +    cache_snap(mode, params, params_bytes);
 +    return ctx_encode_bytes(mode, params, params_bytes, src, nbytes,
 +                            order, dst, dst_cap, out_len);
@@ -732,7 +960,8 @@ diff -urN '--exclude=build' '--exclude=.git*' '--exclude=ext' '--exclude=*.pvh' 
 +int pivco_ctx_bin_decompress(int order, const uint8_t *src, size_t src_len,
 +                             uint8_t *dst, size_t nbytes)
 +{
-+    int mode = (order == 2) ? PIVCO_CTX2_ID : PIVCO_CTX4_ID;
++    if (ctx_k1() && order == 2) order = 1;
++    int mode = (order == 4) ? PIVCO_CTX4_ID : PIVCO_CTX2_ID;
 +    size_t params_bytes = (size_t)(1 << order) / 2;
 +    return ctx_decode_bytes(mode, src, src_len, params_bytes, order,
 +                            dst, nbytes);
@@ -831,9 +1060,9 @@ diff -urN '--exclude=build' '--exclude=.git*' '--exclude=ext' '--exclude=*.pvh' 
 +    }
 +    return 0;
 +}
-diff -urN '--exclude=build' '--exclude=.git*' '--exclude=ext' '--exclude=*.pvh' '--exclude=*.dSYM' '--exclude=.DS_Store' '--exclude=phaz' e1stage/src/pivco_ctx.h pr30tree/src/pivco_ctx.h
+diff -urN '--exclude=build' '--exclude=.git*' '--exclude=ext' '--exclude=*.pvh' '--exclude=*.dSYM' '--exclude=.DS_Store' '--exclude=phaz' '--exclude=build-l*' e1stage/src/pivco_ctx.h ctxwt/src/pivco_ctx.h
 --- e1stage/src/pivco_ctx.h	1969-12-31 16:00:00.000000000 -0800
-+++ pr30tree/src/pivco_ctx.h	2026-08-20 21:37:29.643259490 -0700
++++ ctxwt/src/pivco_ctx.h	2026-08-31 19:29:11.401520286 -0700
 @@ -0,0 +1,69 @@
 +/* Static context-model rANS coders for pivco-huffman's per-node records.
 + *
@@ -904,9 +1133,9 @@ diff -urN '--exclude=build' '--exclude=.git*' '--exclude=ext' '--exclude=*.pvh' 
 +#endif
 +
 +#endif /* PIVCO_CTX_H */
-diff -urN '--exclude=build' '--exclude=.git*' '--exclude=ext' '--exclude=*.pvh' '--exclude=*.dSYM' '--exclude=.DS_Store' '--exclude=phaz' e1stage/src/pivco_fse.c pr30tree/src/pivco_fse.c
+diff -urN '--exclude=build' '--exclude=.git*' '--exclude=ext' '--exclude=*.pvh' '--exclude=*.dSYM' '--exclude=.DS_Store' '--exclude=phaz' '--exclude=build-l*' e1stage/src/pivco_fse.c ctxwt/src/pivco_fse.c
 --- e1stage/src/pivco_fse.c	2026-08-19 19:00:50.000000000 -0700
-+++ pr30tree/src/pivco_fse.c	2026-08-20 21:41:15.099195821 -0700
++++ ctxwt/src/pivco_fse.c	2026-08-31 19:29:11.401828412 -0700
 @@ -1,5 +1,6 @@
  #define FSE_STATIC_LINKING_ONLY
  #include "pivco_fse.h"
@@ -930,9 +1159,9 @@ diff -urN '--exclude=build' '--exclude=.git*' '--exclude=ext' '--exclude=*.pvh' 
  
      pivco_fse_init();
      if (!g_init_ok) return PIVCO_FSE_ERR_INTERNAL;
-diff -urN '--exclude=build' '--exclude=.git*' '--exclude=ext' '--exclude=*.pvh' '--exclude=*.dSYM' '--exclude=.DS_Store' '--exclude=phaz' e1stage/src/pivco_huffman_codec.c pr30tree/src/pivco_huffman_codec.c
+diff -urN '--exclude=build' '--exclude=.git*' '--exclude=ext' '--exclude=*.pvh' '--exclude=*.dSYM' '--exclude=.DS_Store' '--exclude=phaz' '--exclude=build-l*' e1stage/src/pivco_huffman_codec.c ctxwt/src/pivco_huffman_codec.c
 --- e1stage/src/pivco_huffman_codec.c	2026-08-19 19:00:50.000000000 -0700
-+++ pr30tree/src/pivco_huffman_codec.c	2026-08-24 12:58:36.239903055 -0700
++++ ctxwt/src/pivco_huffman_codec.c	2026-08-31 21:48:19.019223529 -0700
 @@ -25,6 +25,7 @@
  #include "pivco_prof.h"
  #ifdef PIVCO_HAS_FSE
@@ -949,7 +1178,7 @@ diff -urN '--exclude=build' '--exclude=.git*' '--exclude=ext' '--exclude=*.pvh' 
                                              uint8_t *marker_slot,
                                              uint8_t *bm, int nbytes,
                                              int n, int n_left, int n_right,
-@@ -216,6 +218,20 @@
+@@ -216,6 +218,23 @@
  #ifdef PIVCO_HAS_FSE
      if (!fse_on) return;
  
@@ -963,6 +1192,9 @@ diff -urN '--exclude=build' '--exclude=.git*' '--exclude=ext' '--exclude=*.pvh' 
 +    }
 +    int lvl = depth < PIVCO_LVL_MAX ? depth : PIVCO_LVL_MAX - 1;
 +    g_pivco_lvl[lvl].nodes++;
++    if (!g_pivco_lvl[lvl].n_min || (uint64_t)n < g_pivco_lvl[lvl].n_min)
++        g_pivco_lvl[lvl].n_min = (uint64_t)n;
++    if ((uint64_t)n > g_pivco_lvl[lvl].n_max) g_pivco_lvl[lvl].n_max = (uint64_t)n;
 +    g_pivco_lvl[lvl].n_sum     += (uint64_t)n;
 +    g_pivco_lvl[lvl].raw_bytes += (uint64_t)nbytes;
 +    g_pivco_lvl[lvl].d_sum++;
@@ -970,7 +1202,7 @@ diff -urN '--exclude=build' '--exclude=.git*' '--exclude=ext' '--exclude=*.pvh' 
      int     best_id  = 0;
      int     best_xor = 0;
      size_t  best_len = 0;
-@@ -228,10 +244,10 @@
+@@ -228,10 +247,10 @@
       * pivco_fse_freq[1] and modelling a near-50/50 bitmap with it costs
       * more than it saves.  Also size-gated: below MIN_BITMAP_BYTES the
       * attempt is not worth the encoder time. */
@@ -983,7 +1215,7 @@ diff -urN '--exclude=build' '--exclude=.git*' '--exclude=ext' '--exclude=*.pvh' 
                        ? pivco_fse_select_table(
                              (double)((n_left >= n_right) ? n_left : n_right) /
                                (double)n)
-@@ -262,7 +278,7 @@
+@@ -262,7 +281,7 @@
          double fse_frac = (double)(len + 2) * 8.0 / (double)n;
          double codeword_ratio = ((double)depth + fse_frac) /
                                    ((double)depth + 1.0);
@@ -992,7 +1224,7 @@ diff -urN '--exclude=build' '--exclude=.git*' '--exclude=ext' '--exclude=*.pvh' 
              best_id  = static_id;
              best_xor = xor_flag;
              best_len = len;
-@@ -301,14 +317,49 @@
+@@ -301,14 +320,53 @@
          }
      }
  
@@ -1000,8 +1232,12 @@ diff -urN '--exclude=build' '--exclude=.git*' '--exclude=ext' '--exclude=*.pvh' 
 +     * Transmitted quantized per-context bit probabilities + rANS
 +     * payload (see pivco_ctx.h).  Pure size gate, like the dynamic
 +     * candidate. */
-+    if (ctx_on && nbytes >= 16) {
-+        for (int oi = 0; oi < 2; oi++) {
++    static int ctx_maxd = -1;
++    if (ctx_maxd < 0) { const char *e = getenv("PIVCO_CTX_MAXD"); ctx_maxd = e ? atoi(e) : 1 << 20; }
++    static int ctx_k2 = -1;
++    if (ctx_k2 < 0) ctx_k2 = getenv("PIVCO_CTX_K2") != NULL;
++    if (ctx_on && nbytes >= 16 && depth <= ctx_maxd) {
++        for (int oi = 0; oi < (ctx_k2 ? 1 : 2); oi++) {
 +            int order = oi ? 4 : 2;
 +            int t_id  = oi ? PIVCO_CTX4_ID : PIVCO_CTX2_ID;
 +            uint8_t ctx_out[(size_t)nbytes + 64];
@@ -1043,7 +1279,7 @@ diff -urN '--exclude=build' '--exclude=.git*' '--exclude=ext' '--exclude=*.pvh' 
      (void)n; (void)n_left; (void)n_right; (void)depth; (void)out_ptr;
  #endif
  }
-@@ -321,7 +372,8 @@
+@@ -321,7 +379,8 @@
  {
  #ifdef PIVCO_HAS_FSE
      /* Below ~8 bytes a 16-symbol NCount cannot pay for itself. */
@@ -1053,7 +1289,7 @@ diff -urN '--exclude=build' '--exclude=.git*' '--exclude=ext' '--exclude=*.pvh' 
  #else
      (void)table; (void)nbytes;
      return 0;
-@@ -356,8 +408,10 @@
+@@ -356,8 +415,10 @@
   *
   * No-op when PIVCO_HAS_FSE is not defined -- the marker byte is still
   * written by the caller, so the wire layout does not depend on it. */
@@ -1065,7 +1301,7 @@ diff -urN '--exclude=build' '--exclude=.git*' '--exclude=ext' '--exclude=*.pvh' 
                                          uint8_t **out_ptr)
  {
  #ifdef PIVCO_HAS_FSE
-@@ -365,33 +419,227 @@
+@@ -365,33 +426,231 @@
       * 32 KiB, so the 2*nbytes staging would be a 64 KiB stack frame. */
      size_t cap = 2 * (size_t)nbytes + 64;
      uint8_t *dyn_out = (uint8_t *)malloc(cap);
@@ -1096,8 +1332,12 @@ diff -urN '--exclude=build' '--exclude=.git*' '--exclude=ext' '--exclude=*.pvh' 
 +            memcpy(dyn_out, try_out, dyn_len);
 +        }
 +    }
-+    if (ctx_on && nbytes >= 16) {
-+        for (int oi = 0; oi < 2; oi++) {
++    static int ctx_maxd_f = -1;
++    if (ctx_maxd_f < 0) { const char *e = getenv("PIVCO_CTX_MAXD"); ctx_maxd_f = e ? atoi(e) : 1 << 20; }
++    static int ctx_k2_f = -1;
++    if (ctx_k2_f < 0) ctx_k2_f = getenv("PIVCO_CTX_K2") != NULL;
++    if (ctx_on && nbytes >= 16 && depth <= ctx_maxd_f) {
++        for (int oi = 0; oi < (ctx_k2_f ? 1 : 2); oi++) {
 +            int order = oi ? 4 : 2;
 +            int t_id  = oi ? PIVCO_CTX4_ID : PIVCO_CTX2_ID;
 +            size_t ctx_len = 0;
@@ -1305,7 +1545,7 @@ diff -urN '--exclude=build' '--exclude=.git*' '--exclude=ext' '--exclude=*.pvh' 
  {
      if (n == 0) return;
      PROF_COUNT_ONLY(PROF_ENC_NODE_VISIT, n);
-@@ -420,6 +668,12 @@
+@@ -420,6 +679,12 @@
           * re-pack in the configured layout over the same bytes, which
           * costs an extra pack only on regions FSE declined. */
          int try_fse = codec_flat_fse_eligible(table, total_bytes);
@@ -1318,7 +1558,7 @@ diff -urN '--exclude=build' '--exclude=.git*' '--exclude=ext' '--exclude=*.pvh' 
          PROF_TIC();
          if (try_fse) prim_enc_pack_dN_natural(ranks, n, D, base, body);
          else         prim_enc_pack_dN(ranks, n, D, base, body,
-@@ -427,7 +681,9 @@
+@@ -427,7 +692,9 @@
          PROF_TOC(PROF_ENC_FLAT, n);
  
          if (try_fse) {
@@ -1329,7 +1569,7 @@ diff -urN '--exclude=build' '--exclude=.git*' '--exclude=ext' '--exclude=*.pvh' 
                  return;                     /* committed, natural-packed */
              if (table->flat_layout != PIVCO_FLAT_NATURAL) {
                  PROF_TIC();
-@@ -472,8 +728,27 @@
+@@ -472,8 +739,27 @@
      /* One K_right header per recursion site, consumed by the decoder
       * at node entry so it can size both children before their regions
       * arrive. */
@@ -1357,7 +1597,7 @@ diff -urN '--exclude=build' '--exclude=.git*' '--exclude=ext' '--exclude=*.pvh' 
      /* Emit the larger-K child's region first: the decoder can then
       * decode it into scratch that the smaller, not-yet-decoded
       * sibling's buffer overlaps (hole-reuse), shrinking the arena
-@@ -484,19 +759,26 @@
+@@ -484,19 +770,26 @@
       * the decoder reorders. */
      if (n_right > n_left) {
          codec_encode_node(table, node->right, tmp,   n_right, depth + 1,
@@ -1388,7 +1628,7 @@ diff -urN '--exclude=build' '--exclude=.git*' '--exclude=ext' '--exclude=*.pvh' 
      uint8_t *marker_slot = *out_ptr;
      *marker_slot = 0;
      *out_ptr += 1;
-@@ -504,6 +786,7 @@
+@@ -504,6 +797,7 @@
      memcpy(bm, bm_stage, (size_t)nbytes);
      *out_ptr += nbytes;
      codec_maybe_fse_attempt(table->fse_enabled, table->fse_dynamic,
@@ -1396,7 +1636,7 @@ diff -urN '--exclude=build' '--exclude=.git*' '--exclude=ext' '--exclude=*.pvh' 
                               marker_slot, bm, nbytes,
                               n, n_left, n_right, depth, out_ptr);
  }
-@@ -539,7 +822,9 @@
+@@ -539,7 +833,9 @@
      prim_enc_init(ranks, N, symbols, table->sym_to_rank, &table->enc_init_aux);
      PROF_TOC(PROF_ENC_INIT, N);
  
@@ -1407,7 +1647,7 @@ diff -urN '--exclude=build' '--exclude=.git*' '--exclude=ext' '--exclude=*.pvh' 
  
      *out_len = (size_t)(ptr - out);
      return PIVCO_OK;
-@@ -589,6 +874,131 @@
+@@ -589,6 +885,131 @@
  static void codec_decode_subtree(const pivco_table_t *table,
                                     int16_t node_id, int K,
                                     uint8_t *out, uint8_t *tmp,
@@ -1539,7 +1779,7 @@ diff -urN '--exclude=build' '--exclude=.git*' '--exclude=ext' '--exclude=*.pvh' 
                                     const uint8_t **in_ptr)
  {
      if (K == 0) return;
-@@ -654,7 +1064,12 @@
+@@ -654,7 +1075,12 @@
          /* Both children internal.  Stream order == decode order ==
           * larger first (strict >, ties left-first — must match the
           * encoder). */
@@ -1553,7 +1793,7 @@ diff -urN '--exclude=build' '--exclude=.git*' '--exclude=ext' '--exclude=*.pvh' 
          int K_left  = K - K_right;
          uint8_t *left_buf, *right_buf;
          if (K_right > K_left) {
-@@ -789,7 +1204,14 @@
+@@ -789,7 +1215,14 @@
       * outgrows that slot, the partner writes spill past N into fresh
       * arena.  The smaller root child then decodes into its slot with a
       * fresh partner beyond N. */
@@ -1569,9 +1809,9 @@ diff -urN '--exclude=build' '--exclude=.git*' '--exclude=ext' '--exclude=*.pvh' 
      int K_left  = N - K_right;
      uint8_t *scratch = decode_scratch_ensure((pivco_scratch_t *)dec_ctx->internal, need);
      if (!scratch) return PIVCO_ERR_NULL;
-diff -urN '--exclude=build' '--exclude=.git*' '--exclude=ext' '--exclude=*.pvh' '--exclude=*.dSYM' '--exclude=.DS_Store' '--exclude=phaz' e1stage/src/pivco_huffman_wire.h pr30tree/src/pivco_huffman_wire.h
+diff -urN '--exclude=build' '--exclude=.git*' '--exclude=ext' '--exclude=*.pvh' '--exclude=*.dSYM' '--exclude=.DS_Store' '--exclude=phaz' '--exclude=build-l*' e1stage/src/pivco_huffman_wire.h ctxwt/src/pivco_huffman_wire.h
 --- e1stage/src/pivco_huffman_wire.h	2026-08-19 19:00:50.000000000 -0700
-+++ pr30tree/src/pivco_huffman_wire.h	2026-08-24 12:58:36.239607428 -0700
++++ ctxwt/src/pivco_huffman_wire.h	2026-08-31 19:29:11.402995625 -0700
 @@ -148,6 +148,7 @@
                                           uint8_t **out_ptr, int n_right)
  {
@@ -1609,10 +1849,10 @@ diff -urN '--exclude=build' '--exclude=.git*' '--exclude=ext' '--exclude=*.pvh' 
  /* Read the per-node bitmap body (marker + payload).  Returns a pointer
   * to the usable n-bit bitmap (either pointing into the input stream
   * for marker==0, or into the caller-provided `scratch` for the FSE
-diff -urN '--exclude=build' '--exclude=.git*' '--exclude=ext' '--exclude=*.pvh' '--exclude=*.dSYM' '--exclude=.DS_Store' '--exclude=phaz' e1stage/src/pivco_huffman.c pr30tree/src/pivco_huffman.c
+diff -urN '--exclude=build' '--exclude=.git*' '--exclude=ext' '--exclude=*.pvh' '--exclude=*.dSYM' '--exclude=.DS_Store' '--exclude=phaz' '--exclude=build-l*' e1stage/src/pivco_huffman.c ctxwt/src/pivco_huffman.c
 --- e1stage/src/pivco_huffman.c	2026-08-19 19:00:50.000000000 -0700
-+++ pr30tree/src/pivco_huffman.c	2026-08-24 12:57:50.204992126 -0700
-@@ -33,6 +33,33 @@
++++ ctxwt/src/pivco_huffman.c	2026-08-31 21:11:40.947614198 -0700
+@@ -33,6 +33,35 @@
  uint64_t g_pivco_fse_bytes_in [PIVCO_FSE_STATS_SLOTS];
  uint64_t g_pivco_fse_bytes_out[PIVCO_FSE_STATS_SLOTS];
  
@@ -1631,14 +1871,16 @@ diff -urN '--exclude=build' '--exclude=.git*' '--exclude=ext' '--exclude=*.pvh' 
 +            if (!s->nodes) continue;
 +            fprintf(stderr,
 +                "LVL %s %d nodes %llu n %llu rawB %llu D %llu"
-+                " w %llu %llu %llu %llu sv %llu %llu %llu\n",
++                " w %llu %llu %llu %llu sv %llu %llu %llu"
++                " nmin %llu nmax %llu\n",
 +                k ? "flat" : "node", d,
 +                (unsigned long long)s->nodes, (unsigned long long)s->n_sum,
 +                (unsigned long long)s->raw_bytes, (unsigned long long)s->d_sum,
 +                (unsigned long long)s->wins[0], (unsigned long long)s->wins[1],
 +                (unsigned long long)s->wins[2], (unsigned long long)s->wins[3],
 +                (unsigned long long)s->saved[1], (unsigned long long)s->saved[2],
-+                (unsigned long long)s->saved[3]);
++                (unsigned long long)s->saved[3],
++                (unsigned long long)s->n_min, (unsigned long long)s->n_max);
 +        }
 +    }
 +}
@@ -1646,7 +1888,7 @@ diff -urN '--exclude=build' '--exclude=.git*' '--exclude=ext' '--exclude=*.pvh' 
  #define PIVCO_FSE_ROOT_LOG_MAX 65536
  pivco_fse_root_event_t g_pivco_fse_root_log[PIVCO_FSE_ROOT_LOG_MAX];
  int g_pivco_fse_root_n;
-@@ -44,6 +71,10 @@
+@@ -44,6 +73,10 @@
      memset(g_pivco_fse_bytes_in,  0, sizeof(g_pivco_fse_bytes_in));
      memset(g_pivco_fse_bytes_out, 0, sizeof(g_pivco_fse_bytes_out));
      g_pivco_fse_root_n = 0;
@@ -1657,7 +1899,7 @@ diff -urN '--exclude=build' '--exclude=.git*' '--exclude=ext' '--exclude=*.pvh' 
  }
  
  void pivco_fse_stats_get(uint64_t commit[PIVCO_FSE_STATS_SLOTS],
-@@ -125,6 +156,7 @@
+@@ -125,6 +158,7 @@
      .effort      = PIVCO_EFFORT_PLAIN,
      .fse_enabled = 1,
      .fse_dynamic = 1,
@@ -1665,9 +1907,9 @@ diff -urN '--exclude=build' '--exclude=.git*' '--exclude=ext' '--exclude=*.pvh' 
      .flat_layout = PIVCO_FLAT_VERTICAL,
  };
  
-diff -urN '--exclude=build' '--exclude=.git*' '--exclude=ext' '--exclude=*.pvh' '--exclude=*.dSYM' '--exclude=.DS_Store' '--exclude=phaz' e1stage/src/pivcohuf_file.c pr30tree/src/pivcohuf_file.c
+diff -urN '--exclude=build' '--exclude=.git*' '--exclude=ext' '--exclude=*.pvh' '--exclude=*.dSYM' '--exclude=.DS_Store' '--exclude=phaz' '--exclude=build-l*' e1stage/src/pivcohuf_file.c ctxwt/src/pivcohuf_file.c
 --- e1stage/src/pivcohuf_file.c	2026-08-19 19:00:50.000000000 -0700
-+++ pr30tree/src/pivcohuf_file.c	2026-08-24 14:01:54.615168821 -0700
++++ ctxwt/src/pivcohuf_file.c	2026-08-31 19:29:11.403860629 -0700
 @@ -110,6 +110,34 @@
   * compress_bound + compress
   * ============================================================ */

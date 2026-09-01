@@ -10,6 +10,11 @@ caveats first:
   anything labeled "old capture") are bit-reproducible only with that
   commit reverted.  The tarballs in `data/` are the archives of record
   for those.
+- **Workflow-era probe tools are not archived.**  The 2026-08-24
+  exploration's one-off probes (wire_audit.c, phprobe.c, e8e9.c, the
+  4-model context scripts) did not survive the
+  scratchpad; ledger sections citing them stand on their recorded
+  outputs only.  Everything in `probes/` here IS archived.
 - **Scratchpads die.**  /tmp (and this session's scratchpad) gets purged
   by macOS; it already ate one worktree mid-session.  Nothing below
   depends on scratchpad state.
@@ -20,7 +25,7 @@ caveats first:
 |---|---|
 | silesia corpus | `curl -sLO http://sun.aei.polsl.pl/~sdeor/corpus/silesia.zip` (12 files, ~68 MB) |
 | Nick's datasets | committed on branch `pr30-dynfse` (= e1bdce0) under `extras/datasets/` |
-| prototype worktree | `git worktree add <dir> e1bdce0 && cd <dir> && patch -p1 < extras/order1/ph-ctx-session.patch` then `cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build` |
+| prototype worktree | `git worktree add <dir> e1bdce0 && cd <dir> && patch -p1 < extras/order1/ph-ctx-session.patch` then `cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build`; for phaz e2e also apply main's capture fix: `git show 668aa37 \| patch -p1` and build phaz with `ZSTD_SRC=<mainrepo>/ext/zstd` |
 | phaz | `extras/phaz/tools/build.sh` (patches a copy of ext/zstd, builds `./phaz`) |
 
 ## Prototype env knobs (all in ph-ctx-session.patch)
@@ -33,6 +38,10 @@ caveats first:
 | `PIVCO_BLKTAB=K` | per-block table ring, K = 1..8 (flags bit 2 on the wire; decode self-describing) |
 | `PIVCO_NODYN=1` | disable id 51 (dynamic nibble) |
 | `PIVCO_CTX=1`, `PIVCO_CTX_DICT=N`, `PIVCO_CTX_FREE=1`, `PIVCO_NOFUSE=1` | ctx coder on / dictionary cap / no dictionary (pre-cap coder) / quad fusion off |
+| `PIVCO_CTX_NOCACHE`, `PIVCO_CTX_DP`, `PIVCO_CTX_L=N` | no table reuse (streaming bound) / DP probability expansion / tableLog override (16-param modes use N−1) |
+| `PIVCO_CTX_K1`, `PIVCO_CTX_K2`, `PIVCO_CTX_MAXD=D` | run id-52 as order-1 / drop the k=4 candidate / ctx attempts only at depth ≤ D |
+| `PIVCO_CTX_W4`, `PIVCO_CTX_X4` | nibble-wide symbols (L can drop to 7) / 4-segment interleaved streams per record |
+| `PIVCO_NIB2` | id-51 position-split experiment (1 = forced split, 2 = best-of with selector byte) |
 
 ## data/ (gitignored)
 
