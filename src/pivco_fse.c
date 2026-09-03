@@ -28,11 +28,18 @@
 #include <string.h>
 
 #include "pivco_huffman.h"   /* PIVCO_FSE_STATS_SLOTS */
-/* The FSE stats arrays are indexed by t_id in [0, PIVCO_FSE_NUM_TABLES]
- * (0 = reject, 1..N = pivco_fse_select_table()).  Guard against the slot
- * count drifting behind the table count (it did once: 26 slots vs 50 tables). */
-_Static_assert(PIVCO_FSE_STATS_SLOTS >= PIVCO_FSE_NUM_TABLES + 1,
-               "PIVCO_FSE_STATS_SLOTS must cover every FSE table id (>= NUM_TABLES + 1)");
+/* The FSE stats arrays are indexed by t_id in [0, PIVCO_FSE_DYNAMIC_ID]
+ * (0 = reject, 1..N = pivco_fse_select_table(), N+1 = the dynamic nibble
+ * table).  Guard against the slot count drifting behind the table count
+ * (it did once: 26 slots vs 50 tables). */
+_Static_assert(PIVCO_FSE_STATS_SLOTS >= PIVCO_FSE_DYNAMIC_ID + 1,
+               "PIVCO_FSE_STATS_SLOTS must cover every FSE table id (>= DYNAMIC_ID + 1)");
+/* The dynamic id sits immediately past the static schedule, and the wire
+ * marker byte only has 7 bits for it (bit 7 is the xor flag). */
+_Static_assert(PIVCO_FSE_DYNAMIC_ID == PIVCO_FSE_NUM_TABLES + 1,
+               "PIVCO_FSE_DYNAMIC_ID must follow the last static table id");
+_Static_assert(PIVCO_FSE_DYNAMIC_ID <= 0x7F,
+               "PIVCO_FSE_DYNAMIC_ID must fit the wire marker's 7-bit table field");
 
 /* One CTable + one DTable per pre-built distribution.  Slot 0 is
  * reserved (matches marker 0 = "no FSE").  Allocated by
@@ -119,11 +126,81 @@ int pivco_fse_select_table(double p_major)
     return 0;  /* below table 1's threshold -- no FSE */
 }
 
+/* ---------- Dynamic nibble path ----------
+ *
+ * Deliberately unoptimized: it mallocs a nibble buffer per call and
+ * runs stock FSE_compress2 / FSE_decompress_wksp over it.  The point is
+ * to establish the wire format and measure the ratio win; the split /
+ * merge and the table build are all obvious targets for later work. */
+
+pivco_fse_status_t pivco_fse_compress_dynamic(const void *src, size_t src_len,
+                                               void *dst, size_t dst_cap,
+                                               size_t *out_len)
+{
+    if (src_len == 0) { *out_len = 0; return PIVCO_FSE_OK; }
+
+    const uint8_t *s = (const uint8_t *)src;
+    /* calloc, not malloc: the loop below writes every byte, but GCC
+     * can't see that through the *2 and warns on the FSE_compress2 read. */
+    uint8_t *nib = (uint8_t *)calloc(src_len, 2);
+    if (!nib) return PIVCO_FSE_ERR_INTERNAL;
+    for (size_t i = 0; i < src_len; i++) {
+        nib[2 * i]     = (uint8_t)(s[i] & 0x0F);
+        nib[2 * i + 1] = (uint8_t)(s[i] >> 4);
+    }
+
+    size_t rc = FSE_compress2(dst, dst_cap, nib, src_len * 2,
+                              PIVCO_FSE_NIB_MAX_SYMBOL,
+                              PIVCO_FSE_NIB_TABLELOG);
+    free(nib);
+
+    if (FSE_isError(rc)) return PIVCO_FSE_ERR_INTERNAL;
+    /* 0 = FSE judged the nibbles incompressible, 1 = single-symbol RLE.
+     * Neither has a payload we could hand back, so both are fallbacks. */
+    if (rc <= 1)         return PIVCO_FSE_FALLBACK;
+    /* Header included -- this is where the dynamic table pays for itself
+     * or doesn't. */
+    if (rc >= src_len)   return PIVCO_FSE_FALLBACK;
+    *out_len = rc;
+    return PIVCO_FSE_OK;
+}
+
+pivco_fse_status_t pivco_fse_decompress_dynamic(const void *src, size_t src_len,
+                                                 void *dst, size_t dst_cap,
+                                                 size_t dst_expected,
+                                                 size_t *out_len)
+{
+    if (dst_cap < dst_expected)  return PIVCO_FSE_ERR_DST_FULL;
+    if (dst_expected == 0) { *out_len = 0; return PIVCO_FSE_OK; }
+
+    uint8_t *nib = (uint8_t *)calloc(dst_expected, 2);
+    if (!nib) return PIVCO_FSE_ERR_INTERNAL;
+
+    FSE_DTable dt[FSE_DTABLE_SIZE_U32(PIVCO_FSE_NIB_TABLELOG)];
+    size_t rc = FSE_decompress_wksp(nib, dst_expected * 2, src, src_len,
+                                    dt, PIVCO_FSE_NIB_TABLELOG);
+    if (FSE_isError(rc) || rc != dst_expected * 2) {
+        free(nib);
+        return PIVCO_FSE_ERR_BAD_INPUT;
+    }
+
+    uint8_t *d = (uint8_t *)dst;
+    for (size_t i = 0; i < dst_expected; i++)
+        d[i] = (uint8_t)((nib[2 * i] & 0x0F) | ((nib[2 * i + 1] & 0x0F) << 4));
+    free(nib);
+
+    *out_len = dst_expected;
+    return PIVCO_FSE_OK;
+}
+
 pivco_fse_status_t pivco_fse_compress(int table_id,
                                        const void *src, size_t src_len,
                                        void *dst, size_t dst_cap,
                                        size_t *out_len)
 {
+    if (table_id == PIVCO_FSE_DYNAMIC_ID)
+        return pivco_fse_compress_dynamic(src, src_len, dst, dst_cap, out_len);
+
     pivco_fse_init();
     if (!g_init_ok) return PIVCO_FSE_ERR_INTERNAL;
     if (table_id < 1 || table_id > PIVCO_FSE_NUM_TABLES)
@@ -155,6 +232,10 @@ pivco_fse_status_t pivco_fse_decompress(int table_id,
                                          size_t dst_expected,
                                          size_t *out_len)
 {
+    if (table_id == PIVCO_FSE_DYNAMIC_ID)
+        return pivco_fse_decompress_dynamic(src, src_len, dst, dst_cap,
+                                             dst_expected, out_len);
+
     pivco_fse_init();
     if (!g_init_ok) return PIVCO_FSE_ERR_INTERNAL;
     if (table_id < 1 || table_id > PIVCO_FSE_NUM_TABLES)

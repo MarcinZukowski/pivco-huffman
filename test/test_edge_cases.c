@@ -375,6 +375,76 @@ static int test_fse_length_sweep(void)
     printf("PASS (%d lengths, %d fallbacks)\n", tested, fell_back);
     return 0;
 }
+
+/* Dynamic nibble table (PIVCO_FSE_DYNAMIC_ID): the payload carries its
+ * own FSE table description, so unlike the static ids the decoder is
+ * handed nothing but the expected byte count.  Sweep every length
+ * across bit densities the static schedule models badly (near-50/50)
+ * as well as ones it models well, and go through both the direct
+ * *_dynamic entry points and the pivco_fse_compress/decompress
+ * table-id dispatch -- the wire decoder only ever reaches the dynamic
+ * path via the latter. */
+static int test_fse_dynamic_nibble(void)
+{
+    printf("[fse_dynamic_nibble] ");
+    pivco_fse_init();
+    uint64_t rng = 0x0dd1e5c0ffeeb0b1ULL;
+    /* 0.50 is the case the static tables refuse outright; the nibble
+     * histogram there is still non-flat for structured bitmaps. */
+    const double biases[] = { 0.50, 0.60, 0.80, 0.95 };
+    int tested = 0, fell_back = 0;
+    for (int bi = 0; bi < 4; bi++) {
+        for (size_t n = 8; n <= 600; n++) {
+            uint8_t src[600], enc[1400], dec[616];
+            for (size_t i = 0; i < n; i++) {
+                uint8_t b = 0;
+                for (int j = 0; j < 8; j++) {
+                    double u = (double)(xorshift64(&rng) >> 11) / 9007199254740992.0;
+                    b |= (uint8_t)((u > biases[bi]) << j);
+                }
+                src[i] = b;
+            }
+            size_t clen = 0;
+            pivco_fse_status_t rc = pivco_fse_compress_dynamic(src, n, enc,
+                                                               sizeof(enc), &clen);
+            if (rc == PIVCO_FSE_FALLBACK) { fell_back++; continue; }
+            if (rc != PIVCO_FSE_OK) FAIL("compress n=%zu rc=%d", n, rc);
+            if (clen >= n) FAIL("dynamic committed a payload >= raw (n=%zu clen=%zu)", n, clen);
+
+            /* Route the decode through the table-id dispatch, exactly as
+             * wire_read_bitmap does. */
+            size_t olen = 0;
+            memset(dec, 0xCB, sizeof(dec));
+            rc = pivco_fse_decompress(PIVCO_FSE_DYNAMIC_ID, enc, clen,
+                                      dec, sizeof(dec), n, &olen);
+            if (rc != PIVCO_FSE_OK) FAIL("decompress n=%zu rc=%d", n, rc);
+            if (olen != n) FAIL("olen %zu != n %zu", olen, n);
+            if (memcmp(src, dec, n) != 0) {
+                size_t i; for (i = 0; i < n && src[i] == dec[i]; i++) ;
+                FAIL("mismatch n=%zu at byte %zu", n, i);
+            }
+
+            /* Same payload via the compress-side dispatch must be
+             * byte-identical to the direct call. */
+            uint8_t enc2[1400];
+            size_t clen2 = 0;
+            rc = pivco_fse_compress(PIVCO_FSE_DYNAMIC_ID, src, n,
+                                    enc2, sizeof(enc2), &clen2);
+            if (rc != PIVCO_FSE_OK || clen2 != clen || memcmp(enc, enc2, clen) != 0)
+                FAIL("compress dispatch differs from direct call (n=%zu)", n);
+
+            /* NB: no truncation test here.  An FSE bitstream carries no
+             * integrity check, so a payload cut short can still decode
+             * to dst_expected bytes of garbage.  The wire format doesn't
+             * lean on detecting that -- fse_len is stored explicitly
+             * ahead of the payload. */
+            tested++;
+        }
+    }
+    if (tested == 0) FAIL("dynamic path never committed -- test is vacuous");
+    printf("PASS (%d lengths, %d fallbacks)\n", tested, fell_back);
+    return 0;
+}
 #endif  /* PIVCO_HAS_FSE */
 
 /* ---------- flat-layout FLAGS byte in the pivcohuf container ---------- */
@@ -406,6 +476,7 @@ static int test_flat_layout_file(void)
         { PIVCO_FLAT_VERTICAL_128, 0x02 },
     };
     size_t nat_len = 0;
+    size_t arm_len[3] = {0, 0, 0};
     for (size_t a = 0; a < sizeof(arms) / sizeof(arms[0]); a++) {
         pivco_cfg_t cfg = pivco_cfg_default;
         cfg.flat_layout = arms[a].layout;
@@ -443,7 +514,20 @@ static int test_flat_layout_file(void)
             FAIL("layout %d: reserved layout 3 gave rc=%d, want BAD_VERSION",
                  (int)arms[a].layout, rc);
         enc[FLAGS_OFF] = arms[a].flags;
+        arm_len[a] = enc_len;
     }
+
+    /* With the dynamic nibble table on (pivco_cfg_default), the three
+     * layouts must produce byte-IDENTICAL lengths: a raw flat region is
+     * the same size in every layout, and an FSE-coded one is always
+     * natural-packed regardless of the table's setting.  If a change
+     * ever makes FSE'd regions honour flat_layout again, the vertical
+     * arms grow (lane-stride-16 gather breaks the code adjacency the
+     * nibble table feeds on) and this fires. */
+    if (arm_len[0] != arm_len[1] || arm_len[0] != arm_len[2])
+        FAIL("layout-dependent size with dynamic FSE on: "
+             "natural %zu, vertical %zu, vertical128 %zu",
+             arm_len[0], arm_len[1], arm_len[2]);
 
     /* Synthetic v0.8: re-create the natural stream, drop the FLAGS byte,
      * relabel the minor, shrink BODY_LENGTH. */
@@ -498,6 +582,8 @@ int test_edge_cases_all(void)
 #ifdef PIVCO_HAS_FSE
     printf("\n--- FSE length sweep ---\n");
     fails += test_fse_length_sweep();
+    printf("\n--- FSE dynamic nibble table ---\n");
+    fails += test_fse_dynamic_nibble();
 #endif
     return fails;
 }

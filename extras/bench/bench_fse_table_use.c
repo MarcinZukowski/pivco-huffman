@@ -8,6 +8,7 @@
  * Usage: pivco_bench_fse_table_use PATH [PATH ...] */
 
 #include "pivco_huffman.h"
+#include "pivco_fse.h"
 #include "bench_ctx.h"
 
 #include <errno.h>
@@ -16,13 +17,25 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* From pivco_fse_tables.h (kept in sync by hand; only 25 entries). */
+/* From pivco_fse_tables.h (kept in sync by hand; only the first 25 of
+ * the static schedule).  Ids past that -- the rest of the schedule and
+ * the dynamic nibble table -- print their id without a nominal p. */
 static const float pivco_fse_freq_nom[26] = {
     0.000f, 0.500f, 0.580f, 0.646f, 0.703f, 0.750f, 0.790f, 0.823f,
     0.851f, 0.875f, 0.895f, 0.912f, 0.926f, 0.938f, 0.947f, 0.956f,
     0.963f, 0.969f, 0.974f, 0.978f, 0.981f, 0.984f, 0.987f, 0.989f,
     0.991f, 0.992f,
 };
+
+/* Column-width-matching label for a table id: the nominal p for the ids
+ * we tabulate, "dyn" for the dynamic nibble table, "-" otherwise. */
+static const char *tid_label(int t)
+{
+    static char buf[8];
+    if (t == PIVCO_FSE_DYNAMIC_ID) return "  dyn";
+    if (t <= 25) { snprintf(buf, sizeof(buf), "%.3f", pivco_fse_freq_nom[t]); return buf; }
+    return "    -";
+}
 
 static int run_one(const char *path)
 {
@@ -98,13 +111,13 @@ static int run_one(const char *path)
         printf("  0   -      %7llu  %7llu  -      %9s  %9s  %5s   %5s\n",
                (unsigned long long)0, (unsigned long long)commit[0], "-", "-", "-", "-");
     }
-    for (int i = 1; i <= 25; i++) {
+    for (int i = 1; i < PIVCO_FSE_STATS_SLOTS; i++) {
         if (attempt[i] == 0 && commit[i] == 0) continue;
         double rej_pct = attempt[i] ? 100.0 * (double)(attempt[i] - commit[i]) / (double)attempt[i] : 0.0;
         double ratio = bin[i] ? 100.0 * (double)bout[i] / (double)bin[i] : 0.0;
         double avg_in = commit[i] ? (double)bin[i] / (double)commit[i] : 0.0;
-        printf("%3d  %.3f  %7llu  %7llu  %4.1f%%  %9llu  %9llu  %5.1f%%  %6.0f\n",
-               i, pivco_fse_freq_nom[i],
+        printf("%3d  %s  %7llu  %7llu  %4.1f%%  %9llu  %9llu  %5.1f%%  %6.0f\n",
+               i, tid_label(i),
                (unsigned long long)attempt[i],
                (unsigned long long)commit[i],
                rej_pct,
@@ -118,8 +131,8 @@ static int run_one(const char *path)
     int rn = pivco_fse_root_count();
     if (rn > 0) {
         printf("=== Root-node events (one per block, %d total) ===\n", rn);
-        int hist[26]      = {0};   /* by committed table_id (slot 0 = no commit) */
-        int hist_attempt[26] = {0};
+        int hist[PIVCO_FSE_STATS_SLOTS]         = {0};   /* by committed table_id (slot 0 = no commit) */
+        int hist_attempt[PIVCO_FSE_STATS_SLOTS] = {0};
         double pmax = 0, pmin = 1.0, psum = 0;
         int root_in = 0, root_out = 0;
         for (int i = 0; i < rn; i++) {
@@ -148,9 +161,9 @@ static int run_one(const char *path)
             for (int j = 0; j < hist[0] && j < 60; j++) putchar('#');
             printf("\n");
         }
-        for (int t = 1; t <= 25; t++) {
+        for (int t = 1; t < PIVCO_FSE_STATS_SLOTS; t++) {
             if (hist[t] == 0 && hist_attempt[t] == 0) continue;
-            printf("%3d  %.3f    %4d    %4d    ", t, pivco_fse_freq_nom[t],
+            printf("%3d  %s    %4d    %4d    ", t, tid_label(t),
                    hist[t], hist_attempt[t]);
             for (int j = 0; j < hist[t] && j < 60; j++) putchar('#');
             printf("\n");

@@ -64,6 +64,8 @@ static uint8_t *decode_scratch_ensure(pivco_scratch_t *sc, size_t need)
  * caller's `symbols` buffer, which guarantees none, is only ever a
  * merge destination (writes are exact). */
 #define MERGE_OVERREAD ((size_t)PIVCO_PRIM_MERGE_OVERREAD)
+_Static_assert(PIVCO_PRIM_MERGE_OVERREAD <= PIVCO_FLAT_FSE_SLACK,
+               "wire_read_flat_region's slack must cover the merges' overread");
 
 /* Growable encode scratch arena, owned by the caller's pivco_encoder_t
  * (the pivco_scratch_t behind its `internal` pointer): holds the
@@ -145,9 +147,51 @@ extern uint64_t g_pivco_fse_bytes_out[PIVCO_FSE_STATS_SLOTS];
  * ≤ bitmap_bytes(N)+64 per level, tree height ≤ PIVCO_MAX_CODE_LEN
  * levels. */
 
+#ifdef PIVCO_HAS_FSE
+/* Overwrite an already-emitted raw region with its FSE form:
+ * marker := [xor_flag:1][t_id:7], region := [fse_len:u16 LE][payload],
+ * and the wire cursor pulled back to one past the payload.  Callers have
+ * already decided the record is worth writing; this only does the write
+ * and the stats. */
+static inline void codec_fse_commit(uint8_t *marker_slot, uint8_t *body,
+                                     int nbytes, int t_id, int xor_flag,
+                                     const uint8_t *payload, size_t fse_len,
+                                     uint8_t **out_ptr)
+{
+    *marker_slot = (uint8_t)((xor_flag ? 0x80 : 0) | t_id);
+    uint8_t *p = body;
+    *p++ = (uint8_t)( fse_len       & 0xFF);
+    *p++ = (uint8_t)((fse_len >> 8) & 0xFF);
+    memcpy(p, payload, fse_len);
+    *out_ptr = p + fse_len;
+
+    g_pivco_fse_commit  [t_id]++;
+    g_pivco_fse_bytes_in [t_id] += (uint64_t)nbytes;
+    g_pivco_fse_bytes_out[t_id] += (uint64_t)(fse_len + 3);
+}
+#endif
+
 /* Arch-agnostic FSE attempt on a freshly-built raw bitmap.
  *
+ * Two candidates are tried and the smaller payload wins:
+ *
+ *   static  — one of the PIVCO_FSE_NUM_TABLES pre-built byte-alphabet
+ *             tables, picked from the partition skew.  Zero header
+ *             cost, but only applies to bitmaps skewed enough
+ *             (p_major >= PIVCO_FSE_MIN_THRESHOLD) for the schedule to
+ *             model them.
+ *   dynamic — PIVCO_FSE_DYNAMIC_ID: the bitmap's bytes split into
+ *             nibbles and coded with a table fitted to *this* bitmap's
+ *             nibble histogram, table description included in the
+ *             payload.  Applies to any bitmap, and pays for its own
+ *             header inside the length it reports — so comparing raw
+ *             payload lengths already accounts for it.
+ *
  * Inputs:
+ *   fse_on       — table->fse_enabled; 0 disables both candidates
+ *   dyn_on       — table->fse_dynamic; 0 leaves only the static one
+ *                  (decode is unaffected either way — it dispatches on
+ *                  the wire marker and always knows both forms)
  *   marker_slot  — points at the 1-byte FSE marker (currently 0 = raw)
  *   bm           — points at the ceil(n/8)-byte raw bitmap region
  *                  immediately after the marker
@@ -163,68 +207,182 @@ extern uint64_t g_pivco_fse_bytes_out[PIVCO_FSE_STATS_SLOTS];
  * On no-commit / no-attempt: stream and stats untouched.
  *
  * No-op when PIVCO_HAS_FSE is not defined. */
-static inline void codec_maybe_fse_attempt(int fse_on, uint8_t *marker_slot,
+static inline void codec_maybe_fse_attempt(int fse_on, int dyn_on,
+                                            uint8_t *marker_slot,
                                             uint8_t *bm, int nbytes,
                                             int n, int n_left, int n_right,
                                             int depth, uint8_t **out_ptr)
 {
 #ifdef PIVCO_HAS_FSE
     if (!fse_on) return;
-    if (nbytes < PIVCO_FSE_MIN_BITMAP_BYTES) return;
 
-    int n_major = (n_left >= n_right) ? n_left : n_right;
-    double p_major = (n > 0) ? (double)n_major / (double)n : 0.0;
-    if (p_major < PIVCO_FSE_MIN_THRESHOLD) return;
+    int     best_id  = 0;
+    int     best_xor = 0;
+    size_t  best_len = 0;
+    /* Either surviving candidate is strictly shorter than the raw region
+     * (that is each one's commit gate), so nbytes + 64 holds it. */
+    uint8_t best_out[(size_t)nbytes + 64];
 
-    int t_id = pivco_fse_select_table(p_major);
-    if (t_id < 1) return;
-    PIVCO_CHECK(t_id < PIVCO_FSE_STATS_SLOTS);  /* guards the g_pivco_fse_* indexing */
-
-    int xor_flag = (n_right > n_left);
-    uint8_t scratch[(size_t)nbytes + 16];
-    if (xor_flag) {
-        for (int i = 0; i < nbytes; i++) scratch[i] = (uint8_t)~bm[i];
-    } else {
-        memcpy(scratch, bm, (size_t)nbytes);
+    /* ---- candidate 1: static table ----
+     * Needs a skewed bitmap; the fixed schedule bottoms out at
+     * pivco_fse_freq[1] and modelling a near-50/50 bitmap with it costs
+     * more than it saves.  Also size-gated: below MIN_BITMAP_BYTES the
+     * attempt is not worth the encoder time. */
+    int static_id = (nbytes >= PIVCO_FSE_MIN_BITMAP_BYTES &&
+                     n > 0 &&
+                     (double)((n_left >= n_right) ? n_left : n_right) /
+                       (double)n >= PIVCO_FSE_MIN_THRESHOLD)
+                      ? pivco_fse_select_table(
+                            (double)((n_left >= n_right) ? n_left : n_right) /
+                              (double)n)
+                      : 0;
+    if (static_id >= 1) {
+        PIVCO_CHECK(static_id < PIVCO_FSE_STATS_SLOTS);  /* guards the g_pivco_fse_* indexing */
+        /* Flip when the right side is the majority: the tables are all
+         * tuned for "0 is the frequent bit". */
+        int xor_flag = (n_right > n_left);
+        uint8_t scratch[(size_t)nbytes + 16];
+        if (xor_flag) {
+            for (int i = 0; i < nbytes; i++) scratch[i] = (uint8_t)~bm[i];
+        } else {
+            memcpy(scratch, bm, (size_t)nbytes);
+        }
+        size_t len = 0;
+        pivco_fse_status_t rc = pivco_fse_compress(static_id, scratch,
+                                                    (size_t)nbytes,
+                                                    best_out, sizeof(best_out),
+                                                    &len);
+        g_pivco_fse_attempt[static_id]++;
+        /* Per-codeword commit gate (see docs/FSE-V0.md):
+         *   raw: every codeword through this node costs (depth + 1) bits
+         *   fse: (depth + (len + 2 wire-prefix) * 8 / n) bits
+         * Commit iff (depth + fse_frac) <= MIN_RATIO * (depth + 1).  This
+         * is a SPEED gate, not a size one: stock-table FSE decode is slow
+         * enough that a marginal byte saving is a bad trade. */
+        double fse_frac = (double)(len + 2) * 8.0 / (double)n;
+        double codeword_ratio = ((double)depth + fse_frac) /
+                                  ((double)depth + 1.0);
+        if (rc == PIVCO_FSE_OK && codeword_ratio <= (double)PIVCO_FSE_MIN_RATIO) {
+            best_id  = static_id;
+            best_xor = xor_flag;
+            best_len = len;
+        }
     }
 
-    uint8_t fse_out[(size_t)nbytes + 64];
-    size_t fse_len = 0;
-    pivco_fse_status_t rc = pivco_fse_compress(t_id, scratch, (size_t)nbytes,
-                                                fse_out, sizeof(fse_out),
-                                                &fse_len);
-    g_pivco_fse_attempt[t_id]++;
-    if (rc != PIVCO_FSE_OK) {
+    /* ---- candidate 2: dynamic nibble table ----
+     * No skew or size precondition: a bitmap the fixed byte-alphabet
+     * schedule cannot model may still have a lopsided nibble histogram.
+     * Coded from `bm` directly, so no xor flip, and the reported length
+     * already includes the table description.
+     *
+     * Gated purely on size (see codec_try_fse_dynamic) -- deliberately
+     * NOT the static path's per-codeword speed gate.  Applying that gate
+     * here was why this codec lost to plain FSE on literal streams: it
+     * declines most deep nodes, where the ratio tends to 1 with depth no
+     * matter how many bytes the coding actually saves. */
+    if (dyn_on) {
+        /* Staging is 2*nbytes+64, not nbytes+64: FSE's internal
+         * incompressibility test is against the nibble count (2*nbytes),
+         * so it can hand back a payload larger than the raw region,
+         * which pivco_fse_compress_dynamic then rejects. */
+        uint8_t dyn_out[2 * (size_t)nbytes + 64];
+        size_t dyn_len = 0;
+        pivco_fse_status_t rc = pivco_fse_compress_dynamic(bm, (size_t)nbytes,
+                                                            dyn_out,
+                                                            sizeof(dyn_out),
+                                                            &dyn_len);
+        g_pivco_fse_attempt[PIVCO_FSE_DYNAMIC_ID]++;
+        if (rc == PIVCO_FSE_OK && dyn_len + 2 < (size_t)nbytes &&
+            (best_id < 1 || dyn_len < best_len)) {
+            best_id  = PIVCO_FSE_DYNAMIC_ID;
+            best_xor = 0;
+            best_len = dyn_len;
+            memcpy(best_out, dyn_out, dyn_len);
+        }
+    }
+
+    if (best_id < 1) {
         g_pivco_fse_commit[0]++;     /* slot 0 = attempted, rejected */
         return;
     }
-    /* Per-codeword commit gate (see docs/FSE-V0.md):
-     *   raw: every codeword through this node costs (depth + 1) bits
-     *   fse: (depth + (fse_len + 2 wire-prefix) * 8 / n) bits
-     * Commit iff (depth + fse_frac) <= MIN_RATIO * (depth + 1). */
-    double fse_frac = (double)(fse_len + 2) * 8.0 / (double)n;
-    double codeword_ratio = ((double)depth + fse_frac) /
-                              ((double)depth + 1.0);
-    if (codeword_ratio > (double)PIVCO_FSE_MIN_RATIO) {
-        g_pivco_fse_commit[0]++;
-        return;
-    }
-
-    /* Commit: rewrite marker + bitmap region with [fse_len][payload],
-     * adjust the wire cursor to one past the payload. */
-    *marker_slot = (uint8_t)((xor_flag ? 0x80 : 0) | t_id);
-    uint8_t *p = bm;
-    *p++ = (uint8_t)( fse_len       & 0xFF);
-    *p++ = (uint8_t)((fse_len >> 8) & 0xFF);
-    memcpy(p, fse_out, fse_len);
-    *out_ptr = p + fse_len;
-
-    g_pivco_fse_commit  [t_id]++;
-    g_pivco_fse_bytes_in [t_id] += (uint64_t)nbytes;
-    g_pivco_fse_bytes_out[t_id] += (uint64_t)(fse_len + 3);
+    codec_fse_commit(marker_slot, bm, nbytes, best_id, best_xor,
+                      best_out, best_len, out_ptr);
 #else
-    (void)marker_slot; (void)bm; (void)nbytes;
+    (void)fse_on; (void)dyn_on; (void)marker_slot; (void)bm; (void)nbytes;
     (void)n; (void)n_left; (void)n_right; (void)depth; (void)out_ptr;
+#endif
+}
+
+/* Is a flat region worth a dynamic-nibble attempt?  Split out from the
+ * attempt itself because the caller has to know the answer *before* it
+ * packs: an FSE'd region is packed naturally, a raw one in the
+ * configured layout (see codec_maybe_fse_flat). */
+static inline int codec_flat_fse_eligible(const pivco_table_t *table, int nbytes)
+{
+#ifdef PIVCO_HAS_FSE
+    /* Below ~8 bytes a 16-symbol NCount cannot pay for itself. */
+    return table->fse_enabled && table->fse_dynamic && nbytes >= 8;
+#else
+    (void)table; (void)nbytes;
+    return 0;
+#endif
+}
+
+/* Dynamic-nibble attempt on a flat-subtree region.  Returns 1 on commit.
+ *
+ * Flat regions are the other half of the source codec's design that the
+ * first port left out: a depth-D flat subtree gives all 2^D of its
+ * symbols the same code length *by construction*, so plain Huffman
+ * models their true frequencies not at all.  Nibble-FSE over the packed
+ * n*D bits is what recovers that -- and on literal streams, where the
+ * bulk of the data sits in flat subtrees, it is where most of the win
+ * is.  Same [marker][fse_len:u16][payload] record as an internal node's
+ * bitmap; only the dynamic table is tried (there is no partition skew
+ * for the static schedule to key on).
+ *
+ * `body` must be packed in PIVCO_FLAT_NATURAL, NOT table->flat_layout.
+ * When D does not divide 4 a nibble straddles code boundaries, so its
+ * value encodes a tuple of neighbouring codes -- and under natural
+ * packing those are *adjacent source symbols*, which makes runs collapse
+ * the tuple distribution onto a few values.  That is order-1 structure
+ * an order-0 nibble coder gets to capture for free.  The vertical
+ * layouts gather at lane stride 16, which breaks the runs and reverts
+ * the tuple distribution to the product of the marginals: measured cost
+ * 0.30% over the corpus, 1.69% on x-ray.serial, and exactly 0 at D == 4
+ * (a nibble is then one whole code, so grouping cannot matter) and for
+ * i.i.d. input.  The marker byte tells the decoder which layout to
+ * unpack with, so the raw path keeps the configured layout and its
+ * decode speed.
+ *
+ * No-op when PIVCO_HAS_FSE is not defined -- the marker byte is still
+ * written by the caller, so the wire layout does not depend on it. */
+static inline int codec_maybe_fse_flat(uint8_t *marker_slot,
+                                        uint8_t *body, int nbytes,
+                                        uint8_t **out_ptr)
+{
+#ifdef PIVCO_HAS_FSE
+    /* Heap, not a VLA: a depth-8 flat root over a full block packs to
+     * 32 KiB, so the 2*nbytes staging would be a 64 KiB stack frame. */
+    size_t cap = 2 * (size_t)nbytes + 64;
+    uint8_t *dyn_out = (uint8_t *)malloc(cap);
+    if (!dyn_out) return 0;
+    size_t dyn_len = 0;
+    pivco_fse_status_t rc = pivco_fse_compress_dynamic(body, (size_t)nbytes,
+                                                        dyn_out, cap, &dyn_len);
+    g_pivco_fse_attempt[PIVCO_FSE_DYNAMIC_ID]++;
+    /* Raw record costs 1 + nbytes, coded costs 3 + dyn_len. */
+    if (rc != PIVCO_FSE_OK || dyn_len + 2 >= (size_t)nbytes) {
+        g_pivco_fse_commit[0]++;
+        free(dyn_out);
+        return 0;
+    }
+    codec_fse_commit(marker_slot, body, nbytes, PIVCO_FSE_DYNAMIC_ID, 0,
+                      dyn_out, dyn_len, out_ptr);
+    free(dyn_out);
+    return 1;
+#else
+    (void)marker_slot; (void)body; (void)nbytes; (void)out_ptr;
+    return 0;
 #endif
 }
 
@@ -241,15 +399,42 @@ static void codec_encode_node(const pivco_table_t *table,
     const pivco_tree_node_t *node = &table->tree[node_id];
     if (node->symbol >= 0) return;  /* leaf — nothing to emit */
 
-    /* Flat-subtree fast path: pack n*D bits, no marker, no K_right. */
+    /* Flat-subtree path: a marker byte then n*D packed bits (no K_right).
+     * The marker is written unconditionally, exactly like an internal
+     * node's, so the wire layout does not depend on the encoder's FSE
+     * settings; codec_maybe_fse_flat may then replace the packed bits
+     * with an FSE record in place. */
     if (table->flat_depth[node_id] >= 2) {
         int D = table->flat_depth[node_id];
+        uint8_t base = table->flat_base_rank[node_id];
         int total_bytes = (n * D + 7) >> 3;
-        PROF_TIC();
-        prim_enc_pack_dN(ranks, n, D, table->flat_base_rank[node_id], *out_ptr,
-                         table->flat_layout);
-        PROF_TOC(PROF_ENC_FLAT, n);
+        uint8_t *marker_slot = *out_ptr;
+        *marker_slot = 0;
+        *out_ptr += 1;
+        uint8_t *body = *out_ptr;
         *out_ptr += total_bytes;
+
+        /* Pack naturally first when an FSE attempt is on the table: the
+         * nibble coder wants adjacent codes sharing a byte (see
+         * codec_maybe_fse_flat).  If the attempt does not commit we
+         * re-pack in the configured layout over the same bytes, which
+         * costs an extra pack only on regions FSE declined. */
+        int try_fse = codec_flat_fse_eligible(table, total_bytes);
+        PROF_TIC();
+        if (try_fse) prim_enc_pack_dN_natural(ranks, n, D, base, body);
+        else         prim_enc_pack_dN(ranks, n, D, base, body,
+                                      table->flat_layout);
+        PROF_TOC(PROF_ENC_FLAT, n);
+
+        if (try_fse) {
+            if (codec_maybe_fse_flat(marker_slot, body, total_bytes, out_ptr))
+                return;                     /* committed, natural-packed */
+            if (table->flat_layout != PIVCO_FLAT_NATURAL) {
+                PROF_TIC();
+                prim_enc_pack_dN(ranks, n, D, base, body, table->flat_layout);
+                PROF_TOC(PROF_ENC_FLAT, n);
+            }
+        }
         return;
     }
 
@@ -318,7 +503,8 @@ static void codec_encode_node(const pivco_table_t *table,
     uint8_t *bm = *out_ptr;
     memcpy(bm, bm_stage, (size_t)nbytes);
     *out_ptr += nbytes;
-    codec_maybe_fse_attempt(table->fse_enabled, marker_slot, bm, nbytes,
+    codec_maybe_fse_attempt(table->fse_enabled, table->fse_dynamic,
+                             marker_slot, bm, nbytes,
                              n, n_left, n_right, depth, out_ptr);
 }
 
@@ -420,11 +606,18 @@ static void codec_decode_subtree(const pivco_table_t *table,
     case PIVCO_NODE_INTERNAL_FLAT: {
         int D = table->flat_depth[node_id];
         int total_bytes = (K * D + 7) >> 3;
-        const uint8_t *bm = *in_ptr;
-        *in_ptr += total_bytes;
+        uint8_t *owned = NULL;
+        int fse_coded = 0;
+        const uint8_t *bm = wire_read_flat_region(in_ptr, total_bytes,
+                                                   &owned, &fse_coded);
+        if (!bm) return;   /* allocation failure; caller sees short output */
         const uint8_t *c2s =
             &table->flat_code_to_sym[table->flat_offset[node_id]];
-        prim_merge_flat(out, K, bm, D, c2s, table->flat_layout);
+        /* An FSE-coded region is always natural-packed, whatever the
+         * table's configured layout (see codec_maybe_fse_flat). */
+        if (fse_coded) prim_merge_flat_natural(out, K, bm, D, c2s);
+        else           prim_merge_flat(out, K, bm, D, c2s, table->flat_layout);
+        free(owned);
         return;
     }
 
@@ -535,11 +728,17 @@ int CODEC_DECODE_ENTRY(pivco_decoder_t *dec_ctx, const pivco_table_t *table, con
         == PIVCO_NODE_INTERNAL_FLAT) {
         int D = table->flat_depth[table->tree_root];
         int total_bytes = (N * D + 7) >> 3;
-        const uint8_t *bm = ptr;
-        ptr += total_bytes;
-        prim_merge_flat(symbols, N, bm, D,
-                        &table->flat_code_to_sym[table->flat_offset[table->tree_root]],
-                        table->flat_layout);
+        uint8_t *owned = NULL;
+        int fse_coded = 0;
+        const uint8_t *bm = wire_read_flat_region(&ptr, total_bytes,
+                                                   &owned, &fse_coded);
+        if (!bm) return PIVCO_ERR_CORRUPT;   /* allocation failure */
+        const uint8_t *root_c2s =
+            &table->flat_code_to_sym[table->flat_offset[table->tree_root]];
+        if (fse_coded) prim_merge_flat_natural(symbols, N, bm, D, root_c2s);
+        else           prim_merge_flat(symbols, N, bm, D, root_c2s,
+                                       table->flat_layout);
+        free(owned);
         *consumed = (size_t)(ptr - in);
         return PIVCO_OK;
     }

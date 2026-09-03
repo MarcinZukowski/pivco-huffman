@@ -36,6 +36,16 @@
  *                                                  fse_len + fse_len bytes
  *                                                  of FSE-compressed bytes
  *
+ * The marker byte is [xor_flag:1][table_id:7].  table_id 1..
+ * PIVCO_FSE_NUM_TABLES selects a pre-built static table (xor_flag says
+ * whether the encoder bit-inverted the bitmap first, so those tables
+ * always see "0 is the frequent bit").  table_id ==
+ * PIVCO_FSE_DYNAMIC_ID selects the dynamic nibble table: the payload
+ * starts with an FSE_writeNCount table description fitted to this
+ * bitmap's nibble histogram, followed by the coded nibbles (low nibble
+ * of each raw byte first); xor_flag is always 0 there.  Both forms are
+ * decoded by pivco_fse_decompress(), which dispatches on table_id.
+ *
  * This is exactly the order the BU decoder consumes bytes.  It needs
  * both child counts up front to size the children's buffers — and
  * forward parsing of variable-size regions requires the sizing
@@ -57,12 +67,34 @@
  * LEAF_LEFT's leaf side) carry no count, and empty subtrees (n == 0)
  * emit nothing at all.
  *
- * Flat-subtree nodes do NOT use the per-node record — they emit n·D
- * packed bits directly (they have no children, so pre- and post-order
- * coincide).  The bit layout inside the region follows
- * table->flat_layout — natural, hybrid vertical, or 128-only vertical
- * (see pivco_huffman_vertical.h); the region byte size is the same in
- * every layout.  See pivco_huffman.h:flat_depth.
+ * Flat-subtree nodes carry no K_right (they have no children, so pre-
+ * and post-order coincide), but they DO carry the same marker + body
+ * record as an internal node's bitmap:
+ *
+ *   [FSE marker byte: uint8, 1 byte]  always
+ *   [region body]                     marker == 0: n·D packed bits,
+ *                                     ceil(n·D/8) bytes
+ *                                     marker != 0: 2-byte LE fse_len +
+ *                                     fse_len payload bytes
+ *
+ * Only the dynamic nibble table is ever used there (marker ==
+ * PIVCO_FSE_DYNAMIC_ID): a flat region has no partition skew for the
+ * static schedule to key on.  Coding it matters because a depth-D flat
+ * subtree gives all 2^D of its symbols the same code length by
+ * construction — Huffman models their real frequencies not at all, and
+ * on literal streams that is where most of the residual redundancy is.
+ * See wire_read_flat_region below and codec_maybe_fse_flat.
+ *
+ * The RAW form's bit layout follows table->flat_layout — natural,
+ * hybrid vertical, or 128-only vertical (see pivco_huffman_vertical.h);
+ * the region byte size is the same in every layout.  The FSE form is
+ * ALWAYS natural, whatever the table says, because the vertical layouts
+ * gather codes at lane stride 16 and that destroys the adjacency the
+ * nibble table feeds on (worth 0.30% over the corpus, 1.69% on
+ * x-ray.serial).  The marker byte therefore selects the unpack kernel,
+ * not table->flat_layout — see wire_read_flat_region and
+ * codec_maybe_fse_flat.  Vertical keeps its decode speed on the raw
+ * path, which is where it matters.  See pivco_huffman.h:flat_depth.
  *
  * Internal header, not part of the public API.
  */
@@ -79,6 +111,7 @@
 #endif
 
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define PIVCO_BLOCK_N_BYTES 2  /* per-block N header: uint16 little-endian */
@@ -195,6 +228,66 @@ static inline const uint8_t *wire_read_bitmap(const uint8_t **in_ptr,
     *in_ptr += nbytes;
     PROF_TOC(PROF_WIRE_BITMAP_FSE, n);
     return *in_ptr - nbytes;
+#endif
+}
+
+/* Slack allocated past an FSE-decoded flat region: the flat merges load
+ * their source in full vectors, so they may read (never write) past the
+ * region's end.  Comfortably above every backend's
+ * PIVCO_PRIM_MERGE_OVERREAD (max 16); static-asserted in the codec. */
+#define PIVCO_FLAT_FSE_SLACK 128
+
+/* Read a flat-subtree region: [marker][n*D packed bits] when marker == 0,
+ * or [marker][fse_len:u16 LE][payload] for the dynamic nibble table.
+ *
+ * Returns a pointer to `nbytes` usable packed bytes -- straight into the
+ * input stream for the raw form (the common case, no copy), or into a
+ * freshly malloc'd buffer for the FSE form, in which case *owned is set
+ * and the caller must free it once the merge has run.
+ *
+ * *fse_coded reports which form was read, and with it which bit layout
+ * the bytes are in: the raw form uses table->flat_layout, the FSE form
+ * is ALWAYS PIVCO_FLAT_NATURAL (the encoder packs it that way so the
+ * nibble table sees adjacent codes sharing a byte -- see
+ * codec_maybe_fse_flat).  Callers must pick the unpack kernel from it,
+ * not from the table.
+ *
+ * *owned and *fse_coded are always written (*owned NULL when nothing was
+ * allocated).  Returns NULL only on allocation failure. */
+static inline const uint8_t *wire_read_flat_region(const uint8_t **in_ptr,
+                                                    int nbytes,
+                                                    uint8_t **owned,
+                                                    int *fse_coded)
+{
+    *owned = NULL;
+    *fse_coded = 0;
+    uint8_t marker = **in_ptr;
+    *in_ptr += 1;
+    if (marker == 0) {
+        const uint8_t *body = *in_ptr;
+        *in_ptr += nbytes;
+        return body;
+    }
+    *fse_coded = 1;
+    uint16_t fse_len;
+    memcpy(&fse_len, *in_ptr, 2);
+    *in_ptr += 2;
+#ifdef PIVCO_HAS_FSE
+    uint8_t *buf = (uint8_t *)malloc((size_t)nbytes + PIVCO_FLAT_FSE_SLACK);
+    if (!buf) { *in_ptr += fse_len; return NULL; }
+    memset(buf + nbytes, 0, PIVCO_FLAT_FSE_SLACK);
+    size_t out_len = 0;
+    (void)pivco_fse_decompress(marker & 0x7F, *in_ptr, fse_len,
+                                buf, (size_t)nbytes, (size_t)nbytes, &out_len);
+    *in_ptr += fse_len;
+    *owned = buf;
+    return buf;
+#else
+    /* FSE not built but the stream uses it -- same best-effort fallback
+     * as wire_read_bitmap: advance and hand back zeros. */
+    *in_ptr += fse_len;
+    *owned = (uint8_t *)calloc((size_t)nbytes + PIVCO_FLAT_FSE_SLACK, 1);
+    return *owned;
 #endif
 }
 
