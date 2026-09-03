@@ -8,6 +8,7 @@
 ### CONSIDERED — open / parked / research direction
 
 **General**
+- [Per-block table ring for pivcohuf/phaz (shelved)](#per-block-table-ring-for-pivcohufphaz-2026-09-03-shelved-branch-per-block-ring)
 - [Vertical flat regions: layout defaults, mid-band forms, text trims](#vertical-flat-regions-layout-defaults-mid-band-forms-text-trims-2026-08-17)
 - [Composed c2s tables for vertical D=2/4 steps](#composed-c2s-tables-for-vertical-d24-steps-2026-08-18)
 - [Generalized flat regions: level-wise bits + late translation for depth≤6 subtrees](#generalized-flat-regions-level-wise-bits--late-translation-for-depth6-subtrees-2026-08-19)
@@ -127,6 +128,51 @@
 ## CONSIDERED
 
 **General**
+
+### Per-block table ring for pivcohuf/phaz, 2026-09-03, shelved (branch per-block-ring)
+Every block carries its own Huffman table -- REUSE one of the last 8
+introduced tables (1-byte tabid) or introduce a fresh one via the cheapest
+compact form (PREFIX / presence-or-change bitmap / packed advance+length
+list, from scratch or delta against a ring rank).  No file-global table:
+block 0 introduces from scratch, wire v0.10 drops the 128-byte header table.
+Reuse-vs-fresh is decided on the code-length bit model and the block is
+encoded once (the same estimate zstd's `HUF_estimateCompressedSize` uses).
+
+Size (PHA, silesia): **-4.47% whole-file, -1.59% on the pivoted ll/ml/of/lit
+streams** (phaz's use).  Decode is unaffected: **1.04x**.
+
+Encode is **1.49x pre-ring**, and that cost is the point of the shelving.
+It decomposes into near-equal thirds: per-block table build 37%, reuse/delta
+search 30%, trial encode 33% (the trial was dropped -- see below).
+
+Component findings:
+- Encode/decode build asymmetry is why decode stays flat.  The encode build
+  (frequencies -> table) runs the real Huffman solve, 5913 ns; the decode
+  build (code-lengths -> table) feeds power-of-two synthetic freqs that
+  collapse the solve, 1315 ns (~4.5x cheaper), and REUSE blocks rebuild
+  nothing.  Even zero-reuse per-block tables are a 1.27x floor.
+- Trial encode (reuse-vs-fresh on real FSE-coded bytes) is worth only
+  ~0.024%; dropped.  The bit-model estimate picks the actual winner well
+  enough (8.7% disagreement, almost all near-ties costing ~8 B each).
+- A file-global seed table as a reuse base is worth 0.0039% -- redundant
+  with the ring.  Removing it also removed the codec's only whole-input
+  pass (the seed histogram); the encoder now streams block-by-block with
+  O(1) internal scratch.
+- Ring depth 8 vs 4: +0.011%.  Deep ranks are marginal; 8 is ~free but not
+  clearly better than 4.
+- Packed-list subsumes the raw-symbol-list forms (dropped ABSLIST / DLIST /
+  SDLIST for +61 B on 162 MB).
+- Joint length/shape optimization does NOT compose per-block: +13% encode
+  AND -0.078% size (worse).  It is a whole-file amortize-once trade of ratio
+  for decode speed, paid badly on every table.  Off by default (PLAIN
+  effort), so the default path is unaffected.
+
+Shelved rather than landed: phaz-with-ring is still +0.4..3.1% larger than
+zstd, so the -1.59% does not reach the "smaller than zstd" goal on its own
+(that needs order-1 modeling).  A 1.49x encode hit for a size win that still
+loses to zstd does not earn a default slot, and the file format has one
+consumer (the phaz/turbobench harness).  On branch per-block-ring for
+revival once order-1 closes most of the gap and the ring's margin decides.
 
 ### Vertical flat regions: layout defaults, mid-band forms, text trims, 2026-08-17
 The vertical layouts landed runtime-selectable (cfg.flat_layout:
