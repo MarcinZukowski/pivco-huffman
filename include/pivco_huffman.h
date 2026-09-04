@@ -182,6 +182,13 @@ typedef struct {
      * build_table after tree and flat_depth are finalized.  Decoders
      * switch on this instead of running per-call conditional chains. */
     uint8_t  node_type[PIVCO_MAX_TREE_NODES];
+
+    /* Non-flat internal nodes (each emits a marker+bitmap record) in
+     * ascending pre-order, cached at build time.  The codec's per-block
+     * marker prefix reuses this instead of re-walking the tree per block.
+     * mk_count is their number. */
+    int16_t  marker_positions[PIVCO_MAX_SYMBOLS];
+    int16_t  mk_count;
 } pivco_table_t;
 
 /* ---------- Tree-shape mode (build-time) ----------

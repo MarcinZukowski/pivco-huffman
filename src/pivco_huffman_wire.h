@@ -9,32 +9,34 @@
  * Wire format (v0.8): file data in decompression order, larger-K
  * child first.  The layout is an Euler walk of the tree — each node's
  * K_right split header lands at its pre-order position (on the way
- * down), its marker+bitmap record at its post-order position (on the
- * way up, after its children's regions):
+ * down), its bitmap record at its post-order position (on the way up,
+ * after its children's regions); its FSE marker is hoisted out to the
+ * block-level marker prefix:
  *
  * Per-block header (once, at the very start of each encoded block):
- *   [block_N: uint16 LE, 2 bytes]                  symbol count N for this
- *                                                  block; the decoder reads
- *                                                  it before starting the
- *                                                  tree walk.  Lets the
- *                                                  codec encode any N up to
- *                                                  65535 — no longer pinned
- *                                                  to PIVCO_BLOCK_SIZE.
+ *   [block_N: uint16 LE, 2 bytes]
+ *        symbol count N for this block; read before the walk (N up to 65535).
+ *   [marker prefix]
+ *        the FSE markers for all M non-flat internal nodes, hoisted out of the
+ *        per-node records.  Empty when M == 0.  Otherwise an (M+1)-bit presence
+ *        bitmap: bit 0 is the "any node FSE-coded" flag, bit i+1 set = node i
+ *        is FSE-coded; when any is set, one marker value byte per set node bit
+ *        follows.  When no node is FSE the whole prefix is that single byte
+ *        (bit 0 == 0) -- all of #PH, and any #PHA block FSE never fired on.
+ *        i indexes the nodes in the table's ascending pre-order
+ *        (marker_positions); M and the order derive from the tree on both
+ *        sides, so nothing else on the wire names them.
  *
- * Per non-flat internal node:
- *   [optional K_right: uint16 LE, 2 bytes]         if kr_header_needed();
- *                                                  at node entry
- *   [larger-K child region][smaller child region]  recursively, same layout;
- *                                                  larger first (strict >,
- *                                                  ties left-first), keyed
- *                                                  on the K_right header —
- *                                                  no extra bits
- *   [FSE marker byte:        uint8,    1 byte]    always
- *   [bitmap body]                                  marker == 0: raw n-bit
- *                                                  bitmap, ceil(n/8) bytes
- *                                                  marker != 0: 2-byte LE
- *                                                  fse_len + fse_len bytes
- *                                                  of FSE-compressed bytes
+ * Per non-flat internal node (marker-less: the marker is in the prefix above):
+ *   [optional K_right: uint16 LE, 2 bytes]
+ *        if kr_header_needed(); at node entry.
+ *   [larger-K child region][smaller child region]
+ *        recursively, same layout; larger first (strict >, ties left-first),
+ *        keyed on the K_right header -- no extra bits.
+ *   [bitmap body]
+ *        marker == 0 (raw): n-bit bitmap, ceil(n/8) bytes.  marker != 0 (FSE):
+ *        2-byte LE fse_len + fse_len bytes of FSE-compressed bytes.  The marker
+ *        is looked up from the prefix by node id.
  *
  * This is exactly the order the BU decoder consumes bytes.  It needs
  * both child counts up front to size the children's buffers — and
@@ -152,21 +154,22 @@ static inline int wire_read_kr_header(const pivco_table_t *table,
     return (int)v;
 }
 
-/* Read the per-node bitmap body (marker + payload).  Returns a pointer
- * to the usable n-bit bitmap (either pointing into the input stream
- * for marker==0, or into the caller-provided `scratch` for the FSE
- * path).  Advances *in_ptr past the whole record.
+/* Read the per-node bitmap body (payload only).  `marker` is this node's
+ * marker, looked up by the caller from the block's marker prefix (0 = raw,
+ * else FSE table id, high bit = XOR flip) -- it is no longer inline in the
+ * region.  Returns a pointer to the usable n-bit bitmap (into the input
+ * stream for marker==0, or into `scratch` for the FSE path).  Advances
+ * *in_ptr past the payload.
  *
  * scratch must hold at least bitmap_bytes(n) bytes and stay live for
  * the entire span where the returned pointer is dereferenced. */
 static inline const uint8_t *wire_read_bitmap(const uint8_t **in_ptr,
                                                 int n,
-                                                uint8_t *scratch)
+                                                uint8_t *scratch,
+                                                uint8_t marker)
 {
     PROF_TIC();
     int nbytes = bitmap_bytes(n);
-    uint8_t marker = **in_ptr;
-    *in_ptr += 1;
     if (marker == 0) {
         const uint8_t *bm = *in_ptr;
         *in_ptr += nbytes;

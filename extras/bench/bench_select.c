@@ -78,34 +78,53 @@ static void simd_scan(const uint8_t *in, int n, uint8_t sym, uint8_t *mask) {
 #define TOTAL (4u << 20)
 
 /* ---- wire region skipper: mirrors codec_decode_subtree's stream order ---- */
-static void skip_marker_bitmap(const uint8_t **p, int K) {
-    uint8_t marker = **p; (*p)++;
+/* Rebuild a block's node_markers[] from its marker prefix (mirrors the
+ * decoder); advances *p past the prefix, using the table's cached order. */
+static void build_node_markers(const pivco_table_t *t, const uint8_t **p,
+                               uint8_t *node_markers) {
+    memset(node_markers, 0, (size_t)t->tree_node_count);
+    int mk_cnt = t->mk_count;
+    if (mk_cnt == 0) return;
+    const uint8_t *presence = *p;
+    if ((presence[0] & 1u) == 0) { *p += 1; return; }   /* bit 0: no FSE */
+    int pbytes = (mk_cnt + 1 + 7) >> 3;
+    *p += pbytes;
+    const uint8_t *values = *p; int n_vals = 0;
+    for (int i = 0; i < mk_cnt; i++) {
+        int b = i + 1;
+        if (presence[b >> 3] & (1u << (b & 7)))
+            node_markers[t->marker_positions[i]] = values[n_vals++];
+    }
+    *p += n_vals;
+}
+
+static void skip_marker_bitmap(const uint8_t **p, int K, uint8_t marker) {
     if (marker == 0) { *p += bitmap_bytes(K); return; }
     uint16_t fse_len; memcpy(&fse_len, *p, 2); *p += 2 + fse_len;
 }
 
 static void skip_region(const pivco_table_t *t, int16_t id, int K,
-                        const uint8_t **p) {
+                        const uint8_t **p, const uint8_t *node_markers) {
     const pivco_tree_node_t *n = &t->tree[id];
     if (K == 0) return;
     if (n->symbol >= 0) return;                       /* leaf: no bytes */
     if (t->flat_depth[id] >= 2) { *p += (K * t->flat_depth[id] + 7) >> 3; return; }
     switch (t->node_type[id]) {
     case PIVCO_NODE_BOTH_LEAVES:
-        skip_marker_bitmap(p, K);
+        skip_marker_bitmap(p, K, node_markers[id]);
         return;
     case PIVCO_NODE_LEAF_LEFT: {
         int Kr = wire_read_kr_header(t, id, p);
-        skip_region(t, n->right, Kr, p);
-        skip_marker_bitmap(p, K);
+        skip_region(t, n->right, Kr, p, node_markers);
+        skip_marker_bitmap(p, K, node_markers[id]);
         return;
     }
     default: {                                        /* FULL */
         int Kr = wire_read_kr_header(t, id, p);
         int Kl = K - Kr;
-        if (Kr > Kl) { skip_region(t, n->right, Kr, p); skip_region(t, n->left, Kl, p); }
-        else         { skip_region(t, n->left, Kl, p);  skip_region(t, n->right, Kr, p); }
-        skip_marker_bitmap(p, K);
+        if (Kr > Kl) { skip_region(t, n->right, Kr, p, node_markers); skip_region(t, n->left, Kl, p, node_markers); }
+        else         { skip_region(t, n->left, Kl, p, node_markers);  skip_region(t, n->right, Kr, p, node_markers); }
+        skip_marker_bitmap(p, K, node_markers[id]);
         return;
     }
     }
@@ -123,7 +142,8 @@ typedef struct {
 
 /* returns mask of target occurrences among this node's K symbols in `out` */
 static void select_rec(const selq_t *q, int16_t id, int K,
-                       uint8_t *out, uint8_t *tmp, const uint8_t **p) {
+                       uint8_t *out, uint8_t *tmp, const uint8_t **p,
+                       const uint8_t *node_markers) {
     const pivco_table_t *t = q->t;
     const pivco_tree_node_t *n = &t->tree[id];
     if (K == 0) return;
@@ -149,7 +169,7 @@ static void select_rec(const selq_t *q, int16_t id, int K,
     uint8_t bm_scratch[(size_t)bitmap_bytes(BLK) + 16];
     switch (t->node_type[id]) {
     case PIVCO_NODE_BOTH_LEAVES: {
-        const uint8_t *bm = wire_read_bitmap(p, K, bm_scratch);
+        const uint8_t *bm = wire_read_bitmap(p, K, bm_scratch, node_markers[id]);
         prim_merge_cst_cst(bm, K,
                            q->target == n->left  ? 0xff : 0x00,
                            q->target == n->right ? 0xff : 0x00, out);
@@ -158,12 +178,12 @@ static void select_rec(const selq_t *q, int16_t id, int K,
     case PIVCO_NODE_LEAF_LEFT: {
         int Kr = wire_read_kr_header(t, id, p);
         if (q->on_spine[n->right] || q->target == n->right) {
-            select_rec(q, n->right, Kr, tmp, out, p);
-            const uint8_t *bm = wire_read_bitmap(p, K, bm_scratch);
+            select_rec(q, n->right, Kr, tmp, out, p, node_markers);
+            const uint8_t *bm = wire_read_bitmap(p, K, bm_scratch, node_markers[id]);
             prim_merge_cst_vec(bm, K, 0x00, tmp, out);
         } else {                               /* target is the left leaf */
-            skip_region(t, n->right, Kr, p);
-            const uint8_t *bm = wire_read_bitmap(p, K, bm_scratch);
+            skip_region(t, n->right, Kr, p, node_markers);
+            const uint8_t *bm = wire_read_bitmap(p, K, bm_scratch, node_markers[id]);
             prim_merge_cst_vec(bm, K, 0xff, q->zeros, out);
         }
         return;
@@ -174,17 +194,17 @@ static void select_rec(const selq_t *q, int16_t id, int K,
         int right_spine = q->on_spine[n->right] || q->target == n->right;
         /* stream order: larger-K child first */
         if (Kr > Kl) {
-            if (right_spine) select_rec(q, n->right, Kr, tmp, out, p);
-            else             skip_region(t, n->right, Kr, p);
-            if (right_spine) skip_region(t, n->left, Kl, p);
-            else             select_rec(q, n->left, Kl, tmp, out, p);
+            if (right_spine) select_rec(q, n->right, Kr, tmp, out, p, node_markers);
+            else             skip_region(t, n->right, Kr, p, node_markers);
+            if (right_spine) skip_region(t, n->left, Kl, p, node_markers);
+            else             select_rec(q, n->left, Kl, tmp, out, p, node_markers);
         } else {
-            if (right_spine) skip_region(t, n->left, Kl, p);
-            else             select_rec(q, n->left, Kl, tmp, out, p);
-            if (right_spine) select_rec(q, n->right, Kr, tmp, out, p);
-            else             skip_region(t, n->right, Kr, p);
+            if (right_spine) skip_region(t, n->left, Kl, p, node_markers);
+            else             select_rec(q, n->left, Kl, tmp, out, p, node_markers);
+            if (right_spine) select_rec(q, n->right, Kr, tmp, out, p, node_markers);
+            else             skip_region(t, n->right, Kr, p, node_markers);
         }
-        const uint8_t *bm = wire_read_bitmap(p, K, bm_scratch);
+        const uint8_t *bm = wire_read_bitmap(p, K, bm_scratch, node_markers[id]);
         if (right_spine) prim_merge_cst_vec(bm, K, 0x00, tmp, out);
         else             prim_merge_vec_vec(bm, K, tmp, q->zeros, out);
         return;
@@ -196,7 +216,9 @@ static int select_block(const selq_t *q, const uint8_t *enc,
                         uint8_t *mask, uint8_t *tmp) {
     const uint8_t *p = enc;
     uint16_t N; memcpy(&N, p, 2); p += 2;      /* block_N header */
-    select_rec(q, q->t->tree_root, (int)N, mask, tmp, &p);
+    uint8_t node_markers[PIVCO_MAX_TREE_NODES];
+    build_node_markers(q->t, &p, node_markers);
+    select_rec(q, q->t->tree_root, (int)N, mask, tmp, &p, node_markers);
     return (int)N;
 }
 
@@ -217,7 +239,8 @@ typedef struct {
 static uint8_t g_mbufL[16][65536], g_mbufR[16][65536];
 
 static void mselect_rec(const mselq_t *q, int16_t id, int K, int depth,
-                        uint8_t *out, const uint8_t **p) {
+                        uint8_t *out, const uint8_t **p,
+                        const uint8_t *node_markers) {
     const pivco_table_t *t = q->t;
     const pivco_tree_node_t *n = &t->tree[id];
     if (K == 0) return;
@@ -232,7 +255,7 @@ static void mselect_rec(const mselq_t *q, int16_t id, int K, int depth,
     uint8_t bm_scratch[(size_t)bitmap_bytes(BLK) + 16];
     switch (t->node_type[id]) {
     case PIVCO_NODE_BOTH_LEAVES: {
-        const uint8_t *bm = wire_read_bitmap(p, K, bm_scratch);
+        const uint8_t *bm = wire_read_bitmap(p, K, bm_scratch, node_markers[id]);
         prim_merge_cst_cst(bm, K, q->leaf_in_set[n->left] ? 0xff : 0x00,
                            q->leaf_in_set[n->right] ? 0xff : 0x00, out);
         return;
@@ -241,12 +264,12 @@ static void mselect_rec(const mselq_t *q, int16_t id, int K, int depth,
         int Kr = wire_read_kr_header(t, id, p);
         uint8_t cst = q->leaf_in_set[n->left] ? 0xff : 0x00;
         if (q->contains[n->right]) {
-            mselect_rec(q, n->right, Kr, depth + 1, g_mbufR[depth], p);
-            const uint8_t *bm = wire_read_bitmap(p, K, bm_scratch);
+            mselect_rec(q, n->right, Kr, depth + 1, g_mbufR[depth], p, node_markers);
+            const uint8_t *bm = wire_read_bitmap(p, K, bm_scratch, node_markers[id]);
             prim_merge_cst_vec(bm, K, cst, g_mbufR[depth], out);
         } else {
-            skip_region(t, n->right, Kr, p);
-            const uint8_t *bm = wire_read_bitmap(p, K, bm_scratch);
+            skip_region(t, n->right, Kr, p, node_markers);
+            const uint8_t *bm = wire_read_bitmap(p, K, bm_scratch, node_markers[id]);
             prim_merge_cst_vec(bm, K, cst, q->zeros, out);
         }
         return;
@@ -258,17 +281,17 @@ static void mselect_rec(const mselq_t *q, int16_t id, int K, int depth,
         const uint8_t *lm = q->zeros, *rm = q->zeros;
         /* stream order: larger-K child first */
         if (Kr > Kl) {
-            if (cr) { mselect_rec(q, n->right, Kr, depth + 1, g_mbufR[depth], p); rm = g_mbufR[depth]; }
-            else skip_region(t, n->right, Kr, p);
-            if (cl) { mselect_rec(q, n->left, Kl, depth + 1, g_mbufL[depth], p); lm = g_mbufL[depth]; }
-            else skip_region(t, n->left, Kl, p);
+            if (cr) { mselect_rec(q, n->right, Kr, depth + 1, g_mbufR[depth], p, node_markers); rm = g_mbufR[depth]; }
+            else skip_region(t, n->right, Kr, p, node_markers);
+            if (cl) { mselect_rec(q, n->left, Kl, depth + 1, g_mbufL[depth], p, node_markers); lm = g_mbufL[depth]; }
+            else skip_region(t, n->left, Kl, p, node_markers);
         } else {
-            if (cl) { mselect_rec(q, n->left, Kl, depth + 1, g_mbufL[depth], p); lm = g_mbufL[depth]; }
-            else skip_region(t, n->left, Kl, p);
-            if (cr) { mselect_rec(q, n->right, Kr, depth + 1, g_mbufR[depth], p); rm = g_mbufR[depth]; }
-            else skip_region(t, n->right, Kr, p);
+            if (cl) { mselect_rec(q, n->left, Kl, depth + 1, g_mbufL[depth], p, node_markers); lm = g_mbufL[depth]; }
+            else skip_region(t, n->left, Kl, p, node_markers);
+            if (cr) { mselect_rec(q, n->right, Kr, depth + 1, g_mbufR[depth], p, node_markers); rm = g_mbufR[depth]; }
+            else skip_region(t, n->right, Kr, p, node_markers);
         }
-        const uint8_t *bm = wire_read_bitmap(p, K, bm_scratch);
+        const uint8_t *bm = wire_read_bitmap(p, K, bm_scratch, node_markers[id]);
         prim_merge_vec_vec(bm, K, lm, rm, out);
         return;
     }
@@ -366,7 +389,9 @@ int main(void) {
         {   size_t cons; static uint8_t d0[BLK];
             pivco_decode(bench_dec_ctx(), &t, enc[0], elen[0], d0, &cons);
             const uint8_t *p = enc[0] + 2;
-            skip_region(&t, t.tree_root, BLK, &p);
+            uint8_t node_markers[PIVCO_MAX_TREE_NODES];
+            build_node_markers(&t, &p, node_markers);
+            skip_region(&t, t.tree_root, BLK, &p, node_markers);
             if ((size_t)(p - enc[0]) != cons)
                 fprintf(stderr, "DBG %s skip consumed %zu vs decode %zu\n",
                         bench_dist_name(di), (size_t)(p - enc[0]), cons);
@@ -476,7 +501,9 @@ int main(void) {
             double t0 = now_ns();
             for (int b = 0; b < nblk; b++) {
                 const uint8_t *p = enc[b]; uint16_t N; memcpy(&N, p, 2); p += 2;
-                mselect_rec(&mq, t.tree_root, (int)N, 0, mask, &p);
+                uint8_t node_markers[PIVCO_MAX_TREE_NODES];
+                build_node_markers(&t, &p, node_markers);
+                mselect_rec(&mq, t.tree_root, (int)N, 0, mask, &p, node_markers);
             }
             double e = now_ns() - t0; if (e < t_multi) t_multi = e;
             t0 = now_ns();
@@ -513,7 +540,9 @@ int main(void) {
         int ok = 1;
         {   size_t cons;
             const uint8_t *p = enc[nblk-1]; uint16_t N; memcpy(&N, p, 2); p += 2;
-            mselect_rec(&mq, t.tree_root, (int)N, 0, mask, &p);
+            uint8_t node_markers[PIVCO_MAX_TREE_NODES];
+            build_node_markers(&t, &p, node_markers);
+            mselect_rec(&mq, t.tree_root, (int)N, 0, mask, &p, node_markers);
             pivco_decode(bench_dec_ctx(), &t, enc[nblk-1], elen[nblk-1], dec, &cons);
             for (int i2 = 0; i2 < BLK; i2++) {
                 uint8_t want = (dec[i2] == syms3[0] || dec[i2] == syms3[1]

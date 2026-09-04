@@ -236,6 +236,25 @@ static void fill_enc_init_aux(pivco_table_t *table)
 
 /* Single-symbol degenerate tree: root -> two leaves of the same symbol.
  * Assumes `table` is zeroed. */
+/* Enumerate the non-flat internal nodes (each emits a marker+bitmap record)
+ * in ascending pre-order and cache the order in the table, so the codec's
+ * per-block marker prefix needs no per-block tree walk. */
+static int enum_markers_rec(const pivco_table_t *t, int16_t id,
+                            int16_t *positions, int count)
+{
+    const pivco_tree_node_t *n = &t->tree[id];
+    if (n->symbol >= 0) return count;             /* leaf */
+    if (t->flat_depth[id] >= 2) return count;     /* flat subtree */
+    positions[count++] = id;
+    count = enum_markers_rec(t, n->left,  positions, count);
+    count = enum_markers_rec(t, n->right, positions, count);
+    return count;
+}
+static void fill_marker_order(pivco_table_t *t)
+{
+    t->mk_count = (int16_t)enum_markers_rec(t, t->tree_root, t->marker_positions, 0);
+}
+
 static void build_single_symbol_table(int sym, pivco_table_t *table)
 {
     table->code[sym] = 0;
@@ -263,6 +282,7 @@ static void build_single_symbol_table(int sym, pivco_table_t *table)
     table->node_type[1] = PIVCO_NODE_LEAF;
     table->node_type[2] = PIVCO_NODE_LEAF;
     fill_enc_init_aux(table);   /* sym_to_rank is all-zero (rank 0) here; aux must not stay NULL */
+    fill_marker_order(table);
 }
 
 int pivco_build_table(const pivco_cfg_t *cfg,
@@ -785,6 +805,7 @@ static int build_table_finish(const uint8_t lengths[PIVCO_MAX_SYMBOLS],
     assign_inorder_ranks(table, table->tree_root, 0);
 
     fill_enc_init_aux(table);   /* x86 2tab/4tab gather tables (or NULL elsewhere) */
+    fill_marker_order(table);
 
     return PIVCO_OK;
 }
