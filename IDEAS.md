@@ -18,7 +18,6 @@
 - [SIMD-ify scalar tails (overwrite or masked stores)](#simd-ify-scalar-tails-overwrite-or-masked-stores-2026-06-15)
 - [Golomb/Rice tier for very-high-skew nodes (p > 0.95)](#golombrice-tier-for-very-high-skew-nodes-p--095-2026-05-16-research)
 - [pivcohuf block-structured file format + tiny-input header](#pivcohuf-block-structured-file-format--tiny-input-header-2026-05-17-parked)
-- [v0.2 FSE marker byte unconditional overhead](#v02-fse-marker-byte-unconditional-overhead-2026-05-13)
 - [Tree-walk node-size histogram → tiny-node fast paths](#tree-walk-node-size-histogram--tiny-node-fast-paths)
 - [FastLanes-style transposed bitpacking](#fastlanes-style-transposed-bitpacking-2026-04-27)
 - [LSB-first canonical codes](#lsb-first-canonical-codes-2026-05-12)
@@ -44,6 +43,7 @@
 ### DONE — shipped
 
 **General**
+- [FSE markers hoisted to a block-level prefix](#fse-markers-hoisted-to-a-block-level-prefix-2026-09-01)
 - [Fast Huffman builder (two-queue + radix, no min-heap)](#fast-huffman-builder-drop-the-index-indirected-min-heap-2026-06-21)
 - [Cross-port post-June-5 x86 optimizations to NEON](#cross-port-post-june-5-x86-optimizations-to-neon-2026-06-13)
 - [Unify-framework refactor (5 phases)](#unify-framework-refactor-2026-05-14)
@@ -294,9 +294,6 @@ Bench (`bench_golomb.c`): Rice loses to FSE at p ≤ 0.95 but wins at p ≥ 0.97
 ### pivcohuf block-structured file format + tiny-input header, 2026-05-17, parked
 Two design pieces worked out in detail: (a) replace the monolithic file with independent 4 MB blocks (own header + Huffman table) — enables streaming, parallel decode, range queries, crash recovery; per-block overhead is in the noise (≤ 0.05% at 4 MB+); (b) sparse-alphabet + narrow-code-length encoding shrinks tiny-input expansion from ~29× to ~3× on 7-byte inputs.  Park until LZ4+ph prototype starts — block boundaries naturally line up with the LZ window then.  pivcohuf is an internal experiment harness, not a real-world compressor.
 
-### v0.2 FSE marker byte unconditional overhead, 2026-05-13
-Every non-flat internal node emits a 1 B marker (`0x00 raw / 0x01..0x19 FSE table id / 0x80|id XOR flip`) even with FSE off.  Overhead: proba80 0.06% / prose_pride 0.6% / chinese_text 0.9% / cat-image 1.6%.  Three options to recover, all wire-format-affecting (file-flag gate, conditional by bitmap size, or 1-bit/node packed vector at block start).  Sub-1% overall, parked.
-
 ### Tree-walk node-size histogram → tiny-node fast paths
 Codex item.  Recursive decoder calls `decode_node_*` per internal node; small-n nodes may have per-call overhead > partition work.  Instrumentation helper landed (`e54e2d5`), histogram analysis + tiny-node fast paths (`n ≤ 8 / ≤ 16`) still open.  Risk of skipping the analysis: dispatcher overhead wipes per-call savings, net negative on real text.
 
@@ -438,6 +435,9 @@ RVV maps well: `vcompress` = partition, `vrgather` = TBL, **`vsuxei8` = native i
 ## DONE
 
 **General**
+
+### FSE markers hoisted to a block-level prefix, 2026-09-01
+The per-node FSE marker (`0 raw / 1..25 FSE table id / 0x80|id XOR flip`) no longer sits inline before each non-flat internal node's bitmap.  A block emits its markers once, in a prefix after the block-N header: an (M+1)-bit presence bitmap (bit 0 = "any node FSE-coded", bit i+1 = node i) then one value byte per set node.  #PH and any all-raw #PHA block spend a single byte.  Markers are keyed by node id via the tree's non-flat-internal pre-order, cached in the table at build time (`marker_positions` / `mk_count`), so decode reads them with no per-block tree walk.  Size: −0.14% #PHA / −0.15% #PH (silesia + pivoted streams); decode neutral-to-faster, encode +~1–2% (regions staged then copied after the prefix).  The write/read prefix functions measured ~0.1–0.2% of E2E, so they stay scalar (branchless / SIMD not worth it).  Commit `bb7a50e`.
 
 ### Fast Huffman builder (drop the index-indirected min-heap), 2026-06-21
 Replaced the freq→lengths min-heap (60–77% of `build_table`, all pointer-chasing) with LSD-radix sort + van Leeuwen two-queue + parent-walk depths (`build_lengths_twoqueue`, `4e0f288`) — ~2.5× uniform/zipf on the phase, roughly halving the table build.  Byte-identical: the `<=` tie-break reproduces the old heap's lengths (3M-case cross-check fuzz on M4/x86/NEON).  Same algorithm as zstd `HUF_buildTree`; its hybrid bucket sort was a wash-to-loss on x86, not adopted.  E2e weight ~1.5–2% under the per-128 KB re-table model (`bench_fair`), ~0.07% for one-global-table files.
