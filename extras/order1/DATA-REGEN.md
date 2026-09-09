@@ -15,6 +15,11 @@ caveats first:
   4-model context scripts) did not survive the
   scratchpad; ledger sections citing them stand on their recorded
   outputs only.  Everything in `probes/` here IS archived.
+- **The 2026-09-08 tools are not archived here yet.**  They live in
+  `notes/2026-08-15-o1demux-k4/` (untracked); build lines below.  Their
+  numbers (ledger §1.3, §4.3, §8.6, §9.1, §16.1–2, §23.1) stand on the
+  archived result files there (`xfield_realfse_results.txt`,
+  `k8_crossfield_results.txt`) and on `sessionratio` re-run 2026-09-09.
 - **Scratchpads die.**  /tmp (and this session's scratchpad) gets purged
   by macOS; it already ate one worktree mid-session.  Nothing below
   depends on scratchpad state.
@@ -42,6 +47,12 @@ caveats first:
 | `PIVCO_CTX_K1`, `PIVCO_CTX_K2`, `PIVCO_CTX_MAXD=D` | run id-52 as order-1 / drop the k=4 candidate / ctx attempts only at depth ≤ D |
 | `PIVCO_CTX_W4`, `PIVCO_CTX_X4` | nibble-wide symbols (L can drop to 7) / 4-segment interleaved streams per record |
 | `PIVCO_NIB2` | id-51 position-split experiment (1 = forced split, 2 = best-of with selector byte) |
+
+On main since 3bfef16 (2026-09-09) the nibble table is production:
+`pivco_cfg_t.fse_nibble_enabled` (opt-in; the CLI's `-a` and
+`pivcohuf_compress_ex(.., 1)` set it), `PIVCO_FSE_NIB_TABLELOG` = 7 with the
+`#ifndef` still honouring `-DPIVCO_FSE_NIB_TABLELOG=$L` for sweeps, and a
+decoder cap `PIVCO_FSE_NIB_TABLELOG_MAX` = 10.
 
 ## data/ (gitignored)
 
@@ -79,6 +90,39 @@ need it reversed.
 | `bench_huf_density.c` | the wscan probe harness: W-sweep, bit-context, quad fusion, 3-level (oct) fusion, dyn51-on-quad — source of ledger §2's probe ladder and §3.1/§3.2 | `cc -O2 -o bench_hd bench_huf_density.c -I<wt>/include -I<wt>/src -I<wt>/ext/fse/lib <wt>/build/libpivco_huffman.a <wt>/build/libhuf0.a -lm`; run `./bench_hd --wscan FILE` |
 
 (`<wt>` = the built prototype worktree.)
+
+## 2026-09-08 tools (`notes/2026-08-15-o1demux-k4/`; main tree, not the prototype)
+
+All need `/tmp/phd_<f>/{lit,ll,ml,of}` + `/tmp/o1maps/<f>.map{2,4}` from
+`data/o1bundle.tgz` and a Release `build/`.  `<top>` = repo root.
+
+| tool | what | build / run |
+|---|---|---|
+| `sessionratio.c` | real-FSE ratio of order0 / K2serial / K4serial / k2g2 / k2g4 / k4g16, whole-stream tables, decode-verified (§9.1) | `cc -O3 -mcpu=native -I ext/fse/lib sessionratio.c build/libpivco_huffman.a -o sessionratio && ./sessionratio [files]` |
+| `sessionratio_blk.c` | same with per-block tables, env `BLK` (default 16384, 0 = whole stream) (§16.1) | as above; `BLK=16384 ./sessionratio_blk` |
+| `sessionratio_rep.c` | + NCount repeat-mode (`REPEAT=1`) and the per-block mode argmax columns (§16.1) | as above; `REPEAT=1 ./sessionratio_rep` |
+| `sessionspeed.c` | end-to-end decode (FSE `usingDTable` + production merges + NEON gather), byte-exact, ns/B (§8.6) | `cc -O3 -mcpu=native -I include -I src -I ext/fse/lib sessionspeed.c build/libpivco_huffman.a -o sessionspeed` |
+| `g4merge.c` | pure reconstruction kernels: g2 merge+OR, g4 3-merge + pext, scalar (§8.6) | `cc -O3 -mcpu=native -I include -I src g4merge.c build/libpivco_huffman.a -o g4merge` |
+| `planefse.c`, `planefse4.c` | class-plane decode, single- and 4-way-interleaved FSE | `cc -O3 -mcpu=native -I ext/fse/lib planefse4.c build/libpivco_huffman.a -o planefse4` |
+| `bmdump.c` | dump id 51's real regions per 16K block via the public table API (§1.3) | `cc -O3 -I include bmdump.c build/libpivco_huffman.a -o bmdump && ./bmdump IN OUT.dump` |
+| `coderbench.c` | nib / pair / byte / pos2 / repeat / tableLog-7 / straight-to-bytes coders on those regions (§1.3); env `TL256` for the pair table | `cc -O3 -mcpu=native -I include -I src -I ext/fse/lib coderbench.c build/libpivco_huffman.a -o coderbench && ./coderbench *.dump` |
+| `fsesum.c` | real FSE byte cost of every `*.bin` in a directory (charging rules in the header) | `cc -O3 -I ext/fse/lib fsesum.c build/libpivco_huffman.a -o /tmp/fsesum` |
+| `xfield_demux.py` | cross-field class-context demux of ll/ml/of into `/tmp/xf/`, then prices with `/tmp/fsesum` (§16.2) | `python3 xfield_demux.py` (writes `xfield_realfse_results.txt`) |
+| `k8_crossfield.py` | Shannon accounting for kKgK² at K = 2/4/8 + cross-field (§9.1, §16.2 Shannon column) | `python3 k8_crossfield.py > k8_crossfield_results.txt` |
+| `extras/bench/bench_merge4way.c` | one-go vs 3-binary 4-way merge (§4.3) — committed | CMake target `pivco_bench_merge4way` |
+
+Sweeps behind the 2026-09-08/09 numbers:
+
+- **ctx vs k4g16** (§23.1): worktree of e1bdce0 + `ph-ctx-session.patch`,
+  `PIVCO_CTX=1 ./build/pivcohuf c -a` per lit stream (dict-48 default) vs
+  `sessionratio` on the same streams.
+- **tableLog re-check on the landing tree** (§1.2 “shipped”): two builds
+  `-DCMAKE_C_FLAGS="-DPIVCO_FSE_NIB_TABLELOG=$L -falign-functions=64"`
+  (L = 7, 10), `probes/nibbench.c` per stream; cross-cap decode = encode
+  with the L=10 build's `pivcohuf c -a`, decode with the L=7 build, `cmp`.
+- **Fleet byte-identity for the landing**: `pivcohuf c [-a] -b 32768` over
+  the 18 o1bundle streams on c8i / c8a / c8g + M4, md5 compared (ph and
+  pha), decode + `cmp` on every host.
 
 ## Sweeps behind ledger/chat numbers (exact arms)
 

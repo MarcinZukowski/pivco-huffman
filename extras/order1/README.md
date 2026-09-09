@@ -47,6 +47,52 @@ Headlines of the merge, measured on identical dumps (details there):
   leaves; (3) kernel-law transfer to the ctx decode loop; (4) grouped-w
   roundtrip only if its xml-class gains survive L19 re-dump.
 
+## 2026-09-08…09: plane-on-wire literals, the deep-dive, #30 landed
+
+Two days in the pivco-huffman session; full record in ledger §1.3, §4.3,
+§8.6, §9.1, §16.1–16.2, §23.1; session notes in
+`notes/2026-09-08-k2g4-k4g16-order1-literals.md`.
+
+- **PR #30 landed on main** (3bfef16, co-authored with Nick) as the
+  *nibble table*: `fse_nibble_enabled` opt-in, encoder tableLog 7 /
+  decoder cap 10, harness and histogram over-read fixes, flat regions
+  coded natural-packed under an inline marker.  Byte-identical output on
+  M4 / Graviton 4 / Zen 5 / Granite Rapids.
+- **The kN gM family** (N classes, M residue contexts; class plane on the
+  wire, residues = within-class rank): k4g16 is the literal-side ratio
+  winner in real FSE (1.2–7.0% under order-0, beats K4serial on binaries),
+  k2g4 ≈ K2serial at a parallel decode, k2g2 weakest, k4g4 dead.
+  Reconstruction = production merges (0.16 ns/B + ~0.14 gather on M4);
+  end-to-end within 1.4× of order-0.  **Joint-split optimization flopped
+  in FSE** — retracted.
+- **Per-block headers erode it** (16K blocks, real FSE): 16 tables eat
+  k4g16's gain everywhere but x-ray; per-block *order-0 adaptation* is the
+  biggest effect on nonstationary binaries (samba 96.7 → 89.9); NCount
+  repeat-mode recovers 1.2–1.8 pp; deployable per-block argmax {o0,
+  K4serial} = 0.8–2.3 pp.  The lever is cheap table transmission.
+- **Cross-field class context on the code streams, in bytes**: ml | ll
+  summed −9.1% vs order-0 (mozilla −12.3%, 3-way −14.4%), x-ray ll | ml
+  −8.1%, `of` unresponsive.  Whole-file tables (phaz's policy).  Build-order
+  #1 confirmed with real FSE.
+- **ctx vs k4g16 on literals are complementary**: ctx x-ray 70.7% of raw
+  (−9.4% vs nibble) vs k4g16 81.2; class order-1 wins text by ~3.5 pp.
+- **id 51 on its real regions**: straight-to-bytes decode −20% (no wire
+  change); byte-FSE decodes 3–4× faster on the same bytes (the cost is 2×
+  steps + per-region build); a byte table wins large flat regions;
+  `FSE_compress2` bails to raw on extreme skew (calgary_pic −4.5 pp
+  recoverable); pos2 killed a second time; pair product table = same
+  bytes, build-bound standalone.
+- **4-way merge wants per-arch dispatch**: one-go wins AVX-512 1.4–1.9×,
+  three binary merges win NEON 2.3×; wire-compatible; serves the quad node
+  and k2g4/k4g16s4.
+- Revised open-work ranking: (1) cross-field class-context sequence coder
+  (ml | ll, 3-way) with whole-file tables; (2) cheap table transmission —
+  repeat-mode flag now, catalog / canonical sets next (unlocks per-block
+  k4g16, pair decode, the ctx speed program); (3) id 51 straight-to-bytes
+  decode, byte table on large flats, extreme-skew bail-out; (4) per-block
+  mode argmax for literals; (5) per-arch 4-way merge dispatch; (6) stack
+  order-1 class trees with ctx bitmaps.
+
 ## The two money pots
 
 **Sequence codes (the general win).**  zstd's parse whitens LL/ML/OF on text,
@@ -199,6 +245,14 @@ binaries (x-ray, sao, mozilla) — exactly Oodle Leviathan's O1 positioning.
 - **K=2 architecture on codes via table-switch** is dominated by full-
   context o6 at equal cost (but see deployable result 3 for the
   effort-adjusted demux variant).
+- **Joint-split class optimization** (ledger §9.1): Shannon promised
+  +0.5–2.3 pp, real FSE ≤ 0.6 pp, worse on webster, exactly 0 on the
+  binary files (no split freedom).  Trust FSE bytes over accounting here.
+- **k4g16 whole-stream numbers as deployable** (§16.1): per-block headers
+  erase them off x-ray; K=8 at block granularity likewise.
+- **Position-split nibble tables for id 51** (second kill, §1.3) and the
+  **pair product-table decode as a standalone** (build-bound; only under a
+  table cache).
 
 ## Prior art (ledger §21)
 
@@ -230,6 +284,7 @@ law, visibility economics), capacitated small-K remap (`mapgen2.py`).
 | `litfse.py` | literals Shannon vs Huffman, order-0 and K=2 (decisive negative) |
 | `seqk2.py`, `seqk2b.py` | K=2 on code streams; seqk2b's FSE accounting exposed ll self-structure hidden by the 1-bit floor |
 | `phbias.py` | traffic-weighted PH-tree bitmap bias (closed the o5-on-PHA niche) |
+| `notes/2026-08-15-o1demux-k4/` (2026-09-08 tools, not yet copied here) | `sessionratio{,_blk,_rep}.c` real-FSE ratio for the kN gM family (whole-stream / per-block / repeat-mode + argmax); `sessionspeed.c` end-to-end decode; `g4merge.c`, `planefse{,4}.c` reconstruction + plane decode; `bmdump.c` + `coderbench.c` id 51 on its real regions; `xfield_demux.py` + `fsesum.c` cross-field in FSE bytes; `k8_crossfield.py` K=8 accounting |
 
 ## Data & bench recipes
 

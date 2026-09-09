@@ -106,6 +106,7 @@ streams ── entropy layer ──▶  container    zstd: order-0 FSE/Huffman �
     <b>2026-08-15…18</b><span>The entropy-coding sessions: demux kernels, order-1 literals, o6, the K=2 endgame.</span>
     <b>2026-08-17…23</b><span>The parallel PH-ctx session, merged 08-23: carry-context coding, the extra-bits audit, the cross-session A/B.</span>
     <b>2026-08-24</b><span>The exploration workflow: position contexts, SUB literals, alignment planes, E8E9, the speed program.</span>
+    <b>2026-09-08…09</b><span>The plane-on-wire literal family (k2g4 / k4g16) in real FSE, the improvement deep-dive (per-block erosion, cross-field in bytes, id 51 on its real regions, ctx vs k4g16), and PR #30 landed on main as the nibble table.</span>
   </div>
   <p class="fnote">Each section's eyebrow names its tool, method, and date.</p>
 
@@ -135,7 +136,8 @@ streams ── entropy layer ──▶  container    zstd: order-0 FSE/Huffman �
     <b>phaz</b><span>zstd's parser + copy engine with PH as the entropy layer.</span>
     <b>ctx</b><span>The carry-context coder (§2).</span>
     <b>o6</b><span>The cross-field context-switched tANS (§13).</span>
-    <b>dANS</b><span>PR #30's dynamic nibble-FSE (§1).</span>
+    <b>dANS / nibANS</b><span>PR #30's dynamic nibble-FSE (§1); landed 2026-09-09 as the <i>nibble table</i> (id 51, bench column nibANS).</span>
+    <b>kN gM</b><span>Plane-on-wire literal coding: N context classes, M residue contexts (§9.1).</span>
     <b>o2…o6 *.c</b><span>Standalone probe coders in extras/order1.</span>
     <b>silesia</b><span>The standard 12-file test corpus.</span>
     <b>Nick</b><span>OpenZL collaborator, author of PR #30.</span>
@@ -145,7 +147,7 @@ streams ── entropy layer ──▶  container    zstd: order-0 FSE/Huffman �
   <div class="keys">
     <b>data</b><span>Silesia; zstd level-3 parse dumps (lit / ll / ml / of); the PH-ctx sessions add L19 parses, whole-container phaz runs, and the huffman-sample-files corpora.</span>
     <b>machines</b><span>Apple M4 · Graviton4 (c8g) · Granite Rapids Xeon 6975P (c8i) · Zen5 EPYC 9R45 (c8a).</span>
-    <b>sources</b><span>pivco-huffman/notes/2026-08-15-o1demux-k4/</span>
+    <b>sources</b><span>pivco-huffman/notes/2026-08-15-o1demux-k4/ (+ notes/2026-09-08-k2g4-k4g16-order1-literals.md for §1.3, §4.3, §8.6, §9.1, §16.1–2, §23.1)</span>
   </div>
 
   <p class="fnote">New reader's path: this header → the three part intros → §2 (carry-context coding),
@@ -224,7 +226,13 @@ streams ── entropy layer ──▶  container    zstd: order-0 FSE/Huffman �
   measured against. Review asks before merge: fse_dynamic off by default, the Apple block-size guard in
   the harness, NCount repeat-mode, nibble tableLog 10 → 7 (§1.2). The carry-context coder (§2) and its parameter dictionary ride on top
   as the next increment; the companion OpenZL issue with Nick's cross-corpus results was announced
-  for ~2026-08-21 and had not appeared as of 2026-08-31.</div>
+  for ~2026-08-21 and had not appeared as of 2026-08-31.
+  <b>Landed 2026-09-09</b> (main 3bfef16, co-authored with Nick) under the name <i>nibble table</i>:
+  <code>fse_nibble_enabled</code> opt-in (default 0; the CLI's <code>-a</code> and
+  <code>pivcohuf_compress_ex(.., 1)</code> turn it on), the harness buffer guard, encoder tableLog 7 with
+  a decoder cap of 10, the FSE histogram over-read fixed; flat regions are coded natural-packed
+  under their own inline marker. Repeat-mode stays open — §1.3 prices it at ≈0 on per-node tables.
+  Output byte-identical across M4, Graviton 4, Zen 5 and Granite Rapids.</div>
   <h3>1.1 · Where in the tree it wins — the per-level census (2026-08-24)</h3>
   <p><b>The question.</b> Per tree level: how many bitmaps, how many where the dynamic coder kicked
   in, and that level's savings amortized to bits per file symbol. The plausible theory: only the top
@@ -295,7 +303,52 @@ streams ── entropy layer ──▶  container    zstd: order-0 FSE/Huffman �
   distributions (two_sym_90/10 up to 2.7×, proba02 up to 2.6×), encode +4–7%; size wash
   (streams −0.002%, synthetics +0.018% — worst cell two_sym_90/10 +0.93%, the L=7 resolution
   tax on extreme skew). Server cores gain more than M4: the O(2^L) build is a larger share of
-  their decode.</div>
+  their decode.
+  <b>Shipped</b> in main 3bfef16 (2026-09-09): encoder cap 7, decoder accepts up to 10
+  (PIVCO_FSE_NIB_TABLELOG_MAX), so mixed-log streams stay decodable. Re-verified on the landing
+  tree (M4, nibble on): mozilla lit +10.4%, samba +8.9%, x-ray +7.0%, xml +10.0%, mozilla ml/ll
+  +8.0/+6.8%, two_sym_90 2.3×, proba02 1.4×; size within ±0.1% on the streams. proba02 is the new
+  worst size cell, +1.6% — at L=7, 28 of 64 blocks lose the head-to-head to the static tables.</div>
+
+  <h3>1.3 · The nibble path on its real regions (2026-09-08)</h3>
+  <p><b>The question.</b> What does id 51 actually code, and what would a different coder do on exactly
+  those bytes? <code>bmdump.c</code> walks the public table API per 16K block and dumps every internal
+  node's partition bitmap and every flat region's packed n·D bits; <code>coderbench.c</code> runs coders
+  over those regions with per-region tables, headers inside the cost, raw fallback, byte-exact roundtrip.
+  Literal streams are flat-dominated (mozilla: 6.8 MB of flat regions vs 4.7 MB of partition bitmaps).</p>
+  <div class="tablewrap"><table>
+    <caption>Decode ns per region byte · x-ray lit regions · M4 · every arm decodes the same bytes</caption>
+    <tr><th>decoder</th><th>ns/B</th><th>vs shipped</th></tr>
+    <tr><td>shipped id 51 (per-region build, nibble array, recombine pass)</td><td>1.62</td><td class="dim">—</td></tr>
+    <tr><td>prebuilt table + recombine</td><td>1.40</td><td>−14%</td></tr>
+    <tr><td class="a">straight-to-bytes (two FSE states → one byte, no nibble array)</td><td class="w">1.27</td><td class="w">−20%</td></tr>
+    <tr><td>tableLog 7 + straight-to-bytes, per-region build included</td><td>1.47</td><td>−9%</td></tr>
+    <tr><td>stock byte-FSE on the same regions, decode-only / incl. build</td><td>0.41 / 1.20</td><td>3–4× faster</td></tr>
+    <tr><td>pair: 256-sym product table from the SAME 16-sym NCount, decode-only / full</td><td>0.71 / <span class="l">2.99</span></td><td>1.8× yield, build-bound</td></tr>
+  </table></div>
+  <ul class="lessons">
+    <li><b>Straight-to-bytes is free</b>: FSE's two interleaved states already yield (lo, hi) of each
+    byte; fusing the recombine removes the 2n buffer and the second pass. No wire change.</li>
+    <li><b>The nibble path's cost is 2× the steps plus the per-region build</b> — byte-FSE decodes
+    3–4× faster on identical regions. Catalog/canonical tables are the structural lever (§3.1's
+    build-cost law, again).</li>
+    <li><b>pair</b>: the same bytes as nibble (x-ray 92.48 vs 92.49% at tl12) and 1.8× the pure-decode
+    yield, but the per-region 256-symbol build makes it slower end-to-end — viable only under a table
+    cache. On extreme skew it is 2.5–3.7 pp smaller (calgary_pic: finer resolution than a 16-symbol
+    table). Ten tiny calgary_pic regions still fail roundtrip in the prototype.</li>
+    <li><b>A byte table with its own histogram</b> loses on partition bitmaps (header) but wins large
+    flat regions (csv flat 93.9 vs 95.7%, x-ray flat 95.65 vs 96.19%) and decodes 3× faster — a
+    size/kind-adaptive nibble-vs-byte choice is real.</li>
+    <li><b>Position-split tables</b> (pos2) are +0.1–0.8 pp worse everywhere — the second header costs
+    more than it models. Second independent kill (§25).</li>
+    <li><b>Repeat-mode across per-node nibble tables ≈ 0</b> (few reuses) — except calgary_pic 63.2 →
+    58.7%, which is not a repeat-mode win: <code>FSE_compress2</code> bails to raw on extreme-skew
+    regions a neighbour's table codes fine. The p ≥ 0.97 skew-tier hole (§5's Golomb/Rice tier).</li>
+  </ul>
+  <div class="verdict"><b>Verdict</b>
+  Three cheap levers on id 51, none touching the wire: straight-to-bytes decode (−20%), a byte table on
+  large flat regions, and closing the extreme-skew bail-out. Cheap table transmission stays the
+  structural one.</div>
 </section>
 
 <section id="s2">
@@ -580,6 +633,31 @@ streams ── entropy layer ──▶  container    zstd: order-0 FSE/Huffman �
   table cannot collect it — and one shared table over the interleaved bits replaces three skew-matched
   tables, a mixture mismatch that costs more than the adjacent-pair joint the nibble packing captures
   (the mixing-uniformizes law, in route space). Fusion does not transfer to id 51.</div>
+
+  <h3>4.3 · The 4-way merge — one-go vs three binary merges, per arch (2026-09-08)</h3>
+  <p><b>The question.</b> A 4-way merge is a 2-bit route: three binary merges (radix-2) or one-go
+  (<code>merge_vvvv</code>, the quad form of issue #21). <code>bench_merge4way</code>, pure merge, random
+  routing, ns per element.</p>
+  <div class="tablewrap"><table>
+    <caption>ns/elem · pure merge · byte-exact on all four</caption>
+    <tr><th>arch</th><th>binary 3-pass</th><th>one-go 4-way</th><th>winner</th></tr>
+    <tr><td>M4 (NEON)</td><td class="w">0.097</td><td>0.223</td><td>binary 2.3×</td></tr>
+    <tr><td>Graviton4 (NEON)</td><td class="w">0.206</td><td>0.472</td><td>binary 2.3×</td></tr>
+    <tr><td>Granite Rapids (AVX-512)</td><td>0.141</td><td class="w">0.075</td><td>one-go 1.9×</td></tr>
+    <tr><td>Zen5 (AVX-512)</td><td>0.069</td><td class="w">0.049</td><td>one-go 1.4×</td></tr>
+  </table></div>
+  <ul class="lessons">
+    <li><b>Reproduces #21's split exactly</b>: AVX-512 wins through bitplane → kmask → <code>vpexpandb</code>;
+    NEON and SSE have no byte-expand, so the three binary merges win there.</li>
+    <li><b>Wire-compatible</b>: the quad wire is two position-order bitplanes (hi/lo). One-go consumes
+    them directly; the binary form pext's the low plane into the two demuxed child masks at decode. Same
+    bytes, the decoder picks its strategy.</li>
+    <li><b>Transfers to §8.6</b>: k2g4 / k4g16s4 reassembly is the same merge (one plane on the wire
+    there — the previous symbol's class is already known — versus two independent tree levels here).</li>
+  </ul>
+  <div class="verdict"><b>Verdict</b>
+  Per-arch dispatch: one-go on AVX-512, three binary merges on NEON. One kernel serves the quad node and
+  the plane-on-wire literal family.</div>
 </section>
 
 <section id="s5">
@@ -772,6 +850,39 @@ cursors += e.nl, e.nr</code></pre>
     <li><b>Compilers are a lever and a hazard:</b> the same GEN_K2C source ranged from champion to 70%-regression
     across gcc/clang instantiations. Below ~35 instructions/step, code-gen luck is a first-order effect.</li>
   </ul>
+
+  <h3>8.6 · Plane-on-wire reconstruction — merge kernels replace the demux walk (2026-09-08)</h3>
+  <p><b>The idea.</b> §7–§8 rebuild an order-1 literal stream by a serial demux walk: the routing is
+  derived from the byte just emitted. Put the class plane on the wire instead (1 bit/symbol at K=2, 2 at
+  K=4) and reconstruction becomes wavelet merges on the production <code>prim_merge_vec_vec</code> — no
+  serial dependency, so it vectorizes. The conservation law prices it: the plane costs the bits the residue
+  then saves (chain rule), so k2g4 ≈ K2serial in ratio (§9.1) at a parallel decode. Per 16K block the
+  group cursors advance by popcounts of the [prev==a &amp; cur==b] indicators — nothing is tracked per
+  symbol.</p>
+  <div class="tablewrap"><table>
+    <caption>ns per output byte · pure reconstruction, no entropy stage · byte-exact on all four ·
+    <code>g4merge.c</code></caption>
+    <tr><th>kernel</th><th>M4</th><th>Zen5</th><th>GNR</th><th>Graviton4</th></tr>
+    <tr><td>k2g2 merge + OR (raw bit, no rank)</td><td>0.079</td><td>0.063</td><td>0.094</td><td>0.178</td></tr>
+    <tr><td class="a">k2g4 / k4g16s4 (3 × 2-way merge + pext)</td><td>0.163</td><td>0.139</td><td>0.154</td><td class="l">0.424</td></tr>
+    <tr><td class="dim">— merge floor (pext precomputed)</td><td class="dim">0.064</td><td class="dim">0.074</td><td class="dim">0.079</td><td class="dim">0.163</td></tr>
+    <tr><td>K2serial route (k2g, §8.2)</td><td>0.148</td><td>0.229</td><td>0.327</td><td>0.401</td></tr>
+    <tr><td>K4serial route (k4 demux)</td><td>~0.50</td><td>~0.49</td><td>~0.58</td><td>~1.0</td></tr>
+  </table></div>
+  <ul class="lessons">
+    <li><b>The rank bijection is not in these numbers</b>: residue → symbol is a gather (128-entry
+    <code>vqtbl</code>), ~0.10–0.15 ns/B; k2g4 with ranks ≈ 0.30 ns/B on M4. The 0.079 merge+OR is the
+    no-rank (worse-ratio) variant.</li>
+    <li><b>Graviton has no BMI2</b>; scalar pext dominates its 0.424 — a NEON bit-compress would reach the
+    0.163 floor.</li>
+    <li><b>End-to-end with real FSE</b> (<code>sessionspeed.c</code>, M4, ns/B): order0 1.15, k2g4 1.46,
+    k2g2 1.62 — all within 1.4× of order0. The family's differentiator is ratio, not speed.</li>
+    <li>The 4-way merge inside k2g4 wants §4.3's per-arch dispatch (one-go on AVX-512).</li>
+  </ul>
+  <div class="verdict"><b>Verdict</b>
+  K2serial's serial walk and the k2g4 merge are speed peers; the plane buys parallelism, not ns/B.
+  k4g16s4 (4 streams + current-class table switch) is the ratio winner's decode form and is unbuilt —
+  only its ratio is measured.</div>
 </section>
 
 <section id="s9">
@@ -800,6 +911,51 @@ cursors += e.nl, e.nr</code></pre>
   K=16 captures 75–93% of full order-1; K=8 is the sweet spot (scalar demux flat, cap non-binding on text).
   Constrained-clustering lesson: the raw top-bit split is a feasible point, so a correct constrained optimizer can
   never return less than raw — optimize <i>with</i> the cap (capacitated assignment), never optimize-then-project.</div>
+
+  <h3>9.1 · The kN gM family in real FSE (2026-09-08)</h3>
+  <p><b>Naming.</b> kN = N context classes (top bits of the map2/map4 remap); gM = M residue
+  <i>contexts</i> — g = K conditions the residue on the previous class only, g = K² on previous and
+  current. Physical stream count is a separate axis: k4g16 is realizable as 16 streams or as 4 streams
+  plus a current-class table switch (k4g16s4). K2serial / K4serial are the plane-less baselines
+  (full symbols split by previous class, routing derived serially, §8); k2g2 conditions on the previous
+  class only and pays a mixing loss I(residue; cur | prev); k4g4 (4 classes, previous-class residues) is
+  dead on that loss. Every arm: stock <code>FSE_compress</code>, whole-stream tables, NCount in the byte
+  count, raw fallback, full decode-verify; plane = packed class bytes under order-0 FSE (“byte8”);
+  residues = within-class frequency rank (a bijection the decoder derives from the code lengths — free on
+  the wire).</p>
+  <div class="tablewrap"><table>
+    <caption><code>sessionratio.c</code> · compressed size as % of the raw lit stream · L3 literals ·
+    lower is better · re-run 2026-09-09 on the landing tree</caption>
+    <tr><th>lit</th><th>order0</th><th>K2serial</th><th>K4serial</th><th>k2g2</th><th>k2g4</th><th>k4g16</th><th>k4g16 vs o0</th></tr>
+    <tr><td>dickens</td><td>65.39</td><td>64.06</td><td class="w">62.34</td><td>64.92</td><td>64.04</td><td>62.56</td><td>−4.3%</td></tr>
+    <tr><td>webster</td><td>66.52</td><td>65.53</td><td class="w">63.77</td><td class="l">67.21</td><td>65.56</td><td>63.98</td><td>−3.8%</td></tr>
+    <tr><td>xml</td><td>72.69</td><td>68.78</td><td class="w">67.09</td><td>71.68</td><td>68.76</td><td>67.63</td><td>−7.0%</td></tr>
+    <tr><td>samba</td><td>96.72</td><td>95.36</td><td>94.01</td><td>94.58</td><td>94.13</td><td class="w">93.45</td><td>−3.4%</td></tr>
+    <tr><td>x-ray</td><td>85.87</td><td>83.79</td><td>81.92</td><td>84.69</td><td>82.33</td><td class="w">81.16</td><td class="w">−5.5%</td></tr>
+    <tr><td>mozilla</td><td>94.91</td><td>94.50</td><td>93.87</td><td>94.81</td><td>94.39</td><td class="w">93.73</td><td>−1.2%</td></tr>
+  </table></div>
+  <ul class="lessons">
+    <li><b>k4g16 is the ratio winner on binaries</b> (beats K4serial on samba / x-ray / mozilla) and
+    1.2–7.0% under order-0; K4serial wins text by 0.2–0.5 pp. The whole family pays on binary /
+    structured literals only — §9's verdict stands.</li>
+    <li><b>k2g4 ≈ K2serial</b> (chain rule) at a parallel decode; k2g2 is the weakest and negative on
+    webster.</li>
+    <li><b>Rank-aligned residues</b> cut k2g2's mixing loss 4–8× on text and cost nothing at decode.</li>
+    <li><b>The byte8 plane</b> captures ≥100% of I(C;D) on the high-gain streams — but sits below a
+    clean 4-bit-context plane in accounting; a real ctx-coded plane is context-switched, i.e. serial-ish.</li>
+    <li><b>Joint-split optimization flopped in FSE</b>: choosing the class split on (plane + context −
+    mixing loss) rather than context alone — accounting promised +0.5–2.3 pp — gives dickens −0.17 /
+    −0.59, webster k2g2 <span class="l">+1.28 worse</span>, xml ≈ 0, and samba / x-ray / mozilla exactly
+    0 (full 256-alphabet, classes at cap, no split freedom). Claim retracted; the split was tuned to a
+    Shannon objective, not to the byte8-FSE coder.</li>
+    <li><b>K = 8 in accounting</b> (<code>k8_crossfield.py</code>): k8g64 keeps climbing (lit summed
+    4.62 → 7.07%, x-ray 10.6 → 17.0) but violates the ≤ 32-symbols-per-class cap on five of six files,
+    and 64 tables die to per-block headers (§16.1). Not pursued.</li>
+  </ul>
+  <div class="verdict"><b>Verdict</b>
+  k4g16 whole-stream is this family's literal-side ceiling, not a deployable number — §16.1 prices the
+  per-block headers. Shannon accounting and real FSE diverge on this family (joint-split is the clearest
+  case): trust the FSE bytes.</div>
 </section>
 
 <section id="s10">
@@ -1012,6 +1168,73 @@ decode:
   bounds. The brotli block-type-switching form (T=8–16 k-means table banks + switch ids on the marker
   channel; probe F: mozilla T16 = 464 KB vs global-o0) is the transmission-efficient realization; its
   incremental value over per-block ctx rides on the same joint, so one implementation serves both.</div>
+
+  <h3>16.1 · Per-block header erosion, priced in real FSE (2026-09-08)</h3>
+  <p><b>The question.</b> §16's erosion mechanism, applied to the literal family: does k4g16's gain
+  survive per-block tables? <code>sessionratio_blk.c</code> / <code>sessionratio_rep.c</code> at 16K
+  blocks (pivco's Apple block), every block its own plane + residue tables with NCount charged, raw
+  fallback per block and stream; a <i>repeat-mode</i> arm reuses the previous block's table for a 1-byte
+  flag whenever every present symbol has mass in it; an <i>argmax</i> arm picks per block among modes for
+  one mode byte.</p>
+  <div class="tablewrap"><table>
+    <caption>16K blocks · % of raw lit stream · lower is better · per-block tables everywhere</caption>
+    <tr><th>lit</th><th>o0</th><th>K4serial</th><th>k4g16</th><th>+repeat: K4serial</th><th>+repeat: k4g16</th><th>argmax {o0, K4ser}</th><th>+ k4g16 mode</th></tr>
+    <tr><td>dickens</td><td>65.56</td><td class="w">63.43</td><td>64.19</td><td>63.22</td><td>63.88</td><td>63.22</td><td>63.22</td></tr>
+    <tr><td>xml</td><td>66.71</td><td class="w">64.50</td><td>65.53</td><td>64.47</td><td>65.44</td><td>64.45</td><td>64.45</td></tr>
+    <tr><td>samba</td><td>89.85</td><td>89.08</td><td class="l">91.78</td><td>89.07</td><td>90.16</td><td>89.07</td><td>89.07</td></tr>
+    <tr><td>x-ray</td><td>85.59</td><td>83.59</td><td class="w">82.74</td><td>82.91</td><td class="w">81.51</td><td>82.92</td><td class="w">81.52</td></tr>
+    <tr><td>mozilla</td><td class="w">92.83</td><td class="l">93.87</td><td class="l">94.81</td><td>93.43</td><td>92.99</td><td>92.61</td><td class="w">92.41</td></tr>
+  </table></div>
+  <ul class="lessons">
+    <li><b>Per-block adaptation of plain order-0 is the biggest single effect on nonstationary
+    binaries</b>: samba 96.7 → 89.9, xml 72.7 → 66.7, mozilla 94.9 → 92.8 versus whole-stream (§9.1).
+    The whole-stream baseline had hidden this.</li>
+    <li><b>16 tables per block eat k4g16's gain</b>: it survives only on x-ray; K4serial (4 tables) wins
+    text; on mozilla per-block order-0 beats every context scheme.</li>
+    <li><b>NCount repeat-mode</b> recovers 1.2–1.8 pp for the 16-table scheme, ~0.2 for 4 tables.
+    Cheap and general.</li>
+    <li><b>Deployable</b>: per-block argmax {o0, K4serial} = 0.8–2.3 pp; carrying k4g16 as a mode is
+    worth it only for x-ray-class inputs (+1.4 pp there, +0.2 on mozilla).</li>
+  </ul>
+  <div class="verdict"><b>Verdict</b>
+  The lever is cheap table transmission — repeat-mode now, catalog ids / canonical sets next — not more
+  contexts. Every block-granular context coder in this ledger dies without it (§3.1, §16, this).</div>
+
+  <h3>16.2 · Cross-field class context on the code streams, in FSE bytes (2026-09-08)</h3>
+  <p><b>The question.</b> o6's cross-field insight (§13) inside the plane + residue structure: a k4g16
+  coder on ll / ml / of whose context class comes from the <i>other</i> field at the same sequence index.
+  <code>xfield_demux.py</code> + <code>fsesum.c</code>: real <code>FSE_compress</code> bytes,
+  whole-stream tables (= phaz's per-file table policy, so §16.1's erosion does not apply), K = 4,
+  dickens / xml / x-ray / mozilla, plane = 2-bit class quads under order-0 FSE, residues as in §9.1.</p>
+  <div class="tablewrap"><table>
+    <caption>% smaller than order-0 · target ml, K = 4 · “prev” = own-stream previous class · 3-way = (ll, of)</caption>
+    <tr><th>ml</th><th>K4serial</th><th>k4g16 prev</th><th>k4g16 | ll</th><th>k4g16 | of</th><th>3-way</th></tr>
+    <tr><td>dickens</td><td>+0.04</td><td>−0.04</td><td>−0.04</td><td>+0.23</td><td>+0.20</td></tr>
+    <tr><td>xml</td><td>+3.25</td><td>+3.00</td><td>+3.23</td><td>+3.54</td><td>+3.71</td></tr>
+    <tr><td>x-ray</td><td>+0.25</td><td>+0.28</td><td>+0.99</td><td>+0.92</td><td>+1.33</td></tr>
+    <tr><td>mozilla</td><td>+3.54</td><td>+4.97</td><td class="w">+12.27</td><td>+6.48</td><td class="w">+14.40</td></tr>
+    <tr><td class="a">summed</td><td>+2.76</td><td>+3.77</td><td class="w">+9.09</td><td>+4.96</td><td class="w">+10.71</td></tr>
+  </table></div>
+  <div class="tablewrap"><table>
+    <caption>Summed over the four files · % smaller than order-0 · best cross context per target</caption>
+    <tr><th>target</th><th>K4serial</th><th>k4g16 prev</th><th>best cross</th><th>note</th></tr>
+    <tr><td>ll</td><td>3.90</td><td>4.52</td><td class="w">5.60 (| ml)</td><td>x-ray ll | ml −8.05%</td></tr>
+    <tr><td>ml</td><td>2.76</td><td>3.77</td><td class="w">9.09 (| ll)</td><td>mozilla −12.3%, 3-way −14.4%</td></tr>
+    <tr><td>of</td><td>3.08</td><td>3.12</td><td>3.42 (| ml)</td><td class="l">responds to nothing</td></tr>
+  </table></div>
+  <ul class="lessons">
+    <li><b>Accounting deflates ~1.7 pp on each side</b> (Shannon said 10.9 vs 5.5 for ml) — the
+    cross-field <i>advantage</i> (~5.3 pp) is intact.</li>
+    <li><b>Matches §13 / §19 / §20</b>: o6ctans had mozilla ml | ll at −13.9%; the plane + residue form
+    lands at −12.3% with an order-0 plane. The plane is 39–51% of the bytes and coded pessimistically
+    (order-0 over 4-class quads) — a ctx-coded plane adds more.</li>
+    <li><b>of's class plane is ~incompressible</b>; no context helps it here, as in §19.</li>
+    <li>The context comes off the already-decoded ll stream (o6's free-context property), so the decode
+    stays parallel.</li>
+  </ul>
+  <div class="verdict"><b>Verdict</b>
+  §23's build-order #1 (route-conditioned table selection on the code streams) confirmed in bytes:
+  mozilla ml −12…−14% with whole-file tables. This is the largest confirmed ratio lever in the ledger.</div>
 </section>
 
 <section id="s17">
@@ -1272,6 +1495,29 @@ decode:
     planes + gap-coded transmission (§17.1/17.2); (4) E8E9 with the invertible guard (§18);
     (5) grouped-w roundtrip (§14.1 gate passed). The ctx speed program (§3) runs alongside.</li>
   </ul>
+
+  <h3>23.1 · ctx vs k4g16 on literals — complementary, not competing (2026-09-08)</h3>
+  <p>The carry-context coder (ids 52–56, <code>ph-ctx-session.patch</code> over e1bdce0, dict-48) against
+  §9.1's class-context family on the same L3 literal streams. ctx numbers are real
+  <code>pivcohuf</code> whole-file sizes (framing included); k4g16 / K4serial are whole-stream FSE.</p>
+  <div class="tablewrap"><table>
+    <caption>% of raw lit stream · lower is better</caption>
+    <tr><th>lit</th><th>pivco + ctx dict-48</th><th>ctx vs nibble (id 51)</th><th>K4serial / k4g16</th><th>verdict</th></tr>
+    <tr><td>dickens</td><td>66.1</td><td>−0.4%</td><td class="w">62.3 / 62.6</td><td>class order-1 −3.5 pp</td></tr>
+    <tr><td>webster</td><td>67.4</td><td>−0.1%</td><td class="w">63.8 / 64.0</td><td>class order-1 −3.5 pp</td></tr>
+    <tr><td>xml</td><td>67.3</td><td>−0.2%</td><td class="w">67.1 / 67.6</td><td>≈ wash</td></tr>
+    <tr><td>samba</td><td>91.7</td><td>−0.3%</td><td class="w">94.0 / 93.5</td><td>ctx −1.8 pp</td></tr>
+    <tr><td>x-ray</td><td class="w">70.7</td><td class="w">−9.4%</td><td>81.9 / 81.2</td><td class="w">ctx −10.5 pp</td></tr>
+    <tr><td>mozilla</td><td>93.6</td><td>−0.2%</td><td class="w">93.9 / 93.7</td><td>≈ wash</td></tr>
+  </table></div>
+  <ul class="lessons">
+    <li><b>Disjoint structure</b>: bit-context inside the tree (ctx) and symbol-class order-1 (k4g16)
+    capture different things — ctx crushes x-ray, class contexts win text by ~3.5 pp.</li>
+    <li>Stacking order-1 class trees with ctx bitmaps is the route-conditioned selection of §16 / §24,
+    unbuilt.</li>
+  </ul>
+  <div class="verdict"><b>Verdict</b>
+  Same law as the ctx-vs-o6 A/B above: per-stream argmax over the menu, never one coder.</div>
 </section>
 
 <section id="s24">
@@ -1306,7 +1552,7 @@ decode walk (pair context, chain identical to order-0):
 </section>
 
 <section id="s25">
-  <p class="eyebrow">running registry · updated 2026-08-24</p>
+  <p class="eyebrow">running registry · updated 2026-09-09</p>
   <h2>25 · Settled negatives — the do-not-re-explore registry</h2>
   <p>Additions from the 2026-08-24 exploration (older negatives live in the README digest and per-section
   verdicts; all were re-checked by the adversarial review round):</p>
@@ -1338,6 +1584,18 @@ decode walk (pair context, chain identical to order-0):
     inputs — single-file win, declined; would want a marker id, not a selector byte, if ever revived.</li>
     <li><b>W4 nibble-wide ctx under a table cache</b>: strictly worse — ×1.9 loop for a build saving
     the cache already amortizes. Streaming/cold-path only (§3.2).</li>
+    <li><b>Joint-split class optimization for the kN gM family</b> (2026-09-08, §9.1): accounting promised
+    +0.5–2.3 pp; real FSE gives ≤ 0.6 pp, webster worse, and exactly 0 on the binary files where the family
+    wins (full alphabet, no split freedom). Retracted.</li>
+    <li><b>k4g4</b> (4 classes, previous-class residues only): the mixing loss over four shapes kills it.</li>
+    <li><b>Position-split nibble tables for id 51, second kill</b> (2026-09-08, §1.3): +0.1–0.8 pp worse
+    on every region kind — the second NCount costs more than it models.</li>
+    <li><b>pair product-table decode for id 51 as a standalone</b> (§1.3): same bytes, 1.8× decode yield,
+    slower end-to-end — the per-region 256-symbol build. Alive only under a table cache.</li>
+    <li><b>k4g16 whole-stream numbers as a deployable claim</b> (§16.1): 16 per-block tables eat the gain
+    everywhere but x-ray; K4serial wins text, per-block order-0 wins mozilla.</li>
+    <li><b>K = 8 class contexts at block granularity</b> (§9.1): 64 tables, cap violations on five of six
+    files; the accounting climb never survives the headers.</li>
   </ul>
 </section>
 </main>
