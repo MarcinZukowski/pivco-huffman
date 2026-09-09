@@ -994,7 +994,7 @@ int main(int argc, char **argv)
                 t_sfse += best_s;
                 /* dynamic nibble FSE (original, unflipped, like the PR) */
                 size_t best_d = (size_t)nb;
-                if (pivco_fse_compress(PIVCO_FSE_DYNAMIC_ID, bm, (size_t)nb, out, sizeof(out), &olen) == PIVCO_FSE_OK
+                if (pivco_fse_compress(PIVCO_FSE_NIBBLE_ID, bm, (size_t)nb, out, sizeof(out), &olen) == PIVCO_FSE_OK
                     && olen + 2 < (size_t)nb)
                     best_d = olen + 2;
                 t_dans += best_d;
@@ -1168,7 +1168,7 @@ int main(int argc, char **argv)
                         size_t sep = 0;
                         for (int t = 0; t < 3; t++) {
                             size_t dl = 0;
-                            sep += (pivco_fse_compress_dynamic(sbm[t], (size_t)slen[t],
+                            sep += (pivco_fse_compress_nibble(sbm[t], (size_t)slen[t],
                                         dout, sizeof(dout), &dl) == PIVCO_FSE_OK
                                     && dl + 2 < (size_t)slen[t]) ? dl + 2 : (size_t)slen[t];
                         }
@@ -1177,7 +1177,7 @@ int main(int argc, char **argv)
                         for (int i = 0; i < K; i++)
                             qpk[i >> 2] |= (uint8_t)(qs[i] << ((i & 3) * 2));
                         size_t dl = 0;
-                        size_t fus = (pivco_fse_compress_dynamic(qpk, (size_t)flen,
+                        size_t fus = (pivco_fse_compress_nibble(qpk, (size_t)flen,
                                           dout, sizeof(dout), &dl) == PIVCO_FSE_OK
                                       && dl + 2 < (size_t)flen) ? dl + 2 : (size_t)flen;
                         qnd_sep[db] += sep; qnd_fus[db] += fus;

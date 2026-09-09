@@ -210,8 +210,16 @@ static void usage(FILE *out) {
 
 int main(int argc, char **argv)
 {
-    pivco_cfg_t cli_cfg = { PIVCO_TREE_MODE_OPTIMIZED, PIVCO_EFFORT_PLAIN, 0,
-                            PIVCO_FLAT_VERTICAL };
+    /* Default configuration */
+    pivco_cfg_t cli_cfg = {
+        .tree_mode   = PIVCO_TREE_MODE_OPTIMIZED,
+        .effort      = PIVCO_EFFORT_PLAIN,
+        /* off by default, -a / --ans to turn on */
+        .fse_enabled = 0,
+        /* requires fse_enabled to be on to have effect */
+        .fse_nibble_enabled = 1,
+        .flat_layout = PIVCO_FLAT_VERTICAL,
+    };
     int force = 0;
     int repeat = 1;
     int use_ans = 0;   /* -a / --ans : compress with #PHA (ANS-coded bitmaps) */

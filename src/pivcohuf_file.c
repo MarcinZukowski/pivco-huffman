@@ -278,6 +278,8 @@ static int compress_dispatch(const uint8_t *in, size_t in_len,
     if (tm) memset(tm, 0, sizeof(*tm));
     pivco_cfg_t cfg = cfg_in ? *cfg_in : pivco_cfg_default;
     cfg.fse_enabled = use_ans;
+    /* #PHA without an explicit cfg is the CLI's -a: nibble tables on. */
+    if (!cfg_in) cfg.fse_nibble_enabled = use_ans;
     /* FASTEST_COMPRESS is the one effort mode the bare table build
      * cannot resolve (it needs the input size): below 256 KiB plain
      * Huffman lengths encode fastest; above, a flatter tree ENCODES

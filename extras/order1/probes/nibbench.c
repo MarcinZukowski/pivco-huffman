@@ -48,8 +48,8 @@ int main(int argc, char **argv)
     uint64_t commit[PIVCO_FSE_STATS_SLOTS], attempt[PIVCO_FSE_STATS_SLOTS];
     uint64_t bin[PIVCO_FSE_STATS_SLOTS], bout[PIVCO_FSE_STATS_SLOTS];
     pivco_fse_stats_get(commit, attempt, bin, bout);
-    uint64_t dyn_c = commit[PIVCO_FSE_DYNAMIC_ID];
-    uint64_t dyn_in = bin[PIVCO_FSE_DYNAMIC_ID], dyn_out = bout[PIVCO_FSE_DYNAMIC_ID];
+    uint64_t dyn_c = commit[PIVCO_FSE_NIBBLE_ID];
+    uint64_t dyn_in = bin[PIVCO_FSE_NIBBLE_ID], dyn_out = bout[PIVCO_FSE_NIBBLE_ID];
     uint64_t sta_c = 0;
     for (int i = 1; i <= PIVCO_FSE_NUM_TABLES; i++) sta_c += commit[i];
 
