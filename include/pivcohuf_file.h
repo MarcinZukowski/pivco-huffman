@@ -114,9 +114,10 @@ int pivcohuf_compress(const uint8_t *in, size_t in_len,
                       uint8_t *out, size_t *out_len);
 
 /* As pivcohuf_compress, but `use_ans != 0` selects #PHA: per-block partition
- * bitmaps may be ANS(FSE)-coded — static tables plus the per-bitmap nibble
- * table (pivco_cfg_t.fse_enabled + fse_nibble_enabled) — for a better ratio
- * on skewed data, at some decode cost.  Same wire format and decoder —
+ * bitmaps may be ANS(FSE)-coded with the static table schedule for a better
+ * ratio on skewed data, at some decode cost (the transmitted-table
+ * candidates, pivco_cfg_t.fse_nibble_enabled / fse_k1_enabled, are opt-in
+ * through pivcohuf_compress_cfg).  Same wire format and decoder —
  * pivcohuf_decompress auto-detects the ANS-coded blocks, so pha and ph
  * streams decompress identically. */
 int pivcohuf_compress_ex(const uint8_t *in, size_t in_len,

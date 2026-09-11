@@ -42,6 +42,10 @@ _Static_assert(PIVCO_FSE_NIBBLE_ID <= 0x7F,
                "PIVCO_FSE_NIBBLE_ID must fit the wire marker's 7-bit table field");
 _Static_assert(PIVCO_FSE_NIB_TABLELOG <= PIVCO_FSE_NIB_TABLELOG_MAX,
                "nibble encoder tableLog must not exceed what the decoder accepts");
+_Static_assert(PIVCO_FSE_STATS_SLOTS >= PIVCO_FSE_K1_ID + 1,
+               "PIVCO_FSE_STATS_SLOTS must cover the k=1 table id");
+_Static_assert(PIVCO_FSE_K1_ID == PIVCO_FSE_NIBBLE_ID + 1 && PIVCO_FSE_K1_ID <= 0x7F,
+               "PIVCO_FSE_K1_ID must follow the nibble id and fit the 7-bit marker field");
 
 /* One CTable + one DTable per pre-built distribution.  Slot 0 is
  * reserved (matches marker 0 = "no FSE").  Allocated by
@@ -211,6 +215,8 @@ pivco_fse_status_t pivco_fse_compress(int table_id,
 {
     if (table_id == PIVCO_FSE_NIBBLE_ID)
         return pivco_fse_compress_nibble(src, src_len, dst, dst_cap, out_len);
+    if (table_id == PIVCO_FSE_K1_ID)
+        return pivco_k1_compress(src, src_len, dst, dst_cap, 0, out_len);
 
     pivco_fse_init();
     if (!g_init_ok) return PIVCO_FSE_ERR_INTERNAL;
@@ -246,6 +252,9 @@ pivco_fse_status_t pivco_fse_decompress(int table_id,
     if (table_id == PIVCO_FSE_NIBBLE_ID)
         return pivco_fse_decompress_nibble(src, src_len, dst, dst_cap,
                                              dst_expected, out_len);
+    if (table_id == PIVCO_FSE_K1_ID)
+        return pivco_k1_decompress(src, src_len, dst, dst_cap,
+                                   dst_expected, out_len);
 
     pivco_fse_init();
     if (!g_init_ok) return PIVCO_FSE_ERR_INTERNAL;

@@ -8,6 +8,9 @@
 ### CONSIDERED — open / parked / research direction
 
 **General**
+- [Encode walk context: FSE staging from the arena, flags from the table](#encode-walk-context-fse-staging-from-the-arena-flags-from-the-table-2026-09-11)
+- [Regime-switching bitmaps: runs and alternations inside one region](#regime-switching-bitmaps-runs-and-alternations-inside-one-region-2026-09-11)
+- [k1 catalog halved by complement symmetry](#k1-catalog-halved-by-complement-symmetry-2026-09-10)
 - [Per-block table ring for pivcohuf/phaz (shelved)](#per-block-table-ring-for-pivcohufphaz-2026-09-03-shelved-branch-per-block-ring)
 - [Vertical flat regions: layout defaults, mid-band forms, text trims](#vertical-flat-regions-layout-defaults-mid-band-forms-text-trims-2026-08-17)
 - [Composed c2s tables for vertical D=2/4 steps](#composed-c2s-tables-for-vertical-d24-steps-2026-08-18)
@@ -128,6 +131,70 @@
 ## CONSIDERED
 
 **General**
+
+### Encode walk context: FSE staging from the arena, flags from the table, 2026-09-11
+Small follow-up to the k1 landing.  `codec_fse_try` stages its
+candidates in a stack VLA up to 33 KB and mallocs above that (a
+depth-8 flat root packs to N bytes, so two halves of 2*nbytes+64 reach
+4*N+128), and takes the three candidate flags as parameters.  Both
+already exist elsewhere: the flags on `pivco_table_t`, and per-encode
+scratch in the arena the entry carves `ranks` / `tmp` / `region_buf`
+from.  Add a walk-level struct {table, fse_stage, node_markers} passed
+through `codec_encode_node` (tmp stays a parameter, it advances per
+level), carve a 4*N+128 `fse_stage` slice when the table has FSE on,
+and let `codec_fse_try` read flags and staging from it: no malloc, no
+VLA, no 33 KB frame in a recursion on a 512 KB thread stack; static
+vs not is implied by n (flat regions pass 0).  Output byte-identical;
+own commit so the recursion signature change reviews alone.
+
+### Regime-switching bitmaps: runs and alternations inside one region, 2026-09-11
+Open problem.  On literal streams of byte-periodic data (x-ray's 16-bit
+samples, mozilla/samba binaries) a region's bits switch between regimes:
+runs of 0x00, runs of 0xff, stretches of 0xaa/0x55 alternation, noise:
+
+    ffffbfaaaa6a55551501000000000000500000001600c0010000653a94fa
+
+Measured on the 1358 x-ray/lit regions k1 commits (280 KB): order-0
+byte entropy 136 KB, k1 model cost 176 KB, k1 table at L=10 169 KB,
+static schedule 241 KB.  Neither fixed-table coder sees it: the
+static schedule prices a byte by its popcount, k1 averages the regimes
+into one pair of transition probabilities that fits none of them (0xaa
+gets 0.013% against a 6% share).  The transmitted nibble table gets
+there (x-ray/lit -5.4% against k1's -2.3%) at half the decode speed.
+k1-side fixes tried analytically and by A/B: a bigger table makes it
+worse (a finer copy of the wrong model; L=12 loses 1.3% on these
+regions and drops 79 of them under the gain gate), smoothing toward the
+catalog average recovers 2-4% of the 23% gap.  What is wanted is a
+coder for sequences of bits with run and alternation structure -- a
+run-length or regime-aware model, or a cheap in-region recipe switch --
+not a better order-1 table.
+Side findings from the same session, k1 catalog only: (1) the
+normalizer's deficit rule takes the whole deficit from the top symbol;
+reserve the forced slots, rescale, floor, then hand the leftover to
+the largest fractional parts (bucket select, ~0.3 us/table) -- mean
+table tax 0.31 -> 0.22 bits/byte, +0.02 points overall; (2) the L=10
+floor is a 25% flat smoothing that the skewed corner does not want
+(x-ray/ml -61.2% vs static -64.4%; L=12 recovers it) and the mid
+recipes do want -- per-recipe L, or per-recipe mix weight, decided by
+the recipe's own entropy, is the data-free form; (3) compiling in the
+normalized frequency vectors (256 KB) makes both a generator-time
+choice and takes libm out of the wire.
+
+### k1 catalog halved by complement symmetry, 2026-09-10
+Complementing a bitmap maps recipe (P(1|0), P(1|1)) = (a, b) to
+(1-b, 1-a), and the grid is closed under p -> 1-p, so the carry-1
+table of every recipe is the carry-0 table of its mirror with the
+symbols complemented.  The 2 MB catalog (256 recipes x 2 carries x
+4 KB at L=10) can hold 256 tables instead of 512.  Two layouts, same
+tables: (1) keep only carry-0 tables and XOR each decoded byte with
+-carry, one ALU op per symbol that may hide behind the table-load
+chain; (2) keep both carries for the 128 canonical recipes, decode a
+mirrored region under its mirror recipe with the initial carry flipped,
+and XOR the region's output per u64 afterwards.  No quartering:
+reversal, the only other transform inside the order-1 family, maps
+every recipe to itself.  Wire changes (FSE's spread is symbol-order
+dependent).  TODO: measure both layouts; the footprint matters most on
+Zen 5 (1 MB L2).
 
 ### Per-block table ring for pivcohuf/phaz, 2026-09-03, shelved (branch per-block-ring)
 Every block carries its own Huffman table -- REUSE one of the last 8
@@ -435,6 +502,9 @@ RVV maps well: `vcompress` = partition, `vrgather` = TBL, **`vsuxei8` = native i
 ## DONE
 
 **General**
+
+### k=1 bit-context table (wire id 52), 2026-09-10
+A third per-region candidate next to the static schedule and the nibble table: the region's bits are modeled as P(bit | previous bit), two grid-quantized probabilities in one recipe byte, coded byte-at-a-time by tANS tables derived from the recipe (two per recipe, one per carry).  256 recipes form a complete catalog built on first use, so the decoder builds nothing per region.  Design points measured on the way: min-freq-1 normalization beats a 257-symbol ESC alphabet (the escape fires on 2–4% of bytes, and the floor's one slot is cheaper than 8 raw bits plus the ESC symbol); the carry-indexed table buys 12–16% of the gain for ~10% of the loop; L=10 halves the catalog for a size wash; 8 interleaved segments above 128 bytes with initial-state absorption match the static path's loop at zero output cost; the region's tables are prefetched up front because 80–92% of consecutive regions change recipe; the recipe comes from popcounts of bit pairs (4× cheaper than a byte table) and a closed-form price skips the walk on losers.  With the 20% minimum-saving gate for transmitted-table candidates: k1 alone −2.46% vs pure PH (static −1.72%) at 0.6–1.0× the static path's decode speed on the L3 streams; k1 wins the code streams (mozilla ml −3.5% vs static −1.8% at 6.7 vs 8.4 GB/s), the nibble table keeps flat-heavy literals, both together −3.13%.  `docs/FSE-V0.md` has the section.
 
 ### FSE markers hoisted to a block-level prefix, 2026-09-01
 The per-node FSE marker (`0 raw / 1..25 FSE table id / 0x80|id XOR flip`) no longer sits inline before each non-flat internal node's bitmap.  A block emits its markers once, in a prefix after the block-N header: an (M+1)-bit presence bitmap (bit 0 = "any node FSE-coded", bit i+1 = node i) then one value byte per set node.  #PH and any all-raw #PHA block spend a single byte.  Markers are keyed by node id via the tree's non-flat-internal pre-order, cached in the table at build time (`marker_positions` / `mk_count`), so decode reads them with no per-block tree walk.  Size: −0.14% #PHA / −0.15% #PH (silesia + pivoted streams); decode neutral-to-faster, encode +~1–2% (regions staged then copied after the prefix).  The write/read prefix functions measured ~0.1–0.2% of E2E, so they stay scalar (branchless / SIMD not worth it).  Commit `bb7a50e`.

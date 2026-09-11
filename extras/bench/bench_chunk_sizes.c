@@ -9,6 +9,8 @@
  *                partition skew (no per-node table header)
  *   pivco+nibANS ... + nibble ANS: the static schedule *and* the per-bitmap
  *                nibble table (PIVCO_FSE_NIBBLE_ID), smaller payload wins
+ *   pivco+k1ANS  ... + the k=1 bit-context table (PIVCO_FSE_K1_ID) instead
+ *   pivco+allANS ... + both transmitted-table candidates
  *   fse          Yann's TANS straight over the chunk's bytes
  *                (FSE_compress -- order-0, self-describing)
  *
@@ -73,11 +75,13 @@
 /* Per-chunk block-type tag (CODED / RAW / RLE). */
 #define BLOCK_TAG_BYTES 1
 
-enum { C_PIVCO = 0, C_PIVCO_SANS, C_PIVCO_NIBANS, C_FSE, N_CODECS };
+enum { C_PIVCO = 0, C_PIVCO_SANS, C_PIVCO_NIBANS, C_PIVCO_K1ANS, C_PIVCO_ALLANS,
+       C_FSE, N_CODECS };
 
 static const char *codec_name[N_CODECS] = {
-    "pivco", "pivco+sANS", "pivco+nibANS", "fse",
+    "pivco", "pivco+sANS", "pivco+nibANS", "pivco+k1ANS", "pivco+allANS", "fse",
 };
+#define N_PIVCO 5   /* the pivco variants, in codec order */
 
 static pivco_flat_layout_t g_flat_layout = PIVCO_FLAT_VERTICAL;
 static const char *g_flat_name = "vertical";
@@ -86,7 +90,8 @@ static int g_per_file_table = 0;
 typedef struct {
     uint64_t bytes;        /* header-inclusive compressed size */
     uint64_t raw_chunks;   /* chunks that fell back to a stored copy */
-    uint64_t dyn_commits;  /* nibble-table bitmaps committed (pivco+nibANS) */
+    uint64_t dyn_commits;  /* nibble-table regions committed */
+    uint64_t k1_commits;   /* k=1-table regions committed */
 } codec_totals_t;
 
 /* ---------- helpers ---------- */
@@ -161,11 +166,12 @@ static size_t pivco_header_bytes(const pivco_table_t *table)
  * lengths, so the encoder must use the table they reconstruct. */
 static int pivco_make_table(const uint64_t freq[PIVCO_MAX_SYMBOLS],
                             int fse_enabled, int fse_nibble_enabled,
-                            pivco_table_t *out)
+                            int fse_k1_enabled, pivco_table_t *out)
 {
     pivco_cfg_t cfg = pivco_cfg_default;
     cfg.fse_enabled = fse_enabled;
     cfg.fse_nibble_enabled = fse_nibble_enabled;
+    cfg.fse_k1_enabled = fse_k1_enabled;
     cfg.flat_layout = g_flat_layout;
 
     pivco_table_t real_table;
@@ -285,7 +291,7 @@ static int run_one(const char *path, size_t chunk, codec_totals_t grand[N_CODECS
     uint8_t *dec = (uint8_t *)malloc(dec_cap);
     if (!enc || !dec) { free(enc); free(dec); free(buf); return 1; }
 
-    codec_totals_t tot[N_CODECS] = {{0, 0, 0}};
+    codec_totals_t tot[N_CODECS] = {{0, 0, 0, 0}};
     size_t nchunks = 0, last_chunk = 0, nrle = 0;
     double entropy_bits = 0.0;
     int failed = 0;
@@ -299,17 +305,19 @@ static int run_one(const char *path, size_t chunk, codec_totals_t grand[N_CODECS
      * being measured.  Default is nonetheless per-chunk, matching what
      * FSE_compress does (a fresh table per chunk) so both sides adapt at
      * the same rate; --table per-file shows the container's policy. */
-    struct { int fse, dyn; } variant[3] = { {0, 0}, {1, 0}, {1, 1} };
-    pivco_table_t file_table[3];
+    struct { int fse, dyn, k1; } variant[N_PIVCO] = {
+        {0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {1, 0, 1}, {1, 1, 1},
+    };
+    pivco_table_t file_table[N_PIVCO];
     size_t per_chunk_hdr = 0;   /* set per chunk when tables are per-chunk */
     if (g_per_file_table) {
         uint64_t freq[PIVCO_MAX_SYMBOLS] = {0};
         if (pivco_histogram(bench_enc_ctx(), buf, len, freq) != PIVCO_OK) {
             free(enc); free(dec); free(buf); return 1;
         }
-        for (int v = 0; v < 3; v++) {
+        for (int v = 0; v < N_PIVCO; v++) {
             if (!pivco_make_table(freq, variant[v].fse, variant[v].dyn,
-                                  &file_table[v])) {
+                                  variant[v].k1, &file_table[v])) {
                 fprintf(stderr, "%s: table build failed\n", path);
                 free(enc); free(dec); free(buf); return 1;
             }
@@ -330,9 +338,9 @@ static int run_one(const char *path, size_t chunk, codec_totals_t grand[N_CODECS
             continue;
         }
 
-        for (int v = 0; v < 3; v++) {
-            /* Reset per chunk so the nibble-commit count is attributable
-             * to this variant alone. */
+        for (int v = 0; v < N_PIVCO; v++) {
+            /* Reset per chunk so the commit counts are attributable to
+             * this variant alone. */
             pivco_fse_stats_reset();
             pivco_table_t chunk_table;
             const pivco_table_t *table = &file_table[v];
@@ -340,7 +348,7 @@ static int run_one(const char *path, size_t chunk, codec_totals_t grand[N_CODECS
                 uint64_t freq[PIVCO_MAX_SYMBOLS] = {0};
                 if (pivco_histogram(bench_enc_ctx(), src, n, freq) != PIVCO_OK ||
                     !pivco_make_table(freq, variant[v].fse, variant[v].dyn,
-                                      &chunk_table)) {
+                                      variant[v].k1, &chunk_table)) {
                     fprintf(stderr, "%s: table build failed at offset %zu\n",
                             path, off);
                     failed = 1;
@@ -360,11 +368,12 @@ static int run_one(const char *path, size_t chunk, codec_totals_t grand[N_CODECS
             }
             tot[v].bytes += sz;
             tot[v].raw_chunks += (uint64_t)stored;
-            if (v == C_PIVCO_NIBANS) {
+            if (variant[v].dyn || variant[v].k1) {
                 uint64_t commit[PIVCO_FSE_STATS_SLOTS], attempt[PIVCO_FSE_STATS_SLOTS];
                 uint64_t bin[PIVCO_FSE_STATS_SLOTS], bout[PIVCO_FSE_STATS_SLOTS];
                 pivco_fse_stats_get(commit, attempt, bin, bout);
                 tot[v].dyn_commits += commit[PIVCO_FSE_NIBBLE_ID];
+                tot[v].k1_commits  += commit[PIVCO_FSE_K1_ID];
             }
         }
         if (failed) break;
@@ -387,14 +396,17 @@ static int run_one(const char *path, size_t chunk, codec_totals_t grand[N_CODECS
     printf("%zu bytes, %zu chunk%s of %zu (last %zu), %zu constant (RLE)\n",
            len, nchunks, nchunks == 1 ? "" : "s", chunk, last_chunk, nrle);
     print_table((uint64_t)len, entropy_bits / 8.0, tot);
-    printf("pivco+nibANS committed the nibble table on %llu bitmap%s\n\n",
+    printf("regions committed: nibANS %llu nibble; k1ANS %llu k1; allANS %llu nibble + %llu k1\n\n",
            (unsigned long long)tot[C_PIVCO_NIBANS].dyn_commits,
-           tot[C_PIVCO_NIBANS].dyn_commits == 1 ? "" : "s");
+           (unsigned long long)tot[C_PIVCO_K1ANS].k1_commits,
+           (unsigned long long)tot[C_PIVCO_ALLANS].dyn_commits,
+           (unsigned long long)tot[C_PIVCO_ALLANS].k1_commits);
 
     for (int c = 0; c < N_CODECS; c++) {
         grand[c].bytes       += tot[c].bytes;
         grand[c].raw_chunks  += tot[c].raw_chunks;
         grand[c].dyn_commits += tot[c].dyn_commits;
+        grand[c].k1_commits  += tot[c].k1_commits;
     }
     *grand_raw += len;
     *grand_entropy_bits += entropy_bits;
@@ -451,7 +463,7 @@ int main(int argc, char **argv)
         return 2;
     }
 
-    codec_totals_t grand[N_CODECS] = {{0, 0, 0}};
+    codec_totals_t grand[N_CODECS] = {{0, 0, 0, 0}};
     uint64_t grand_raw = 0;
     double grand_entropy_bits = 0.0;
     int nfiles = 0, nfail = 0;

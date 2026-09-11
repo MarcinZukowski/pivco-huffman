@@ -131,7 +131,7 @@
  *        marker_slot = *out_ptr;  *marker_slot = 0;  *out_ptr += 1;
  *        bm = *out_ptr;  *out_ptr += bitmap_bytes(n);
  *        n_right = prim_enc_partition_<m>(ranks, n, split_rank, bm, ...);
- *        codec_maybe_fse_attempt(...);  // may rewrite marker + bm,
+ *        codec_fse_try(...);  // may rewrite marker + bm,
  *                                       // adjust *out_ptr on commit
  *        wire_commit_kr_header(kr_slot, n_right);
  *

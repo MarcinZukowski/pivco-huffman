@@ -1,4 +1,4 @@
-/* nibbench: id-51 tableLog sweep bench.  Compress (PHA, dynamic on) +
+/* nibbench: id-51 tableLog sweep bench.  Compress (PHA, nibble table on) +
  * decompress one file in-process; report size, enc/dec speed (best-of),
  * and slot-51 commit stats.  Link against a lib built with the desired
  * -DPIVCO_FSE_NIB_TABLELOG. */
@@ -28,6 +28,10 @@ int main(int argc, char **argv)
     if (!f || fread(src, 1, n, f) != n) { perror("read"); return 1; }
     fclose(f);
 
+    /* PHA with the nibble table on: the candidate this bench exists for */
+    pivco_cfg_t cfg = pivco_cfg_default;
+    cfg.fse_enabled = 1;
+    cfg.fse_nibble_enabled = 1;
     size_t cap = pivcohuf_compress_bound(n);
     uint8_t *c = malloc(cap);
     uint8_t *d = malloc(n + 64);
@@ -38,7 +42,7 @@ int main(int argc, char **argv)
         pivco_fse_stats_reset();
         size_t l = cap;
         double t = now();
-        if (pivcohuf_compress_ex(src, n, c, &l, 1) != PIVCOHUF_OK) {
+        if (pivcohuf_compress_cfg(src, n, c, &l, &cfg, PIVCO_BLOCK_SIZE, NULL) != PIVCOHUF_OK) {
             fprintf(stderr, "compress fail\n"); return 1;
         }
         double dt = now() - t;

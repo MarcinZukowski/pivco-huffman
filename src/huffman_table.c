@@ -313,6 +313,7 @@ int pivco_build_table(const pivco_cfg_t *cfg,
         build_single_symbol_table(used[0], table);
         table->fse_enabled = (uint8_t)(cfg->fse_enabled ? 1 : 0);
         table->fse_nibble_enabled = (uint8_t)(cfg->fse_nibble_enabled ? 1 : 0);
+        table->fse_k1_enabled = (uint8_t)(cfg->fse_k1_enabled ? 1 : 0);
         table->flat_layout = (uint8_t)cfg->flat_layout;
         return PIVCO_OK;
     }
@@ -371,6 +372,7 @@ static int build_table_finish(const uint8_t lengths[PIVCO_MAX_SYMBOLS],
 {
     table->fse_enabled = (uint8_t)(cfg->fse_enabled ? 1 : 0);
     table->fse_nibble_enabled = (uint8_t)(cfg->fse_nibble_enabled ? 1 : 0);
+    table->fse_k1_enabled = (uint8_t)(cfg->fse_k1_enabled ? 1 : 0);
     table->flat_layout = (uint8_t)cfg->flat_layout;
     /* Copy lengths to table */
     for (int i = 0; i < PIVCO_MAX_SYMBOLS; i++) {
@@ -846,6 +848,7 @@ int pivco_build_table_from_code_lens(
         build_single_symbol_table(last, table);
         table->fse_enabled = (uint8_t)(cfg->fse_enabled ? 1 : 0);
         table->fse_nibble_enabled = (uint8_t)(cfg->fse_nibble_enabled ? 1 : 0);
+        table->fse_k1_enabled = (uint8_t)(cfg->fse_k1_enabled ? 1 : 0);
         table->flat_layout = (uint8_t)cfg->flat_layout;
         return PIVCO_OK;
     }

@@ -102,6 +102,31 @@ static uint8_t *encode_scratch_ensure(pivco_scratch_t *sc, size_t need)
 #ifndef PIVCO_FSE_MIN_BITMAP_BYTES
 #define PIVCO_FSE_MIN_BITMAP_BYTES 32
 #endif
+/* Smallest regions the transmitted-table candidates are tried on:
+ * below these the table description (a 16-symbol NCount, or the k=1
+ * recipe byte plus its state flushes) cannot pay for itself. */
+#ifndef PIVCO_FSE_NIBBLE_MIN_BYTES
+#define PIVCO_FSE_NIBBLE_MIN_BYTES 8
+#endif
+#ifndef PIVCO_FSE_K1_MIN_BYTES
+#define PIVCO_FSE_K1_MIN_BYTES 16
+#endif
+/* Per-region commit gates for the transmitted-table candidates: the
+ * coded region must save at least this fraction of the raw region.
+ * These coders decode far slower than a raw merge (~0.15 ns per byte):
+ * the nibble table at ~2.8 ns per coded byte, k=1 at ~1.0, so regions
+ * that save little cost more time than they are worth, and the two
+ * deserve their own dials.  Measured with both at the same value on the
+ * L3 streams + datasets (M4): 0.05 keeps 93% of the unconstrained gain
+ * at 1.4-2.5x the whole-file decode speed on text-like streams, 0.10
+ * keeps ~85% at ~1.3x more, 0.20 keeps ~65% at 2-3x overall.  0 commits
+ * on any saving. */
+#ifndef PIVCO_FSE_NIBBLE_MIN_GAIN
+#define PIVCO_FSE_NIBBLE_MIN_GAIN 0.20
+#endif
+#ifndef PIVCO_FSE_K1_MIN_GAIN
+#define PIVCO_FSE_K1_MIN_GAIN 0.20
+#endif
 
 /* FSE per-table-id stats live in src/pivco_huffman.c (backend-neutral
  * TU) so the symbols resolve regardless of backend.  codec.c writes
@@ -169,66 +194,118 @@ static inline void codec_fse_commit(uint8_t *marker_slot, uint8_t *body,
     g_pivco_fse_bytes_in [t_id] += (uint64_t)nbytes;
     g_pivco_fse_bytes_out[t_id] += (uint64_t)(fse_len + 3);
 }
+
+/* Compute the maximum accepted size for a coded region of nbytes.
+ * The size depends on the min_gain expected, but also pays
+ * extra 2 bytes needed on the wire when coded.
+ * (raw form has marker+bytes, coded form has marker+length+payload). */
+static inline size_t codec_table_len_bound(int nbytes, double min_gain)
+{
+    size_t keep = (size_t)nbytes - (size_t)((double)nbytes * min_gain);
+    return keep > 2 ? keep - 2 : 0;
+}
 #endif
 
-/* Arch-agnostic FSE attempt on a freshly-built raw bitmap.
+/* Largest staging kept on the stack: two halves of 2*nbytes + 64 (`cap` in
+ * codec_fse_try) for the largest internal-node bitmap.  Only flat regions
+ * can be bigger -- a depth-8 flat root over a full block packs to
+ * 32 KiB -- and those go to the heap rather than a 128 KiB stack frame. */
+#define CODEC_FSE_STACK_STAGE (2 * (2 * (PIVCO_WIRE_MAX_N / 8 + 1) + 64))
+
+/* Arch-agnostic FSE attempt on a freshly-emitted raw region: an internal
+ * node's bitmap, or a flat subtree's packed n*D bits.  Returns 1 on
+ * commit.
  *
- * Two candidates are tried and the smaller payload wins:
+ * Up to three candidates are tried, each behind its own gate, and the
+ * smallest payload wins:
  *
  *   static  — one of the PIVCO_FSE_NUM_TABLES pre-built byte-alphabet
  *             tables, picked from the partition skew.  Zero header
  *             cost, but only applies to bitmaps skewed enough
  *             (p_major >= PIVCO_FSE_MIN_THRESHOLD) for the schedule to
- *             model them.
- *   nibble  — PIVCO_FSE_NIBBLE_ID: the bitmap's bytes split into
- *             nibbles and coded with a table fitted to *this* bitmap's
+ *             model them, and only past the per-region speed gate.
+ *             Internal nodes only: a flat body has no left/right split
+ *             to key on, and by bit density it would qualify on ~6% of
+ *             flat bytes for ~10% there.
+ *   nibble  — PIVCO_FSE_NIBBLE_ID: the region's bytes split into
+ *             nibbles and coded with a table fitted to *this* region's
  *             nibble histogram, table description included in the
- *             payload.  Applies to any bitmap, and pays for its own
- *             header inside the length it reports — so comparing raw
- *             payload lengths already accounts for it.
+ *             payload.  Applies to any region; the length it reports
+ *             includes its header.  Gated on PIVCO_FSE_NIBBLE_MIN_GAIN.
+ *   k=1     — PIVCO_FSE_K1_ID: the region's bits coded under a
+ *             P(bit | previous bit) model, one recipe byte on the wire,
+ *             tables from the catalog (pivco_k1.c).  Gated on
+ *             PIVCO_FSE_K1_MIN_GAIN.
+ *
+ * Flat regions are where FSE matters most on literal streams: a
+ * depth-D flat subtree gives all 2^D of its symbols the same code
+ * length *by construction*, so plain Huffman models their true
+ * frequencies not at all, and FSE over the packed n*D bits is what
+ * recovers that.  A flat `body` must be packed in PIVCO_FLAT_NATURAL,
+ * NOT table->flat_layout.  When D does not divide 4 a nibble straddles
+ * code boundaries, so its value encodes a tuple of neighbouring codes --
+ * and under natural packing those are *adjacent source symbols*, which
+ * makes runs collapse the tuple distribution onto a few values.  That
+ * is order-1 structure an order-0 nibble coder gets to capture for
+ * free.  The vertical layouts gather at lane stride 16, which breaks
+ * the runs and reverts the tuple distribution to the product of the
+ * marginals: measured cost 0.30% over the corpus, 1.69% on
+ * x-ray.serial, and exactly 0 at D == 4 (a nibble is then one whole
+ * code, so grouping cannot matter) and for i.i.d. input.  The marker
+ * byte tells the decoder which layout to unpack with, so the raw path
+ * keeps the configured layout and its decode speed.
  *
  * Inputs:
- *   fse_on       — table->fse_enabled; 0 disables both candidates
- *   nibble_on       — table->fse_nibble_enabled; 0 leaves only the static one
+ *   static_on    — try the static schedule (internal nodes); 0 for flat
+ *                  regions
+ *   nibble_on    — table->fse_nibble_enabled; 0 skips the nibble candidate
+ *   k1_on        — table->fse_k1_enabled; 0 skips the k=1 candidate
  *                  (decode is unaffected either way — it dispatches on
- *                  the wire marker and always knows both forms)
+ *                  the wire marker and always knows every form)
  *   marker_slot  — points at the 1-byte FSE marker (currently 0 = raw)
- *   bm           — points at the ceil(n/8)-byte raw bitmap region
- *                  immediately after the marker
- *   nbytes       — bitmap_bytes(n)
- *   n / n_left / n_right — partition counts (for the skew test)
- *   depth        — for the codeword-cost gate
+ *   body         — the nbytes-byte raw region, already in the stream
+ *   n / n_left / n_right — partition counts (static skew test)
+ *   depth        — static codeword-cost gate
  *   out_ptr      — cursor; advanced past the FSE payload on commit
  *
- * On commit: rewrites *marker_slot, replaces bm with [fse_len:u16
+ * On commit: rewrites *marker_slot, replaces body with [fse_len:u16
  * LE][fse_payload], advances *out_ptr to one past the payload.  Stats
  * (g_pivco_fse_*) are bumped.
  *
  * On no-commit / no-attempt: stream and stats untouched.
  *
- * No-op when PIVCO_HAS_FSE is not defined. */
-static inline void codec_maybe_fse_attempt(int fse_on, int nibble_on,
-                                            uint8_t *marker_slot,
-                                            uint8_t *bm, int nbytes,
-                                            int n, int n_left, int n_right,
-                                            int depth, uint8_t **out_ptr)
+ * No-op when PIVCO_HAS_FSE is not defined -- the marker byte is still
+ * written by the caller, so the wire layout does not depend on it. */
+
+static inline int codec_fse_try(int static_on, int nibble_on, int k1_on,
+                                uint8_t *marker_slot,
+                                uint8_t *body, int nbytes,
+                                int n, int n_left, int n_right,
+                                int depth, uint8_t **out_ptr)
 {
 #ifdef PIVCO_HAS_FSE
-    if (!fse_on) return;
-
+    /* Two staging halves: the best candidate so far and the one being
+     * tried; a winner is kept by swapping the pointers.  2*nbytes+64,
+     * not nbytes+64: FSE's internal incompressibility test is against
+     * the nibble count (2*nbytes), so it can hand back a payload larger
+     * than the raw region, which pivco_fse_compress_nibble then rejects. */
+    size_t   cap = 2 * (size_t)nbytes + 64;
+    uint8_t  stack_stage[2 * cap <= CODEC_FSE_STACK_STAGE ? 2 * cap : 1];
+    uint8_t *buf = 2 * cap <= CODEC_FSE_STACK_STAGE ? stack_stage
+                                                    : (uint8_t *)malloc(2 * cap);
+    if (!buf) return 0;
+    uint8_t *best_out = buf, *try_out = buf + cap;
     int     best_id  = 0;
     int     best_xor = 0;
-    size_t  best_len = 0;
-    /* Either surviving candidate is strictly shorter than the raw region
-     * (that is each one's commit gate), so nbytes + 64 holds it. */
-    uint8_t best_out[(size_t)nbytes + 64];
+    size_t  best_len = 0, try_len = 0;
 
     /* ---- candidate 1: static table ----
      * Needs a skewed bitmap; the fixed schedule bottoms out at
      * pivco_fse_freq[1] and modelling a near-50/50 bitmap with it costs
      * more than it saves.  Also size-gated: below MIN_BITMAP_BYTES the
      * attempt is not worth the encoder time. */
-    int static_id = (nbytes >= PIVCO_FSE_MIN_BITMAP_BYTES &&
+    int static_id = (static_on &&
+                     nbytes >= PIVCO_FSE_MIN_BITMAP_BYTES &&
                      n > 0 &&
                      (double)((n_left >= n_right) ? n_left : n_right) /
                        (double)n >= PIVCO_FSE_MIN_THRESHOLD)
@@ -239,19 +316,19 @@ static inline void codec_maybe_fse_attempt(int fse_on, int nibble_on,
     if (static_id >= 1) {
         PIVCO_CHECK(static_id < PIVCO_FSE_STATS_SLOTS);  /* guards the g_pivco_fse_* indexing */
         /* Flip when the right side is the majority: the tables are all
-         * tuned for "0 is the frequent bit". */
+         * tuned for "0 is the frequent bit".  The flipped copy borrows
+         * the try half. */
         int xor_flag = (n_right > n_left);
-        uint8_t scratch[(size_t)nbytes + 16];
+        uint8_t *scratch = try_out;
         if (xor_flag) {
-            for (int i = 0; i < nbytes; i++) scratch[i] = (uint8_t)~bm[i];
+            for (int i = 0; i < nbytes; i++) scratch[i] = (uint8_t)~body[i];
         } else {
-            memcpy(scratch, bm, (size_t)nbytes);
+            memcpy(scratch, body, (size_t)nbytes);
         }
         size_t len = 0;
         pivco_fse_status_t rc = pivco_fse_compress(static_id, scratch,
                                                     (size_t)nbytes,
-                                                    best_out, sizeof(best_out),
-                                                    &len);
+                                                    best_out, cap, &len);
         g_pivco_fse_attempt[static_id]++;
         /* Per-codeword commit gate (see docs/FSE-V0.md):
          *   raw: every codeword through this node costs (depth + 1) bits
@@ -270,9 +347,9 @@ static inline void codec_maybe_fse_attempt(int fse_on, int nibble_on,
     }
 
     /* ---- candidate 2: nibble table ----
-     * No skew or size precondition: a bitmap the fixed byte-alphabet
-     * schedule cannot model may still have a lopsided nibble histogram.
-     * Coded from `bm` directly, so no xor flip, and the reported length
+     * No skew precondition: a bitmap the fixed byte-alphabet schedule
+     * cannot model may still have a lopsided nibble histogram.  Coded
+     * from `body` directly, so no xor flip, and the reported length
      * already includes the table description.
      *
      * Gated purely on the byte saving (the commit test below) -- deliberately
@@ -280,108 +357,72 @@ static inline void codec_maybe_fse_attempt(int fse_on, int nibble_on,
      * here was why this codec lost to plain FSE on literal streams: it
      * declines most deep nodes, where the ratio tends to 1 with depth no
      * matter how many bytes the coding actually saves. */
-    if (nibble_on) {
-        /* Staging is 2*nbytes+64, not nbytes+64: FSE's internal
-         * incompressibility test is against the nibble count (2*nbytes),
-         * so it can hand back a payload larger than the raw region,
-         * which pivco_fse_compress_nibble then rejects. */
-        uint8_t dyn_out[2 * (size_t)nbytes + 64];
-        size_t dyn_len = 0;
-        pivco_fse_status_t rc = pivco_fse_compress_nibble(bm, (size_t)nbytes,
-                                                            dyn_out,
-                                                            sizeof(dyn_out),
-                                                            &dyn_len);
+    if (nibble_on && nbytes >= PIVCO_FSE_NIBBLE_MIN_BYTES) {
+        size_t lim = codec_table_len_bound(nbytes, PIVCO_FSE_NIBBLE_MIN_GAIN);
+        if (best_id >= 1 && best_len < lim) lim = best_len;
+        pivco_fse_status_t rc = pivco_fse_compress_nibble(body, (size_t)nbytes,
+                                                            try_out, cap,
+                                                            &try_len);
         g_pivco_fse_attempt[PIVCO_FSE_NIBBLE_ID]++;
-        if (rc == PIVCO_FSE_OK && dyn_len + 2 < (size_t)nbytes &&
-            (best_id < 1 || dyn_len < best_len)) {
+        if (rc == PIVCO_FSE_OK && try_len < lim) {
             best_id  = PIVCO_FSE_NIBBLE_ID;
             best_xor = 0;
-            best_len = dyn_len;
-            memcpy(best_out, dyn_out, dyn_len);
+            best_len = try_len;
+            uint8_t *t = best_out; best_out = try_out; try_out = t;
         }
     }
 
+    /* ---- candidate 3: k=1 bit-context table ----
+     * A recipe byte names two grid probabilities; the tables come from
+     * the catalog.  Same gain gate as the nibble table. */
+    if (k1_on && nbytes >= PIVCO_FSE_K1_MIN_BYTES) {
+        size_t lim = codec_table_len_bound(nbytes, PIVCO_FSE_K1_MIN_GAIN);
+        if (best_id >= 1 && best_len < lim) lim = best_len;
+        /* lim == 0: no payload can commit, and max_len 0 would mean "no
+         * limit" to the pricing skip. */
+        if (lim > 0) {
+            pivco_fse_status_t rc = pivco_k1_compress(body, (size_t)nbytes,
+                                                      try_out, cap,
+                                                      lim - 1, &try_len);
+            g_pivco_fse_attempt[PIVCO_FSE_K1_ID]++;
+            if (rc == PIVCO_FSE_OK && try_len < lim) {
+                best_id  = PIVCO_FSE_K1_ID;
+                best_xor = 0;
+                best_len = try_len;
+                uint8_t *t = best_out; best_out = try_out; try_out = t;
+            }
+        }
+    }
+
+    int committed = 0;
     if (best_id < 1) {
         g_pivco_fse_commit[0]++;     /* slot 0 = attempted, rejected */
-        return;
+    } else {
+        codec_fse_commit(marker_slot, body, nbytes, best_id, best_xor,
+                          best_out, best_len, out_ptr);
+        committed = 1;
     }
-    codec_fse_commit(marker_slot, bm, nbytes, best_id, best_xor,
-                      best_out, best_len, out_ptr);
+    if (buf != stack_stage) free(buf);
+    return committed;
 #else
-    (void)fse_on; (void)nibble_on; (void)marker_slot; (void)bm; (void)nbytes;
-    (void)n; (void)n_left; (void)n_right; (void)depth; (void)out_ptr;
-#endif
-}
-
-/* Is a flat region worth a nibble attempt?  Split out from the
- * attempt itself because the caller has to know the answer *before* it
- * packs: an FSE'd region is packed naturally, a raw one in the
- * configured layout (see codec_maybe_fse_flat). */
-static inline int codec_flat_fse_eligible(const pivco_table_t *table, int nbytes)
-{
-#ifdef PIVCO_HAS_FSE
-    /* Below ~8 bytes a 16-symbol NCount cannot pay for itself. */
-    return table->fse_enabled && table->fse_nibble_enabled && nbytes >= 8;
-#else
-    (void)table; (void)nbytes;
+    (void)static_on; (void)nibble_on; (void)k1_on; (void)marker_slot; (void)body;
+    (void)nbytes; (void)n; (void)n_left; (void)n_right; (void)depth; (void)out_ptr;
     return 0;
 #endif
 }
 
-/* Nibble attempt on a flat-subtree region.  Returns 1 on commit.
- *
- * Flat regions are the other half of the source codec's design that the
- * first port left out: a depth-D flat subtree gives all 2^D of its
- * symbols the same code length *by construction*, so plain Huffman
- * models their true frequencies not at all.  Nibble-FSE over the packed
- * n*D bits is what recovers that -- and on literal streams, where the
- * bulk of the data sits in flat subtrees, it is where most of the win
- * is.  Same [marker][fse_len:u16][payload] record as an internal node's
- * bitmap; only the nibble table is tried (there is no partition skew
- * for the static schedule to key on).
- *
- * `body` must be packed in PIVCO_FLAT_NATURAL, NOT table->flat_layout.
- * When D does not divide 4 a nibble straddles code boundaries, so its
- * value encodes a tuple of neighbouring codes -- and under natural
- * packing those are *adjacent source symbols*, which makes runs collapse
- * the tuple distribution onto a few values.  That is order-1 structure
- * an order-0 nibble coder gets to capture for free.  The vertical
- * layouts gather at lane stride 16, which breaks the runs and reverts
- * the tuple distribution to the product of the marginals: measured cost
- * 0.30% over the corpus, 1.69% on x-ray.serial, and exactly 0 at D == 4
- * (a nibble is then one whole code, so grouping cannot matter) and for
- * i.i.d. input.  The marker byte tells the decoder which layout to
- * unpack with, so the raw path keeps the configured layout and its
- * decode speed.
- *
- * No-op when PIVCO_HAS_FSE is not defined -- the marker byte is still
- * written by the caller, so the wire layout does not depend on it. */
-static inline int codec_maybe_fse_flat(uint8_t *marker_slot,
-                                        uint8_t *body, int nbytes,
-                                        uint8_t **out_ptr)
+/* Is a flat region worth an FSE attempt?  Split out from the attempt
+ * itself because the caller has to know the answer *before* it packs:
+ * an FSE'd region is packed naturally, a raw one in the configured
+ * layout (see codec_fse_try). */
+static inline int codec_flat_fse_eligible(const pivco_table_t *table, int nbytes)
 {
 #ifdef PIVCO_HAS_FSE
-    /* Heap, not a VLA: a depth-8 flat root over a full block packs to
-     * 32 KiB, so the 2*nbytes staging would be a 64 KiB stack frame. */
-    size_t cap = 2 * (size_t)nbytes + 64;
-    uint8_t *dyn_out = (uint8_t *)malloc(cap);
-    if (!dyn_out) return 0;
-    size_t dyn_len = 0;
-    pivco_fse_status_t rc = pivco_fse_compress_nibble(body, (size_t)nbytes,
-                                                        dyn_out, cap, &dyn_len);
-    g_pivco_fse_attempt[PIVCO_FSE_NIBBLE_ID]++;
-    /* Raw record costs 1 + nbytes, coded costs 3 + dyn_len. */
-    if (rc != PIVCO_FSE_OK || dyn_len + 2 >= (size_t)nbytes) {
-        g_pivco_fse_commit[0]++;
-        free(dyn_out);
-        return 0;
-    }
-    codec_fse_commit(marker_slot, body, nbytes, PIVCO_FSE_NIBBLE_ID, 0,
-                      dyn_out, dyn_len, out_ptr);
-    free(dyn_out);
-    return 1;
+    return table->fse_enabled &&
+           ((table->fse_nibble_enabled && nbytes >= PIVCO_FSE_NIBBLE_MIN_BYTES) ||
+            (table->fse_k1_enabled && nbytes >= PIVCO_FSE_K1_MIN_BYTES));
 #else
-    (void)marker_slot; (void)body; (void)nbytes; (void)out_ptr;
+    (void)table; (void)nbytes;
     return 0;
 #endif
 }
@@ -403,7 +444,7 @@ static void codec_encode_node(const pivco_table_t *table,
     /* Flat-subtree path: a marker byte then n*D packed bits (no K_right).
      * The marker is written unconditionally, exactly like an internal
      * node's, so the wire layout does not depend on the encoder's FSE
-     * settings; codec_maybe_fse_flat may then replace the packed bits
+     * settings; codec_fse_try may then replace the packed bits
      * with an FSE record in place. */
     if (table->flat_depth[node_id] >= 2) {
         int D = table->flat_depth[node_id];
@@ -417,7 +458,7 @@ static void codec_encode_node(const pivco_table_t *table,
 
         /* Pack naturally first when an FSE attempt is on the table: the
          * nibble coder wants adjacent codes sharing a byte (see
-         * codec_maybe_fse_flat).  If the attempt does not commit we
+         * codec_fse_try).  If the attempt does not commit we
          * re-pack in the configured layout over the same bytes, which
          * costs an extra pack only on regions FSE declined. */
         int try_fse = codec_flat_fse_eligible(table, total_bytes);
@@ -428,7 +469,10 @@ static void codec_encode_node(const pivco_table_t *table,
         PROF_TOC(PROF_ENC_FLAT, n);
 
         if (try_fse) {
-            if (codec_maybe_fse_flat(marker_slot, body, total_bytes, out_ptr))
+            if (codec_fse_try(0, table->fse_nibble_enabled,
+                              table->fse_k1_enabled,
+                              marker_slot, body, total_bytes,
+                              0, 0, 0, 0, out_ptr))
                 return;                     /* committed, natural-packed */
             if (table->flat_layout != PIVCO_FLAT_NATURAL) {
                 PROF_TIC();
@@ -502,9 +546,10 @@ static void codec_encode_node(const pivco_table_t *table,
     uint8_t *bm = *out_ptr;
     memcpy(bm, bm_stage, (size_t)nbytes);
     *out_ptr += nbytes;
-    codec_maybe_fse_attempt(table->fse_enabled, table->fse_nibble_enabled,
-                             &node_markers[node_id], bm, nbytes,
-                             n, n_left, n_right, depth, out_ptr);
+    if (table->fse_enabled)
+        codec_fse_try(1, table->fse_nibble_enabled, table->fse_k1_enabled,
+                      &node_markers[node_id], bm, nbytes,
+                      n, n_left, n_right, depth, out_ptr);
 }
 
 /* Write this block's marker prefix at `out`; returns its length.  Empty (0
@@ -675,7 +720,7 @@ static void codec_decode_subtree(const pivco_table_t *table,
         const uint8_t *c2s =
             &table->flat_code_to_sym[table->flat_offset[node_id]];
         /* An FSE-coded region is always natural-packed, whatever the
-         * table's configured layout (see codec_maybe_fse_flat). */
+         * table's configured layout (see codec_fse_try). */
         if (fse_coded) prim_merge_flat_natural(out, K, bm, D, c2s);
         else           prim_merge_flat(out, K, bm, D, c2s, table->flat_layout);
         free(owned);

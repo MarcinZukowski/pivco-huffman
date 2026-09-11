@@ -125,6 +125,7 @@ const pivco_cfg_t pivco_cfg_default = {
     .effort      = PIVCO_EFFORT_PLAIN,
     .fse_enabled = 1,
     .fse_nibble_enabled = 0,
+    .fse_k1_enabled = 0,
     .flat_layout = PIVCO_FLAT_VERTICAL,
 };
 

@@ -741,9 +741,9 @@ the byte-alphabet static tables average over.
 
 ### Selection
 
-`codec_maybe_fse_attempt` now runs both candidates on every
-bitmap ≥ `PIVCO_FSE_MIN_BITMAP_BYTES` and keeps the shorter
-payload:
+The attempt runs both candidates (static and nibble; the k=1 table
+joined on 2026-09-10, see below) on every bitmap that passes their
+size floors and keeps the shorter payload:
 
 - **static** — unchanged, still gated on
   `p_major >= PIVCO_FSE_MIN_THRESHOLD`, still xor-flipped so the
@@ -844,9 +844,10 @@ flat regions carry the bulk of the bytes.  Nibble-FSE over the packed
 region recovers that.
 
 So a flat region carries the same `[marker][body]` record as an internal
-node's bitmap (+1 byte per flat region), with only the nibble table
-tried — a flat region has no partition skew for the static schedule to
-key on.  See `codec_maybe_fse_flat` and `wire_read_flat_region`.
+node's bitmap (+1 byte per flat region), with only the transmitted
+tables tried (nibble, and since 2026-09-10 k=1) — a flat region has no
+partition skew for the static schedule to key on.  See `codec_fse_try`
+and `wire_read_flat_region`.
 
 ### The nibble candidate uses a gain gate, not the static speed gate
 
@@ -1012,3 +1013,91 @@ on the slow path.  Main bench: html_wiki 589 → 500 M/s, json_api 534 →
 469, chinese_text 599 → 552 (calgary_pic went the other way, 1295 →
 1333).  Compression moved with it — html_wiki 2890541 → 2884344,
 json_api 2663054 → 2658177, chinese_text 3018031 → 3007199.
+
+## 2026-09-10 — k=1 bit-context table (table id 52)
+
+The order-1 ledger's k-ladder (`extras/order1/RESULTS.html` §3.3)
+showed that on post-LZ streams most of the carry-context coder's win
+comes from the first context bit: P(bit | previous bit) keeps 55–90%
+of what k=2/4 with a parameter dictionary gets, and it is the one
+order whose parameter space enumerates — two 4-bit grid indices, 256
+recipes, a complete prebuilt catalog.  That is what `src/pivco_k1.c`
+lands as the third candidate beside the static schedule and the
+nibble table.
+
+### Design choices
+
+- **Byte-alphabet tANS from a bit model.**  Each recipe expands to two
+  256-symbol tables (one per carry, the previous byte's top bit) whose
+  probabilities are the chain-rule products of the bit probabilities,
+  quantized into 16 probability ranges.
+  One dependent lookup per byte, like the static path.
+- **No escape symbol.**  Measured against a 257-symbol ESC alphabet on
+  the L3 streams and the datasets: the two-parameter model calls common
+  bytes negligible often enough that the escape fired on 2–4% of bytes,
+  and one forced slot (min-freq-1) is cheaper than 8 raw bits plus the
+  ESC symbol.  Floor: −0.39% of output vs ESC, and a compare-free loop.
+- **Carry stays.**  Dropping the carry-indexed table costs 12–16% of
+  the gain (mozilla codes +0.7–0.9%) for ~10% of the loop at equal
+  table footprint.
+- **L = 10.**  Half the catalog of L = 11 (2 MB of decode tables),
+  decode −18% on the streams, size a wash.
+- **8 interleaved segments above 128 bytes, with absorption.**  Each
+  segment's first-encoded symbol is absorbed into its initial state
+  (FSE's `initCState2`), which pays for the extra state flushes: 8
+  segments cost the same output as 4 did without absorption and bring
+  the warm loop to 0.50 ns/B against the static x8 loop's 0.43.  The
+  128-byte split costs +0.14% of output against a 1 KiB one and halves
+  the per-region decode time; most regions are 300–900 bytes.
+- **Table prefetch per region.**  80–92% of consecutive regions change
+  recipe, so every region starts cold; fetching the 128 lines up front
+  overlaps the misses.  Whole-file A/B, k1 arm, prefetch on vs off:
+  Granite Rapids +1–6.5%, Zen 5 +1–4%, Graviton 4 a wash, M4 +1–10% on
+  the code streams and −1.5% on the literals (large regions amortize
+  the cold table and pay the 128 instructions).  Build knob
+  `PIVCO_K1_PREFETCH`.
+- **Recipe from popcounts.**  The (previous bit, bit) pair counts come
+  from three popcounts per 64-bit word (two more count the 0x00 / 0xFF
+  bytes for the price correction), 4× cheaper than a per-byte table;
+  the grid index is a 15-threshold binary search on the ratio.
+- **Priced before coded.**  The bit counts give the coded size to
+  within ±4% on 90% of regions; the encoder skips the tANS walk when
+  the estimate scaled by `PIVCO_K1_EST_SKIP` exceeds the caller's
+  limit.  The estimate runs high on regions dominated by one byte value
+  (normalization prices 0x00/0xFF differently from the model; a per-
+  region correction for those two values recovers part of it), so the
+  factor is a dial: 0.80 lossless at 1.3–1.5× compress, 0.85 (shipped)
+  +0.02% for 1.3–1.8×.
+- **Minimum-saving gate for both transmitted-table candidates.**  These
+  coders decode at ~1 ns (k=1) to ~3 ns (nibble) per coded byte against
+  ~0.15 for a raw merge,
+  and at a pure gain gate they committed on 20–40% of the input for
+  mostly small savings.  `PIVCO_FSE_NIBBLE_MIN_GAIN` / `PIVCO_FSE_K1_MIN_GAIN`
+  (both 0.20, separate dials since the nibble path decodes ~3× slower
+  per byte than k1) keep ~65%
+  of the unconstrained gain at 2–3× the whole-file decode speed.
+
+### Measured (M4, 16 KiB blocks, L3 literal/code streams + the datasets)
+
+Size vs pure PH and whole-file decode MB/s, all candidates at the 20%
+gate:
+
+| stream            | sANS   | +nibble|   +k1  | +both  | PH    | sANS | +nib | +k1  | +both|
+|-------------------|-------:|-------:|-------:|-------:|------:|-----:|-----:|-----:|-----:|
+| x-ray lit         |  −0.48 |  −5.36 |  −2.40 |  −5.78 |  7968 | 7047 | 1694 | 5036 | 1932 |
+| mozilla lit       |  −0.92 |  −1.06 |  −1.05 |  −1.10 |  8114 | 6756 | 5478 | 6478 | 5699 |
+| mozilla ll        |  −3.19 |  −4.93 |  −4.95 |  −5.28 | 13222 | 8722 | 4756 | 8102 | 5956 |
+| mozilla ml        |  −1.82 |  −4.53 |  −3.49 |  −4.84 | 11764 | 8369 | 3778 | 7186 | 4485 |
+| mozilla of        |  −2.89 |  −5.20 |  −5.71 |  −5.97 | 14498 | 8182 | 3632 | 6830 | 5719 |
+| calgary_pic       | −33.30 | −39.49 | −39.96 | −40.31 | 22314 | 5766 | 2333 | 6038 | 3918 |
+| csv_numeric       |  −5.22 | −10.13 |  −9.30 | −10.74 | 13158 | 6329 | 2381 | 5263 | 3521 |
+| total (29 inputs) |  −1.72 |  −2.95 |  −2.46 |  −3.13 |       |      |      |      |      |
+
+k1 wins the code streams outright (better ratio than the nibble table
+at 1.4–1.9× its decode speed); the nibble table keeps the flat-heavy
+literals, where a per-region histogram models leaf frequencies a
+two-parameter bit chain cannot; both together is the best ratio on 28
+of 29 inputs.  The remaining k1 decode cost over the static path is the
+cold table per region; the wire-level fix (recipe byte in the block
+marker prefix, so the next region's table can be prefetched during the
+current one) is not done.

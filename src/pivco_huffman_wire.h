@@ -47,8 +47,14 @@
  *   selects the nibble table: the payload
  *   starts with an FSE_writeNCount table description fitted to this
  *   bitmap's nibble histogram, followed by the coded nibbles (low nibble
- *   of each raw byte first); xor_flag is always 0 there.  Both forms are
- *   decoded by pivco_fse_decompress(), which dispatches on table_id.
+ *   of each raw byte first); xor_flag is always 0 there.
+ * table_id == PIVCO_FSE_K1_ID
+ *   selects the k=1 bit-context table: the payload is one recipe byte
+ *   (two 4-bit grid indices for P(bit | previous bit)) followed by the
+ *   tANS bits, coded from a prebuilt catalog; xor_flag is always 0.
+ *
+ * All forms are decoded by pivco_fse_decompress(), which dispatches on
+ * table_id.
  *
  * The order above is exactly the order the BU decoder consumes bytes.
  * It needs both child counts up front to size the children's buffers
@@ -87,7 +93,7 @@
  * subtree gives all 2^D of its symbols the same code length by
  * construction — Huffman models their real frequencies not at all, and
  * on literal streams that is where most of the residual redundancy is.
- * See wire_read_flat_region below and codec_maybe_fse_flat.
+ * See wire_read_flat_region below and codec_fse_try.
  *
  * The RAW form's bit layout follows table->flat_layout — natural,
  * hybrid vertical, or 128-only vertical (see pivco_huffman_vertical.h);
@@ -97,7 +103,7 @@
  * nibble table feeds on (worth 0.30% over the corpus, 1.69% on
  * x-ray.serial).  The marker byte therefore selects the unpack kernel,
  * not table->flat_layout — see wire_read_flat_region and
- * codec_maybe_fse_flat.  Vertical keeps its decode speed on the raw
+ * codec_fse_try.  Vertical keeps its decode speed on the raw
  * path, which is where it matters.  See pivco_huffman.h:flat_depth.
  *
  * Internal header, not part of the public API.
@@ -243,7 +249,8 @@ static inline const uint8_t *wire_read_bitmap(const uint8_t **in_ptr,
 #define PIVCO_FLAT_FSE_SLACK 128
 
 /* Read a flat-subtree region: [marker][n*D packed bits] when marker == 0,
- * or [marker][fse_len:u16 LE][payload] for the nibble table.
+ * or [marker][fse_len:u16 LE][payload] for a transmitted table (nibble
+ * or k=1).
  *
  * Returns a pointer to `nbytes` usable packed bytes -- straight into the
  * input stream for the raw form (the common case, no copy), or into a
@@ -254,7 +261,7 @@ static inline const uint8_t *wire_read_bitmap(const uint8_t **in_ptr,
  * the bytes are in: the raw form uses table->flat_layout, the FSE form
  * is ALWAYS PIVCO_FLAT_NATURAL (the encoder packs it that way so the
  * nibble table sees adjacent codes sharing a byte -- see
- * codec_maybe_fse_flat).  Callers must pick the unpack kernel from it,
+ * codec_fse_try).  Callers must pick the unpack kernel from it,
  * not from the table.
  *
  * *owned and *fse_coded are always written (*owned NULL when nothing was

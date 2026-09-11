@@ -49,8 +49,10 @@ caveats first:
 | `PIVCO_NIB2` | id-51 position-split experiment (1 = forced split, 2 = best-of with selector byte) |
 
 On main since 3bfef16 (2026-09-09) the nibble table is production:
-`pivco_cfg_t.fse_nibble_enabled` (opt-in; the CLI's `-a` and
-`pivcohuf_compress_ex(.., 1)` set it), `PIVCO_FSE_NIB_TABLELOG` = 7 with the
+`pivco_cfg_t.fse_nibble_enabled` (opt-in; the CLI's `-a --ans-nibble` sets
+it; `pivcohuf_compress_ex(.., 1)` is the static schedule only, so `nibbench`
+passes a cfg, while phaz's `compress_ex` calls deliberately stay on the
+static schedule until the nibble / k1 trade-offs are settled), `PIVCO_FSE_NIB_TABLELOG` = 7 with the
 `#ifndef` still honouring `-DPIVCO_FSE_NIB_TABLELOG=$L` for sweeps, and a
 decoder cap `PIVCO_FSE_NIB_TABLELOG_MAX` = 10.
 

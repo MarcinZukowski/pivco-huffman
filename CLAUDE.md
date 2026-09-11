@@ -98,6 +98,7 @@ five phases ending 2026-05-14; before that, each backend had its own
 - `src/pivco_huffman_primitives_x86.h` — SSE4.1 + AVX2 primitive implementations
 - `src/pivco_huffman_primitives_avx512.h` — AVX-512 VBMI2 primitive implementations
 - `src/pivco_huffman_wire.h` — single source of truth for the per-node wire record (K_right + FSE marker + bitmap)
+- `src/pivco_k1.c` — the k=1 bit-context tANS candidate (wire id 52): 256-recipe catalog, 8-way interleaved decode, fast pricing gate based on statistics
 - `src/pivco_huffman_neon_tables.{c,h}` — shared NEON compress_tab + expand_tab
 - `src/pivco_huffman_x86_tables.{c,h}` — shared x86 compress_tab + expand_tab (used by codec_x86 + codec_avx512 BU SSE-tail)
 - `src/pivco_huffman_neon_flat.h` — D=2..6 NEON unpack helpers (shared with bench_micro)
@@ -111,7 +112,7 @@ five phases ending 2026-05-14; before that, each backend had its own
 - `extras/bench/bench_partition_skew.c` — per-distribution partition-skewness histogram
 - `extras/bench/bench_multicore.c` — multi-threaded decode scaling vs huf0_x2
 - `extras/bench/bench_chunk_sizes.c` — per-chunk header-inclusive size comparison
-  over arbitrary files: pivco / pivco+static-ANS / pivco+dynamic-ANS / fse,
+  over arbitrary files: pivco / +static ANS / +nibble / +k1 / +both / fse,
   all measured against a summed per-chunk order-0 entropy floor
 - `extras/bench/bench_coalesce.c` + `bench_coalesce_avx512.c` — store-coalescing experiments (all losers)
 - `extras/profile_m4.sh` + `profile_xctrace_parse.py` — one-line xctrace Time Profiler capture + per-source-line aggregator

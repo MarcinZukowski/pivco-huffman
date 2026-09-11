@@ -191,6 +191,10 @@ static void usage(FILE *out) {
         "Flags:\n"
         "  -a, --ans             compress with PHA (ANS-coded bitmaps; better\n"
         "                        ratio on skewed data).  decompress auto-detects.\n"
+        "  --ans-nibble          with -a: also try the per-region nibble table\n"
+        "                        (id 51); smaller payload wins\n"
+        "  --ans-k1              with -a: also try the k=1 bit-context table\n"
+        "                        (id 52); smaller payload wins\n"
         "  -b, --block-size N    symbols per block (1..65535; default per-arch).\n"
         "                        recorded in the stream; decompress reads it back.\n"
         "  -e, --effort N        compress-time shaping effort (0..4, default 1):\n"
@@ -216,8 +220,10 @@ int main(int argc, char **argv)
         .effort      = PIVCO_EFFORT_PLAIN,
         /* off by default, -a / --ans to turn on */
         .fse_enabled = 0,
-        /* requires fse_enabled to be on to have effect */
-        .fse_nibble_enabled = 1,
+        /* the transmitted-table candidates need fse_enabled and their
+         * own flag: --ans-nibble / --ans-k1 */
+        .fse_nibble_enabled = 0,
+        .fse_k1_enabled = 0,
         .flat_layout = PIVCO_FLAT_VERTICAL,
     };
     int force = 0;
@@ -234,6 +240,10 @@ int main(int argc, char **argv)
         } else if ((argv[i][0] == '-' && argv[i][1] == 'a' && argv[i][2] == '\0')
                    || strcmp(argv[i], "--ans") == 0) {
             use_ans = 1;
+        } else if (strcmp(argv[i], "--ans-nibble") == 0) {
+            cli_cfg.fse_nibble_enabled = 1;
+        } else if (strcmp(argv[i], "--ans-k1") == 0) {
+            cli_cfg.fse_k1_enabled = 1;
         } else if (argv[i][0] == '-' && argv[i][1] == 'r' && argv[i][2] == '\0'
                    && i + 1 < argc) {
             repeat = atoi(argv[i + 1]);

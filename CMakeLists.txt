@@ -106,6 +106,7 @@ if(PIVCO_FSE)
     add_compile_definitions(PIVCO_HAS_FSE=1)
     list(APPEND PIVCO_SOURCES
         src/pivco_fse.c
+        src/pivco_k1.c
         ext/fse/lib/fse_compress.c
         ext/fse/lib/fse_decompress.c
         ext/fse/lib/entropy_common.c

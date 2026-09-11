@@ -445,6 +445,157 @@ static int test_fse_nibble(void)
     printf("PASS (%d lengths, %d fallbacks)\n", tested, fell_back);
     return 0;
 }
+
+/* k=1 bit-context table (PIVCO_FSE_K1_ID): one recipe byte on the wire,
+ * tables from the catalog.  Sweep every length from 16 to 615 (both
+ * sides of the PIVCO_K1_SPLIT_MIN segment split) plus a set of large
+ * sizes, over i.i.d. densities and Markov chains with strong
+ * run persistence either way; go through the direct entry points and
+ * the table-id dispatch, which is the only path the wire decoder
+ * takes. */
+static int test_fse_k1(void)
+{
+    printf("[fse_k1] ");
+    uint64_t rng = 0x5eed0f0dd15c0b1eULL;
+    /* {P(1 | prev 0), P(1 | prev 1)}: i.i.d. densities, then chains. */
+    const double chains[][2] = {
+        { 0.50, 0.50 }, { 0.20, 0.20 }, { 0.05, 0.05 },
+        { 0.90, 0.10 }, { 0.05, 0.95 }, { 0.30, 0.70 }, { 0.98, 0.98 },
+    };
+    const size_t big[] = { 1000, 1023, 1024, 1025, 1040, 2048, 4095, 4096, 16384, 32768 };
+    static uint8_t src[32768], enc[32768 + 64], enc2[32768 + 64], dec[32768 + 16];
+    int tested = 0, fell_back = 0;
+    for (size_t ci = 0; ci < sizeof(chains) / sizeof(chains[0]); ci++) {
+        for (size_t li = 0; li < 600 + sizeof(big) / sizeof(big[0]); li++) {
+            size_t n = li < 600 ? 16 + li : big[li - 600];
+            int prev = 0;
+            for (size_t i = 0; i < n; i++) {
+                uint8_t b = 0;
+                for (int j = 0; j < 8; j++) {
+                    double u = (double)(xorshift64(&rng) >> 11) / 9007199254740992.0;
+                    int bit = u < chains[ci][prev];
+                    b |= (uint8_t)(bit << j);
+                    prev = bit;
+                }
+                src[i] = b;
+            }
+            size_t clen = 0;
+            pivco_fse_status_t rc = pivco_k1_compress(src, n, enc, sizeof(enc), 0, &clen);
+            if (rc == PIVCO_FSE_FALLBACK) { fell_back++; continue; }
+            if (rc != PIVCO_FSE_OK) FAIL("compress n=%zu rc=%d", n, rc);
+            if (clen >= n) FAIL("k1 committed a payload >= raw (n=%zu clen=%zu)", n, clen);
+
+            size_t olen = 0;
+            memset(dec, 0xCB, sizeof(dec));
+            rc = pivco_fse_decompress(PIVCO_FSE_K1_ID, enc, clen, dec, sizeof(dec), n, &olen);
+            if (rc != PIVCO_FSE_OK) FAIL("decompress n=%zu rc=%d", n, rc);
+            if (olen != n) FAIL("olen %zu != n %zu", olen, n);
+            if (memcmp(src, dec, n) != 0) {
+                size_t i; for (i = 0; i < n && src[i] == dec[i]; i++) ;
+                FAIL("mismatch n=%zu chain=%zu at byte %zu", n, ci, i);
+            }
+            size_t clen2 = 0;
+            rc = pivco_fse_compress(PIVCO_FSE_K1_ID, src, n, enc2, sizeof(enc2), &clen2);
+            if (rc != PIVCO_FSE_OK || clen2 != clen || memcmp(enc, enc2, clen) != 0)
+                FAIL("compress dispatch differs from direct call (n=%zu)", n);
+            /* Damaged payloads: a tANS bitstream carries no integrity
+             * check, so a payload cut short can still decode to n bytes
+             * of garbage (fse_len on the wire is what bounds the read);
+             * what must hold is that every read stays inside the payload
+             * (ASan) and a success always fills n bytes. */
+            if (li % 37 == 0) {
+                const size_t cuts[] = { 1, 2, clen / 2, clen - 1 };
+                for (size_t c = 0; c < sizeof(cuts) / sizeof(cuts[0]); c++) {
+                    if (cuts[c] >= clen) continue;
+                    olen = 0;
+                    rc = pivco_fse_decompress(PIVCO_FSE_K1_ID, enc, cuts[c], dec, sizeof(dec), n, &olen);
+                    if (rc == PIVCO_FSE_OK && olen != n) FAIL("truncated payload: OK with olen %zu != n %zu", olen, n);
+                }
+                memcpy(enc2, enc, clen);
+                for (size_t i = 0; i < clen; i++) enc2[i] ^= (uint8_t)(xorshift64(&rng) >> 56);
+                olen = 0;
+                rc = pivco_fse_decompress(PIVCO_FSE_K1_ID, enc2, clen, dec, sizeof(dec), n, &olen);
+                if (rc == PIVCO_FSE_OK && olen != n) FAIL("garbage payload: OK with olen %zu != n %zu", olen, n);
+            }
+            tested++;
+        }
+    }
+    if (tested == 0) FAIL("k1 path never committed -- test is vacuous");
+    printf("PASS (%d lengths, %d fallbacks)\n", tested, fell_back);
+    return 0;
+}
+
+/* k=1 on the wire, through the file API: the codec's static -> nibble ->
+ * k1 chain, codec_fse_commit with id 52, and the decoder's dispatch of
+ * marker 52 on both region kinds.  The file API builds one table from
+ * the whole input, so a locally skewed block under a globally balanced
+ * histogram gives regions the bit-pair model wins and the static
+ * schedule cannot touch (its skew gate needs a lopsided bitmap):
+ *   nodes -- a 2-state chain over {a, b} with rare extras: the root
+ *            bitmap is balanced but runs
+ *   flat  -- 16 equally frequent symbols (flat root, D = 4), each 32K
+ *            block dominated by one of them: 16 KB bodies of one
+ *            repeated code, which also drives codec_fse_try's staging
+ *            past its stack budget onto the heap. */
+static int test_fse_k1_wire(void)
+{
+    printf("[fse_k1_wire] ");
+    uint64_t rng = 0xC0FFEE0DDBA11ULL;
+    uint64_t commit[PIVCO_FSE_STATS_SLOTS], attempt[PIVCO_FSE_STATS_SLOTS];
+    uint64_t bin[PIVCO_FSE_STATS_SLOTS], bout[PIVCO_FSE_STATS_SLOTS];
+    pivco_cfg_t cfg = pivco_cfg_default;
+    cfg.fse_enabled = 1;
+    cfg.fse_nibble_enabled = 0;
+    cfg.fse_k1_enabled = 1;
+
+    for (int part = 0; part < 2; part++) {
+        const size_t B = part == 0 ? (size_t)PIVCO_BLOCK_SIZE : 32768;
+        const size_t N = part == 0 ? 200000 : 16 * 32768;
+        uint8_t *in = malloc(N);
+        if (!in) FAIL("oom in");
+        if (part == 0) {
+            int state = 0;
+            for (size_t i = 0; i < N; i++) {
+                uint64_t x = xorshift64(&rng);
+                if ((x & 127) == 0) state ^= 1;                 /* runs of ~128 */
+                uint8_t r = (uint8_t)((x >> 8) % 20);
+                in[i] = r < 18 ? (uint8_t)('a' + state)
+                               : (uint8_t)('c' + 2 * state + (r & 1));
+            }
+        } else {
+            for (size_t i = 0; i < N; i++) {
+                uint64_t x = xorshift64(&rng);
+                uint8_t dominant = (uint8_t)((i / 32768) & 15);
+                in[i] = (x & 15) ? dominant : (uint8_t)((x >> 8) & 15);
+            }
+        }
+        size_t cap = pivcohuf_compress_bound_blk(N, B);
+        uint8_t *enc = malloc(cap), *dec = malloc(N);
+        if (!enc || !dec) { free(in); free(enc); free(dec); FAIL("oom bufs"); }
+
+        pivco_fse_stats_reset();
+        size_t enc_len = cap;
+        int rc = pivcohuf_compress_cfg(in, N, enc, &enc_len, &cfg, B, NULL);
+        if (rc != PIVCOHUF_OK) { free(in); free(enc); free(dec); FAIL("part %d: compress rc=%d", part, rc); }
+        pivco_fse_stats_get(commit, attempt, bin, bout);
+        if (commit[PIVCO_FSE_K1_ID] == 0) {
+            free(in); free(enc); free(dec);
+            FAIL("part %d: k1 never committed (attempts %llu) -- test is vacuous",
+                 part, (unsigned long long)attempt[PIVCO_FSE_K1_ID]);
+        }
+        size_t dec_len = N;
+        rc = pivcohuf_decompress(enc, enc_len, dec, &dec_len);
+        if (rc != PIVCOHUF_OK || dec_len != N || memcmp(in, dec, N) != 0) {
+            free(in); free(enc); free(dec);
+            FAIL("part %d: roundtrip failed (rc=%d len=%zu)", part, rc, dec_len);
+        }
+        printf("%s%llu k1 regions", part ? ", flat: " : "nodes: ",
+               (unsigned long long)commit[PIVCO_FSE_K1_ID]);
+        free(in); free(enc); free(dec);
+    }
+    printf(" PASS\n");
+    return 0;
+}
 #endif  /* PIVCO_HAS_FSE */
 
 /* ---------- flat-layout FLAGS byte in the pivcohuf container ---------- */
@@ -480,6 +631,7 @@ static int test_flat_layout_file(void)
     for (size_t a = 0; a < sizeof(arms) / sizeof(arms[0]); a++) {
         pivco_cfg_t cfg = pivco_cfg_default;
         cfg.fse_nibble_enabled = 1;   /* opt in: this test exercises the FSE-flat path */
+        cfg.fse_k1_enabled = 1;
         cfg.flat_layout = arms[a].layout;
         size_t enc_len = cap;
         int rc = pivcohuf_compress_cfg(in, N, enc, &enc_len, &cfg,
@@ -535,6 +687,7 @@ static int test_flat_layout_file(void)
     {
         pivco_cfg_t cfg = pivco_cfg_default;
         cfg.fse_nibble_enabled = 1;
+        cfg.fse_k1_enabled = 1;
         cfg.flat_layout = PIVCO_FLAT_NATURAL;
         size_t enc_len = cap;
         int rc = pivcohuf_compress_cfg(in, N, enc, &enc_len, &cfg,
@@ -586,6 +739,9 @@ int test_edge_cases_all(void)
     fails += test_fse_length_sweep();
     printf("\n--- FSE nibble table ---\n");
     fails += test_fse_nibble();
+    printf("\n--- FSE k=1 bit-context table ---\n");
+    fails += test_fse_k1();
+    fails += test_fse_k1_wire();
 #endif
     return fails;
 }
