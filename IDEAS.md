@@ -46,6 +46,8 @@
 ### DONE — shipped
 
 **General**
+- [Per-segment Huffman tables in pivcohuf (wire v0.10)](#per-segment-huffman-tables-in-pivcohuf-wire-v010-2026-09-12)
+- [k=1 bit-context table (wire id 52)](#k1-bit-context-table-wire-id-52-2026-09-10)
 - [FSE markers hoisted to a block-level prefix](#fse-markers-hoisted-to-a-block-level-prefix-2026-09-01)
 - [Fast Huffman builder (two-queue + radix, no min-heap)](#fast-huffman-builder-drop-the-index-indirected-min-heap-2026-06-21)
 - [Cross-port post-June-5 x86 optimizations to NEON](#cross-port-post-june-5-x86-optimizations-to-neon-2026-06-13)
@@ -164,10 +166,22 @@ there (x-ray/lit -5.4% against k1's -2.3%) at half the decode speed.
 k1-side fixes tried analytically and by A/B: a bigger table makes it
 worse (a finer copy of the wrong model; L=12 loses 1.3% on these
 regions and drops 79 of them under the gain gate), smoothing toward the
-catalog average recovers 2-4% of the 23% gap.  What is wanted is a
-coder for sequences of bits with run and alternation structure -- a
-run-length or regime-aware model, or a cheap in-region recipe switch --
-not a better order-1 table.
+catalog average recovers 2-4% of the 23% gap.  Measured further
+(2026-09-11), the two streams need different things: on x-ray/lit the
+00/55/aa/ff bytes come in 2-3 byte clumps interleaved with noise (9%
+of them in runs >= 16 B), per-chunk k1 parameters gain nothing even
+at 16-byte chunks, and the gap is byte vocabulary -- an order-2 bit
+model with region-exact parameters reaches the byte order-0 bound
+(k=1 176 KB, k=2 139 KB, bound 136 KB ideal), k=3/4 add 3-6% more,
+each rung doubling the recipe.  On mozilla/of the regimes are real at
+32-128 B (32% of regime bytes in runs >= 16 B): k1 with one recipe
+per 32-64 B chunk lands at 148 KB against 169 KB per region and the
+151 KB byte order-0 bound.  Transmitted 00/55/aa/ff weights, or an
+escape symbol plus a side stream for them, get 3-6% and need
+on-demand tables; the nibble table cannot see the within-byte
+correlation (nibble order-0 171 KB vs byte order-0 136 KB).  So: k2
+with a coarse grid for the vocabulary case, chunked recipes for the
+regime case.
 Side findings from the same session, k1 catalog only: (1) the
 normalizer's deficit rule takes the whole deficit from the top symbol;
 reserve the forced slots, rescale, floor, then hand the leftover to
@@ -240,6 +254,8 @@ zstd, so the -1.59% does not reach the "smaller than zstd" goal on its own
 loses to zstd does not earn a default slot, and the file format has one
 consumer (the phaz/turbobench harness).  On branch per-block-ring for
 revival once order-1 closes most of the gap and the ring's margin decides.
+2026-09-12: per-segment tables at 128 KiB landed on main (see DONE);
+the ring is the sub-128K refinement of that mechanism.
 
 ### Vertical flat regions: layout defaults, mid-band forms, text trims, 2026-08-17
 The vertical layouts landed runtime-selectable (cfg.flat_layout:
@@ -502,6 +518,29 @@ RVV maps well: `vcompress` = partition, `vrgather` = TBL, **`vsuxei8` = native i
 ## DONE
 
 **General**
+
+### Per-segment Huffman tables in pivcohuf (wire v0.10), 2026-09-12
+One Huffman table per 128 KiB of input instead of one per file: each
+segment histograms its own bytes and builds its own table, sent with
+the segment's first block (BLOCK_FLAGS NEW_TABLE) when it saves more than
+its own 128 bytes (code-length bit model); the period is encoder
+policy, nothing on the wire but the flag.  Segment-size sweep on the 30 inputs (M4, 16 KiB
+blocks, output vs one table per file / compress / decompress): PH 64K
+-1.95% / -12% / -12%, 128K -1.68% / -5% / -2%, 256K -1.37%, 512K -1.13%;
+PHA 128K -1.10% / 0% / +8% (adapted tables leave fewer skewed bitmaps
+for the FSE path).  Per input at 128K: samba lit -5.1%, cat-wiki -3.2%,
+mozilla lit -2.0%, x-ray lit -1.8%, text within 0.3%.  The cost is the
+table builds (build share of time at 64/128/256K: compress 8-10 / 4-6 /
+2-4%, decompress 8-11 / 4-8 / 3-5%), so faster builders (the limiter's
+counting sort, Dougall's rank-range build on his branch at 1.9-3.6x)
+move the knee toward 64K; the histogram is one pass either way.
+Joint length/shape shaping composes at this segment size (mozilla lit
+fastest-decompress 12.5 GB/s vs 10.1 whole-file, samba 19.4 vs 12.9,
+same size), unlike at the ring's 16 KiB, at a solve per segment on
+compress; FASTEST_COMPRESS resolves on the segment size.  zstd adapts per
+128 KiB block, so this closes the adaptation half of the phaz-vs-zstd
+gap on binaries; the ring (below) is the finer-grained version and
+stays shelved unless 64K-and-below becomes worth it.
 
 ### k=1 bit-context table (wire id 52), 2026-09-10
 A third per-region candidate next to the static schedule and the nibble table: the region's bits are modeled as P(bit | previous bit), two grid-quantized probabilities in one recipe byte, coded byte-at-a-time by tANS tables derived from the recipe (two per recipe, one per carry).  256 recipes form a complete catalog built on first use, so the decoder builds nothing per region.  Design points measured on the way: min-freq-1 normalization beats a 257-symbol ESC alphabet (the escape fires on 2–4% of bytes, and the floor's one slot is cheaper than 8 raw bits plus the ESC symbol); the carry-indexed table buys 12–16% of the gain for ~10% of the loop; L=10 halves the catalog for a size wash; 8 interleaved segments above 128 bytes with initial-state absorption match the static path's loop at zero output cost; the region's tables are prefetched up front because 80–92% of consecutive regions change recipe; the recipe comes from popcounts of bit pairs (4× cheaper than a byte table) and a closed-form price skips the walk on losers.  With the 20% minimum-saving gate for transmitted-table candidates: k1 alone −2.46% vs pure PH (static −1.72%) at 0.6–1.0× the static path's decode speed on the L3 streams; k1 wins the code streams (mozilla ml −3.5% vs static −1.8% at 6.7 vs 8.4 GB/s), the nibble table keeps flat-heavy literals, both together −3.13%.  `docs/FSE-V0.md` has the section.

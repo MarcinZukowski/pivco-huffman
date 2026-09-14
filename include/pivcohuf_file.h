@@ -29,11 +29,20 @@
  *            The decoder rejects any value or set bit it does not
  *            implement (BAD_VERSION), so reserved bits are assignable
  *            later without risking silent mis-decode.
+ *              bits3..7 reserved, must be 0
  *     11-138 CODE_LENGTHS[256] packed as 4-bit nibbles, LSB first
  *            (symbol 2i in low nibble of byte i, symbol 2i+1 in high nibble)
  *     139... Concatenated per-block records:
- *               4 bytes ENCODED_LEN (uint32)
+ *               3 bytes ENCODED_LEN (uint24) -- payload length
+ *               1 byte  BLOCK_FLAGS (uint8, v0.10+; 0 before):
+ *                         bit0  NEW_TABLE: 128 bytes CODE_LENGTHS follow,
+ *                               the table for this and the following blocks
+ *                         bits1..7 reserved, must be 0
+ *               [128 bytes CODE_LENGTHS when NEW_TABLE is set]
  *               ENCODED_LEN bytes encoded block (pivco-Huffman stream)
+ *            When and how often the encoder switches tables is its own
+ *            policy (see PIVCOHUF_SEGMENT_BYTES_DEFAULT); the decoder only
+ *            follows the flags.
  *
  *   v0.4 vs v0.3: drops the within-tier ORDERING section.  The decode tree
  *   is fully determined by the code lengths (within-tier order is symbol-
@@ -58,6 +67,13 @@
  *   vertical, see pivco_cfg_t.flat_layout).  Decode still accepts v0.8
  *   streams: no FLAGS byte, flat regions natural.
  *
+ *   v0.10 vs v0.9: the block record's 32-bit ENCODED_LEN becomes a
+ *   24-bit length plus a BLOCK_FLAGS byte, whose NEW_TABLE bit lets a
+ *   block carry its own code-length table (see above); the default entry
+ *   points write a new table per PIVCOHUF_SEGMENT_BYTES_DEFAULT of input
+ *   when it pays for itself.  A stream with no flagged block is
+ *   byte-identical to v0.9, and v0.9 / v0.8 streams still decode.
+ *
  *   The final block may have fewer than BLOCK_SIZE input symbols.  The
  *   encoder pads the input to BLOCK_SIZE with the file's first byte
  *   (always present in the alphabet); the decoder truncates output
@@ -76,7 +92,7 @@ extern "C" {
 
 #define PIVCOHUF_MAGIC          "PIVCOHUF"
 #define PIVCOHUF_VERSION_MAJOR  0
-#define PIVCOHUF_VERSION_MINOR  9
+#define PIVCOHUF_VERSION_MINOR  10
 #define PIVCOHUF_HEADER_SIZE    26
 
 /* BODY FLAGS byte (v0.9+).  Bits0-1 carry the pivco_flat_layout_t value
@@ -84,6 +100,20 @@ extern "C" {
  * reserved QUAD_NODES bit) makes the decoder return BAD_VERSION. */
 #define PIVCOHUF_FLAGS_LAYOUT_MASK   0x03u  /* bits0-1: flat layout */
 #define PIVCOHUF_FLAG_QUAD_NODES     0x04u  /* bit2: reserved, must be 0 */
+/* Block record header: a 24-bit ENCODED_LEN and a BLOCK_FLAGS byte
+ * (v0.10+; the byte was the always-zero top of a 32-bit length before). */
+#define PIVCOHUF_BLOCK_LEN_MASK      0x00FFFFFFu
+#define PIVCOHUF_BLOCK_FLAGS_SHIFT   24
+#define PIVCOHUF_BLOCK_FLAG_NEW_TABLE 0x01u  /* 128-byte code-length table precedes the payload */
+
+/* Input bytes per Huffman table for the entry points that take no
+ * seg_blocks: one table per 128 KiB (rounded to whole blocks).  128 KiB
+ * is the knee of the segment-size sweep: -1.7% (PH) / -1.1% (PHA) of output
+ * over one table per file at ~5% / 0% compress cost and ~2% / -8%
+ * decode cost, against -1.9% / -1.2% at 64 KiB for twice the table
+ * builds.  Per-file streams stay available via pivcohuf_compress_seg
+ * with seg_blocks == 0. */
+#define PIVCOHUF_SEGMENT_BYTES_DEFAULT (128u * 1024u)
 
 typedef enum {
     PIVCOHUF_OK = 0,
@@ -99,13 +129,23 @@ typedef enum {
 } pivcohuf_status_t;
 
 /* Worst-case output size given input size.  Overestimates; never lies low.
- * Uses the default block size (PIVCO_BLOCK_SIZE). */
+ * Uses the default block size (PIVCO_BLOCK_SIZE) and segment size. */
 size_t pivcohuf_compress_bound(size_t in_len);
 
 /* As pivcohuf_compress_bound, but for a specific block size.  Smaller blocks
  * carry more per-block overhead and need a larger bound, so callers of
- * pivcohuf_compress_blk must size the output buffer with this. */
+ * pivcohuf_compress_blk must size the output buffer with this.  Assumes
+ * the default segment size. */
 size_t pivcohuf_compress_bound_blk(size_t in_len, size_t block_size);
+
+/* As pivcohuf_compress_bound_blk, for a stream with a table every
+ * seg_blocks blocks (0 = one table for the whole input). */
+size_t pivcohuf_compress_bound_seg(size_t in_len, size_t block_size,
+                                   size_t seg_blocks);
+
+/* Blocks per segment for the default segment size at a given block size
+ * (at least 1, at most 255). */
+size_t pivcohuf_default_seg_blocks(size_t block_size);
 
 /* Compress in[0..in_len) into out (capacity *out_len).  On success,
  * sets *out_len to the actual encoded length and returns PIVCOHUF_OK.
@@ -153,6 +193,16 @@ int pivcohuf_compress_cfg(const uint8_t *in, size_t in_len,
                           uint8_t *out, size_t *out_len,
                           const pivco_cfg_t *cfg, size_t block_size,
                           pivcohuf_timing_t *timing);
+
+/* As pivcohuf_compress_cfg, with the Huffman table rebuilt from the
+ * input every seg_blocks blocks and transmitted when it pays for itself
+ * (0 = one table for the whole input).  seg_blocks is at most 255.
+ * Size the output with pivcohuf_compress_bound_seg.  The other compress
+ * entry points use pivcohuf_default_seg_blocks(block_size). */
+int pivcohuf_compress_seg(const uint8_t *in, size_t in_len,
+                          uint8_t *out, size_t *out_len,
+                          const pivco_cfg_t *cfg, size_t block_size,
+                          size_t seg_blocks, pivcohuf_timing_t *timing);
 
 
 /* As pivcohuf_compress_ex / pivcohuf_decompress, but fill *timing (nullable)

@@ -155,8 +155,11 @@ static inline uint64_t pivco_prof_tick(void) {
     pivco_prof_counters[(id)].elements += (uint64_t)(n_elem); \
 } while (0)
 
-/* Begin a timed region.  Pairs with PROF_TOC. */
+/* Begin a timed region.  Pairs with PROF_TOC.  PROF_TIC declares the
+ * start time, so a second region in the same scope re-arms it with
+ * PROF_RETIC instead. */
 #define PROF_TIC() uint64_t _prof_t0 = pivco_prof_tick()
+#define PROF_RETIC() ((void)(_prof_t0 = pivco_prof_tick()))
 
 /* End a timed region. */
 #define PROF_TOC(id, n_elem) do { \
@@ -170,6 +173,7 @@ static inline uint64_t pivco_prof_tick(void) {
 
 #define PROF_COUNT_ONLY(id, n_elem)  ((void)0)
 #define PROF_TIC()                   ((void)0)
+#define PROF_RETIC()                 ((void)0)
 #define PROF_TOC(id, n_elem)         ((void)0)
 
 #endif

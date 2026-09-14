@@ -527,8 +527,8 @@ static int test_fse_k1(void)
 
 /* k=1 on the wire, through the file API: the codec's static -> nibble ->
  * k1 chain, codec_fse_commit with id 52, and the decoder's dispatch of
- * marker 52 on both region kinds.  The file API builds one table from
- * the whole input, so a locally skewed block under a globally balanced
+ * marker 52 on both region kinds.  With one table for the whole input
+ * (seg_blocks 0), a locally skewed block under a globally balanced
  * histogram gives regions the bit-pair model wins and the static
  * schedule cannot touch (its skew gate needs a lopsided bitmap):
  *   nodes -- a 2-state chain over {a, b} with rare extras: the root
@@ -575,7 +575,7 @@ static int test_fse_k1_wire(void)
 
         pivco_fse_stats_reset();
         size_t enc_len = cap;
-        int rc = pivcohuf_compress_cfg(in, N, enc, &enc_len, &cfg, B, NULL);
+        int rc = pivcohuf_compress_seg(in, N, enc, &enc_len, &cfg, B, 0, NULL);
         if (rc != PIVCOHUF_OK) { free(in); free(enc); free(dec); FAIL("part %d: compress rc=%d", part, rc); }
         pivco_fse_stats_get(commit, attempt, bin, bout);
         if (commit[PIVCO_FSE_K1_ID] == 0) {
@@ -597,6 +597,21 @@ static int test_fse_k1_wire(void)
     return 0;
 }
 #endif  /* PIVCO_HAS_FSE */
+
+/* Blocks of a pivcohuf stream that carry their own code-length table
+ * (BLOCK_FLAGS NEW_TABLE, v0.10). */
+static size_t count_table_blocks(const uint8_t *stream, size_t len)
+{
+    size_t p = PIVCOHUF_HEADER_SIZE + 11 + 128, n = 0;
+    while (p + 4 <= len) {
+        uint32_t f = (uint32_t)stream[p] | ((uint32_t)stream[p + 1] << 8)
+                   | ((uint32_t)stream[p + 2] << 16) | ((uint32_t)stream[p + 3] << 24);
+        p += 4;
+        if ((f >> PIVCOHUF_BLOCK_FLAGS_SHIFT) & PIVCOHUF_BLOCK_FLAG_NEW_TABLE) { n++; p += 128; }
+        p += f & PIVCOHUF_BLOCK_LEN_MASK;
+    }
+    return n;
+}
 
 /* ---------- flat-layout FLAGS byte in the pivcohuf container ---------- */
 
@@ -626,7 +641,6 @@ static int test_flat_layout_file(void)
         { PIVCO_FLAT_VERTICAL,     0x01 },
         { PIVCO_FLAT_VERTICAL_128, 0x02 },
     };
-    size_t nat_len = 0;
     size_t arm_len[3] = {0, 0, 0};
     for (size_t a = 0; a < sizeof(arms) / sizeof(arms[0]); a++) {
         pivco_cfg_t cfg = pivco_cfg_default;
@@ -657,7 +671,6 @@ static int test_flat_layout_file(void)
             FAIL("layout %d: unknown FLAGS bit gave rc=%d, want BAD_VERSION",
                  (int)arms[a].layout, rc);
         enc[FLAGS_OFF] = arms[a].flags;
-        if (arms[a].layout == PIVCO_FLAT_NATURAL) nat_len = enc_len;
 
         /* The reserved layout value (3) is a refusal too. */
         enc[FLAGS_OFF] = 0x03;
@@ -682,19 +695,19 @@ static int test_flat_layout_file(void)
              "natural %zu, vertical %zu, vertical128 %zu",
              arm_len[0], arm_len[1], arm_len[2]);
 
-    /* Synthetic v0.8: re-create the natural stream, drop the FLAGS byte,
-     * relabel the minor, shrink BODY_LENGTH. */
+    /* Synthetic v0.8: a natural stream with one table for the whole
+     * input (v0.8 has no segments), drop the FLAGS byte, relabel the
+     * minor, shrink BODY_LENGTH. */
     {
         pivco_cfg_t cfg = pivco_cfg_default;
         cfg.fse_nibble_enabled = 1;
         cfg.fse_k1_enabled = 1;
         cfg.flat_layout = PIVCO_FLAT_NATURAL;
         size_t enc_len = cap;
-        int rc = pivcohuf_compress_cfg(in, N, enc, &enc_len, &cfg,
-                                       PIVCO_BLOCK_SIZE, NULL);
-        if (rc != PIVCOHUF_OK || enc_len != nat_len)
-            FAIL("v0.8 synth: re-compress rc=%d len %zu vs %zu",
-                 rc, enc_len, nat_len);
+        int rc = pivcohuf_compress_seg(in, N, enc, &enc_len, &cfg,
+                                       PIVCO_BLOCK_SIZE, 0, NULL);
+        if (rc != PIVCOHUF_OK || enc[FLAGS_OFF] != 0 || count_table_blocks(enc, enc_len) != 0)
+            FAIL("v0.8 synth: re-compress rc=%d flags %02x", rc, enc[FLAGS_OFF]);
         memmove(enc + FLAGS_OFF, enc + FLAGS_OFF + 1,
                 enc_len - FLAGS_OFF - 1);
         enc_len -= 1;
@@ -717,6 +730,86 @@ static int test_flat_layout_file(void)
 
 /* ---------- entry point ---------- */
 
+/* Per-segment Huffman tables in the pivcohuf container (v0.10): a
+ * 3-part input whose byte distribution changes every 64 KiB, at a table
+ * every 2 blocks, so the stream carries fresh tables at the changes
+ * (BLOCK_FLAGS NEW_TABLE) and none inside the stationary stretches.
+ * Roundtrip, smaller than the whole-file stream, the whole-file stream
+ * (v0.9 layout) still roundtrips, the default entry point's bound covers
+ * its output, and a truncated stream is refused rather than read past
+ * its end. */
+
+static int test_table_segments(void)
+{
+    printf("[table_segments] ");
+    enum { PART = 64 * 1024, N = 3 * PART };
+    uint8_t *in = malloc(N);
+    if (!in) FAIL("oom in");
+    uint64_t rng = 0x5E6E7A11E5ULL;
+    for (size_t i = 0; i < N; i++) {
+        uint64_t x = xorshift64(&rng);
+        int part = (int)(i / PART);
+        /* part 0: skewed on 'a'..'d'; part 1: uniform bytes; part 2: skewed on 'w'..'z' */
+        in[i] = part == 1 ? (uint8_t)x
+              : (uint8_t)((part ? 'w' : 'a') + ((x & 7) ? 0 : (x >> 8) & 3));
+    }
+    const size_t B = 16384;
+    size_t cap = pivcohuf_compress_bound_seg(N, B, 2);
+    uint8_t *seg = malloc(cap), *whole = malloc(cap), *dec = malloc(N);
+    if (!seg || !whole || !dec) { free(in); free(seg); free(whole); free(dec); FAIL("oom bufs"); }
+    pivco_cfg_t cfg = pivco_cfg_default;
+    cfg.fse_enabled = 0;
+    size_t seg_len = cap, whole_len = cap;
+    int rc = pivcohuf_compress_seg(in, N, seg, &seg_len, &cfg, B, 2, NULL);
+    if (rc != PIVCOHUF_OK) FAIL("segmented compress rc=%d", rc);
+    rc = pivcohuf_compress_seg(in, N, whole, &whole_len, &cfg, B, 0, NULL);
+    if (rc != PIVCOHUF_OK) FAIL("whole-file compress rc=%d", rc);
+    if (seg_len >= whole_len) FAIL("segments did not shrink the stream (%zu vs %zu)", seg_len, whole_len);
+    /* Two distribution changes, 6 segments: 2..5 blocks carry a table on
+     * the segmented stream (fresh where the data changed, reused where
+     * it did not), none on the whole-file one, and neither sets a FLAGS
+     * bit beyond the layout. */
+    size_t nt = count_table_blocks(seg, seg_len);
+    if (nt < 2 || nt > 5) FAIL("segmented stream carries %zu block tables, want 2..5", nt);
+    if (count_table_blocks(whole, whole_len) != 0) FAIL("whole-file stream carries block tables");
+    if ((seg[PIVCOHUF_HEADER_SIZE + 10] | whole[PIVCOHUF_HEADER_SIZE + 10]) & ~PIVCOHUF_FLAGS_LAYOUT_MASK)
+        FAIL("FLAGS byte has bits beyond the layout");
+    for (int which = 0; which < 2; which++) {
+        const uint8_t *s = which ? whole : seg; size_t sl = which ? whole_len : seg_len;
+        size_t dl = N;
+        memset(dec, 0, N);
+        rc = pivcohuf_decompress(s, sl, dec, &dl);
+        if (rc != PIVCOHUF_OK || dl != N || memcmp(in, dec, N) != 0)
+            FAIL("%s stream roundtrip failed (rc=%d len=%zu)", which ? "whole-file" : "segmented", rc, dl);
+    }
+    /* The default entry point segments too; its bound must hold. */
+    size_t def_cap = pivcohuf_compress_bound(N), def_len = def_cap;
+    uint8_t *def = malloc(def_cap);
+    if (!def) FAIL("oom def");
+    rc = pivcohuf_compress(in, N, def, &def_len);
+    if (rc != PIVCOHUF_OK || count_table_blocks(def, def_len) == 0)
+        FAIL("default compress: rc=%d, no block table at 128 KiB on a 192 KiB input", rc);
+    size_t dl = N;
+    rc = pivcohuf_decompress(def, def_len, dec, &dl);
+    if (rc != PIVCOHUF_OK || dl != N || memcmp(in, dec, N) != 0) FAIL("default stream roundtrip failed");
+    free(def);
+    /* Truncation inside a later segment's table must be refused. */
+    {
+        uint8_t *cut = malloc(seg_len);
+        if (!cut) FAIL("oom cut");
+        memcpy(cut, seg, seg_len);
+        /* Lie about the body length so the reader runs off the buffer end. */
+        size_t short_len = seg_len / 2;
+        dl = N;
+        rc = pivcohuf_decompress(cut, short_len, dec, &dl);
+        if (rc == PIVCOHUF_OK) { free(cut); FAIL("truncated segmented stream decoded OK"); }
+        free(cut);
+    }
+    free(in); free(seg); free(whole); free(dec);
+    printf("PASS (segmented %zu B vs whole-file %zu B)\n", seg_len, whole_len);
+    return 0;
+}
+
 int test_edge_cases_all(void)
 {
     int fails = 0;
@@ -734,6 +827,7 @@ int test_edge_cases_all(void)
     fails += test_fse_dispatch();
     printf("\n--- flat-layout FLAGS byte ---\n");
     fails += test_flat_layout_file();
+    fails += test_table_segments();
 #ifdef PIVCO_HAS_FSE
     printf("\n--- FSE length sweep ---\n");
     fails += test_fse_length_sweep();

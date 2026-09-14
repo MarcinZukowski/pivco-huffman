@@ -197,6 +197,9 @@ static void usage(FILE *out) {
         "                        (id 52); smaller payload wins\n"
         "  -b, --block-size N    symbols per block (1..65535; default per-arch).\n"
         "                        recorded in the stream; decompress reads it back.\n"
+        "  --table-kb N          rebuild the Huffman table every N KiB of input\n"
+        "                        (rounded to whole blocks; default 128; 0 = one\n"
+        "                        table per file).  recorded in the stream.\n"
         "  -e, --effort N        compress-time shaping effort (0..4, default 1):\n"
         "                        0 simplest, 1 balanced, 2 faster-decompress,\n"
         "                        3 fastest-decompress, 4 fastest-compress\n"
@@ -230,6 +233,7 @@ int main(int argc, char **argv)
     int repeat = 1;
     int use_ans = 0;   /* -a / --ans : compress with #PHA (ANS-coded bitmaps) */
     size_t block_size = PIVCO_BLOCK_SIZE;  /* -b / --block-size : symbols/block */
+    size_t table_kb = PIVCOHUF_SEGMENT_BYTES_DEFAULT / 1024;  /* --table-kb : input per Huffman table, 0 = whole file */
     /* First pass: pluck flags anywhere on the command line. */
     const char *positionals[4] = {0};
     int npos = 0;
@@ -244,6 +248,9 @@ int main(int argc, char **argv)
             cli_cfg.fse_nibble_enabled = 1;
         } else if (strcmp(argv[i], "--ans-k1") == 0) {
             cli_cfg.fse_k1_enabled = 1;
+        } else if (strcmp(argv[i], "--table-kb") == 0 && i + 1 < argc) {
+            table_kb = (size_t)strtoul(argv[i + 1], NULL, 0);
+            i++;
         } else if (argv[i][0] == '-' && argv[i][1] == 'r' && argv[i][2] == '\0'
                    && i + 1 < argc) {
             repeat = atoi(argv[i + 1]);
@@ -342,7 +349,9 @@ int main(int argc, char **argv)
     double io_read_ms = (now_sec() - _rd0) * 1000.0;
 
     if (cmd[0] == 'c') {
-        size_t bound = pivcohuf_compress_bound_blk(in_len, block_size);
+        size_t seg_blocks = table_kb ? (table_kb * 1024 + block_size - 1) / block_size : 0;
+        if (seg_blocks > 255) seg_blocks = 255;
+        size_t bound = pivcohuf_compress_bound_seg(in_len, block_size, seg_blocks);
         double _m0 = now_sec();
         uint8_t *out_buf = (uint8_t *)xmalloc(bound);
         double cli_malloc_ms = (now_sec() - _m0) * 1000.0;
@@ -350,7 +359,7 @@ int main(int argc, char **argv)
         pivcohuf_timing_t tm;
         double t0 = now_sec();
         cli_cfg.fse_enabled = use_ans;
-        int rc = pivcohuf_compress_cfg(in_buf, in_len, out_buf, &out_len, &cli_cfg, block_size, &tm);
+        int rc = pivcohuf_compress_seg(in_buf, in_len, out_buf, &out_len, &cli_cfg, block_size, seg_blocks, &tm);
         double t1 = now_sec();
         if (rc != PIVCOHUF_OK) {
             fprintf(stderr, "pivcohuf: compress failed: %s\n", err_msg(rc));
@@ -367,7 +376,7 @@ int main(int argc, char **argv)
             for (int r = 1; r < repeat; r++) {
                 size_t rep_out_len = bound;
                 double rt0 = now_sec();
-                pivcohuf_compress_cfg(in_buf, in_len, out_buf, &rep_out_len, &cli_cfg, block_size, NULL);
+                pivcohuf_compress_seg(in_buf, in_len, out_buf, &rep_out_len, &cli_cfg, block_size, seg_blocks, NULL);
                 double rt1 = now_sec();
                 int ms = (int)((rt1 - rt0) * 1000.0 + 0.5);
                 fprintf(stderr, "  iter %2d: comp:%dms  comp_bw in=%d MB/s out=%d MB/s\n",
