@@ -19,72 +19,141 @@
  * (leaves sorted by (freq,sym); internals in creation order). */
 typedef struct { uint64_t freq; uint16_t sym; } leaf_t;
 
-/* Stable LSD radix sort of leaf[0..n) by frequency ascending, over only the
- * bytes the max frequency needs (typically 2-3 for per-window counts).  Beats
- * qsort here: no indirect compare per element, and stability over the
- * symbol-ordered seed keeps the (freq,sym) tie discipline the heap relied on. */
-static void sort_leaves_by_freq(leaf_t *leaf, int n)
+/* Stable ascending (freq, sym) sort of leaf[0..n).  Leaves arrive in
+ * symbol order, so a stable sort by frequency is the (freq, sym) order
+ * the two-queue's tie discipline needs.  Small alphabets insertion-sort;
+ * larger ones take an LSD radix over the frequency bytes the largest
+ * frequency needs (two for a 16 KiB block, three for a 128 KiB
+ * segment). */
+static void sort_leaves_by_freq(leaf_t *leaf, int n, uint64_t freq_bits)
 {
-    uint64_t mx = 0;
-    for (int i = 0; i < n; i++) if (leaf[i].freq > mx) mx = leaf[i].freq;
-    int nbytes = 0;
-    while (mx) { nbytes++; mx >>= 8; }   /* freq>0 for every leaf => nbytes>=1 */
+    if (n <= 40) {
+        /* Insertion sort */
+        for (int i = 1; i < n; i++) {
+            leaf_t cur = leaf[i];
+            int j = i - 1;
+            while (j >= 0 && leaf[j].freq > cur.freq) {
+                leaf[j + 1] = leaf[j];
+                j--;
+            }
+            leaf[j + 1] = cur;
+        }
+        return;
+    }
+
+    /* The planes to sort on, least significant first: one per byte of
+     * the OR of all frequencies. */
+    int npass = 0;
+    while (freq_bits) {
+        npass++;
+        freq_bits >>= 8;
+    }
+
+    /* Histogram every plane in one pass over the leaves, so the
+     * same-bin increments of one plane are interleaved with the other
+     * planes' instead of chaining back to back.  u8 bins are enough at
+     * n <= 256: only a plane every leaf shares fills a bin to 256, which
+     * wraps to 0, and that is harmless -- the cursor of an empty bin is
+     * never used and the final increment is never read again (the
+     * fullest-bin test below just does not fire for it). */
+    uint8_t cnt[8][256];
+    memset(cnt, 0, (size_t)npass * sizeof(cnt[0]));
+    for (int i = 0; i < n; i++) {
+        for (int p = 0; p < npass; p++) {
+            cnt[p][(leaf[i].freq >> (8 * p)) & 0xFF]++;
+        }
+    }
 
     leaf_t tmp[PIVCO_MAX_SYMBOLS];
-    leaf_t *src = leaf, *dst = tmp;
-    for (int b = 0; b < nbytes; b++) {
-        int shift = b * 8;
-        int cnt[256] = {0};
-        for (int i = 0; i < n; i++) cnt[(src[i].freq >> shift) & 0xFF]++;
-        int sum = 0;
-        for (int c = 0; c < 256; c++) { int t = cnt[c]; cnt[c] = sum; sum += t; }
-        for (int i = 0; i < n; i++) { int k = (src[i].freq >> shift) & 0xFF; dst[cnt[k]++] = src[i]; }
-        leaf_t *t = src; src = dst; dst = t;
+    leaf_t *src = leaf;
+    leaf_t *dst = tmp;
+    for (int p = 0; p < npass; p++) {
+        /* Bin cursors from the bin counts.  Remember the fullest/dominator bin. */
+        leaf_t *cursor[256];
+        unsigned sum = 0;
+        unsigned dom = 0;
+        unsigned dom_count = 0;
+        for (int k = 0; k < 256; k++) {
+            unsigned c = cnt[p][k];
+            if (c > dom_count) {
+                dom_count = c;
+                dom = (unsigned)k;
+            }
+            cursor[k] = dst + sum;
+            sum += c;
+        }
+        /* Stable scatter on this plane.  When one bin holds most of the
+         * leaves its cursor stays in a register instead of chaining
+         * through the bin array on every increment. */
+        if (dom_count >= (unsigned)n / 2) {
+            /* Dominator path */
+            leaf_t *dom_cursor = cursor[dom];
+            for (int i = 0; i < n; i++) {
+                unsigned k = (src[i].freq >> (8 * p)) & 0xFF;
+                if (k == dom) {
+                    *dom_cursor++ = src[i];
+                } else {
+                    *cursor[k]++ = src[i];
+                }
+            }
+        } else {
+            for (int i = 0; i < n; i++) {
+                *cursor[(src[i].freq >> (8 * p)) & 0xFF]++ = src[i];
+            }
+        }
+        leaf_t *t = src;
+        src = dst;
+        dst = t;
     }
     if (src != leaf) memcpy(leaf, src, (size_t)n * sizeof(leaf_t));
 }
 
-/* Derives code lengths for n_used (>=2) symbols into lengths[] (indexed by
- * symbol; untouched entries stay 0).  No length limiting -- the caller applies
- * limit_code_lengths afterwards, same as the heap path did. */
-static void build_lengths_twoqueue(const uint64_t freq[PIVCO_MAX_SYMBOLS],
-                                   int n_used, const int used[PIVCO_MAX_SYMBOLS],
-                                   uint8_t lengths[PIVCO_MAX_SYMBOLS])
+/* Code lengths for the gathered leaves (symbol order in, sorted here).
+ * Returns the deepest length, so the caller can skip the limiter. */
+static int build_lengths_twoqueue(leaf_t leaf[PIVCO_MAX_SYMBOLS], int n_used,
+                                  uint64_t freq_bits,
+                                  uint8_t lengths[PIVCO_MAX_SYMBOLS])
 {
-    leaf_t leaf[PIVCO_MAX_SYMBOLS];
-    for (int i = 0; i < n_used; i++) {
-        leaf[i].freq = freq[used[i]];
-        leaf[i].sym  = (uint16_t)used[i];
-    }
-    sort_leaves_by_freq(leaf, n_used);
+    sort_leaves_by_freq(leaf, n_used, freq_bits);
 
     /* nodes 0..n_used-1 = leaves (sorted order); n_used.. = internals.
      * The internal queue is the contiguous index range [ih, it). */
-    const int N = n_used;
     uint64_t nfreq[PIVCO_MAX_SYMBOLS * 2];
     int      parent[PIVCO_MAX_SYMBOLS * 2];
-    for (int i = 0; i < N; i++) nfreq[i] = leaf[i].freq;
+    for (int i = 0; i < n_used; i++) nfreq[i] = leaf[i].freq;
 
     int li = 0;          /* next unconsumed leaf */
-    int ih = N;          /* internal-queue head (oldest) */
-    int ni = N;          /* next internal node index to create (== queue tail) */
-    for (int remaining = N; remaining > 1; remaining--) {
-        int a, b;
-        if (li < N && (ih == ni || nfreq[li] <= nfreq[ih])) a = li++; else a = ih++;
-        if (li < N && (ih == ni || nfreq[li] <= nfreq[ih])) b = li++; else b = ih++;
+    int ih = n_used;          /* internal-queue head (oldest) */
+    int ni = n_used;          /* next internal node index to create (== queue tail) */
+    for (int remaining = n_used; remaining > 1; remaining--) {
+        int a;
+        int b;
+        if (li < n_used && (ih == ni || nfreq[li] <= nfreq[ih]))
+            a = li++;
+        else
+            a = ih++;
+        if (li < n_used && (ih == ni || nfreq[li] <= nfreq[ih]))
+            b = li++;
+        else
+            b = ih++;
         nfreq[ni] = nfreq[a] + nfreq[b];
         parent[a] = ni;
         parent[b] = ni;
         ni++;            /* extends the internal queue tail */
     }
 
-    const int root = ni - 1;            /* == 2N-2 */
+    const int root = ni - 1;            /* == 2*n_used-2 */
     uint8_t depth[PIVCO_MAX_SYMBOLS * 2];
     depth[root] = 0;
     for (int i = root - 1; i >= 0; i--) /* parent index always > child index */
         depth[i] = (uint8_t)(depth[parent[i]] + 1);
-    for (int i = 0; i < N; i++)
-        lengths[leaf[i].sym] = depth[i] > 0 ? depth[i] : 1;
+    int max_len = 1;
+    for (int i = 0; i < n_used; i++) {
+        uint8_t d = depth[i] > 0 ? depth[i] : 1;
+        lengths[leaf[i].sym] = d;
+        if (d > max_len) max_len = d;
+    }
+    return max_len;
 }
 
 /* ---------- Code length limiting (DEFLATE-style, RFC 1951) ---------- */
@@ -342,12 +411,18 @@ int pivco_build_table(const pivco_cfg_t *cfg,
 
     memset(table, 0, sizeof(*table));
 
-    /* Count symbols with nonzero frequency */
+    /* Gather the used symbols as leaves, in symbol order, and the
+     * OR of all frequencies, whose width is how many bytes the sort
+     * looks at. */
     int n_used = 0;
-    int used[PIVCO_MAX_SYMBOLS];
+    leaf_t leaf[PIVCO_MAX_SYMBOLS];
+    uint64_t freq_bits = 0;
     for (int i = 0; i < PIVCO_MAX_SYMBOLS; i++) {
         if (freq[i] > 0) {
-            used[n_used++] = i;
+            leaf[n_used].freq = freq[i];
+            leaf[n_used].sym = (uint16_t)i;
+            n_used++;
+            freq_bits |= freq[i];
         }
     }
 
@@ -356,7 +431,7 @@ int pivco_build_table(const pivco_cfg_t *cfg,
     table->num_symbols = (uint16_t)n_used;
 
     if (n_used == 1) {
-        build_single_symbol_table(used[0], table);
+        build_single_symbol_table(leaf[0].sym, table);
         table->fse_enabled = (uint8_t)(cfg->fse_enabled ? 1 : 0);
         table->fse_nibble_enabled = (uint8_t)(cfg->fse_nibble_enabled ? 1 : 0);
         table->fse_k1_enabled = (uint8_t)(cfg->fse_k1_enabled ? 1 : 0);
@@ -367,10 +442,11 @@ int pivco_build_table(const pivco_cfg_t *cfg,
     /* Derive code lengths from frequencies (two-queue, no heap) */
     uint8_t lengths[PIVCO_MAX_SYMBOLS];
     memset(lengths, 0, sizeof(lengths));
-    build_lengths_twoqueue(freq, n_used, used, lengths);
+    int max_len = build_lengths_twoqueue(leaf, n_used, freq_bits, lengths);
 
-    /* Limit code lengths to PIVCO_MAX_CODE_LEN */
-    limit_code_lengths(lengths, PIVCO_MAX_SYMBOLS, PIVCO_MAX_CODE_LEN);
+    /* Limit code lengths to PIVCO_MAX_CODE_LEN, when the tree exceeds it */
+    if (max_len > PIVCO_MAX_CODE_LEN)
+        limit_code_lengths(lengths, PIVCO_MAX_SYMBOLS, PIVCO_MAX_CODE_LEN);
 
     /* Optional joint length/shape pass (encoder side only; the decoder
        rebuilds identically from the transmitted lengths).  Any internal
