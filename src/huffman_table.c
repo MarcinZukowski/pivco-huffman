@@ -91,14 +91,39 @@ static void build_lengths_twoqueue(const uint64_t freq[PIVCO_MAX_SYMBOLS],
 
 static void limit_code_lengths(uint8_t *lengths, int n_symbols, int max_len)
 {
-    /* Count symbols at each length */
+    /* Count symbols at each length.  Four interleaved histograms: the
+     * lengths fall into a handful of bins, so one histogram serializes
+     * on store-to-load forwarding of the same counter. */
     int count[64] = {0}; /* support original lengths up to 63 */
     int max_orig = 0;
-    for (int i = 0; i < n_symbols; i++) {
-        if (lengths[i] > 0) {
-            count[lengths[i]]++;
-            if (lengths[i] > max_orig) max_orig = lengths[i];
+    {
+        int c2[64] = {0}, c3[64] = {0}, c4[64] = {0};
+        int m1 = 0, m2 = 0, m3 = 0, m4 = 0;
+        int i = 0;
+        for (; i + 3 < n_symbols; i += 4) {
+            uint8_t a = lengths[i];
+            uint8_t b = lengths[i + 1];
+            uint8_t c = lengths[i + 2];
+            uint8_t d = lengths[i + 3];
+            count[a]++;
+            c2[b]++;
+            c3[c]++;
+            c4[d]++;
+            if (a > m1) m1 = a;
+            if (b > m2) m2 = b;
+            if (c > m3) m3 = c;
+            if (d > m4) m4 = d;
         }
+        for (; i < n_symbols; i++) {
+            count[lengths[i]]++;
+            if (lengths[i] > m1) m1 = lengths[i];
+        }
+        for (int l = 1; l < 64; l++) count[l] += c2[l] + c3[l] + c4[l];
+        count[0] = 0;   /* unused symbols are not code lengths */
+        max_orig = m1;
+        if (m2 > max_orig) max_orig = m2;
+        if (m3 > max_orig) max_orig = m3;
+        if (m4 > max_orig) max_orig = m4;
     }
     if (max_orig <= max_len) return; /* nothing to do */
 
@@ -187,15 +212,36 @@ static void limit_code_lengths(uint8_t *lengths, int n_symbols, int max_len)
             ns++;
         }
     }
-    /* Sort by original length (shorter = more frequent = should get shorter code) */
-    for (int i = 1; i < ns; i++) {
-        ls_t tmp = sorted[i];
-        int j = i - 1;
-        while (j >= 0 && sorted[j].len > tmp.len) {
-            sorted[j + 1] = sorted[j];
-            j--;
+    /* Stable counting sort by original length (shorter = more frequent =
+     * should get shorter code); symbols keep their value order within a
+     * length.  Lengths are at most max_len here (clamped above).  The
+     * bin count is split four ways for the same forwarding reason, and
+     * the merge doubles as the prefix sum, giving one write cursor per
+     * length. */
+    {
+        int h1[PIVCO_MAX_CODE_LEN + 1] = {0};
+        int h2[PIVCO_MAX_CODE_LEN + 1] = {0};
+        int h3[PIVCO_MAX_CODE_LEN + 1] = {0};
+        int h4[PIVCO_MAX_CODE_LEN + 1] = {0};
+        int i = 0;
+        for (; i + 3 < ns; i += 4) {
+            h1[sorted[i].len]++;
+            h2[sorted[i + 1].len]++;
+            h3[sorted[i + 2].len]++;
+            h4[sorted[i + 3].len]++;
         }
-        sorted[j + 1] = tmp;
+        for (; i < ns; i++)
+            h1[sorted[i].len]++;
+        ls_t by_len[PIVCO_MAX_SYMBOLS];
+        ls_t *cursor[PIVCO_MAX_CODE_LEN + 1];
+        int acc = 0;
+        for (int l = 0; l <= PIVCO_MAX_CODE_LEN; l++) {
+            cursor[l] = by_len + acc;
+            acc += h1[l] + h2[l] + h3[l] + h4[l];
+        }
+        for (int i = 0; i < ns; i++)
+            *cursor[sorted[i].len]++ = sorted[i];
+        memcpy(sorted, by_len, (size_t)ns * sizeof(ls_t));
     }
 
     /* Assign new lengths from count array */
