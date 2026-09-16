@@ -127,6 +127,12 @@ static uint8_t *encode_scratch_ensure(pivco_scratch_t *sc, size_t need)
 #ifndef PIVCO_FSE_K1_MIN_GAIN
 #define PIVCO_FSE_K1_MIN_GAIN 0.20
 #endif
+#ifndef PIVCO_FSE_K2_MIN_BYTES
+#define PIVCO_FSE_K2_MIN_BYTES 16
+#endif
+#ifndef PIVCO_FSE_K2_MIN_GAIN
+#define PIVCO_FSE_K2_MIN_GAIN 0.20
+#endif
 
 /* FSE per-table-id stats live in src/pivco_huffman.c (backend-neutral
  * TU) so the symbols resolve regardless of backend.  codec.c writes
@@ -278,7 +284,7 @@ static inline size_t codec_table_len_bound(int nbytes, double min_gain)
  * written by the caller, so the wire layout does not depend on it. */
 
 static inline int codec_fse_try(int static_on, int nibble_on, int k1_on,
-                                uint8_t *marker_slot,
+                                int k2_on, uint8_t *marker_slot,
                                 uint8_t *body, int nbytes,
                                 int n, int n_left, int n_right,
                                 int depth, uint8_t **out_ptr)
@@ -394,6 +400,25 @@ static inline int codec_fse_try(int static_on, int nibble_on, int k1_on,
         }
     }
 
+    /* ---- candidate 4: k=2 bit-context table ----
+     * As k=1 with one more bit of context. */
+    if (k2_on && nbytes >= PIVCO_FSE_K2_MIN_BYTES) {
+        size_t lim = codec_table_len_bound(nbytes, PIVCO_FSE_K2_MIN_GAIN);
+        if (best_id >= 1 && best_len < lim) lim = best_len;
+        if (lim > 0) {
+            pivco_fse_status_t rc = pivco_k2_compress(body, (size_t)nbytes,
+                                                      try_out, cap,
+                                                      lim - 1, &try_len);
+            g_pivco_fse_attempt[PIVCO_FSE_K2_ID]++;
+            if (rc == PIVCO_FSE_OK && try_len < lim) {
+                best_id  = PIVCO_FSE_K2_ID;
+                best_xor = 0;
+                best_len = try_len;
+                uint8_t *t = best_out; best_out = try_out; try_out = t;
+            }
+        }
+    }
+
     int committed = 0;
     if (best_id < 1) {
         g_pivco_fse_commit[0]++;     /* slot 0 = attempted, rejected */
@@ -405,7 +430,7 @@ static inline int codec_fse_try(int static_on, int nibble_on, int k1_on,
     if (buf != stack_stage) free(buf);
     return committed;
 #else
-    (void)static_on; (void)nibble_on; (void)k1_on; (void)marker_slot; (void)body;
+    (void)static_on; (void)nibble_on; (void)k1_on; (void)k2_on; (void)marker_slot; (void)body;
     (void)nbytes; (void)n; (void)n_left; (void)n_right; (void)depth; (void)out_ptr;
     return 0;
 #endif
@@ -420,7 +445,8 @@ static inline int codec_flat_fse_eligible(const pivco_table_t *table, int nbytes
 #ifdef PIVCO_HAS_FSE
     return table->fse_enabled &&
            ((table->fse_nibble_enabled && nbytes >= PIVCO_FSE_NIBBLE_MIN_BYTES) ||
-            (table->fse_k1_enabled && nbytes >= PIVCO_FSE_K1_MIN_BYTES));
+            (table->fse_k1_enabled && nbytes >= PIVCO_FSE_K1_MIN_BYTES) ||
+            (table->fse_k2_enabled && nbytes >= PIVCO_FSE_K2_MIN_BYTES));
 #else
     (void)table; (void)nbytes;
     return 0;
@@ -470,7 +496,7 @@ static void codec_encode_node(const pivco_table_t *table,
 
         if (try_fse) {
             if (codec_fse_try(0, table->fse_nibble_enabled,
-                              table->fse_k1_enabled,
+                              table->fse_k1_enabled, table->fse_k2_enabled,
                               marker_slot, body, total_bytes,
                               0, 0, 0, 0, out_ptr))
                 return;                     /* committed, natural-packed */
@@ -554,7 +580,8 @@ static void codec_encode_node(const pivco_table_t *table,
     memcpy(bm, bm_stage, (size_t)nbytes);
     *out_ptr += nbytes;
     if (table->fse_enabled)
-        codec_fse_try(1, table->fse_nibble_enabled, table->fse_k1_enabled,
+        codec_fse_try(table->fse_static_enabled, table->fse_nibble_enabled,
+                      table->fse_k1_enabled, table->fse_k2_enabled,
                       &node_markers[rec_idx], bm, nbytes,
                       n, n_left, n_right, depth, out_ptr);
 }

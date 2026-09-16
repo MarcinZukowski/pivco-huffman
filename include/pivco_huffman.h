@@ -214,8 +214,10 @@ typedef struct {
     uint8_t  min_len;
     uint16_t num_symbols;
     uint8_t  fse_enabled;        /* baked from pivco_cfg_t at build */
+    uint8_t  fse_static_enabled; /* baked from pivco_cfg_t at build */
     uint8_t  fse_nibble_enabled; /* baked from pivco_cfg_t at build */
     uint8_t  fse_k1_enabled;     /* baked from pivco_cfg_t at build */
+    uint8_t  fse_k2_enabled;     /* baked from pivco_cfg_t at build */
     uint8_t  flat_layout;        /* baked from pivco_cfg_t at build */
 
     /* Flat-subtree fast path: per-node, if flat_depth[i] >= 2 then node i
@@ -360,6 +362,10 @@ typedef struct {
     pivco_tree_mode_t   tree_mode;    /* default PIVCO_TREE_MODE_OPTIMIZED */
     pivco_effort_t      effort;       /* default PIVCO_EFFORT_PLAIN */
     int                 fse_enabled;  /* default 1: per-node FSE attempts */
+    /* Try the static-schedule tables (ids 1..PIVCO_FSE_NUM_TABLES) on
+     * partition bitmaps.  Encoder-side only.
+     * default: 1.  Ignored when fse_enabled is 0. */
+    int                 fse_static_enabled;
     /* Let a per-node FSE attempt additionally try the nibble table
      * (PIVCO_FSE_NIBBLE_ID), and take whichever is smaller.
      * It wins ratio on structured data but costs 30-50% decode.
@@ -372,6 +378,10 @@ typedef struct {
      * Encoder-side only.
      * default: 0.  Ignored when fse_enabled is 0. */
     int                 fse_k1_enabled;
+    /* Likewise the k=2 bit-context table (PIVCO_FSE_K2_ID): P(bit |
+     * previous two bits) on a coarser grid, same recipe byte.
+     * default: 0.  Ignored when fse_enabled is 0. */
+    int                 fse_k2_enabled;
     pivco_flat_layout_t flat_layout;  /* default PIVCO_FLAT_VERTICAL */
 } pivco_cfg_t;
 
@@ -438,7 +448,7 @@ int pivco_joint_optimize_lengths(const uint64_t freq[PIVCO_MAX_SYMBOLS],
  * k=1 bit-context table.
  * MUST be >= PIVCO_FSE_K1_ID + 1 (static-asserted in pivco_fse.c).
  * Not thread-safe; intended for single-threaded analysis runs. */
-#define PIVCO_FSE_STATS_SLOTS 53
+#define PIVCO_FSE_STATS_SLOTS 54
 void pivco_fse_stats_reset(void);
 void pivco_fse_stats_get(uint64_t commit_count[PIVCO_FSE_STATS_SLOTS],
                                  uint64_t attempt_count[PIVCO_FSE_STATS_SLOTS],

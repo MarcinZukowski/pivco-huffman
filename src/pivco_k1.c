@@ -72,8 +72,16 @@ typedef struct {
 /* The catalog: one entry per recipe, all built together on the coder's
  * first use (pthread_once, like pivco_fse_init).
  * TODO: the carry-1 table of a recipe is the carry-0 table of its complement
- * mirror (grid index k <-> 15-k) with the symbols complemented, so half
- * of it is redundant; see IDEAS.md. */
+ * with the symbols complemented, so half of the catalog is redundant.
+ * pivco_k2.c keeps tables for its canonical recipes only and codes a
+ * region under a non-canonical recipe as its complement, with one XOR
+ * pass over the region after the decode loop: half the catalog for a
+ * decode cost at the noise floor.
+ * TODO: Try the same here.
+ * TODO: the catalog is built from doubles at first use; the static
+ * schedule ships its normalized frequency vectors instead
+ * (pivco_fse_tables.h) and builds from integers.  Consider generating
+ * the vectors for this catalog and k2's the same way. */
 static k1_tabs_t *g_k1_cat[256];
 static pthread_once_t g_k1_once = PTHREAD_ONCE_INIT;
 static int g_k1_ok;

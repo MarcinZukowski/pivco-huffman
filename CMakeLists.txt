@@ -107,6 +107,7 @@ if(PIVCO_FSE)
     list(APPEND PIVCO_SOURCES
         src/pivco_fse.c
         src/pivco_k1.c
+        src/pivco_k2.c
         ext/fse/lib/fse_compress.c
         ext/fse/lib/fse_decompress.c
         ext/fse/lib/entropy_common.c

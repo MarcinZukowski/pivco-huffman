@@ -109,6 +109,30 @@ typedef enum {
 #define PIVCO_K1_PREFETCH 1
 #endif
 
+/* Table id for the k=2 bit-context table (see pivco_k2.c): the k=1
+ * coder with one more bit of context, P(bit | previous two bits), four
+ * probabilities each on a 4-value grid, one recipe byte.  Four carry
+ * tables per canonical recipe (complement symmetry halves the 256),
+ * built on first use. */
+#define PIVCO_FSE_K2_ID 53
+
+/* The k=2 knobs mirror the k=1 ones above. */
+#ifndef PIVCO_K2_TABLELOG
+#define PIVCO_K2_TABLELOG 10
+#endif
+#ifndef PIVCO_K2_SPLIT_MIN
+#define PIVCO_K2_SPLIT_MIN 128
+#endif
+#ifndef PIVCO_K2_SEGS
+#define PIVCO_K2_SEGS 8
+#endif
+#ifndef PIVCO_K2_EST_SKIP
+#define PIVCO_K2_EST_SKIP 0.85
+#endif
+#ifndef PIVCO_K2_PREFETCH
+#define PIVCO_K2_PREFETCH 1
+#endif
+
 
 /* Idempotent.  Safe to call multiple times; first call builds the
  * CTables + DTables; subsequent calls are no-ops. */
@@ -193,6 +217,18 @@ pivco_fse_status_t pivco_k1_decompress(const void *src, size_t src_len,
 /* Build the whole catalog (pthread_once; the coders call this on first
  * use).  Returns 0, or -1 on allocation failure. */
 int pivco_k1_prebuild(void);
+
+/* The k=2 coder, same contract as the k=1 one. */
+pivco_fse_status_t pivco_k2_compress(const void *src, size_t src_len,
+                                      void *dst, size_t dst_cap,
+                                      size_t max_len, size_t *out_len);
+
+pivco_fse_status_t pivco_k2_decompress(const void *src, size_t src_len,
+                                        void *dst, size_t dst_cap,
+                                        size_t dst_expected,
+                                        size_t *out_len);
+
+int pivco_k2_prebuild(void);
 
 /* Helper: byte-wise XOR-flip a buffer (all 1s become 0s and vice
  * versa).  Used when the right side is the majority -- we flip the

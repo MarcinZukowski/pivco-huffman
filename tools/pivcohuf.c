@@ -195,6 +195,9 @@ static void usage(FILE *out) {
         "                        (id 51); smaller payload wins\n"
         "  --ans-k1              with -a: also try the k=1 bit-context table\n"
         "                        (id 52); smaller payload wins\n"
+        "  --ans-k2              with -a: also try the k=2 bit-context table\n"
+        "                        (id 53); smaller payload wins\n"
+        "  --ans-no-static       with -a: do not try the static-schedule tables\n"
         "  -b, --block-size N    symbols per block (1..65535; default per-arch).\n"
         "                        recorded in the stream; decompress reads it back.\n"
         "  --table-kb N          rebuild the Huffman table every N KiB of input\n"
@@ -223,10 +226,12 @@ int main(int argc, char **argv)
         .effort      = PIVCO_EFFORT_PLAIN,
         /* off by default, -a / --ans to turn on */
         .fse_enabled = 0,
+        .fse_static_enabled = 1,
         /* the transmitted-table candidates need fse_enabled and their
-         * own flag: --ans-nibble / --ans-k1 */
+         * own flag: --ans-nibble / --ans-k1 / --ans-k2 */
         .fse_nibble_enabled = 0,
         .fse_k1_enabled = 0,
+        .fse_k2_enabled = 0,
         .flat_layout = PIVCO_FLAT_VERTICAL,
     };
     int force = 0;
@@ -248,6 +253,10 @@ int main(int argc, char **argv)
             cli_cfg.fse_nibble_enabled = 1;
         } else if (strcmp(argv[i], "--ans-k1") == 0) {
             cli_cfg.fse_k1_enabled = 1;
+        } else if (strcmp(argv[i], "--ans-k2") == 0) {
+            cli_cfg.fse_k2_enabled = 1;
+        } else if (strcmp(argv[i], "--ans-no-static") == 0) {
+            cli_cfg.fse_static_enabled = 0;
         } else if (strcmp(argv[i], "--table-kb") == 0 && i + 1 < argc) {
             table_kb = (size_t)strtoul(argv[i + 1], NULL, 0);
             i++;

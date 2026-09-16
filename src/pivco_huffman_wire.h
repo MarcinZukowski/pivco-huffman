@@ -52,6 +52,9 @@
  *   selects the k=1 bit-context table: the payload is one recipe byte
  *   (two 4-bit grid indices for P(bit | previous bit)) followed by the
  *   tANS bits, coded from a prebuilt catalog; xor_flag is always 0.
+ * table_id == PIVCO_FSE_K2_ID
+ *   the k=2 bit-context table: the same form with P(bit | previous two
+ *   bits), four 2-bit grid indices in the recipe byte.
  *
  * All forms are decoded by pivco_fse_decompress(), which dispatches on
  * table_id.
@@ -248,7 +251,7 @@ static inline const uint8_t *wire_read_bitmap(const uint8_t **in_ptr,
 
 /* Read a flat-subtree region: [marker][n*D packed bits] when marker == 0,
  * or [marker][fse_len:u16 LE][payload] for a transmitted table (nibble
- * or k=1).
+ * or k=1/k=2).
  *
  * Returns a pointer to `nbytes` usable packed bytes -- straight into the
  * input stream for the raw form (the common case, no copy), or into a

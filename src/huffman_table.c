@@ -439,8 +439,10 @@ int pivco_build_table(const pivco_cfg_t *cfg,
     if (n_used == 1) {
         build_single_symbol_table(leaf[0].sym, table);
         table->fse_enabled = (uint8_t)(cfg->fse_enabled ? 1 : 0);
+        table->fse_static_enabled = (uint8_t)(cfg->fse_static_enabled ? 1 : 0);
         table->fse_nibble_enabled = (uint8_t)(cfg->fse_nibble_enabled ? 1 : 0);
         table->fse_k1_enabled = (uint8_t)(cfg->fse_k1_enabled ? 1 : 0);
+        table->fse_k2_enabled = (uint8_t)(cfg->fse_k2_enabled ? 1 : 0);
         table->flat_layout = (uint8_t)cfg->flat_layout;
         return PIVCO_OK;
     }
@@ -548,8 +550,10 @@ static int build_table_finish(const uint8_t lengths[PIVCO_MAX_SYMBOLS],
                               const pivco_cfg_t *cfg)
 {
     table->fse_enabled = (uint8_t)(cfg->fse_enabled ? 1 : 0);
+    table->fse_static_enabled = (uint8_t)(cfg->fse_static_enabled ? 1 : 0);
     table->fse_nibble_enabled = (uint8_t)(cfg->fse_nibble_enabled ? 1 : 0);
     table->fse_k1_enabled = (uint8_t)(cfg->fse_k1_enabled ? 1 : 0);
+    table->fse_k2_enabled = (uint8_t)(cfg->fse_k2_enabled ? 1 : 0);
     table->flat_layout = (uint8_t)cfg->flat_layout;
     /* Copy lengths to table */
     for (int i = 0; i < PIVCO_MAX_SYMBOLS; i++) {
@@ -1218,8 +1222,10 @@ int pivco_build_table_from_code_lens(
     if (n_used == 1) {
         build_single_symbol_table(last, table);
         table->fse_enabled = (uint8_t)(cfg->fse_enabled ? 1 : 0);
+        table->fse_static_enabled = (uint8_t)(cfg->fse_static_enabled ? 1 : 0);
         table->fse_nibble_enabled = (uint8_t)(cfg->fse_nibble_enabled ? 1 : 0);
         table->fse_k1_enabled = (uint8_t)(cfg->fse_k1_enabled ? 1 : 0);
+        table->fse_k2_enabled = (uint8_t)(cfg->fse_k2_enabled ? 1 : 0);
         table->flat_layout = (uint8_t)cfg->flat_layout;
         return PIVCO_OK;
     }
@@ -1244,8 +1250,10 @@ int pivco_build_codec_table(const pivco_cfg_t *cfg,
     if (rc != PIVCO_OK)
         return rc;
     table->fse_enabled = (uint8_t)(cfg->fse_enabled ? 1 : 0);
+    table->fse_static_enabled = (uint8_t)(cfg->fse_static_enabled ? 1 : 0);
     table->fse_nibble_enabled = (uint8_t)(cfg->fse_nibble_enabled ? 1 : 0);
     table->fse_k1_enabled = (uint8_t)(cfg->fse_k1_enabled ? 1 : 0);
+    table->fse_k2_enabled = (uint8_t)(cfg->fse_k2_enabled ? 1 : 0);
     table->flat_layout = (uint8_t)cfg->flat_layout;
     memcpy(table->code_len, code_lens, PIVCO_MAX_SYMBOLS);
     /* The encoder's symbol -> rank gather: the inverse of rank_to_sym,
