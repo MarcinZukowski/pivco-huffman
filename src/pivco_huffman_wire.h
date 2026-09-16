@@ -90,9 +90,9 @@
  *                                     marker != 0: 2-byte LE fse_len +
  *                                     fse_len payload bytes
  *
- * Only the nibble table is ever used there (marker ==
- * PIVCO_FSE_NIBBLE_ID): a flat region has no partition skew for the
- * static schedule to key on.  Coding it matters because a depth-D flat
+ * Only the transmitted-table candidates are used there (the nibble
+ * table, k=1, k=2): a flat region has no partition skew for the static
+ * schedule to key on.  Coding it matters because a depth-D flat
  * subtree gives all 2^D of its symbols the same code length by
  * construction — Huffman models their real frequencies not at all, and
  * on literal streams that is where most of the residual redundancy is.
