@@ -96,6 +96,7 @@ static inline int bitmap_bytes(int n)
  *
  * The "needs header" decision is a pure function of the tree topology and
  * matches across encoder and decoder via this shared helper. */
+#ifdef PIVCO_HUFFMAN_LEGACY_TREE_TABLE
 static inline int kr_header_needed(const pivco_table_t *table,
                                     int16_t node_id)
 {
@@ -105,6 +106,14 @@ static inline int kr_header_needed(const pivco_table_t *table,
     return (table->tree[n->left].symbol < 0)
         || (table->tree[n->right].symbol < 0);
 }
+#else
+static inline int kr_header_needed(const pivco_table_t *table,
+                                    int16_t rec_idx)
+{
+    pivco_sched_kind_t kind = pivco_sched_kind(&table->dec.sched[rec_idx]);
+    return kind == PIVCO_SCHED_FULL || kind == PIVCO_SCHED_LEAF_LEFT;
+}
+#endif
 
 #define KR_HEADER_BYTES 2  /* uint16 little-endian */
 

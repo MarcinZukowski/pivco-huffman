@@ -354,20 +354,18 @@ static void fill_enc_init_aux(pivco_table_t *table)
 /* Enumerate the non-flat internal nodes (each emits a marker+bitmap record)
  * in ascending pre-order and cache the order in the table, so the codec's
  * per-block marker prefix needs no per-block tree walk. */
-static int enum_markers_rec(const pivco_table_t *t, int16_t id,
-                            int16_t *positions, int count)
-{
-    const pivco_tree_node_t *n = &t->tree[id];
-    if (n->symbol >= 0) return count;             /* leaf */
-    if (t->flat_depth[id] >= 2) return count;     /* flat subtree */
-    positions[count++] = id;
-    count = enum_markers_rec(t, n->left,  positions, count);
-    count = enum_markers_rec(t, n->right, positions, count);
-    return count;
-}
+/* The block-level marker prefix carries one entry per non-flat internal
+ * node in pre-order: exactly the non-FLAT schedule records in index
+ * order. */
 static void fill_marker_order(pivco_table_t *t)
 {
-    t->mk_count = (int16_t)enum_markers_rec(t, t->tree_root, t->marker_positions, 0);
+    int count = 0;
+    for (int i = 0; i < t->dec.sched_len; i++) {
+        if (pivco_sched_kind(&t->dec.sched[i]) != PIVCO_SCHED_FLAT) {
+            t->marker_positions[count++] = (int16_t)i;
+        }
+    }
+    t->mk_count = (int16_t)count;
 }
 
 static void build_single_symbol_table(int sym, pivco_table_t *table)
@@ -396,6 +394,14 @@ static void build_single_symbol_table(int sym, pivco_table_t *table)
     table->node_type[0] = PIVCO_NODE_BOTH_LEAVES;
     table->node_type[1] = PIVCO_NODE_LEAF;
     table->node_type[2] = PIVCO_NODE_LEAF;
+    /* Schedule: two ranks of the symbol under one BOTH_LEAVES record. */
+    table->dec.rank_to_sym[0] = (uint8_t)sym;
+    table->dec.rank_to_sym[1] = (uint8_t)sym;
+    table->dec.num_ranks = 2;
+    table->dec.sched[0].op = (uint8_t)PIVCO_SCHED_BOTH_LEAVES;
+    table->dec.sched[0].param = 0;
+    table->dec.sched[0].right = 0;
+    table->dec.sched_len = 1;
     fill_enc_init_aux(table);   /* sym_to_rank is all-zero (rank 0) here; aux must not stay NULL */
     fill_marker_order(table);
 }
@@ -486,6 +492,55 @@ static uint16_t assign_inorder_ranks(pivco_table_t *table,
     rank = assign_inorder_ranks(table, n->left, rank);
     table->split_rank[id] = (uint8_t)(rank - 1); /* max rank of the left subtree */
     return assign_inorder_ranks(table, n->right, rank);
+}
+
+/* Render the materialised tree as the walk schedule (pre-order, one
+ * record per visited internal node) and the leaves as rank_to_sym.
+ * Ranks come from assign_inorder_ranks, so this runs after it. */
+static void sched_from_tree_rec(pivco_table_t *t, int16_t id)
+{
+    const pivco_tree_node_t *n = &t->tree[id];
+    pivco_decode_core_t *dec = &t->dec;
+    int self = dec->sched_len++;
+    pivco_sched_rec_t *rec = &dec->sched[self];
+    if (t->flat_depth[id] >= 2) {
+        rec->op = (uint8_t)(PIVCO_SCHED_FLAT | (t->flat_depth[id] << 2));
+        rec->param = t->flat_base_rank[id];
+        rec->right = 0;
+        return;
+    }
+    int left_leaf = t->tree[n->left].symbol >= 0;
+    int right_leaf = t->tree[n->right].symbol >= 0;
+    rec->param = t->split_rank[id];
+    if (left_leaf && right_leaf) {
+        rec->op = (uint8_t)PIVCO_SCHED_BOTH_LEAVES;
+        rec->right = 0;
+        return;
+    }
+    if (left_leaf) {
+        rec->op = (uint8_t)PIVCO_SCHED_LEAF_LEFT;
+        rec->right = 1;
+        sched_from_tree_rec(t, n->right);
+        return;
+    }
+    rec->op = (uint8_t)PIVCO_SCHED_FULL;
+    sched_from_tree_rec(t, n->left);
+    rec->right = (uint8_t)(dec->sched_len - self);
+    sched_from_tree_rec(t, n->right);
+}
+
+static void sched_from_tree(pivco_table_t *t)
+{
+    t->dec.sched_len = 0;
+    sched_from_tree_rec(t, t->tree_root);
+    int n_leaves = 0;
+    for (int s = 0; s < PIVCO_MAX_SYMBOLS; s++) {
+        if (t->code_len[s]) {
+            t->dec.rank_to_sym[t->sym_to_rank[s]] = (uint8_t)s;
+            n_leaves++;
+        }
+    }
+    t->dec.num_ranks = (uint16_t)n_leaves;
 }
 
 static int build_table_finish(const uint8_t lengths[PIVCO_MAX_SYMBOLS],
@@ -931,8 +986,202 @@ static int build_table_finish(const uint8_t lengths[PIVCO_MAX_SYMBOLS],
     assign_inorder_ranks(table, table->tree_root, 0);
 
     fill_enc_init_aux(table);   /* x86 2tab/4tab gather tables (or NULL elsewhere) */
+    sched_from_tree(table);
     fill_marker_order(table);
 
+    return PIVCO_OK;
+}
+
+/* ---------- Walk schedule straight from code lengths ----------
+ *
+ * The decoder's build: no explicit tree.  The same pipeline as the
+ * default tree mode above up to the depth-sorted chunk list, then one
+ * pre-order reconstruction writes the records and the ranks directly.
+ * A depth-sorted list of leaf depths determines the canonical tree:
+ * at each depth the next chunk either is the node (its depth matches)
+ * or the node is internal and its two children sit one level down.
+ * The dc_ prefix: decode core. */
+
+/* One chunk: 2^bit same-length leaves under one root at `depth`. */
+typedef struct {
+    uint8_t depth;
+    uint8_t bit;
+    uint8_t sym_idx;   /* index into the length-sorted symbol list */
+} dc_chunk_t;
+
+/* The reconstruction's state: the chunk cursor, the symbol list the
+ * chunks index, and the record and rank cursors of the output. */
+typedef struct {
+    pivco_decode_core_t *dec;
+    const dc_chunk_t *next;
+    const dc_chunk_t *end;
+    const uint8_t *items;
+    uint16_t sched_len;
+    unsigned rank;
+} dc_gen_t;
+
+/* One subtree rooted at `depth`, pre-order.  A subtree is a bare leaf
+ * iff it emits no record and advances the rank cursor by exactly one. */
+static int dc_gen(dc_gen_t *g, unsigned depth)
+{
+    if (g->next == g->end || depth > PIVCO_MAX_CODE_LEN)
+        return -1;
+    const dc_chunk_t *c = g->next;
+    /* A shallower unconsumed chunk cannot belong anywhere below here. */
+    if (c->depth < depth)
+        return -1;
+
+    if (c->depth == depth) {
+        g->next++;
+        unsigned b = c->bit;
+        unsigned rank0 = g->rank;
+        memcpy(&g->dec->rank_to_sym[rank0], &g->items[c->sym_idx], (size_t)1 << b);
+        g->rank += 1u << b;
+        if (b == 0) return 0;                  /* bare leaf: no record */
+        pivco_sched_rec_t *rec = &g->dec->sched[g->sched_len++];
+        rec->op = (b == 1) ? (uint8_t)PIVCO_SCHED_BOTH_LEAVES
+                           : (uint8_t)(PIVCO_SCHED_FLAT | (b << 2));
+        rec->param = (uint8_t)rank0;
+        rec->right = 0;
+        return 0;
+    }
+
+    /* Internal node: reserve its record, then note the record and rank
+     * cursors at each child boundary. */
+    uint16_t self = g->sched_len++;
+    uint16_t left_sched = g->sched_len;
+    unsigned left_rank = g->rank;
+    if (dc_gen(g, depth + 1) != 0) return -1;
+    uint16_t right_sched = g->sched_len;
+    unsigned right_rank = g->rank;
+    if (dc_gen(g, depth + 1) != 0) return -1;
+
+    /* Only the left child can be a lone leaf: the list is depth-sorted
+     * and stable, chunks generate in ascending length, and depth d's
+     * only possible singleton is length d's bit-0 chunk, so it sorts
+     * ahead of every other chunk at its depth and is taken as a left
+     * child. */
+    int left_leaf = right_sched == left_sched && right_rank == left_rank + 1;
+    pivco_sched_rec_t *rec = &g->dec->sched[self];
+    rec->op = left_leaf ? (uint8_t)PIVCO_SCHED_LEAF_LEFT : (uint8_t)PIVCO_SCHED_FULL;
+    rec->param = (uint8_t)(right_rank - 1);
+    rec->right = (uint8_t)(right_sched - self);
+    return 0;
+}
+
+int pivco_build_decode_core(const uint8_t code_lens[PIVCO_MAX_SYMBOLS],
+                            pivco_decode_core_t *dec)
+{
+    if (!code_lens || !dec) return PIVCO_ERR_NULL;
+
+    /* Symbols sorted by length, symbol order within a length, and the
+     * per-length counts.  The symbol range is split in four quarters
+     * handled in one interleaved loop, so the same-length counter and
+     * cursor chains of one quarter overlap the others' instead of
+     * serializing (neighbouring symbols tend to share a length), and
+     * the placement is branch-free: unused symbols are scattered into a
+     * sink through the length-0 cursors.  Validation is by accounting:
+     * a length outside 1..PIVCO_MAX_CODE_LEN is counted in the
+     * histogram (the OR test keeps it in bounds) but summed nowhere, so
+     * the placed and zero counts fall short of 256. */
+    enum { Q = PIVCO_MAX_SYMBOLS / 4 };
+    enum { BINS = 16 };   /* one per possible nibble; the length indexes directly */
+    uint8_t h[4][BINS];
+    memset(h, 0, sizeof(h));
+    for (int i = 0; i < Q; i++) {
+        uint8_t a = code_lens[i];
+        uint8_t b = code_lens[Q + i];
+        uint8_t c = code_lens[2 * Q + i];
+        uint8_t d = code_lens[3 * Q + i];
+        if ((a | b | c | d) >= BINS) return PIVCO_ERR_CORRUPT;
+        h[0][a]++;
+        h[1][b]++;
+        h[2][c]++;
+        h[3][d]++;
+    }
+    int sym_count[PIVCO_MAX_CODE_LEN + 1];
+    int per_len_start[PIVCO_MAX_CODE_LEN + 1];
+    uint8_t items[PIVCO_MAX_SYMBOLS];
+    uint8_t sink[PIVCO_MAX_SYMBOLS];
+    uint8_t *cursor[4][BINS];
+    int acc = 0;
+    int max_len = 0;
+    for (int q = 0; q < 4; q++) cursor[q][0] = sink + q * Q;
+    for (int L = 1; L <= PIVCO_MAX_CODE_LEN; L++) {
+        per_len_start[L] = acc;
+        for (int q = 0; q < 4; q++) {
+            cursor[q][L] = items + acc;
+            acc += h[q][L];
+        }
+        sym_count[L] = acc - per_len_start[L];
+        if (sym_count[L])
+            max_len = L;
+    }
+    int n_zero = h[0][0] + h[1][0] + h[2][0] + h[3][0];
+    if (acc + n_zero != PIVCO_MAX_SYMBOLS)
+        return PIVCO_ERR_CORRUPT;
+    if (acc == 0)
+        return PIVCO_ERR_EMPTY;
+    for (int i = 0; i < Q; i++) {
+        *cursor[0][code_lens[i]]++ = (uint8_t)i;
+        *cursor[1][code_lens[Q + i]]++ = (uint8_t)(Q + i);
+        *cursor[2][code_lens[2 * Q + i]]++ = (uint8_t)(2 * Q + i);
+        *cursor[3][code_lens[3 * Q + i]]++ = (uint8_t)(3 * Q + i);
+    }
+
+    if (acc == 1) {
+        dec->rank_to_sym[0] = items[0];
+        dec->rank_to_sym[1] = items[0];
+        dec->num_ranks = 2;
+        dec->sched[0].op = (uint8_t)PIVCO_SCHED_BOTH_LEAVES;
+        dec->sched[0].param = 0;
+        dec->sched[0].right = 0;
+        dec->sched_len = 1;
+        return PIVCO_OK;
+    }
+
+    /* Chunks: each length's count by its set bits, larger chunks first
+     * within a length (the default tree mode's decomposition). */
+    dc_chunk_t chunks[PIVCO_MAX_SYMBOLS];
+    int n_chunks = 0;
+    for (int L = 1; L <= max_len; L++) {
+        unsigned c = (unsigned)sym_count[L];
+        int cur = per_len_start[L];
+        while (c) {
+            int bit = 31 - __builtin_clz(c);
+            int depth = (bit >= 1) ? L - bit : L;
+            chunks[n_chunks].bit = (uint8_t)bit;
+            chunks[n_chunks].depth = (uint8_t)depth;
+            chunks[n_chunks].sym_idx = (uint8_t)cur;
+            cur += 1 << bit;
+            n_chunks++;
+            c &= ~(1u << bit);
+        }
+    }
+
+    /* Stable sort by root depth.  Insertion sort: generation order is
+     * ascending length, already nearly depth-sorted. */
+    for (int i = 1; i < n_chunks; i++) {
+        dc_chunk_t cur = chunks[i];
+        int j = i - 1;
+        while (j >= 0 && chunks[j].depth > cur.depth) {
+            chunks[j + 1] = chunks[j];
+            j--;
+        }
+        chunks[j + 1] = cur;
+    }
+
+    dc_gen_t g;
+    g.dec = dec;
+    g.next = chunks;
+    g.end = chunks + n_chunks;
+    g.items = items;
+    g.sched_len = 0;
+    g.rank = 0;
+    if (dc_gen(&g, 0) != 0 || g.next != g.end)
+        return PIVCO_ERR_CORRUPT;
+    dec->sched_len = g.sched_len;
+    dec->num_ranks = (uint16_t)g.rank;
     return PIVCO_OK;
 }
 
@@ -975,6 +1224,43 @@ int pivco_build_table_from_code_lens(
         return PIVCO_OK;
     }
     return build_table_finish(code_lens, table, cfg);
+}
+
+int pivco_build_codec_table(const pivco_cfg_t *cfg,
+                            const uint8_t code_lens[PIVCO_MAX_SYMBOLS],
+                            pivco_table_t *table)
+{
+    if (!code_lens || !table)
+        return PIVCO_ERR_NULL;
+    if (!cfg)
+        cfg = &pivco_cfg_default;
+    if ((unsigned)cfg->flat_layout > PIVCO_FLAT_VERTICAL_128)
+        return PIVCO_ERR_BAD_CFG;
+    /* The research tree modes shape the tree differently. */
+    if (cfg->tree_mode != PIVCO_TREE_MODE_OPTIMIZED)
+        return pivco_build_table_from_code_lens(cfg, code_lens, table);
+
+    int rc = pivco_build_decode_core(code_lens, &table->dec);
+    if (rc != PIVCO_OK)
+        return rc;
+    table->fse_enabled = (uint8_t)(cfg->fse_enabled ? 1 : 0);
+    table->fse_nibble_enabled = (uint8_t)(cfg->fse_nibble_enabled ? 1 : 0);
+    table->fse_k1_enabled = (uint8_t)(cfg->fse_k1_enabled ? 1 : 0);
+    table->flat_layout = (uint8_t)cfg->flat_layout;
+    memcpy(table->code_len, code_lens, PIVCO_MAX_SYMBOLS);
+    /* The encoder's symbol -> rank gather: the inverse of rank_to_sym,
+     * walked downward so the single-symbol table's two ranks leave
+     * rank 0, as the full build does. */
+    memset(table->sym_to_rank, 0, PIVCO_MAX_SYMBOLS);
+    for (int r = table->dec.num_ranks - 1; r >= 0; r--) {
+        table->sym_to_rank[table->dec.rank_to_sym[r]] = (uint8_t)r;
+    }
+    int single = table->dec.num_ranks == 2 &&
+                 table->dec.rank_to_sym[0] == table->dec.rank_to_sym[1];
+    table->num_symbols = single ? 1 : table->dec.num_ranks;
+    fill_enc_init_aux(table);
+    fill_marker_order(table);
+    return PIVCO_OK;
 }
 
 /* Fill the 2^MAX_CODE_LEN flat decode table (decode_sym/decode_len) read by

@@ -467,6 +467,42 @@ static int test_joint_lengths(void)
             if (rc != PIVCO_OK)
                 FAIL("%s effort %d: decode returned %d",
                      dists[d].name, (int)efforts[e], rc);
+
+            /* The codec table built from the same lengths carries the
+             * same schedule and ranks, encodes to the same bytes and
+             * decodes them. */
+            pivco_table_t ctable;
+            rc = pivco_build_codec_table(NULL, table.code_len, &ctable);
+            if (rc != PIVCO_OK)
+                FAIL("%s effort %d: build_codec_table returned %d",
+                     dists[d].name, (int)efforts[e], rc);
+            if (ctable.dec.num_ranks != table.dec.num_ranks
+                || ctable.dec.sched_len != table.dec.sched_len
+                || memcmp(ctable.dec.rank_to_sym, table.dec.rank_to_sym,
+                          table.dec.num_ranks) != 0
+                || memcmp(ctable.dec.sched, table.dec.sched,
+                          table.dec.sched_len * sizeof(pivco_sched_rec_t)) != 0
+                || memcmp(ctable.sym_to_rank, table.sym_to_rank,
+                          sizeof(table.sym_to_rank)) != 0
+                || ctable.mk_count != table.mk_count
+                || memcmp(ctable.marker_positions, table.marker_positions,
+                          (size_t)table.mk_count * sizeof(int16_t)) != 0)
+                FAIL("%s effort %d: codec table diverged from the full build",
+                     dists[d].name, (int)efforts[e]);
+            uint8_t encoded2[PIVCO_MAX_ENCODED_SIZE];
+            size_t enc_len2;
+            rc = pivco_encode(g_tenc, &ctable, symbols, PIVCO_BLOCK_SIZE,
+                              encoded2, &enc_len2);
+            if (rc != PIVCO_OK || enc_len2 != enc_len
+                || memcmp(encoded, encoded2, enc_len) != 0)
+                FAIL("%s effort %d: codec table encodes differently",
+                     dists[d].name, (int)efforts[e]);
+            uint8_t decoded2[PIVCO_BLOCK_SIZE];
+            rc = pivco_decode(g_tdec, &ctable, encoded, enc_len,
+                              decoded2, &consumed);
+            if (rc != PIVCO_OK || memcmp(decoded2, symbols, PIVCO_BLOCK_SIZE) != 0)
+                FAIL("%s effort %d: codec table decode diverged",
+                     dists[d].name, (int)efforts[e]);
             if (consumed != enc_len)
                 FAIL("%s effort %d: consumed %zu of %zu bytes",
                      dists[d].name, (int)efforts[e], consumed, enc_len);

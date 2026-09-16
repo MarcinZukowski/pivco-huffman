@@ -36,7 +36,7 @@
  *   [bitmap body]
  *        marker == 0 (raw): n-bit bitmap, ceil(n/8) bytes.  marker != 0 (FSE):
  *        2-byte LE fse_len + fse_len bytes of FSE-compressed bytes.  The marker
- *        is looked up from the prefix by node id.
+ *        is looked up from the prefix by schedule record.
  *
  * The marker byte is [xor_flag:1][table_id:7].
  * table_id == 1..PIVCO_FSE_NUM_TABLES
@@ -154,10 +154,10 @@ static inline int wire_read_block_n(const uint8_t **in_ptr)
  * node, so the header value is known and written directly at node
  * entry.  No-op when the node carries no header (kr_header_needed()). */
 static inline void wire_write_kr_header(const pivco_table_t *table,
-                                         int16_t node_id,
+                                         int16_t rec_idx,
                                          uint8_t **out_ptr, int n_right)
 {
-    if (!kr_header_needed(table, node_id)) return;
+    if (!kr_header_needed(table, rec_idx)) return;
     (*out_ptr)[0] = (uint8_t)(n_right & 0xFF);
     (*out_ptr)[1] = (uint8_t)((n_right >> 8) & 0xFF);
     *out_ptr += KR_HEADER_BYTES;
@@ -176,17 +176,15 @@ static inline void wire_write_kr_header(const pivco_table_t *table,
 /* ---------- Decode side ---------- */
 
 /* Read the K_right header at node entry.  Every decode-side call site
- * dispatches on node_type first (LEAF_LEFT / INTERNAL_FULL), where the
- * header is present by construction, so kr_header_needed() -- three
- * dependent tree loads re-deriving a statically known truth -- is only
- * consulted in debug builds.  (The encoder's write side still uses it:
- * its walk visits header-less nodes too.) */
+ * dispatches on the record kind first (LEAF_LEFT / FULL), where the
+ * header is present by construction, so kr_header_needed() is only
+ * consulted in debug builds. */
 static inline int wire_read_kr_header(const pivco_table_t *table,
-                                       int16_t node_id,
+                                       int16_t rec_idx,
                                        const uint8_t **in_ptr)
 {
-    PIVCO_CHECK_DEBUG(kr_header_needed(table, node_id));
-    (void)table; (void)node_id;
+    PIVCO_CHECK_DEBUG(kr_header_needed(table, rec_idx));
+    (void)table; (void)rec_idx;
     PROF_TIC();
     uint16_t v;
     memcpy(&v, *in_ptr, 2);

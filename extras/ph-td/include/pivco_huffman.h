@@ -1,5 +1,8 @@
 #ifndef PIVCO_HUFFMAN_H
 #define PIVCO_HUFFMAN_H
+/* This lineage keeps the explicit tree; src/pivco_huffman_common.h keys
+ * its K_right rule on it. */
+#define PIVCO_HUFFMAN_LEGACY_TREE_TABLE 1
 
 #include <stddef.h>
 #include <stdint.h>

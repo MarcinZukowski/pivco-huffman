@@ -106,6 +106,59 @@ typedef enum {
     PIVCO_NODE_LEAF,               /* leaf — consumed by the parent merge, never dispatched */
 } pivco_node_type_t;
 
+/* ---------- Walk schedule tree representation ----------
+ *
+ * The tree as the codec walks it: one record per internal node the walk
+ * visits, in pre-order.  Leaves have no record (the parent's merge
+ * consumes their symbol) and the nodes inside a flat subtree are never
+ * visited.  Child links are implicit in the pre-order layout: the left
+ * child's record, when it has one, is the next record, the right
+ * child's sits `right` records ahead.  Ranks are leaves in code order,
+ * so every subtree is a contiguous rank range and rank_to_sym is the
+ * only symbol table the walk needs: a flat subtree's code -> symbol
+ * table is the slice rank_to_sym[param ..].
+ *
+ *   op     the operation: its kind (pivco_sched_kind_t) in the low 2 bits and,
+ *          for FLAT, the subtree depth D above them (op >> 2)
+ *   param  FULL / LEAF_LEFT / BOTH_LEAVES: the max rank of the left subtree
+ *          (the partition threshold; for LEAF_LEFT and BOTH_LEAVES also the
+ *          left leaf's rank).  FLAT: the subtree's first rank.
+ *   right  offset from this record to the right child's record: 1 + the
+ *          number of records in the left subtree (0 for a lone leaf, so
+ *          1 for LEAF_LEFT); 0 (unused) for FLAT and BOTH_LEAVES */
+typedef enum {
+    PIVCO_SCHED_FULL        = 0,  /* both children internal -- K_right header */
+    PIVCO_SCHED_FLAT        = 1,  /* flat subtree, D = op >> 2 -- no header  */
+    PIVCO_SCHED_BOTH_LEAVES = 2,  /* both children leaves -- no K_right      */
+    PIVCO_SCHED_LEAF_LEFT   = 3,  /* left child lone leaf -- K_right header  */
+} pivco_sched_kind_t;
+
+typedef struct {
+    uint8_t op;
+    uint8_t param;
+    uint8_t right;
+} pivco_sched_rec_t;
+
+static inline pivco_sched_kind_t pivco_sched_kind(const pivco_sched_rec_t *r)
+{
+    return (pivco_sched_kind_t)(r->op & 3u);
+}
+
+static inline int pivco_sched_flat_depth(const pivco_sched_rec_t *r)
+{
+    return r->op >> 2;
+}
+
+/* Everything the decoder's walk reads about the tree, about 1 KB.  A
+ * single-symbol table is two ranks of the same symbol under one BOTH_LEAVES
+ * record, so the walk needs no special case for it. */
+typedef struct {
+    uint16_t num_ranks;
+    uint16_t sched_len;
+    uint8_t  rank_to_sym[PIVCO_MAX_SYMBOLS];
+    pivco_sched_rec_t sched[PIVCO_MAX_SYMBOLS - 1];
+} pivco_decode_core_t;
+
 /* ---------- Huffman table ---------- */
 
 /* Arch-specific precomputed gather tables for prim_enc_init.  Every pointer is
@@ -140,7 +193,9 @@ typedef struct {
     uint8_t  split_rank[PIVCO_MAX_TREE_NODES];      /* max rank in node's left subtree */
     uint8_t  flat_base_rank[PIVCO_MAX_TREE_NODES];  /* min rank in a flat subtree */
 
-    /* Tree for PIVCO tree-walk encode/decode */
+    /* The explicit tree represented as nodes with children.
+     * The codec walks `dec` below actually ; this form only serves the full
+     * build's own passes, the research tree modes and the benches. */
     pivco_tree_node_t tree[PIVCO_MAX_TREE_NODES];
     int16_t tree_root;
     int16_t tree_node_count;
@@ -191,6 +246,9 @@ typedef struct {
      * mk_count is their number. */
     int16_t  marker_positions[PIVCO_MAX_SYMBOLS];
     int16_t  mk_count;
+
+    /* The walk schedule of the tree above (see pivco_decode_core_t). */
+    pivco_decode_core_t dec;
 } pivco_table_t;
 
 /* ---------- Tree-shape mode (build-time) ----------
@@ -425,6 +483,27 @@ int pivco_build_table_from_code_lens(
     const pivco_cfg_t *cfg,
     const uint8_t code_lens[PIVCO_MAX_SYMBOLS],
     pivco_table_t *table);
+
+/* Build the walk schedule straight from code lengths, without the
+ * explicit tree: the same chunk decomposition and depth order as
+ * pivco_build_table's default tree mode, rendered into records by one
+ * pre-order reconstruction.  Byte-identical to the `dec` of the full
+ * build for the same lengths.  Returns PIVCO_ERR_CORRUPT for lengths
+ * that are not a complete code (or exceed PIVCO_MAX_CODE_LEN),
+ * PIVCO_ERR_EMPTY when no symbol is used. */
+int pivco_build_decode_core(const uint8_t code_lens[PIVCO_MAX_SYMBOLS],
+                            pivco_decode_core_t *dec);
+
+/* The codec's table from code lengths: fills only what the encoder and
+ * decoder walks read (the schedule, the rank maps, the marker order,
+ * the baked cfg flags, code_len, num_symbols), no explicit tree, no
+ * memset of the rest, and the other fields are left as they were.
+ * Encode and decode with it exactly as with a full table; the wire is
+ * identical.  Sized for the per-segment rebuild.  Research tree modes
+ * take the full build. */
+int pivco_build_codec_table(const pivco_cfg_t *cfg,
+                            const uint8_t code_lens[PIVCO_MAX_SYMBOLS],
+                            pivco_table_t *table);
 
 /* Fill the 2^MAX_CODE_LEN flat decode table (decode_sym/decode_len) used only
  * by the traditional flat-table decoder (trad_huffman_decode*).  Call after

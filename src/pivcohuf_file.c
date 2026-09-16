@@ -243,8 +243,8 @@ static int pivcohuf_compress_impl(pivco_encoder_t *enc_ctx,
              * is fully determined by the lengths; within-tier order is
              * symbol-value). */
             PROF_RETIC(); t0 = TIC(tm);
-            if (pivco_build_table_from_code_lens(cfg, real_table.code_len,
-                                                          &table) != PIVCO_OK) {
+            if (pivco_build_codec_table(cfg, real_table.code_len,
+                                                 &table) != PIVCO_OK) {
                 free(block_buf); return PIVCOHUF_ERR_INTERNAL; }
             PROF_TOC(PROF_FILE_BUILD_TABLE_SYN, 1); TOC(tm, build_ns, t0);
 
@@ -509,7 +509,7 @@ static int pivcohuf_decompress_impl(pivco_decoder_t *dec_ctx,
 
     pivco_table_t table;
     { PROF_TIC(); double _t = TIC(tm);
-      if (pivco_build_table_from_code_lens(&cfg, code_lens, &table) != PIVCO_OK)
+      if (pivco_build_codec_table(&cfg, code_lens, &table) != PIVCO_OK)
           return PIVCOHUF_ERR_INTERNAL;
       PROF_TOC(PROF_FILE_BUILD_TABLE_SYN, 1); TOC(tm, build_ns, _t); }
     /* Sanity check: rebuilt code lengths must match. */
@@ -553,7 +553,7 @@ static int pivcohuf_decompress_impl(pivco_decoder_t *dec_ctx,
               }
               p += 128;
               double t0 = TIC(tm);
-              if (pivco_build_table_from_code_lens(&cfg, code_lens, &table) != PIVCO_OK) {
+              if (pivco_build_codec_table(&cfg, code_lens, &table) != PIVCO_OK) {
                   err = PIVCOHUF_ERR_INTERNAL; break; }
               TOC(tm, build_ns, t0);
           }
