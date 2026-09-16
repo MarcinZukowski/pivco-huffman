@@ -604,7 +604,7 @@ static void encode_node_neon(const pivco_huffman_table_t *table,
     *out_ptr += nbytes;
 
     PROF_TIC();
-    int n_right = prim_enc_partition_full(codes_la, n, depth, bm, tmp);
+    int n_right = u16enc_partition_full(codes_la, n, depth, bm, tmp);
     int n_left  = n - n_right;
     PROF_TOC(PROF_ENC_NODE_FULL, n);
 

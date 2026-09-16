@@ -19,8 +19,22 @@
 
 #if defined(__aarch64__)
 
-/* Retired u16 D5/6/7 ryg pack (moved out of pivco_huffman_neon_pack.h; uses the
- * shared pivco_pack_compact_d{5,6,7}_neon tables still defined there). */
+/* Retired u16 D5/6/7 ryg pack (moved out of pivco_huffman_neon_pack.h).  Its
+ * per-lane compaction tables: the shared pivco_pack_compact_d{5,6}_neon
+ * moved on with the u8 pyramid pack (lane offsets shifted by one), so the
+ * u16 form keeps the layout it was written against here. */
+static const uint8_t u16pack_compact_d5_neon[16] = {
+    0, 1, 2, 3, 4,   8, 9, 10, 11, 12,
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff
+};
+static const uint8_t u16pack_compact_d6_neon[16] = {
+    0, 1, 2, 3, 4, 5,   8, 9, 10, 11, 12, 13,
+    0xff, 0xff, 0xff, 0xff
+};
+static const uint8_t u16pack_compact_d7_neon[16] = {
+    0, 1, 2, 3, 4, 5, 6,   8, 9, 10, 11, 12, 13, 14,
+    0xff, 0xff
+};
 /* Load 16 left-aligned u16 codes, right-shift, narrow to one u8x16
  * (1 code/byte), mask to D bits.  Lane k holds codes_la[base + k]. */
 static inline uint8x16_t
@@ -74,9 +88,9 @@ static inline int NAME(uint8_t *out, const uint16_t *codes_la,                 \
     }                                                                            \
     return i;                                                                    \
 }
-PIVCO_U16PACK_NEON_DN(u16pack_d5_neon, 5, pivco_pack_compact_d5_neon)
-PIVCO_U16PACK_NEON_DN(u16pack_d6_neon, 6, pivco_pack_compact_d6_neon)
-PIVCO_U16PACK_NEON_DN(u16pack_d7_neon, 7, pivco_pack_compact_d7_neon)
+PIVCO_U16PACK_NEON_DN(u16pack_d5_neon, 5, u16pack_compact_d5_neon)
+PIVCO_U16PACK_NEON_DN(u16pack_d6_neon, 6, u16pack_compact_d6_neon)
+PIVCO_U16PACK_NEON_DN(u16pack_d7_neon, 7, u16pack_compact_d7_neon)
 #undef PIVCO_U16PACK_NEON_DN
 /* ---------- Encode primitives (bitmap + partition) ----------
  *
