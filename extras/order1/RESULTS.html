@@ -151,7 +151,41 @@ streams ── entropy layer ──▶  container    zstd: order-0 FSE/Huffman �
   </div>
 
   <p class="fnote">New reader's path: this header → the three part intros → §2 (carry-context coding),
-  §13 (o6), §17 (extra bits), §23 (the merge A/B and the build order) → §25 (what is settled dead).</p>
+  §13 (o6), §17 (extra bits), §23 (the merge A/B and the build order) → §25 (what is settled dead) → §26
+  (the digest: money pots, ranked results, laws).</p>
+
+  <h3>Files &amp; recipes</h3>
+  <div class="tablewrap"><table>
+  <tr><th>file</th><th>what it is</th></tr>
+  <tr><td><code>RESULTS.html</code></td><td>The Order-1 Ledger — three parts, §1–§25 (live artifact, URL above)</td></tr>
+  <tr><td><code>o2demux.c</code></td><td>demux kernel shootout: all K=2/K=4 kernels incl. champions (k2g/k2q/k2p, GEN_K2C compaction, k4x/k4v, scalar walks), selftests + byte-exact verify, <code>ONLY=</code> filter</td></tr>
+  <tr><td><code>o3huf.c</code></td><td>fused order-1 Huffman (per-class bitstreams, ctx-switched decode) — first roundtrip order-1 coder; fused-K4 ≥ two-pass on all platforms</td></tr>
+  <tr><td><code>o4tans.c</code></td><td>tANS window walk + MZ's grouped-w extensions (prepacked width arrays, w\</td><td>state measurement)</td></tr>
+  <tr><td><code>o5bans.c</code></td><td>binary tANS window walk for Bernoulli/bitmap groups, canonical p-levels</td></tr>
+  <tr><td><code>o6ctans.c</code></td><td>order-1 context-switched tANS, roundtrip + full cost audit — the deployable sequence-side coder</td></tr>
+  <tr><td><code>mapgen.py</code>, <code>mapgen2.py</code></td><td>bijective remap so class = top bits; mapgen2 = capacity-constrained clustering done right (cap inside the optimizer, ≥ raw by construction)</td></tr>
+  <tr><td><code>k8ratio.py</code></td><td>order-1 gain curve over K (2…256), ideal + constrained</td></tr>
+  <tr><td><code>k4yield.py</code>, <code>k4cluster.py</code></td><td>yield-per-dependent-lookup simulation; ratio-vs-yield Pareto sweep</td></tr>
+  <tr><td><code>o1seq.py</code>, <code>o1seq2.py</code>, <code>o1seq3.py</code></td><td>sequence-code contexts: single, joint-bucketed (K=32 pair contexts), context-map storage options</td></tr>
+  <tr><td><code>litfse.py</code></td><td>literals Shannon vs Huffman, order-0 and K=2 (decisive negative)</td></tr>
+  <tr><td><code>seqk2.py</code>, <code>seqk2b.py</code></td><td>K=2 on code streams; seqk2b's FSE accounting exposed ll self-structure hidden by the 1-bit floor</td></tr>
+  <tr><td><code>phbias.py</code></td><td>traffic-weighted PH-tree bitmap bias (closed the o5-on-PHA niche)</td></tr>
+  <tr><td><code>notes/2026-08-15-o1demux-k4/</code> (2026-09-08 tools, not yet copied here)</td><td><code>sessionratio{,_blk,_rep}.c</code> real-FSE ratio for the kN gM family (whole-stream / per-block / repeat-mode + argmax); <code>sessionspeed.c</code> end-to-end decode; <code>g4merge.c</code>, <code>planefse{,4}.c</code> reconstruction + plane decode; <code>bmdump.c</code> + <code>coderbench.c</code> id 51 on its real regions; <code>xfield_demux.py</code> + <code>fsesum.c</code> cross-field in FSE bytes; <code>k8_crossfield.py</code> K=8 accounting</td></tr>
+  </table></div>
+  <p>Inputs are Silesia stream dumps + class maps (not committed; ~25 MB bundle in <code>data/o1bundle.tgz</code>, gitignored, also on test-c8a:/tmp/o1bundle.tgz):</p>
+  <pre># regenerate dumps (extras/phaz tool; level 3 used throughout this thread)
+./phaz dump &lt;silesia/file&gt; /tmp/phd_&lt;name&gt; -l 3     # writes lit/ll/ml/of + meta.txt
+python3 mapgen2.py                                   # -&gt; /tmp/o1maps/&lt;f&gt;.map2 (+ .map4/8/16)
+# or just restore the exact bundle
+tar xzf data/o1bundle.tgz -C /tmp</pre>
+  <p>Files used everywhere: dickens mozilla samba webster x-ray xml.</p>
+  <pre>cc -O3 -march=native -o o2demux o2demux.c &amp;&amp; ./o2demux    # x86 + Graviton (-mcpu=native there)
+cc -O3 -Wall -o o2demux o2demux.c &amp;&amp; ./o2demux            # M4
+ONLY=k2q ./o2demux                                        # substring filter (strstr, no regex)
+# perf delta method (cloud boxes): measure ONLY=zzzz (setup baseline), subtract
+perf stat -x, -e cycles:u,instructions:u env ONLY=zzzz ./o2demux</pre>
+  <p>Machines: <code>test-c8a</code> = Zen5 EPYC 9R45, <code>test-c8i</code> = GNR Xeon 6975P, <code>test-c8g</code> = Graviton4 (all 2 vCPU, gcc11; clang-15 also present — the Zen5 champion <code>k2qc</code> needs clang).  Bench harness: 8–16 KB striding segments, per-block context restart, jittered bases.</p>
+  <p class="fnote">Data regeneration in full: <code>DATA-REGEN.md</code>; the 2026-08-23 handoff: <code>HANDOFF.md</code>; the PH-ctx session digest: <code>PH-CTX-SESSION.md</code>.</p>
 </header>
 
 <nav>
@@ -183,6 +217,7 @@ streams ── entropy layer ──▶  container    zstd: order-0 FSE/Huffman �
   <div><span class="n">23</span><a href="#s23">Merge A/B &amp; build order</a></div>
   <div><span class="n">24</span><a href="#s24">Assembled design (L3 era)</a></div>
   <div><span class="n">25</span><a href="#s25">Settled negatives registry</a></div>
+  <div><span class="n">26</span><a href="#s26">The digest (retired README)</a></div>
 </nav>
 
 <section class="part">
@@ -349,6 +384,45 @@ streams ── entropy layer ──▶  container    zstd: order-0 FSE/Huffman �
   Three cheap levers on id 51, none touching the wire: straight-to-bytes decode (−20%), a byte table on
   large flat regions, and closing the extreme-skew bail-out. Cheap table transmission stays the
   structural one.</div>
+
+  <h3>1.4 · id 51 on the wide-cursor coder; nib8 discarded (2026-09-17)</h3>
+  <p><b>What changed.</b> The nibble table ran on stock FSE: two interleaved states, a 2n nibble buffer,
+  a repack pass. It now writes the static path's wide-cursor layout (<code>encode_x</code>, eight states)
+  and decodes with a dedicated loop that packs each cursor pair's nibbles straight into the output byte
+  (main@1ca6835; <code>PIVCO_FSE_NIB_X</code> selects 4 or 8). Same NCount header; the bitstream layout is
+  new. The §1.3 lever list had "straight-to-bytes" and "a byte table on large flats" — this is the first
+  plus the cursor count, and the second was then measured on real regions and killed.</p>
+  <div class="tablewrap"><table>
+    <caption>29 inputs (44.2 MB) · one Huffman table per 128 KiB segment · size vs PH / decode MB/s · stock → wide</caption>
+    <tr><th>menu</th><th>M4 (16 KiB blocks)</th><th>Graviton 4</th><th>Granite Rapids</th><th>Zen 5</th></tr>
+    <tr><td>sANS+nib</td><td>−2.14 → −2.09% · 4792 → <span class="w">6519</span></td><td>−1.92 → −1.89% · 2723 → 3272</td><td>4003 → 5561</td><td>6139 → 7613</td></tr>
+    <tr><td>sANS+nib+k1</td><td>5714 → 6764</td><td>3049 → 3363</td><td>4741 → 5678</td><td>6815 → 7632</td></tr>
+    <tr><td>sANS+nib+k1+k2</td><td>5902 → 6265</td><td>3041 → 3120</td><td>4780 → 4960</td><td>6219 → 6347</td></tr>
+    <tr><td class="dim">4 cursors, M4, sANS+nib</td><td class="dim">−2.12% · 5964</td><td colspan="3" class="dim">half the initial-state cost (0.02 vs 0.05 points), two thirds of the gain</td></tr>
+  </table></div>
+  <ul class="lessons">
+    <li><b>Per region the wide decoder is 2.3–2.8× the stock one at every size</b>: three factors of about
+    2× each in the old path — eight chains in flight instead of two, no temporary buffer and repack, and
+    the encoder's own histogram + split in one pass (compress +15%).</li>
+    <li><b>The 0.05-point size cost is the eight initial states</b> (56 bits per region against 14) on the
+    small regions that dominate by count; the static path sidesteps it with the stock layout under 64
+    bytes.</li>
+    <li><b>nib's place once k2 exists</b>: in the full menu nib wins 183 regions (0.13 MB) for 0.02 points
+    while costing 60% of the encode speed. Opt-in stays; the recommended menus are sANS+k1+k2 or sANS+k2.</li>
+    <li><b>nib8</b>: a 256-symbol table derived on both sides from the transmitted 16 counts (product
+    model, 1024 states, absent bytes get no slot, one-sweep largest-remainder normalization), coded with
+    the k2 loop — half the steps, no static tables, ~3 µs per-region build (the floor for a 1024-state
+    spread; FSE's normalizer added 3 µs more on its slow path). On literal bytes as stand-in regions it
+    crossed wide nib at 4 KB (1.8× at 16 KB). On the 49,620 real regions, each candidate timed per
+    region: slower than wide nib on 94% of the bytes above 1 KB (real regions cluster at 1–4 KB), 2.7×
+    slower and 5% larger than k2 on the same regions (256 symbols in 1024 states with a one-slot floor
+    quantize worse than 16 in 128 on mozilla-like tables), 7 regions won in the full menu. Prototype kept
+    out of the tree.</li>
+  </ul>
+  <div class="verdict"><b>Verdict</b>
+  The wide coder is the nibble path's speed fix and needs no per-region build; a byte table from the
+  nibble counts does not pay on real region sizes. §1.3's remaining lever, the extreme-skew bail-out,
+  is moot: the wide encoder never bails to raw.</div>
 </section>
 
 <section id="s2">
@@ -578,6 +652,66 @@ streams ── entropy layer ──▶  container    zstd: order-0 FSE/Huffman �
     builds, and ~100 lines of mechanism, it is the simplest ctx configuration measured to date.
     Remaining gates: size-gated X, fleet validation. Roundtrips green throughout.</li>
   </ul>
+
+  <h3>3.5 · k1 → k2: the two-bit context, the halved catalog, the gate (2026-09-10…16)</h3>
+  <p><b>Why k2.</b> k1's P(bit | previous bit) fits neither the byte-vocabulary streams (x-ray/lit:
+  00/55/aa/ff in 2–3 byte clumps; on the regions k1 commits, byte order-0 is 136 KB against k1's 176 KB)
+  nor the 32–128 B regime streams (mozilla/of). k1-side fixes, all measured: a bigger table loses (L=12
+  −1.3% on those regions), smoothing toward the catalog average recovers 2–4% of a 23% gap,
+  quantile-placed grids fit their own data and lose held-out (the symmetric 16×16 logit grid stays),
+  boosting the four run bytes gets −5.9% on x-ray/lit at 1024 recipes (−3.8% at 256 with a 3-bit grid),
+  chunked recipes −12% on mozilla/of and nothing on x-ray. The model-level answer is one more context
+  bit: k2 on a symmetric 2-bit grid (0.03/0.25/0.75/0.97; the mid placement 0.06/0.375/0.625/0.94 is
+  0.2 points worse overall, better on mozilla) is 256 recipes like k1 and keeps most of the
+  exact-parameter gain; a 4-bit grid (65,536 recipes) adds only 0.3 points. Landed as id 53
+  (main@ba053c8), off by default, 20% gain gate like k1.</p>
+  <div class="tablewrap"><table>
+    <caption>29 inputs · 128 KiB segments · size vs PH / decode MB/s · M4 16 KiB blocks, servers 32 KiB</caption>
+    <tr><th>menu</th><th>M4</th><th>Graviton 4</th><th>Granite Rapids</th><th>Zen 5</th></tr>
+    <tr><td>sANS</td><td>−1.14 / 8195</td><td>−0.90 / 3922</td><td>−0.90 / 7224</td><td>−0.90 / 10416</td></tr>
+    <tr><td>sANS+k1</td><td>−1.97 / 7302</td><td>−1.72 / 3615</td><td>−1.72 / 6217</td><td>−1.72 / 8397</td></tr>
+    <tr><td>sANS+nib+k1 (the menu before k2; nib on stock FSE)</td><td>−2.35 / 5714</td><td>−2.11 / 3059</td><td>−2.11 / 4747</td><td>−2.11 / 6868</td></tr>
+    <tr><td class="a">k2 alone</td><td class="w">−3.28 / 6622</td><td>−3.14 / 3249</td><td>−3.14 / 5265</td><td>−3.14 / 6590</td></tr>
+    <tr><td class="a">sANS+k2</td><td class="w">−3.45 / 6310</td><td>−3.26 / 3145</td><td>−3.26 / 5015</td><td>−3.26 / 6398</td></tr>
+    <tr><td>sANS+k1+k2</td><td>−3.48 / 6297</td><td>−3.28 / 3148</td><td>−3.28 / 4955</td><td>−3.28 / 6403</td></tr>
+  </table></div>
+  <ul class="lessons">
+    <li><b>The aggregate is mostly one stream</b>: x-ray/lit (15% of the compressed corpus) goes 1.23× →
+    1.32× and carries ~1.0 of the 1.1 points; the mozilla code streams gain ~1 point each, text nothing.
+    k1 adds 0.02 points on top of k2, sANS 0.12–0.17; compress is 3× the nibble menus'.</li>
+    <li><b>Coder vs coverage, measured both ways.</b> On the regions the static gate picks, k2 saves 12%
+    more than the static tables at the same decode speed (k1 is even a touch faster: 4 KB tables). On
+    k2's own 20% regions the static tables cannot shrink 48% of the bytes at all and k1 19%; of what each
+    can code, k2 saves 36%, k1 28%, sANS 23%. The rest of k2's gain is coverage, and every extra byte
+    through a tANS loop costs ~12 raw bytes of decode time whichever coder runs it: the gate is the dial
+    (10%: −4.19% at 5186 MB/s; 20%: −3.45 at 6185; 30%: −2.43 at 7116; 50%: −1.87 at 7513; loosening
+    sANS to "any saving" gives −1.31 at 6793). The static gate is depth-aware and k2's is not; a k2 gate
+    of that form is untried.</li>
+    <li><b>Where k2 loses</b>: it cannot code 0.02–0.04% of the bytes sANS or k1 code; on pure-skew
+    regions (dickens/ll, x-ray/ml) the static table with its exact skew and L=12 is ~3% smaller, 15 KB
+    over the corpus, which sANS in the menu recovers. k1 adds nothing k2 lacks.</li>
+    <li><b>Catalog halving by complement symmetry.</b> The grid is closed under p → 1−p, so
+    P<sub>r</sub>(byte | carry) = P<sub>r′</sub>(~byte | ~carry) for the mirror recipe. Layout 1 (mirror
+    tables for two of the four carries, XOR per decoded byte) costs 1–4% decode on the servers: same
+    per-region footprint, one more op and an indirection in the loop. Layout 2 (tables for the 136
+    canonical recipes only; a non-canonical region coded as its complement under the mirror from carry 3,
+    one XOR pass after the loop) shipped: within 1% of the full catalog everywhere, −1% on Zen 5, 4.25 MB
+    (2.1 MB of decode tables). Neither shrinks what a region touches (four tables, 16 KB); no quartering
+    (reversal is not a recipe permutation for order-2). k1 keeps its full 4 MB catalog; the same layout
+    applies.</li>
+    <li><b>Recipe counts</b>: the per-word popcount form (8 popcounts per 64-bit word) beats a
+    (carry, byte) histogram with a table reduction at every region size on M4, Zen 5 and Graviton 4
+    (16–47 ns at 64 B against 0.5–1.5 µs; 4–11 µs at 16 KB against 5–19 µs): no per-byte chain, no fixed
+    cost. The encoder's interleaved loop does not want unrolling (±1%, noise).</li>
+    <li><b>Prebuilt tables</b>: both catalogs are built from doubles at first use, unlike the static
+    schedule (normalized frequency vectors in the binary, integer build). Shipping the vectors (k2 278 KB,
+    k1 256 KB) takes libm out of the wire; binary size is not a load cost (demand-paged, shared,
+    first-touch only). Open.</li>
+  </ul>
+  <div class="verdict"><b>Verdict</b>
+  k2 is the coder in the menu; sANS stays for the pure-skew regions and is now switchable
+  (<code>fse_static_enabled</code>); k1 is redundant given k2; the gate, not the loop, sets the
+  size/speed point. Open: a depth-aware k2 gate, prebuilt vectors, k1's halving.</div>
 </section>
 
 <section id="s4">
@@ -703,6 +837,38 @@ streams ── entropy layer ──▶  container    zstd: order-0 FSE/Huffman �
   <div class="verdict"><b>Verdict</b>
   Fold marker-drop-when-FSE-off into the next planned wire revision; do not give it its own format break.
   Skip the kr diet. Total honest ceiling of both diets: 0.06–0.28% of container.</div>
+
+  <h3>6.1 · Per-segment tables, the walk schedule, the builder (2026-09-12…16)</h3>
+  <p><b>The adaptation gap.</b> zstd fits its literal Huffman per 128 KB block; PH had one table per
+  file. That, not the coder, was the size gap on the literal streams. One table per 128 KiB segment, sent
+  with the segment's first block only when it saves its own 128 bytes (code-length bit model; the period
+  is encoder policy, nothing on the wire but a flag): PH −1.68% / −5% compress / −2% decompress at 128K
+  (64K −1.95% / −12% / −12%; 256K −1.37%; 512K −1.13%), sANS −1.10%. Joint optimization unaffected. The
+  shelved 16 KiB ring with its reuse forms is superseded: at 128 KiB a raw table is 0.1–0.8% of a block
+  and depth-1 reuse already catches the two streams where that bites. Wire v0.10 (main@ad33427):
+  24-bit ENCODED_LEN plus a BLOCK_FLAGS byte.</p>
+  <p><b>The walk schedule (issue #7, Dougall's construction).</b> The tree the codec walks is ~1 KB of
+  3-byte pre-order records (op, partition threshold or rank base, right-child offset) plus rank_to_sym;
+  the depth-sorted chunk list determines the tree, so one recursion emits records and ranks straight
+  from the code lengths. Byte-identical to the materialised tree on every block and mode (26,772 tables
+  checked); the explicit tree stays for the full build, the research modes and the benches. The
+  per-segment rebuild that had cost PH 5% decode at 128 KiB drops 2.7–3.1× (1.43 → 0.52 µs on mozilla
+  lit), and the 1 KB walk working set does the rest: PH decode end to end +4.3% M4, +2.0% Graviton 4,
+  +5.8% Granite Rapids, +11.8% Zen 5 (main@999ccc5). K_right and markers are keyed on records; the
+  wire is unchanged.</p>
+  <ul class="lessons">
+    <li><b>The encode-side build was two forwarding-chain loops and an O(n²) sort</b>: the limiter's
+    insertion sort over used symbols (counting sort, 4-way split histograms: −25% build on literals) and
+    the leaf sort (one-pass radix planes, a register cursor for the dominant bin, pointer cursors:
+    −5..−33% build). Output byte-identical throughout. huf0's build costs the same as ours did; zstd's
+    cheap adaptation is block size, not builder speed.</li>
+    <li><b>Approximate leaf sorts are not worth it</b>: sorting on the top 8 bits of the max costs up to
+    +6% on calgary pic (a dominant symbol collapses the tail); a float-like key keeps it under 0.02% but
+    saves a fraction of a percent of encode time.</li>
+  </ul>
+  <div class="verdict"><b>Verdict</b>
+  128 KiB segments plus the schedule close the adaptation gap at a net decode gain on every host. The
+  ring returns only if finer segments become worthwhile.</div>
 </section>
 
 <section class="part">
@@ -1554,7 +1720,7 @@ decode walk (pair context, chain identical to order-0):
 <section id="s25">
   <p class="eyebrow">running registry · updated 2026-09-09</p>
   <h2>25 · Settled negatives — the do-not-re-explore registry</h2>
-  <p>Additions from the 2026-08-24 exploration (older negatives live in the README digest and per-section
+  <p>Additions from the 2026-08-24 exploration (older negatives are in §26.4 and the per-section
   verdicts; all were re-checked by the adversarial review round):</p>
   <ul class="lessons">
     <li><b>Brotli distance short codes</b> (rep ±1..3 symbols): best case samba +20 KB (0.5%); mozilla NET
@@ -1596,6 +1762,49 @@ decode walk (pair context, chain identical to order-0):
     everywhere but x-ray; K4serial wins text, per-block order-0 wins mozilla.</li>
     <li><b>K = 8 class contexts at block granularity</b> (§9.1): 64 tables, cap violations on five of six
     files; the accounting climb never survives the headers.</li>
+    <li><b>k1-side fixes for the vocabulary and regime streams</b> (2026-09-11, §3.5): bigger tables,
+    catalog smoothing, quantile grids, run-byte boosts, chunked recipes — each measured, all superseded
+    by one more context bit (k2 at 256 recipes).</li>
+    <li><b>k2 catalog halving, layout 1</b> (per-byte XOR with mirror tables, §3.5): 1–4% decode on the
+    servers for the same footprint per region; layout 2 (canonical recipes) is the one.</li>
+    <li><b>nib8</b> (2026-09-17, §1.4): a byte table derived from the nibble counts loses to the
+    wide-cursor nibble path on 94% of real region bytes above 1 KB and to k2 on both axes; the 4 KB
+    crossover seen on literal bytes does not exist on real regions.</li>
+    <li><b>Unrolling the k2 encoder's interleaved rounds</b>: ±1%, noise; the pricing gate, not the walk,
+    is the encode cost.</li>
   </ul>
+</section>
+
+<section id="s26">
+  <p class="eyebrow">the retired README digest · 2026-08-23…09-09 · folded in 2026-09-17</p>
+  <h2>26 · The digest — money pots, ranked results, laws, older negatives, session digests</h2>
+  <p>This was <code>extras/order1/README.md</code>, the curated digest that sat beside the ledger; folded
+  in here so the ledger is the one document. Its section references ("ledger §…") point into this file.
+  The 2026-09-10…17 thread (#31) is filed as §1.4, §3.5, §6.1 and §25 directly.</p>
+
+  <h3>26.1 · The two money pots</h3>
+  <p><b>Sequence codes (the general win).</b>  zstd's parse whitens LL/ML/OF on text, but structure survives as <i>same-sequence cross-field</i> correlation (ml|ll, of|ml — not lag-1) plus <i>temporal/state-chain</i> structure.  Both are decodable with zero serial-reconstruction cost because the routing stream is pre-decoded (contexts come off the chain for free).  At sequence volume (~3 code symbols per ~10.5-byte sequence) even 1 ns/sym ≈ 0.1 ns/output-B.</p>
+  <p><b>Literals (per-file opt-in).</b>  Ideal H(X|prev) saves 8–17.5% of post-LZ literal streams; realizable flat K=8 nets 3–9%; x-ray with lag-2 contexts nets ~−13% of container.  But byte-granular reconstruction has a measured ~0.5–0.7 ns/B floor at meaningful K (M4) — multi-GB/s decode and meaningful literal gains do not coexist.  Exception: the K=2 window kernel (6+ GB/s), whose ratio is thin (70–80% of K=8's gain on binary files only).  Verdict: contextual literals ship as encoder-selected opt-in for literal-heavy binaries (x-ray, sao, mozilla) — exactly Oodle Leviathan's O1 positioning.</p>
+
+  <h3>26.2 · Deployable results, ranked (2026-08-23)</h3>
+  <ol class="lessons"><li><b>o6ctans — order-1 context-switched tANS for sequence codes</b> (<code>o6ctans.c</code>, roundtrip-verified; the thread's most deployable result). ANS state is table-agnostic ⇒ per-context 512-entry FSE tables, decode <code>e = dpk[(ctx&lt;&lt;TLOG)|x]</code> with ctx from the already-decoded route stream — context never touches the serial chain.  x-ray ml|ll 0.385 → 0.205 b/sym (at cond-Shannon) at identical speed (~1.0 ns/sym).  Containers (phaz l3, per-stream argmax PHA vs o1-tans): mozilla <b>−1.55%</b> (closes ~40% of the gap to zstd-19), x-ray −0.31%, dickens −0.33%, xml −0.27%.  Full cost audit passed: decoder builds 10–40 µs for all tables, Elias-gamma headers net-positive on every pair (low-mass contexts merge into a shared fallback).  Recipe: ll (order-0) → ml|llc → of|ml, each a plain FSE pass with table select.</li><li><b>Grouped w-values, secondary-coded (MZ's scheme)</b> (<code>o4tans.c</code> extended; ledger §14).  One tANS table; the raw w-bit streams are partitioned by the <i>state</i> that consumes them and each group gets a secondary coder chosen per group from {raw, Huffman, canonical binary tANS} (2-bit flag + 4-bit p-level; o5bans prebuilt tables for nb=1 Bernoulli groups).  w|state captures 3–8% of stream bits = the full lag-1 Markov structure (the memory lives in the slot, not the symbol).  Unique property: a single-table walk that reads no bits — all entropy decode happens in parallel pre-passes.  Containers (realizable, 3-way secondary): xml <b>≈−2.1%</b> (xml's redundancy is temporal; beats o6 there), mozilla ≈−1.5% (ties o6), dickens −0.5%, x-ray −0.26%.  <b>Complementary</b> to o6 (temporal vs cross-stream): per-stream argmax over both; stacked mozilla/ xml plausibly −2.5–3% sequence-side.  <i>No roundtrip coder yet</i> — Shannon/ realizable accounting only.</li><li><b>K=2 demux on code streams</b> — the minimal-diff shipping path: remap + split codes by prev-code class, per-class order-0 FSE sub-streams, k2 kernel re-interleave.  Zero new entropy coder (reuses phaz_pack_stream + the built kernel).  xml −0.87% container (beats measured o6 there — self- lag structure), mozilla −0.58%, samba ~−0.36%.  ~1.03 ns/sym.</li><li><b>K=2 literal demux kernels</b> (<code>o2demux.c</code>) — (6,6)-window table walk, 13-bit index (6 L bits | 6 R bits | class), meta+pattern split tables, ~9.1 B per dependent lookup.  Final dispatch (2026-08-18, mozilla ns/B): | arch | kernel | mozilla | range (6 files) | |---|---|---|---| | M4 | <code>k2g_u4</code> (2×16 B double-step) | 0.150 | 0.139–0.171 | | Zen5 | <code>k2qc_u4</code> (clang) ≈ <code>k2p_u4</code> (gcc) | 0.206 | 0.186–0.241 | | GNR | <code>k2q_u6</code> | 0.229 | 0.207–0.287 | | Graviton4 | <code>k2ntc_u4</code> | 0.328 | 0.319–0.432 | Records: M4 webster 0.130 ns/B = 7.7 GB/s (<code>k2gc</code>), Zen5 webster 0.186 = 5.4 GB/s.  Ingredients that got here, each measured on all four archs: chain count swept to 4 (not the inherited 8), MZ's shared-header double-step (<code>k2g</code>), cursor compaction (dense live slots, FCFS segment counter, CMOVE-shrink loops — −7.9 instr/pair exactly as predicted), and pext + byte-packed meta (one <code>pext</code> replaces the shift/and index assembly; 40.8 → 32.2 instr/step, single-step retakes the x86 crown).</li><li><b>K=4 demux</b>: trivial scalar array walk (<code>*P[c]++</code>) at 6 cursors on M4 (0.50–0.56) and Graviton4 (0.99); <code>k4x_u16</code> on AVX-512 — cross-chain lane-parallel arithmetic walk, bit-plane headers, vpermb-512 emit, vpternlog class fold — Zen5 0.485–0.488, GNR 0.582–0.587 (−27%/−35% vs scalar).  Tables cannot vectorize across chains; arithmetic can.</li><li><b>tANS window walk</b> (<code>o4tans.c</code>): demux-table pattern on entropy — idx = (state&lt;&lt;W)|next-W-bits, emit all determined symbols.  4.4× classic interleaved tANS on skewed streams, but the 64K-entry eager build costs more than it saves below ~3M symbols.  Key reframe: <i>the ratio never needed the window</i> — classic 8-way FSE hits the same 0.385 b/sym on x-ray-ml.  phaz fix for degenerate streams = a plain FSE method in pack_stream; window walk is an optional length-gated accelerator.</li><li><b>Binary window tANS for Bernoulli groups</b> (<code>o5bans.c</code>): at-Shannon, 32-bit packed groups per lookup, hybrid crossover vs byte-FSE at p≈0.85–0.88 on all four platforms; ~16 canonical p-levels with prebuilt shared tables (2–4 MB) kill per-node build cost.  Its customer is the nb=1 groups of result 2 (the PHA-bitmap niche measured empty — see negatives).</li><li><b>Context-map storage</b> (<code>o1seq3.py</code>): freeform entropy-coded grid (150–900 B, keeps all), product f(ll)×g(pml) (28 B, keeps 72–99%), spec-predefined pooled map (0 B, keeps 75–97% — context structure is semantic and transfers across files).  Ship as a per-stream mode flag, exactly zstd's FSE table-mode structure.</li></ol>
+
+  <h3>26.3 · Laws (each measured, not argued)</h3>
+  <ul class="lessons"><li><b>Conservation law</b>: order-1 information flows through serial reconstruction, or transmitted bits, or is surrendered — no fourth option.  Priced at every corner (exact class-plane = flat ratio but same serial step count; parallel plane forfeits I(c;c_prev) = 30–75% of gain).</li><li><b>Kernel metric = yield / effective dependent-lookup cost</b>; locality sets the cost (L1 160 KB @ 8.35 B/lookup beats L2 512 KB @ ~11).  The dependent-lookup constant is ~1.4 ns on M4, ~3.0–3.7 ns on cloud cores; yield is the only lever.</li><li><b>The IPC wall</b>: at optimal chain count, cycles/pair = instructions/pair ÷ an arch-specific effective-IPC wall (Zen5 ~3.7–3.9, GNR 3.45–4.9, Graviton4 ~4.2–4.4, M4 ~5.5–6).  Not load ports, not dispatch width, not chain latency at u4.  Serialization matters only through its effect on the wall (GNR dropped k2g's wall to 3.45).</li><li><b>Count the scaffolding</b>: ~40% of kernel instructions were field extraction + guards + spills, all removable (pext, byte-packed meta, cursor compaction) — the wins were pure instruction count.</li><li>~4 lockstep chains hide the recurrence; more chains spill registers instead of raising IPC.  u2 is the latency floor.</li><li>Huffman is the zero-state member of the ANS family — no free order-1 channel exists in the code itself; table/stream switching on the just-emitted byte <i>is</i> the Huffman equivalent of FSE's state-carried context, with the freeness relocated to the decode-side switch.</li><li>Compiler hazards: gcc compiles a two-sided x86 ternary to a data-dependent branch (kills chain interleaving; write the ALU mux explicitly); 4K-aliased chain pointers collapse 6× (jitter segment bases); goto-chained compacted loops are compiler roulette (gcc and clang each mangle a different subset — production pins per compiler or freezes asm).</li></ul>
+
+  <h3>26.4 · Settled negatives from the digest</h3>
+  <ul class="lessons"><li><b>Nested K-leaf-stream scheme</b> cannot be exact below the root (value/residence decoupling); keeps ~half of flat's gain.  Exactness requires transmitting per-level routing bits — see conservation law.</li><li><b>Window-walk lazy build</b> dead: 52–97% of entries touched in one decode.</li><li><b>PHA bitmaps have no biased mass on literal trees</b> (<code>phbias.py</code>): all literal trees sit at mean bias 0.52–0.53 — Huffman is the de-skewing transform; bias exists only on dominant-symbol trees, where symbol-level tANS supersedes PH+bitmap entirely.</li><li><b>K=4 SIMD visibility tables</b> (heads4/win4d3) lose to the trivial scalar walk everywhere off-M4; K=4 big-table lands on scalar; scalar arithmetic re-serialization (k4r) loses everywhere — redeemed only when vectorized <i>across chains</i> (k4v/k4x, AVX-512 only).</li><li><b>Gather-based headers</b> (k4w): −45–52% — 32 scalar loads + movemask + pdep beat vpgatherqq by ~2×.</li><li><b>k2d/k2e/k2f double-step family</b> retired (chained second meta load is layout-invariant); k2g survived by sharing the header gather, then was superseded on x86 by pext singles.</li><li><b>Table shrinking</b> (small TLOG/W, packed entries): loses everywhere — the active subset of a big table self-shrinks into L1; W is the binding resource.</li><li><b>Routed walk</b> (pre-decoded class array) does not speed byte demux — the kernel is µop-bound, the chain was already hidden.</li><li><b>Literal-side coder tech</b>: Huffman is within 0.4–0.6% of Shannon on literal streams and K=2 contexts don't sharpen into the sub-bit regime (<code>litfse.py</code>) — literal-side money is structural, not coder-tech.</li><li><b>K=2 architecture on codes via table-switch</b> is dominated by full- context o6 at equal cost (but see deployable result 3 for the effort-adjusted demux variant).</li><li><b>Joint-split class optimization</b> (ledger §9.1): Shannon promised +0.5–2.3 pp, real FSE ≤ 0.6 pp, worse on webster, exactly 0 on the binary files (no split freedom).  Trust FSE bytes over accounting here.</li><li><b>k4g16 whole-stream numbers as deployable</b> (§16.1): per-block headers erase them off x-ray; K=8 at block granularity likewise.</li><li><b>Position-split nibble tables for id 51</b> (second kill, §1.3) and the <b>pair product-table decode as a standalone</b> (build-bound; only under a table cache).</li></ul>
+
+  <h3>26.5 · Prior art, the digest's reading</h3>
+  <p>Oodle Leviathan (2017) is the closest shipped system: O1 literal mode = 16 streams split by last_byte&gt;&gt;4, per-stream entropy menu, encoder-selected — validating both the stream-split architecture and the opt-in verdict; its SUB (match-predicted residuals) and SUBAND3 (pos%4) modes are unexplored in phaz.  LZMA <code>lc</code> = K by top bits in the serial-adaptive regime; brotli context map = clustered contexts with transmitted map.  OpenZL's Dispatch transmits routing tags — derived-control-stream routing (our o6) is exactly what it lacks.  Ours: same-sequence cross-field contexts, the w-bits/ state-chain decomposition, the demux kernel-geometry theory (yield/lookup law, visibility economics), capacitated small-K remap (<code>mapgen2.py</code>).</p>
+
+  <h3>26.6 · Session digest: the PH-ctx merge (2026-08-23)</h3>
+  <p>The pivco-huffman session's parallel thread (PR #30 → the ctx coder family → phaz e2e → xbits) is digested in <code>PH-CTX-SESSION.md</code> here. Headlines of the merge, measured on identical dumps (details there):</p>
+  <ul class="lessons"><li><b>Convergent findings</b> (independently measured twice, now settled): literal-tree bitmaps carry no bias (<code>phbias.py</code> ≡ the p_major histogram); Huffman ≈ Shannon on literals (<code>litfse.py</code> ≡ the #29 study); contexts must select static tables, never adaptive state; per-set table builds dominate decode unless bounded (o5's canonical p-levels ≡ the ctx parameter dictionary); x-ray wants lag-2.</li><li><b>Complementarity law</b>: their within-stream carry-context coder and o6's cross-field contexts capture different information.  ctx wins ml/ll-class streams (its per-block bitmaps add free nonstationarity adaptation that global tables lack); o6 wins where cross-field correlation dominates (x-ray ml|ll at L3: 16.8 KB vs ctx's 29.8 KB; x-ray of|ml at L19: −6.9%).  Which pair carries the correlation MOVES with the parse level → per-stream argmax over the full menu, never a fixed recipe.  New L19 o6 numbers (open-work item 4, now partially done) are in <code>PH-CTX-SESSION.md</code>.</li><li><b>The fused-phaz × xbits composition</b> is the standout joint design: FUSED-PHAZ's per-code leaf runs ARE the per-(stream,width) classes the xbits analysis needs; coding each leaf's top byte inside that structure adds ~0.4pp of corpus ratio to the extract-free decode.</li><li>Revised open-work ranking: (1) cross-field × per-block (o6-style route-conditioned table select inside the per-node marker machinery — the largest untried cell); (2) fused-phaz rebase + top-byte leaves; (3) kernel-law transfer to the ctx decode loop; (4) grouped-w roundtrip only if its xml-class gains survive L19 re-dump.</li></ul>
+
+  <h3>26.7 · Session digest: plane-on-wire literals, #30 (2026-09-08…09)</h3>
+  <p>Two days in the pivco-huffman session; full record in ledger §1.3, §4.3, §8.6, §9.1, §16.1–16.2, §23.1; session notes in <code>notes/2026-09-08-k2g4-k4g16-order1-literals.md</code>.</p>
+  <ul class="lessons"><li><b>PR #30 landed on main</b> (3bfef16, co-authored with Nick) as the <i>nibble table</i>: <code>fse_nibble_enabled</code> opt-in, encoder tableLog 7 / decoder cap 10, harness and histogram over-read fixes, flat regions coded natural-packed under an inline marker.  Byte-identical output on M4 / Graviton 4 / Zen 5 / Granite Rapids.</li><li><b>The kN gM family</b> (N classes, M residue contexts; class plane on the wire, residues = within-class rank): k4g16 is the literal-side ratio winner in real FSE (1.2–7.0% under order-0, beats K4serial on binaries), k2g4 ≈ K2serial at a parallel decode, k2g2 weakest, k4g4 dead. Reconstruction = production merges (0.16 ns/B + ~0.14 gather on M4); end-to-end within 1.4× of order-0.  <b>Joint-split optimization flopped in FSE</b> — retracted.</li><li><b>Per-block headers erode it</b> (16K blocks, real FSE): 16 tables eat k4g16's gain everywhere but x-ray; per-block <i>order-0 adaptation</i> is the biggest effect on nonstationary binaries (samba 96.7 → 89.9); NCount repeat-mode recovers 1.2–1.8 pp; deployable per-block argmax {o0, K4serial} = 0.8–2.3 pp.  The lever is cheap table transmission.</li><li><b>Cross-field class context on the code streams, in bytes</b>: ml | ll summed −9.1% vs order-0 (mozilla −12.3%, 3-way −14.4%), x-ray ll | ml −8.1%, <code>of</code> unresponsive.  Whole-file tables (phaz's policy).  Build-order #1 confirmed with real FSE.</li><li><b>ctx vs k4g16 on literals are complementary</b>: ctx x-ray 70.7% of raw (−9.4% vs nibble) vs k4g16 81.2; class order-1 wins text by ~3.5 pp.</li><li><b>id 51 on its real regions</b>: straight-to-bytes decode −20% (no wire change); byte-FSE decodes 3–4× faster on the same bytes (the cost is 2× steps + per-region build); a byte table wins large flat regions; <code>FSE_compress2</code> bails to raw on extreme skew (calgary_pic −4.5 pp recoverable); pos2 killed a second time; pair product table = same bytes, build-bound standalone.</li><li><b>4-way merge wants per-arch dispatch</b>: one-go wins AVX-512 1.4–1.9×, three binary merges win NEON 2.3×; wire-compatible; serves the quad node and k2g4/k4g16s4.</li><li>Revised open-work ranking: (1) cross-field class-context sequence coder (ml | ll, 3-way) with whole-file tables; (2) cheap table transmission — repeat-mode flag now, catalog / canonical sets next (unlocks per-block k4g16, pair decode, the ctx speed program); (3) id 51 straight-to-bytes decode, byte table on large flats, extreme-skew bail-out; (4) per-block mode argmax for literals; (5) per-arch 4-way merge dispatch; (6) stack order-1 class trees with ctx bitmaps.</li></ul>
+
 </section>
 </main>

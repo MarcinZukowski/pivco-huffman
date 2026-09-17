@@ -3,7 +3,7 @@
 Written 2026-08-23 by the pivco-lz Claude session, where the order-1
 research thread (2026-06 zph-era measurement → 2026-08 kernel endgame) ran.
 This directory is the merge point: everything useful from that thread now
-lives here.  Read `README.md` first (curated digest), then `RESULTS.html`
+lives here.  Read `RESULTS.html`
 (The Order-1 Ledger — the full experiment record, three parts, §1–§25).
 
 ## State in one paragraph

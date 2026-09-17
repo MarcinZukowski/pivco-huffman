@@ -9,8 +9,6 @@
 
 **General**
 - [Encode walk context: FSE staging from the arena, flags from the table](#encode-walk-context-fse-staging-from-the-arena-flags-from-the-table-2026-09-11)
-- [Regime-switching bitmaps: runs and alternations inside one region](#regime-switching-bitmaps-runs-and-alternations-inside-one-region-2026-09-11)
-- [k1 catalog halved by complement symmetry](#k1-catalog-halved-by-complement-symmetry-2026-09-10)
 - [Per-block table ring for pivcohuf/phaz (shelved)](#per-block-table-ring-for-pivcohufphaz-2026-09-03-shelved-branch-per-block-ring)
 - [Vertical flat regions: layout defaults, mid-band forms, text trims](#vertical-flat-regions-layout-defaults-mid-band-forms-text-trims-2026-08-17)
 - [Composed c2s tables for vertical D=2/4 steps](#composed-c2s-tables-for-vertical-d24-steps-2026-08-18)
@@ -46,6 +44,9 @@
 ### DONE — shipped
 
 **General**
+- [Nibble table on the wide-cursor coder](#nibble-table-on-the-wide-cursor-coder-2026-09-17)
+- [k=2 bit-context table (wire id 53)](#k2-bit-context-table-wire-id-53-2026-09-16)
+- [Pre-order walk schedule instead of the explicit tree](#pre-order-walk-schedule-instead-of-the-explicit-tree-2026-09-16)
 - [Per-segment Huffman tables in pivcohuf (wire v0.10)](#per-segment-huffman-tables-in-pivcohuf-wire-v010-2026-09-12)
 - [k=1 bit-context table (wire id 52)](#k1-bit-context-table-wire-id-52-2026-09-10)
 - [FSE markers hoisted to a block-level prefix](#fse-markers-hoisted-to-a-block-level-prefix-2026-09-01)
@@ -91,6 +92,8 @@
 ### REJECTED — tried, lost or discarded
 
 **General**
+- [nib8: byte table from the nibble counts](#nib8-byte-table-from-the-nibble-counts-2026-09-17)
+- [k1 boosts, finer grids, chunked recipes](#k1-boosts-finer-grids-chunked-recipes-2026-09-11)
 - [Hybrid block decoder (deliberately not pursued)](#hybrid-block-decoder-deliberately-not-pursued)
 - [Entropy-skew flat-subtree split (per-block real-freq)](#entropy-skew-flat-subtree-split-per-block-real-freq-2026-05-13)
 - [FSE-decode ↔ merge fusion (microbench win, integration regression)](#fse-decode--merge-fusion-2026-05-23)
@@ -148,67 +151,6 @@ and let `codec_fse_try` read flags and staging from it: no malloc, no
 VLA, no 33 KB frame in a recursion on a 512 KB thread stack; static
 vs not is implied by n (flat regions pass 0).  Output byte-identical;
 own commit so the recursion signature change reviews alone.
-
-### Regime-switching bitmaps: runs and alternations inside one region, 2026-09-11
-Open problem.  On literal streams of byte-periodic data (x-ray's 16-bit
-samples, mozilla/samba binaries) a region's bits switch between regimes:
-runs of 0x00, runs of 0xff, stretches of 0xaa/0x55 alternation, noise:
-
-    ffffbfaaaa6a55551501000000000000500000001600c0010000653a94fa
-
-Measured on the 1358 x-ray/lit regions k1 commits (280 KB): order-0
-byte entropy 136 KB, k1 model cost 176 KB, k1 table at L=10 169 KB,
-static schedule 241 KB.  Neither fixed-table coder sees it: the
-static schedule prices a byte by its popcount, k1 averages the regimes
-into one pair of transition probabilities that fits none of them (0xaa
-gets 0.013% against a 6% share).  The transmitted nibble table gets
-there (x-ray/lit -5.4% against k1's -2.3%) at half the decode speed.
-k1-side fixes tried analytically and by A/B: a bigger table makes it
-worse (a finer copy of the wrong model; L=12 loses 1.3% on these
-regions and drops 79 of them under the gain gate), smoothing toward the
-catalog average recovers 2-4% of the 23% gap.  Measured further
-(2026-09-11), the two streams need different things: on x-ray/lit the
-00/55/aa/ff bytes come in 2-3 byte clumps interleaved with noise (9%
-of them in runs >= 16 B), per-chunk k1 parameters gain nothing even
-at 16-byte chunks, and the gap is byte vocabulary -- an order-2 bit
-model with region-exact parameters reaches the byte order-0 bound
-(k=1 176 KB, k=2 139 KB, bound 136 KB ideal), k=3/4 add 3-6% more,
-each rung doubling the recipe.  On mozilla/of the regimes are real at
-32-128 B (32% of regime bytes in runs >= 16 B): k1 with one recipe
-per 32-64 B chunk lands at 148 KB against 169 KB per region and the
-151 KB byte order-0 bound.  Transmitted 00/55/aa/ff weights, or an
-escape symbol plus a side stream for them, get 3-6% and need
-on-demand tables; the nibble table cannot see the within-byte
-correlation (nibble order-0 171 KB vs byte order-0 136 KB).  So: k2
-with a coarse grid for the vocabulary case, chunked recipes for the
-regime case.
-Side findings from the same session, k1 catalog only: (1) the
-normalizer's deficit rule takes the whole deficit from the top symbol;
-reserve the forced slots, rescale, floor, then hand the leftover to
-the largest fractional parts (bucket select, ~0.3 us/table) -- mean
-table tax 0.31 -> 0.22 bits/byte, +0.02 points overall; (2) the L=10
-floor is a 25% flat smoothing that the skewed corner does not want
-(x-ray/ml -61.2% vs static -64.4%; L=12 recovers it) and the mid
-recipes do want -- per-recipe L, or per-recipe mix weight, decided by
-the recipe's own entropy, is the data-free form; (3) compiling in the
-normalized frequency vectors (256 KB) makes both a generator-time
-choice and takes libm out of the wire.
-
-### k1 catalog halved by complement symmetry, 2026-09-10
-Complementing a bitmap maps recipe (P(1|0), P(1|1)) = (a, b) to
-(1-b, 1-a), and the grid is closed under p -> 1-p, so the carry-1
-table of every recipe is the carry-0 table of its mirror with the
-symbols complemented.  The 2 MB catalog (256 recipes x 2 carries x
-4 KB at L=10) can hold 256 tables instead of 512.  Two layouts, same
-tables: (1) keep only carry-0 tables and XOR each decoded byte with
--carry, one ALU op per symbol that may hide behind the table-load
-chain; (2) keep both carries for the 128 canonical recipes, decode a
-mirrored region under its mirror recipe with the initial carry flipped,
-and XOR the region's output per u64 afterwards.  No quartering:
-reversal, the only other transform inside the order-1 family, maps
-every recipe to itself.  Wire changes (FSE's spread is symbol-order
-dependent).  TODO: measure both layouts; the footprint matters most on
-Zen 5 (1 MB L2).
 
 ### Per-block table ring for pivcohuf/phaz, 2026-09-03, shelved (branch per-block-ring)
 Every block carries its own Huffman table -- REUSE one of the last 8
@@ -519,6 +461,42 @@ RVV maps well: `vcompress` = partition, `vrgather` = TBL, **`vsuxei8` = native i
 
 **General**
 
+### Nibble table on the wide-cursor coder, 2026-09-17
+id 51's bitstream is now the static path's wide-cursor layout (eight
+states) and the decoder packs each cursor pair's nibbles straight into
+the output byte, instead of stock FSE's two states, a nibble buffer and
+a repack pass.  Per region 2.3–2.8x the old decoder; the nibble menu's
+decode +20..39% across the fleet at 0.05 points of size.  With k2 in
+the menu nib wins 0.13 MB of regions for 0.02 points at 60% of the
+encode speed.  the ledger `extras/order1/RESULTS.html` §1.4 has the
+numbers; `PIVCO_FSE_NIB_X` selects 4 or 8 cursors.
+
+### k=2 bit-context table (wire id 53), 2026-09-16
+The k1 coder with one more bit of context: P(bit | previous two bits),
+four probabilities on a symmetric 4-value grid, one recipe byte; only
+the 136 canonical recipes carry tables (complement symmetry: a region
+under a non-canonical recipe is coded as its complement under the
+mirror recipe and complemented back after the decode loop), 4.25 MB.
+29 inputs at 128 KiB segments, size vs PH / decode on M4: sANS -1.14%
+/ 8195 MB/s, today's sANS+nib+k1 -2.34 / 6785, sANS+k2 -3.45 / 6310,
+k2 alone -3.28 / 6622, compress 3x the nibble menus'.  The gain is
+mostly x-ray/lit (1.23x → 1.32x); on the regions all coders can code,
+k2 saves 12% more than the static tables at the same speed, the rest
+is regions the static schedule cannot code at all.  The static
+candidate became switchable (`fse_static_enabled`).  Open: a
+depth-aware gate of the static form for k2, prebuilt frequency
+vectors for both catalogs, k1's halving.  Full study in the
+ledger `extras/order1/RESULTS.html` §3.5.
+
+### Pre-order walk schedule instead of the explicit tree, 2026-09-16
+Dougall's #7 construction: the tree the codec walks is ~1 KB of 3-byte
+pre-order records plus rank_to_sym, built straight from the code
+lengths by one recursion over the depth-sorted chunk list; byte-
+identical to the materialised tree, which stays for the full build,
+the research modes and the benches.  Per-segment rebuild 2.7–3.1x
+cheaper; PH decode end to end +4.3% M4, +2.0% Graviton 4, +5.8%
+Granite Rapids, +11.8% Zen 5.  Wire unchanged.  Ledger §6.1.
+
 ### Per-segment Huffman tables in pivcohuf (wire v0.10), 2026-09-12
 One Huffman table per 128 KiB of input instead of one per file: each
 segment histograms its own bytes and builds its own table, sent with
@@ -655,6 +633,27 @@ NEON (`7e4bc44`, `flat_d7_unpack` + two-level TBL scatter) and AVX-512 (`dcfaecc
 ## REJECTED
 
 **General**
+
+### nib8: byte table from the nibble counts, 2026-09-17
+A 256-symbol table derived on both sides from the transmitted nibble
+counts (product model, 1024 states) and decoded with the k2 loop: half
+the steps of the nibble path, no static tables, a ~3 µs per-region
+build.  On the 49,620 real regions of the 29 inputs it is slower than
+the wide nibble path on 94% of the bytes above 1 KB and 2.7x slower
+plus 5% larger than k2 on the same regions; it would take 7 regions in
+the full menu.  The 4 KB crossover seen on literal bytes as stand-in
+regions does not exist on real ones, which cluster at 1–4 KB.  Ledger
+§1.4.
+
+### k1 boosts, finer grids, chunked recipes, 2026-09-11
+Attempts to fix k1's model where it misses (byte-vocabulary streams,
+32–128 B regimes): bigger tables lose (L=12 -1.3% on those regions),
+smoothing toward the catalog average recovers 2–4% of a 23% gap,
+quantile-placed grids fit their own data and lose held-out, boosting
+the 00/55/aa/ff bytes gets -5.9% on x-ray/lit at 1024 recipes, chunked
+recipes -12% on mozilla/of and nothing on x-ray.  All superseded by
+k2, which reaches most of the exact order-2 gain at 256 recipes.
+Ledger §3.5.
 
 ### Hybrid block decoder (deliberately not pursued)
 Pick faster of pivco / trad_4s / huf0_x2 per block — trivially never loses on real text outside Apple silicon.  **Intentionally not done**: doesn't move the science; once you pick-the-winner you stop debugging the loss; the Graviton/Zen 3/Zen 5 prose gap is the open research problem.  Worth mentioning in the paper as a deployment-engineering fallback.
