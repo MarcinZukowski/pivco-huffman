@@ -147,7 +147,7 @@ streams ── entropy layer ──▶  container    zstd: order-0 FSE/Huffman �
   <div class="keys">
     <b>data</b><span>Silesia; zstd level-3 parse dumps (lit / ll / ml / of); the PH-ctx sessions add L19 parses, whole-container phaz runs, and the huffman-sample-files corpora.</span>
     <b>machines</b><span>Apple M4 · Graviton4 (c8g) · Granite Rapids Xeon 6975P (c8i) · Zen5 EPYC 9R45 (c8a).</span>
-    <b>sources</b><span>pivco-huffman/notes/2026-08-15-o1demux-k4/ (+ notes/2026-09-08-k2g4-k4g16-order1-literals.md for §1.3, §4.3, §8.6, §9.1, §16.1–2, §23.1)</span>
+    <b>sources</b><span>pivco-huffman/notes/2026-08-15-o1demux-k4/ (+ notes/2026-09-08-k2g4-k4g16-order1-literals.md for §1.3, §4.3, §8.6, §9.1, §16.1–2, §23.1); the ctx prototype of §2–§3 is <code>ph-ctx-session.patch</code> at commit 9d4409e (11 files against e1bdce0, the PR #30 base; superseded by k1/k2 on main); the origin session's memory: <code>~/.claude/projects/-Users-mzukowski-src-pivco-lz/memory/order1-literals.md</code> (+ <code>phaz-status.md</code>, <code>fused-pha-decoder.md</code>); <code>docs/FUSED-PHAZ.md</code> on the <code>fused-phaz</code> branch (base bda0ac1) for the fused extra-bits decoder.</span>
   </div>
 
   <p class="fnote">New reader's path: this header → the three part intros → §2 (carry-context coding),
@@ -185,7 +185,8 @@ ONLY=k2q ./o2demux                                        # substring filter (st
 # perf delta method (cloud boxes): measure ONLY=zzzz (setup baseline), subtract
 perf stat -x, -e cycles:u,instructions:u env ONLY=zzzz ./o2demux</pre>
   <p>Machines: <code>test-c8a</code> = Zen5 EPYC 9R45, <code>test-c8i</code> = GNR Xeon 6975P, <code>test-c8g</code> = Graviton4 (all 2 vCPU, gcc11; clang-15 also present — the Zen5 champion <code>k2qc</code> needs clang).  Bench harness: 8–16 KB striding segments, per-block context restart, jittered bases.</p>
-  <p class="fnote">Data regeneration in full: <code>DATA-REGEN.md</code>; the 2026-08-23 handoff: <code>HANDOFF.md</code>; the PH-ctx session digest: <code>PH-CTX-SESSION.md</code>.</p>
+  <p class="fnote">Data regeneration in full: <code>DATA-REGEN.md</code>.  The handoff and the PH-ctx
+  session digest that used to sit beside this file are folded in (header sources, §2, §22, §25).</p>
 </header>
 
 <nav>
@@ -428,6 +429,23 @@ perf stat -x, -e cycles:u,instructions:u env ONLY=zzzz ./o2demux</pre>
 <section id="s2">
   <p class="eyebrow">ph-ctx session · 2026-08-17…23 · pivco_ctx.c on the PR #30 branch · roundtrip</p>
   <h2>2 · Carry-context coding — order-k tANS on the partition bitmaps</h2>
+  <p><b>The prototype</b> (ph-ctx-session.patch): one mechanism, order-c carry-indexed tANS over
+  bytes — per-carry 2<sup>L</sup>-entry tables (L = 11 / 10), a 257-symbol alphabet with an ESC for
+  model-impossible bytes, FSE-style spread, encode backward / read backward; parameters are per-context
+  4-bit quantized probabilities on the wire (2–32 B), expanded to tables on both sides. Bit-context on
+  partition bitmaps and natural flats (ids 52/53), pair-context on fused quad records (54–56, fusion
+  flagged in K_right bit 15, commit-if-smaller against the unfused form). Hot loop:
+  <code>e = T[carry][state]; emit e.sym; carry = cmap[e.sym &gt;&gt; (8-c)]; state = e.base + read(e.nbBits)</code>.
+  Free per-node parameters made table builds 97% of decode time; the capped per-mode parameter dictionary
+  (<code>PIVCO_CTX_DICT</code>, default 48; nodes past the cap adopt the nearest set) was the ratio/decode
+  dial: free = −1.66% vs zstd-3 at 0.02–0.65 GB/s, cap 128 = −0.89% at 0.3–2.4 GB/s. The k1 catalog (§3.3–3.4)
+  and then k2 (§3.5) are what this became on main. Two bugs were found by <i>pricing</i>, not round trips
+  (both sides consistent, output correct, ratio silently bad): a carry bit-order mismatch (the rolling
+  context is newest-bit-first, a byte's top bits are stream-order) and the min-freq-1 floor tax on skewed
+  tables, which the ESC symbol answered here and k1 later answered better by keeping the floor.
+  Nick's OpenZL joint-token variant (token = min(ll,15) | min(ml−3,15)&lt;&lt;4, 2026-08-22) measured
+  ratio-neutral to −0.3 pp against per-stream ctx (correlation gained ≈ within-stream context lost) but
+  halves the sequence-symbol count; o6 (§13) is the superior form of the idea — condition instead of fuse.</p>
   <p><b>The idea.</b> Bring order-1+ modeling inside PH itself, onto the partition bitmaps
   (Part II's literal and sequence-code threads reach the same idea from the stream side):</p>
   <ul class="lessons">
@@ -1608,6 +1626,13 @@ decode:
     <li><b>Count the scaffolding, not just the kernel:</b> the step macro was ~15 instructions; the loop ran ~36.
     Field extraction, register spills, and per-chain guards each rivaled the semantic work — and each fell to a
     targeted fix (byte-packed meta + pext, fewer chains, cursor compaction) worth more than most kernel cleverness.</li>
+    <li><b>Price the model, don't just round-trip it:</b> a consistent encoder/decoder pair hides a wrong
+    model (§2's carry bit order, the floor tax); the ideal-cost estimate against the actual payload is the
+    test that catches it.</li>
+    <li><b>Baseline contaminations that cost a day each:</b> the PR #30 branch defaulted
+    <code>fse_dynamic=1</code> (the dynamic coder silently inside "plain" arms, −30..50% decode); Apple
+    builds need PIVCO_BLOCK_SIZE 16384 (a forced-32K harness cost ~10% decode and overflowed
+    bench_chunk_sizes' 16K buffer — the old SIGTRAP). Verify the BLK header on both arms of every A/B.</li>
   </ul>
 </section>
 
@@ -1772,6 +1797,17 @@ decode walk (pair context, chain identical to order-0):
     crossover seen on literal bytes does not exist on real regions.</li>
     <li><b>Unrolling the k2 encoder's interleaved rounds</b>: ±1%, noise; the pricing gate, not the walk,
     is the encode cost.</li>
+    <li><b>Bias-only coding of PH bitmaps</b> (ctx session): dead — 99% of bitmap bytes sit below
+    p_major 0.625 on silesia-class data (matches <code>phbias.py</code>).</li>
+    <li><b>Static-vs-dynamic FSE as settled by docs/FSE-V0.md</b>: that comparison was made under an
+    order-0 model, and the iid assumption hid #30's sequence-structure win (nibble alphabet, cheap NCount).
+    Recorded so the foot-gun is not repeated: a per-region table can win where the static schedule's model
+    is the wrong one, not just where it is imprecise.</li>
+    <li><b>Tree shaping for per-node coders</b>: hill-climb (placement + Kraft-exact reshape) tops out at
+    −1..−5% at absurd encoder cost; dstride preprocessing subsumes it on record data; fusion-aware shaping
+    ("make the root full two levels") is the only shaping idea left.</li>
+    <li><b>Per-bitmap free parameters at decode</b>: dead by the build-cost law (§2, §3.1); <b>W&gt;8
+    histogram tANS</b>: unnecessary, context depth replaces width.</li>
   </ul>
 </section>
 

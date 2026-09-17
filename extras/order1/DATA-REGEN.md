@@ -30,10 +30,10 @@ caveats first:
 |---|---|
 | silesia corpus | `curl -sLO http://sun.aei.polsl.pl/~sdeor/corpus/silesia.zip` (12 files, ~68 MB) |
 | Nick's datasets | committed on branch `pr30-dynfse` (= e1bdce0) under `extras/datasets/` |
-| prototype worktree | `git worktree add <dir> e1bdce0 && cd <dir> && patch -p1 < extras/order1/ph-ctx-session.patch` then `cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build`; for phaz e2e also apply main's capture fix: `git show 668aa37 \| patch -p1` and build phaz with `ZSTD_SRC=<mainrepo>/ext/zstd` |
+| prototype worktree | `git worktree add <dir> e1bdce0 && cd <dir> && git show 9d4409e:extras/order1/ph-ctx-session.patch \| patch -p1` (the patch left the tree after 9d4409e) then `cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build`; for phaz e2e also apply main's capture fix: `git show 668aa37 \| patch -p1` and build phaz with `ZSTD_SRC=<mainrepo>/ext/zstd` |
 | phaz | `extras/phaz/tools/build.sh` (patches a copy of ext/zstd, builds `./phaz`) |
 
-## Prototype env knobs (all in ph-ctx-session.patch)
+## Prototype env knobs (all in ph-ctx-session.patch, at commit 9d4409e)
 
 | knob | effect |
 |---|---|
@@ -115,7 +115,7 @@ All need `/tmp/phd_<f>/{lit,ll,ml,of}` + `/tmp/o1maps/<f>.map{2,4}` from
 
 Sweeps behind the 2026-09-08/09 numbers:
 
-- **ctx vs k4g16** (§23.1): worktree of e1bdce0 + `ph-ctx-session.patch`,
+- **ctx vs k4g16** (§23.1): worktree of e1bdce0 + `ph-ctx-session.patch` (from 9d4409e),
   `PIVCO_CTX=1 ./build/pivcohuf c -a` per lit stream (dict-48 default) vs
   `sessionratio` on the same streams.
 - **tableLog re-check on the landing tree** (§1.2 “shipped”): two builds
