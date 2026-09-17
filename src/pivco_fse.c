@@ -138,49 +138,125 @@ int pivco_fse_select_table(double p_major)
 
 /* ---------- Nibble path ----------
  *
- * Deliberately unoptimized: it mallocs a nibble buffer per call and
- * runs stock FSE_compress2 / FSE_decompress_wksp over it.  The point is
- * to establish the wire format and measure the ratio win; the split /
- * merge and the table build are all obvious targets for later work. */
+ * Payload: [FSE_writeNCount of the 16 nibble counts][bitstream].  The
+ * bitstream is the wide-cursor layout of the static path (encode_x /
+ * the decode template of fse_xy_codec.h, PIVCO_FSE_NIB_X cursors), so
+ * the decoder keeps that many dependent table-load chains in flight
+ * instead of stock FSE's two, and it packs each cursor pair's nibbles
+ * straight into the output byte: no nibble buffer, no repack pass. */
 
-/* FSE_compress2's histogram reads the input in 4-byte words (an
- * unconditional MEM_read32 before its 16-byte stripe loop), so it runs
- * up to 3 bytes past a nibble buffer shorter than a word -- src_len == 1
- * gives a 2-byte buffer.  Over-allocate the nibble buffer by a word so
- * that read stays in bounds (same reason wire.h keeps PIVCO_FLAT_FSE_SLACK
- * past an FSE-decoded flat region). */
-#define PIVCO_FSE_NIB_HIST_SLACK 8
+#ifndef PIVCO_FSE_NIB_X
+#define PIVCO_FSE_NIB_X 8
+#endif
+_Static_assert(PIVCO_FSE_NIB_X == 4 || PIVCO_FSE_NIB_X == 8, "the nibble decoder is written for 4 or 8 cursors");
+_Static_assert(4 * PIVCO_FSE_NIB_TABLELOG_MAX <= 64 - 7,
+               "four decodes between reloads must fit the bit container");
+
+/* The nibble decoder: one round of PIVCO_FSE_NIB_X decodes is half as
+ * many output bytes, low nibble from the even cursor.  DEC is
+ * FSE_decodeSymbolFast for a table where no symbol takes half the
+ * states or more, else the checked FSE_decodeSymbol.  Termination
+ * mirrors the fse_xy_codec.h template. */
+#if PIVCO_FSE_NIB_X == 8
+#define NIB_ROUND(DEC, base)                                                  \
+    op[(base) + 0] = (uint8_t)(DEC(&s[0], &bitD) | (DEC(&s[1], &bitD) << 4)); \
+    op[(base) + 1] = (uint8_t)(DEC(&s[2], &bitD) | (DEC(&s[3], &bitD) << 4)); \
+    BIT_reloadDStream(&bitD);                                                 \
+    op[(base) + 2] = (uint8_t)(DEC(&s[4], &bitD) | (DEC(&s[5], &bitD) << 4)); \
+    op[(base) + 3] = (uint8_t)(DEC(&s[6], &bitD) | (DEC(&s[7], &bitD) << 4));
+#else
+#define NIB_ROUND(DEC, base)                                                  \
+    op[(base) + 0] = (uint8_t)(DEC(&s[0], &bitD) | (DEC(&s[1], &bitD) << 4)); \
+    op[(base) + 1] = (uint8_t)(DEC(&s[2], &bitD) | (DEC(&s[3], &bitD) << 4));
+#endif
+#define NIB_RB (PIVCO_FSE_NIB_X / 2)   /* bytes per round */
+
+#define MK_NIB_DECODE(NAME, DEC)                                              \
+static size_t NAME(const void *src, size_t src_len,                          \
+                   uint8_t *dst, size_t dst_expected,                        \
+                   const FSE_DTable *dt)                                     \
+{                                                                            \
+    BIT_DStream_t bitD;                                                      \
+    if (FSE_isError(BIT_initDStream(&bitD, src, src_len))) return 0;         \
+    FSE_DState_t s[PIVCO_FSE_NIB_X];                                         \
+    for (int k = 0; k < PIVCO_FSE_NIB_X; k++) FSE_initDState(&s[k], &bitD, dt); \
+    uint8_t *op = dst;                                                       \
+    uint8_t * const olim = dst + dst_expected;                               \
+    while ((BIT_reloadDStream(&bitD) == BIT_DStream_unfinished)              \
+            & (op + NIB_RB <= olim)) {                                       \
+        NIB_ROUND(DEC, 0)                                                    \
+        op += NIB_RB;                                                        \
+    }                                                                        \
+    /* Tail rounds, reload-checked between bytes; once the                \
+     * reader overflows the remaining symbols are fixed by the states     \
+     * alone (the template's rule), so the round and the partial final    \
+     * round finish without checks. */                                    \
+    while (op + NIB_RB <= olim) {                                            \
+        int overflowed = 0;                                                  \
+        for (int j = 0; j < NIB_RB; j++) {                                   \
+            uint8_t lo = FSE_decodeSymbol(&s[2 * j], &bitD);                 \
+            *op++ = (uint8_t)(lo | (FSE_decodeSymbol(&s[2 * j + 1], &bitD) << 4)); \
+            if (BIT_reloadDStream(&bitD) == BIT_DStream_overflow) {          \
+                for (int jj = j + 1; jj < NIB_RB && op < olim; jj++) {       \
+                    lo = FSE_decodeSymbol(&s[2 * jj], &bitD);                \
+                    *op++ = (uint8_t)(lo | (FSE_decodeSymbol(&s[2 * jj + 1], &bitD) << 4)); \
+                }                                                            \
+                overflowed = 1;                                              \
+                break;                                                       \
+            }                                                                \
+        }                                                                    \
+        if (overflowed) break;                                               \
+    }                                                                        \
+    for (int j = 0; j < NIB_RB && op < olim; j++) {                          \
+        uint8_t lo = FSE_decodeSymbol(&s[2 * j], &bitD);                     \
+        *op++ = (uint8_t)(lo | (FSE_decodeSymbol(&s[2 * j + 1], &bitD) << 4)); \
+    }                                                                        \
+    return (size_t)(op - dst);                                               \
+}
+MK_NIB_DECODE(nib_decode_fast, FSE_decodeSymbolFast)
+MK_NIB_DECODE(nib_decode_safe, FSE_decodeSymbol)
 
 pivco_fse_status_t pivco_fse_compress_nibble(const void *src, size_t src_len,
                                                void *dst, size_t dst_cap,
                                                size_t *out_len)
 {
     if (src_len == 0) { *out_len = 0; return PIVCO_FSE_OK; }
+    if (src_len * 2 < PIVCO_FSE_NIB_X) return PIVCO_FSE_FALLBACK;   /* one nibble per cursor */
 
     const uint8_t *s = (const uint8_t *)src;
-    /* calloc, not malloc: the loop below writes every byte, but GCC
-     * can't see that through the *2 and warns on the FSE_compress2 read.
-     * The trailing slack (see above) is what keeps that read in bounds. */
-    uint8_t *nib = (uint8_t *)calloc(src_len * 2 + PIVCO_FSE_NIB_HIST_SLACK, 1);
+    uint8_t *nib = (uint8_t *)malloc(src_len * 2);
     if (!nib) return PIVCO_FSE_ERR_INTERNAL;
+    unsigned cnt[16] = {0};
     for (size_t i = 0; i < src_len; i++) {
         nib[2 * i]     = (uint8_t)(s[i] & 0x0F);
         nib[2 * i + 1] = (uint8_t)(s[i] >> 4);
+        cnt[s[i] & 0x0F]++;
+        cnt[s[i] >> 4]++;
     }
+    /* A single nibble value: nothing to code (stock FSE's RLE case). */
+    int used = 0;
+    for (int v = 0; v < 16; v++) used += cnt[v] > 0;
+    if (used < 2) { free(nib); return PIVCO_FSE_FALLBACK; }
 
-    size_t rc = FSE_compress2(dst, dst_cap, nib, src_len * 2,
-                              PIVCO_FSE_NIB_MAX_SYMBOL,
-                              PIVCO_FSE_NIB_TABLELOG);
+    unsigned tl = FSE_optimalTableLog(PIVCO_FSE_NIB_TABLELOG, src_len * 2, PIVCO_FSE_NIB_MAX_SYMBOL);
+    short nc[PIVCO_FSE_NIB_MAX_SYMBOL + 1];
+    size_t rc = FSE_normalizeCount(nc, tl, cnt, src_len * 2, PIVCO_FSE_NIB_MAX_SYMBOL);
+    if (FSE_isError(rc)) { free(nib); return PIVCO_FSE_FALLBACK; }
+    tl = (unsigned)rc;
+    uint8_t *d = (uint8_t *)dst;
+    size_t hlen = FSE_writeNCount(d, dst_cap, nc, PIVCO_FSE_NIB_MAX_SYMBOL, tl);
+    if (FSE_isError(hlen)) { free(nib); return PIVCO_FSE_FALLBACK; }
+
+    FSE_CTable ct[FSE_CTABLE_SIZE_U32(PIVCO_FSE_NIB_TABLELOG_MAX, PIVCO_FSE_NIB_MAX_SYMBOL)];
+    rc = FSE_buildCTable(ct, nc, PIVCO_FSE_NIB_MAX_SYMBOL, tl);
+    if (FSE_isError(rc)) { free(nib); return PIVCO_FSE_ERR_INTERNAL; }
+    size_t blen = encode_x(PIVCO_FSE_NIB_X, nib, src_len * 2, d + hlen, dst_cap - hlen, ct);
     free(nib);
-
-    if (FSE_isError(rc)) return PIVCO_FSE_ERR_INTERNAL;
-    /* 0 = FSE judged the nibbles incompressible, 1 = single-symbol RLE.
-     * Neither has a payload we could hand back, so both are fallbacks. */
-    if (rc <= 1)         return PIVCO_FSE_FALLBACK;
+    if (blen == 0) return PIVCO_FSE_FALLBACK;
     /* Header included -- this is where the nibble table pays for itself
      * or doesn't. */
-    if (rc >= src_len)   return PIVCO_FSE_FALLBACK;
-    *out_len = rc;
+    if (hlen + blen >= src_len) return PIVCO_FSE_FALLBACK;
+    *out_len = hlen + blen;
     return PIVCO_FSE_OK;
 }
 
@@ -192,22 +268,25 @@ pivco_fse_status_t pivco_fse_decompress_nibble(const void *src, size_t src_len,
     if (dst_cap < dst_expected)  return PIVCO_FSE_ERR_DST_FULL;
     if (dst_expected == 0) { *out_len = 0; return PIVCO_FSE_OK; }
 
-    uint8_t *nib = (uint8_t *)calloc(dst_expected, 2);
-    if (!nib) return PIVCO_FSE_ERR_INTERNAL;
-
-    FSE_DTable dt[FSE_DTABLE_SIZE_U32(PIVCO_FSE_NIB_TABLELOG_MAX)];
-    size_t rc = FSE_decompress_wksp(nib, dst_expected * 2, src, src_len,
-                                    dt, PIVCO_FSE_NIB_TABLELOG_MAX);
-    if (FSE_isError(rc) || rc != dst_expected * 2) {
-        free(nib);
+    short nc[PIVCO_FSE_NIB_MAX_SYMBOL + 1];
+    unsigned max_sym = PIVCO_FSE_NIB_MAX_SYMBOL, tl = 0;
+    size_t hlen = FSE_readNCount(nc, &max_sym, &tl, src, src_len);
+    if (FSE_isError(hlen) || max_sym > PIVCO_FSE_NIB_MAX_SYMBOL
+        || tl > PIVCO_FSE_NIB_TABLELOG_MAX || hlen >= src_len)
         return PIVCO_FSE_ERR_BAD_INPUT;
-    }
-
-    uint8_t *d = (uint8_t *)dst;
-    for (size_t i = 0; i < dst_expected; i++)
-        d[i] = (uint8_t)((nib[2 * i] & 0x0F) | ((nib[2 * i + 1] & 0x0F) << 4));
-    free(nib);
-
+    FSE_DTable dt[FSE_DTABLE_SIZE_U32(PIVCO_FSE_NIB_TABLELOG_MAX)];
+    if (FSE_isError(FSE_buildDTable(dt, nc, max_sym, tl))) return PIVCO_FSE_ERR_BAD_INPUT;
+    /* The fast decode step reads at least one bit per symbol; a symbol
+     * holding half the states or more takes none (FSE's own fastMode
+     * rule), so such a table decodes through the checked step. */
+    int fast = 1;
+    const short large_limit = (short)(1 << (tl - 1));
+    for (unsigned v = 0; v <= max_sym; v++) if (nc[v] >= large_limit) fast = 0;
+    size_t r = fast ? nib_decode_fast((const uint8_t *)src + hlen, src_len - hlen,
+                                      (uint8_t *)dst, dst_expected, dt)
+                    : nib_decode_safe((const uint8_t *)src + hlen, src_len - hlen,
+                                      (uint8_t *)dst, dst_expected, dt);
+    if (r != dst_expected) return PIVCO_FSE_ERR_BAD_INPUT;
     *out_len = dst_expected;
     return PIVCO_FSE_OK;
 }

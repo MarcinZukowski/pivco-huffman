@@ -47,7 +47,9 @@
  *   selects the nibble table: the payload
  *   starts with an FSE_writeNCount table description fitted to this
  *   bitmap's nibble histogram, followed by the coded nibbles (low nibble
- *   of each raw byte first); xor_flag is always 0 there.
+ *   of each raw byte first) in the wide-cursor bitstream layout of the
+ *   static tables (PIVCO_FSE_NIB_X interleaved states); xor_flag is
+ *   always 0 there.
  * table_id == PIVCO_FSE_K1_ID
  *   selects the k=1 bit-context table: the payload is one recipe byte
  *   (two 4-bit grid indices for P(bit | previous bit)) followed by the
