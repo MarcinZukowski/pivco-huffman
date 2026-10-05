@@ -9,7 +9,6 @@
 
 **General**
 - [Encode walk context: FSE staging from the arena, flags from the table](#encode-walk-context-fse-staging-from-the-arena-flags-from-the-table-2026-09-11)
-- [Per-block table ring for pivcohuf/phaz (shelved)](#per-block-table-ring-for-pivcohufphaz-2026-09-03-shelved-branch-per-block-ring)
 - [Vertical flat regions: layout defaults, mid-band forms, text trims](#vertical-flat-regions-layout-defaults-mid-band-forms-text-trims-2026-08-17)
 - [Composed c2s tables for vertical D=2/4 steps](#composed-c2s-tables-for-vertical-d24-steps-2026-08-18)
 - [Generalized flat regions: level-wise bits + late translation for depth≤6 subtrees](#generalized-flat-regions-level-wise-bits--late-translation-for-depth6-subtrees-2026-08-19)
@@ -23,6 +22,10 @@
 - [FastLanes-style transposed bitpacking](#fastlanes-style-transposed-bitpacking-2026-04-27)
 - [LSB-first canonical codes](#lsb-first-canonical-codes-2026-05-12)
 - [Skew-specialized merge: per-word easy paths](#skew-specialized-merge-per-word-easy-paths-all-zero--all-ones-2026-07-01-parked)
+
+**PHAZ**
+- [Context menu per code stream, chosen under a decode-cost class](#context-menu-per-code-stream-chosen-under-a-decode-cost-class-2026-10-04)
+- [Per-block table ring for pivcohuf/phaz (shelved)](#per-block-table-ring-for-pivcohufphaz-2026-09-03-shelved-branch-per-block-ring)
 
 **NEON**
 - [16-wide one-sided part_core (right16)](#16-wide-one-sided-part_core-right16-2026-06-28-parked)
@@ -106,6 +109,9 @@
 - [SIMD/GPU Huffman literature survey](#simdgpu-huffman-literature-survey-2026-05-12)
 - [EWAH word-aligned hybrid bitmap](#ewah-word-aligned-hybrid-bitmap-2026-05-16)
 
+**PHAZ**
+- [K_right by popcount, bit-packed block prefix](#k_right-by-popcount-bit-packed-block-prefix-2026-09-20)
+
 **NEON**
 - [Root fusion (init + root encode)](#root-fusion-init--root-encode-2026-05-11)
 - [neon2 4-way fused decode](#neon2-4-way-fused-decode)
@@ -151,53 +157,6 @@ and let `codec_fse_try` read flags and staging from it: no malloc, no
 VLA, no 33 KB frame in a recursion on a 512 KB thread stack; static
 vs not is implied by n (flat regions pass 0).  Output byte-identical;
 own commit so the recursion signature change reviews alone.
-
-### Per-block table ring for pivcohuf/phaz, 2026-09-03, shelved (branch per-block-ring)
-Every block carries its own Huffman table -- REUSE one of the last 8
-introduced tables (1-byte tabid) or introduce a fresh one via the cheapest
-compact form (PREFIX / presence-or-change bitmap / packed advance+length
-list, from scratch or delta against a ring rank).  No file-global table:
-block 0 introduces from scratch, wire v0.10 drops the 128-byte header table.
-Reuse-vs-fresh is decided on the code-length bit model and the block is
-encoded once (the same estimate zstd's `HUF_estimateCompressedSize` uses).
-
-Size (PHA, silesia): **-4.47% whole-file, -1.59% on the pivoted ll/ml/of/lit
-streams** (phaz's use).  Decode is unaffected: **1.04x**.
-
-Encode is **1.49x pre-ring**, and that cost is the point of the shelving.
-It decomposes into near-equal thirds: per-block table build 37%, reuse/delta
-search 30%, trial encode 33% (the trial was dropped -- see below).
-
-Component findings:
-- Encode/decode build asymmetry is why decode stays flat.  The encode build
-  (frequencies -> table) runs the real Huffman solve, 5913 ns; the decode
-  build (code-lengths -> table) feeds power-of-two synthetic freqs that
-  collapse the solve, 1315 ns (~4.5x cheaper), and REUSE blocks rebuild
-  nothing.  Even zero-reuse per-block tables are a 1.27x floor.
-- Trial encode (reuse-vs-fresh on real FSE-coded bytes) is worth only
-  ~0.024%; dropped.  The bit-model estimate picks the actual winner well
-  enough (8.7% disagreement, almost all near-ties costing ~8 B each).
-- A file-global seed table as a reuse base is worth 0.0039% -- redundant
-  with the ring.  Removing it also removed the codec's only whole-input
-  pass (the seed histogram); the encoder now streams block-by-block with
-  O(1) internal scratch.
-- Ring depth 8 vs 4: +0.011%.  Deep ranks are marginal; 8 is ~free but not
-  clearly better than 4.
-- Packed-list subsumes the raw-symbol-list forms (dropped ABSLIST / DLIST /
-  SDLIST for +61 B on 162 MB).
-- Joint length/shape optimization does NOT compose per-block: +13% encode
-  AND -0.078% size (worse).  It is a whole-file amortize-once trade of ratio
-  for decode speed, paid badly on every table.  Off by default (PLAIN
-  effort), so the default path is unaffected.
-
-Shelved rather than landed: phaz-with-ring is still +0.4..3.1% larger than
-zstd, so the -1.59% does not reach the "smaller than zstd" goal on its own
-(that needs order-1 modeling).  A 1.49x encode hit for a size win that still
-loses to zstd does not earn a default slot, and the file format has one
-consumer (the phaz/turbobench harness).  On branch per-block-ring for
-revival once order-1 closes most of the gap and the ring's margin decides.
-2026-09-12: per-segment tables at 128 KiB landed on main (see DONE);
-the ring is the sub-128K refinement of that mechanism.
 
 ### Vertical flat regions: layout defaults, mid-band forms, text trims, 2026-08-17
 The vertical layouts landed runtime-selectable (cfg.flat_layout:
@@ -342,6 +301,83 @@ Prototyped on `merge_cst_vec` (NEON), a few flavors tested:
 It also addresses a pathological "cursor stuck at a page boundary" case from #8.
 
 Probably not worth pursuing due to marginal applicability.
+
+**PHAZ**
+
+### Context menu per code stream, chosen under a decode-cost class, 2026-10-04
+phaz's context-binned code streams (`PHAZ_CTX`, ledger §27) fix one
+context definition per routing form: ll | (ml, of), ml | (of, of-1)
+chain-free or (of, ll-1) chained, of | (ll-1, ml-1), each optionally
+nested with the previous pair.  The 12-file accounting at B=64
+(`ctxbin/kbin.c`, ledger §27.4) says the best fields differ per
+stream and per file, and the best ones often sit in a slower routing
+class: ll | (ml, ml-1) codes the corpus at 78.5% of order-0 against
+82.2% for the shipped (ml, of) and stays chain-free (ml is whole
+before ll routes); ml | (of, ml-1) reaches 88.6% against 92.1 / 92.9
+for the shipped chained / chain-free pairs; of | (of-1, ml-1) 96.0
+against 97.5.  Self-history (ml-1 for ml, of-1 for of) is a serial
+walk within the stream, the §7 multi-walk shape, not a gather.
+
+Idea: make the encoder try a menu of context definitions per stream
+(field ids and lags, one or two stages) and keep the smallest, with
+the decoder class as the knob: gather (chain-free: a stream may use
+any lag of streams already materialized), self-walk (plus its own
+history, lanes), cross-chain (anything, ~11 ns/sequence).  The stream
+order is a candidate too (of need not be the order-0 one).  The wire
+carries the definition, not an enum, so the decoder is one routine
+per class.  A decode budget in cycles per sequence becomes an encoder
+parameter, which gives up zstd's level-independent decode speed.  The
+fit is one counting pass plus a greedy merge over <= 2809 contexts
+per candidate.  Needs per-file maps (the previous-sequence contexts
+do not pool across files) with the map cost in the comparison; the
+product form of (ml, ml-1) is unmeasured, the full map is ~2 KB.
+
+### Per-block table ring for pivcohuf/phaz, 2026-09-03, shelved (branch per-block-ring)
+Every block carries its own Huffman table -- REUSE one of the last 8
+introduced tables (1-byte tabid) or introduce a fresh one via the cheapest
+compact form (PREFIX / presence-or-change bitmap / packed advance+length
+list, from scratch or delta against a ring rank).  No file-global table:
+block 0 introduces from scratch, wire v0.10 drops the 128-byte header table.
+Reuse-vs-fresh is decided on the code-length bit model and the block is
+encoded once (the same estimate zstd's `HUF_estimateCompressedSize` uses).
+
+Size (PHA, silesia): **-4.47% whole-file, -1.59% on the pivoted ll/ml/of/lit
+streams** (phaz's use).  Decode is unaffected: **1.04x**.
+
+Encode is **1.49x pre-ring**, and that cost is the point of the shelving.
+It decomposes into near-equal thirds: per-block table build 37%, reuse/delta
+search 30%, trial encode 33% (the trial was dropped -- see below).
+
+Component findings:
+- Encode/decode build asymmetry is why decode stays flat.  The encode build
+  (frequencies -> table) runs the real Huffman solve, 5913 ns; the decode
+  build (code-lengths -> table) feeds power-of-two synthetic freqs that
+  collapse the solve, 1315 ns (~4.5x cheaper), and REUSE blocks rebuild
+  nothing.  Even zero-reuse per-block tables are a 1.27x floor.
+- Trial encode (reuse-vs-fresh on real FSE-coded bytes) is worth only
+  ~0.024%; dropped.  The bit-model estimate picks the actual winner well
+  enough (8.7% disagreement, almost all near-ties costing ~8 B each).
+- A file-global seed table as a reuse base is worth 0.0039% -- redundant
+  with the ring.  Removing it also removed the codec's only whole-input
+  pass (the seed histogram); the encoder now streams block-by-block with
+  O(1) internal scratch.
+- Ring depth 8 vs 4: +0.011%.  Deep ranks are marginal; 8 is ~free but not
+  clearly better than 4.
+- Packed-list subsumes the raw-symbol-list forms (dropped ABSLIST / DLIST /
+  SDLIST for +61 B on 162 MB).
+- Joint length/shape optimization does NOT compose per-block: +13% encode
+  AND -0.078% size (worse).  It is a whole-file amortize-once trade of ratio
+  for decode speed, paid badly on every table.  Off by default (PLAIN
+  effort), so the default path is unaffected.
+
+Shelved rather than landed: phaz-with-ring is still +0.4..3.1% larger than
+zstd, so the -1.59% does not reach the "smaller than zstd" goal on its own
+(that needs order-1 modeling).  A 1.49x encode hit for a size win that still
+loses to zstd does not earn a default slot, and the file format has one
+consumer (the phaz/turbobench harness).  On branch per-block-ring for
+revival once order-1 closes most of the gap and the ring's margin decides.
+2026-09-12: per-segment tables at 128 KiB landed on main (see DONE);
+the ring is the sub-128K refinement of that mechanism.
 
 **NEON**
 
@@ -687,6 +723,37 @@ Surveyed.  Best-of-list: (a) Oodle 6-stream BMI2 (ryg, Oct 2023) — SOTA branch
 
 ### EWAH word-aligned hybrid bitmap, 2026-05-16
 Measured (`ext/ewah` via Lemire's EWAHBoolArray, uword=uint64_t) on ph's per-node bitmaps: EWAH **expands** the bitmap by 1.6% across p ∈ [0.5, 0.95] and only manages ratio 0.617 at p=0.99 (vs Rice 0.072 and FSE 0.097).  Decode 140–310 MB/s at moderate skew (slower than both Rice and FSE everywhere).  Root cause: EWAH targets clustered minorities (posting lists); ph's per-node bitmaps are IID Bernoulli — every 64-bit word at p ∈ [0.5, 0.9] contains both 0s and 1s, gets classified "literal" + pays a per-word header on top.  Wrong tool for ph's regime.  Results: `results/bench_golomb_ewah-m4-20260516-*.txt`.
+
+**PHAZ**
+
+### K_right by popcount, bit-packed block prefix, 2026-09-20
+Two ways to shrink the per-node header, after the phaz accounting
+put ~50 bytes per (block, stream) against zstd's 17 (ledger §28.1).
+Every internal node sends its right child's count as 2 bytes at node
+entry, 0.1–0.5% of a PH stream at 128 KiB tables.  (1) Popcount: the
+node's bitmap goes ahead of its children and the decoder counts it
+instead of reading the field.  -0.15..-0.2% of phaz output (-0.7..-1.0%
+aligned to zstd's blocks); +6–13% PH decode on M4 with a scalar count,
++2–10% with FSE on, the count sits before the children can start.
+(2) Packed prefix: one field per region in a block prefix with the FSE
+flag, the region's tail bits (regions then hold whole bytes) and
+K_right in ceil(log2(n+1)) bits, n known from the parent's split, no
+lengths sent.  K_right averages 7.1–7.7 bits per slot, tails 3.5 bits
+per region, -0.14..-0.28% per stream.  Three readers on four hosts
+(pivco_bu, geometric mean over 9 distributions): a pre-pass into
+per-record arrays M4 -6.8% / Graviton4 -3.2% / GNR -4.8% / Zen5 -5.7%;
+inline byte-loop refill reading the prefix backwards from the block
+end -6.6 / -2.6 / -2.8 / -0.4; inline branchless 8-byte refill
+-4.5 / -1.6 / -0.6 / +2.9 (Zen5 noisy).  The tails are free (flag +
+K_right alone costs the same); the whole price is a variable-width
+fetch in place of an aligned 2-byte load on the walk's critical path,
+five cycles per node = 4% on M4.  Both trade 0.1–0.3% of size for
+1–7% of decode on the fast hosts; dropped, code kept as
+`extras/order1/ctxbin/kright-experiments.patch`
+(`PIVCO_WIRE_KR_POPCOUNT`, `PIVCO_WIRE_PACKED_HDR`).  Untested
+alternative: byte planes (one low byte per node, a presence bitmap,
+sparse high bytes), unpacked with a memcpy, keeping ~40% of the
+K_right bytes without a variable-width fetch.  Ledger §28.2.
 
 **NEON**
 

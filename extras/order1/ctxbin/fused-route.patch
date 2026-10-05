@@ -1,0 +1,140 @@
+diff --git a/extras/phaz/phaz.h b/extras/phaz/phaz.h
+index d5e8f81..9e245e8 100644
+--- a/extras/phaz/phaz.h
++++ b/extras/phaz/phaz.h
+@@ -198,6 +198,18 @@ static void phaz_updateRep(U32 rep[3], U32 offBase, U32 ll0) {
+  * ZSTD_execSequence (repcodes/overlap/window all handled by zstd). Single
+  * frame, whole-buffer output, no dictionary. Returns bytes written.
+  * Exported (used by tools/phaz.c); prototype silences -Wmissing-prototypes. */
++/* Chain-free context routing fused into the sequence loop: ml is pulled from
++ * a bin chosen by (of[i], of[i-1]) [+ (of[i-2], of[i-3]) nested], ll from a bin
++ * chosen by (ml[i], of[i]) [+ (ml[i-1], of[i-1])], history lane-local. */
++typedef struct {
++    int on, nested, B, L;
++    const unsigned char *t0, *m2, *mn;   /* stage maps */
++    const unsigned char **cur;           /* per (bin, lane) cursor */
++} phaz_route_stream;
++typedef struct { phaz_route_stream s[2]; size_t nseq; } phaz_route;
++size_t ZSTD_phazDecodeCtx(void*, size_t, const unsigned char*, const unsigned char*,
++        const unsigned char*, const unsigned char*, const unsigned char*, size_t,
++        const unsigned*, const unsigned*, const unsigned char*, size_t, const phaz_route*);
+ size_t ZSTD_phazDecode(void*, size_t, const unsigned char*, const unsigned char*,
+         const unsigned char*, const unsigned char*, const unsigned char*, size_t,
+         const unsigned*, const unsigned*, const unsigned char*, size_t);
+@@ -205,6 +217,13 @@ size_t ZSTD_phazDecode(void* dst, size_t dstCap,
+         const unsigned char* llc, const unsigned char* mlc, const unsigned char* ofc,
+         const unsigned char* xb, const unsigned char* lit, size_t litSize,
+         const unsigned* blkNs, const unsigned* blkTl, const unsigned char* blkCf, size_t nblk) {
++    return ZSTD_phazDecodeCtx(dst, dstCap, llc, mlc, ofc, xb, lit, litSize, blkNs, blkTl, blkCf, nblk, NULL);
++}
++size_t ZSTD_phazDecodeCtx(void* dst, size_t dstCap,
++        const unsigned char* llc, const unsigned char* mlc, const unsigned char* ofc,
++        const unsigned char* xb, const unsigned char* lit, size_t litSize,
++        const unsigned* blkNs, const unsigned* blkTl, const unsigned char* blkCf, size_t nblk,
++        const phaz_route* rt) {
+     BYTE* const ostart = (BYTE*)dst;
+     BYTE* const oend = ostart + dstCap;
+     BYTE* op = ostart;
+@@ -225,6 +244,10 @@ size_t ZSTD_phazDecode(void* dst, size_t dstCap,
+      * that predate the flag / never hit raw blocks). */
+     repC[0] = repStartValue[0]; repC[1] = repStartValue[1]; repC[2] = repStartValue[2];  /* {1,4,8} */
+     phaz_br_init(&br, xb);
++    /* routing state: lane l covers [l*nseq/L, (l+1)*nseq/L); history resets at a lane start */
++    int lane = 0, L = rt ? (rt->s[0].on ? rt->s[0].L : rt->s[1].L) : 1;
++    size_t laneEnd = rt ? (rt->nseq / (size_t)L) : (size_t)-1;
++    unsigned pOf = 0, ppOf = 0, pppOf = 0, pMl = 0;
+ 
+     for (b = 0; b < nblk; b++) {
+         BYTE* const blockStart = op;
+@@ -232,7 +255,23 @@ size_t ZSTD_phazDecode(void* dst, size_t dstCap,
+         unsigned k;
+         rep[0] = repC[0]; rep[1] = repC[1]; rep[2] = repC[2];
+         for (k = 0; k < ns; k++, si++) {
+-            unsigned const llCode = llc[si], mlCode = mlc[si], ofCode = ofc[si];
++            unsigned llCode, mlCode, ofCode = ofc[si];
++            if (rt) {
++                if (si == laneEnd) { lane++; laneEnd = (size_t)(lane + 1) * rt->nseq / (size_t)L; pOf = ppOf = pppOf = pMl = 0; }
++                if (rt->s[1].on) {
++                    const phaz_route_stream* r = &rt->s[1];
++                    unsigned bin = r->t0[ofCode * 32 + pOf];
++                    if (r->nested) bin = r->mn[bin * 32 + r->m2[ppOf * 32 + pppOf]];
++                    mlCode = *r->cur[bin * L + lane]++;
++                } else mlCode = mlc[si];
++                if (rt->s[0].on) {
++                    const phaz_route_stream* r = &rt->s[0];
++                    unsigned bin = r->t0[mlCode * 32 + ofCode];
++                    if (r->nested) bin = r->mn[bin * 32 + r->m2[pMl * 32 + pOf]];
++                    llCode = *r->cur[bin * L + lane]++;
++                } else llCode = llc[si];
++                pppOf = ppOf; ppOf = pOf; pOf = ofCode; pMl = mlCode;
++            } else { llCode = llc[si]; mlCode = mlc[si]; }
+             seq_t seq;
+             U32 offBase, ll0;
+             size_t oneSeqSize;
+diff --git a/extras/phaz/phaz_codec.c b/extras/phaz/phaz_codec.c
+index 4fea15a..1049132 100644
+--- a/extras/phaz/phaz_codec.c
++++ b/extras/phaz/phaz_codec.c
+@@ -18,6 +18,7 @@
+ #include "zstd.h"
+ #include "pivcohuf_file.h"
+ #include "phaz_codec.h"
++#include "phaz_route.h"
+ 
+ #define PHAZ_MAGIC "phaz"
+ #define PHAZ_VER   2          /* v2: + per-block blk_cf[] repcode-confirmed flags */
+@@ -709,17 +710,29 @@ size_t phaz_decompress(const void *src_, size_t fn, void *dst_, size_t cap,
+     }
+     double trt = now();
+     int cf = 0; for (int k = 0; k < 3; k++) if (ctxd[k] && CTX_ISCF(cs[k].m.mode)) cf = 1;
+-    if (ctxd[0] || ctxd[1] || ctxd[2]) {
++    int fused = cf && !getenv("PHAZ_NOFUSE");
++    phaz_route rt; memset(&rt, 0, sizeof rt); rt.nseq = nseq;
++    if (fused) {
++        /* chain-free contexts route inside the sequence loop; ll/ml stay demuxed */
++        for (int k = 0; k < 2; k++) { if (!ctxd[k]) continue; ctxstream_t *c = &cs[k]; phaz_route_stream *r = &rt.s[k];
++            r->on = 1; r->nested = CTX_KIND(c->m.mode) == CTX_NESTED; r->B = c->m.B; r->L = c->L; r->t0 = c->t0; r->m2 = c->m.m2; r->mn = c->m.mn;
++            r->cur = malloc((size_t)c->m.B * c->L * sizeof *r->cur);
++            for (int b = 0; b < c->m.B; b++) for (int l = 0; l < c->L; l++) r->cur[b * c->L + l] = c->sub[b] + c->pos[(size_t)b * c->L + l]; }
++        if (rt.s[0].on && rt.s[1].on && rt.s[0].L != rt.s[1].L) fused = 0;
++        for (int k = 0; k < 2; k++) if (ctxd[k] && CTX_KIND(cs[k].m.mode) >= CTX_PROD) fused = 0;
++    }
++    if ((ctxd[0] || ctxd[1] || ctxd[2]) && !fused) {
+         if (!(cf ? ctx_route_cf(nseq, cs, ctxd, str[0], str[1], str[2]) : ctx_route(nseq, cs, ctxd, str[0], str[1], str[2]))) {
+             for (int j = 0; j < 3; j++) ctx_free_stream(&cs[j]); for (int j = 0; j < 4; j++) free(str[j]);
+             free(bns); free(btl); free(bcf); return 0; }
+     }
+-    for (int j = 0; j < 3; j++) ctx_free_stream(&cs[j]);
+     if (st) st->route_ms = (now() - trt) * 1e3;
+     double tr = now();
+-    size_t got = ZSTD_phazDecode(dst_, cap, str[0], str[1], str[2], xb, str[3],
+-                                 lits, bns, btl, bcf, nblk);
++    size_t got = ZSTD_phazDecodeCtx(dst_, cap, str[0], str[1], str[2], xb, str[3],
++                                    lits, bns, btl, bcf, nblk, fused ? &rt : NULL);
+     if (st) st->reconstruct_ms = (now() - tr) * 1e3;
++    for (int k = 0; k < 2; k++) free(rt.s[k].cur);
++    for (int j = 0; j < 3; j++) ctx_free_stream(&cs[j]);
+     for (int i = 0; i < 4; i++) free(str[i]);
+     free(bns); free(btl); free(bcf);
+     return got == n ? got : 0;
+diff --git a/extras/phaz/phaz_route.h b/extras/phaz/phaz_route.h
+new file mode 100644
+index 0000000..fde57c8
+--- /dev/null
++++ b/extras/phaz/phaz_route.h
+@@ -0,0 +1,15 @@
++/* phaz: chain-free context routing fused into the sequence loop (shared by
++ * the patched zstd side and the container codec). */
++#ifndef PHAZ_ROUTE_H
++#define PHAZ_ROUTE_H
++#include <stddef.h>
++typedef struct {
++    int on, nested, B, L;
++    const unsigned char *t0, *m2, *mn;   /* stage maps */
++    const unsigned char **cur;           /* per (bin, lane) cursor */
++} phaz_route_stream;
++typedef struct { phaz_route_stream s[2]; size_t nseq; } phaz_route;
++size_t ZSTD_phazDecodeCtx(void*, size_t, const unsigned char*, const unsigned char*,
++        const unsigned char*, const unsigned char*, const unsigned char*, size_t,
++        const unsigned*, const unsigned*, const unsigned char*, size_t, const phaz_route*);
++#endif

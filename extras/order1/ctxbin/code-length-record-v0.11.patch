@@ -1,0 +1,349 @@
+diff --git a/include/pivcohuf_file.h b/include/pivcohuf_file.h
+index 3e52749..1939a4f 100644
+--- a/include/pivcohuf_file.h
++++ b/include/pivcohuf_file.h
+@@ -30,15 +30,22 @@
+  *            implement (BAD_VERSION), so reserved bits are assignable
+  *            later without risking silent mis-decode.
+  *              bits3..7 reserved, must be 0
+- *     11-138 CODE_LENGTHS[256] packed as 4-bit nibbles, LSB first
+- *            (symbol 2i in low nibble of byte i, symbol 2i+1 in high nibble)
+- *     139... Concatenated per-block records:
++ *     11...  CODE_LENGTHS record (v0.11; 128 bytes of 4-bit nibbles,
++ *            symbol 2i in the low nibble of byte i, before):
++ *               1 byte  LAST_SYM -- highest symbol with a code; symbols
++ *                       above it have none
++ *               1 byte  MODE, then the lengths of symbols 0..LAST_SYM:
++ *                         0       4-bit nibbles, symbol 2i in the low
++ *                                 nibble of byte i ((LAST_SYM+2)/2 bytes)
++ *                         1..127  FSE-coded, MODE bytes
++ *                         128+L   every symbol has length L, no payload
++ *     then   Concatenated per-block records:
+  *               3 bytes ENCODED_LEN (uint24) -- payload length
+  *               1 byte  BLOCK_FLAGS (uint8, v0.10+; 0 before):
+- *                         bit0  NEW_TABLE: 128 bytes CODE_LENGTHS follow,
++ *                         bit0  NEW_TABLE: a CODE_LENGTHS record follows,
+  *                               the table for this and the following blocks
+  *                         bits1..7 reserved, must be 0
+- *               [128 bytes CODE_LENGTHS when NEW_TABLE is set]
++ *               [CODE_LENGTHS record when NEW_TABLE is set]
+  *               ENCODED_LEN bytes encoded block (pivco-Huffman stream)
+  *            When and how often the encoder switches tables is its own
+  *            policy (see PIVCOHUF_SEGMENT_BYTES_DEFAULT); the decoder only
+@@ -74,6 +81,11 @@
+  *   when it pays for itself.  A stream with no flagged block is
+  *   byte-identical to v0.9, and v0.9 / v0.8 streams still decode.
+  *
++ *   v0.11 vs v0.10: CODE_LENGTHS shrink from 128 nibble bytes to the
++ *   LAST_SYM / MODE record above, FSE-coded when that pays (after
++ *   huff0's weight coding; typically 20-40 bytes).  Earlier streams
++ *   still decode with their nibble tables.
++ *
+  *   The final block may have fewer than BLOCK_SIZE input symbols.  The
+  *   encoder pads the input to BLOCK_SIZE with the file's first byte
+  *   (always present in the alphabet); the decoder truncates output
+@@ -92,7 +104,7 @@ extern "C" {
+ 
+ #define PIVCOHUF_MAGIC          "PIVCOHUF"
+ #define PIVCOHUF_VERSION_MAJOR  0
+-#define PIVCOHUF_VERSION_MINOR  10
++#define PIVCOHUF_VERSION_MINOR  11
+ #define PIVCOHUF_HEADER_SIZE    26
+ 
+ /* BODY FLAGS byte (v0.9+).  Bits0-1 carry the pivco_flat_layout_t value
+@@ -104,7 +116,9 @@ extern "C" {
+  * (v0.10+; the byte was the always-zero top of a 32-bit length before). */
+ #define PIVCOHUF_BLOCK_LEN_MASK      0x00FFFFFFu
+ #define PIVCOHUF_BLOCK_FLAGS_SHIFT   24
+-#define PIVCOHUF_BLOCK_FLAG_NEW_TABLE 0x01u  /* 128-byte code-length table precedes the payload */
++#define PIVCOHUF_BLOCK_FLAG_NEW_TABLE 0x01u  /* a CODE_LENGTHS record precedes the payload */
++/* Largest CODE_LENGTHS record: LAST_SYM, MODE and 128 nibble bytes. */
++#define PIVCOHUF_CODE_LENGTHS_MAX     130u
+ 
+ /* Input bytes per Huffman table for the entry points that take no
+  * seg_blocks: one table per 128 KiB (rounded to whole blocks).  128 KiB
+@@ -174,6 +188,12 @@ int pivcohuf_decompress(const uint8_t *in, size_t in_len,
+ int pivcohuf_peek_uncompressed_size(const uint8_t *in, size_t in_len,
+                                      size_t *uncompressed_size);
+ 
++/* Read a CODE_LENGTHS record (v0.11 form) at p into code_len[256].
++ * Returns the bytes the record spans, 0 when it is malformed or runs
++ * past avail. */
++size_t pivcohuf_read_code_lengths(const uint8_t *p, size_t avail,
++                                  uint8_t code_len[256]);
++
+ /* Per-phase wall-clock breakdown (nanoseconds) filled by the *_timed
+  * variants.  Phases not relevant to the call stay 0 (e.g. freq_ns on
+  * decompress).  freq_ns and build_ns are distinct: a caller who already
+diff --git a/src/pivcohuf_file.c b/src/pivcohuf_file.c
+index 3c722ec..5961a03 100644
+--- a/src/pivcohuf_file.c
++++ b/src/pivcohuf_file.c
+@@ -4,6 +4,10 @@
+ #include "pivcohuf_file.h"
+ #include "pivco_huffman.h"
+ #include "pivco_prof.h"
++#ifdef PIVCO_HAS_FSE
++#define FSE_STATIC_LINKING_ONLY
++#include "fse.h"
++#endif
+ 
+ #include <stdio.h>
+ #include <stdlib.h>
+@@ -110,6 +114,90 @@ static inline uint64_t get_u64(const uint8_t *p) {
+  * compress_bound + compress
+  * ============================================================ */
+ 
++/* CODE_LENGTHS record (see pivcohuf_file.h): LAST_SYM, MODE, then the
++ * lengths of symbols 0..LAST_SYM as MODE says.  Returns the bytes
++ * written, at most PIVCOHUF_CODE_LENGTHS_MAX. */
++static size_t write_code_lengths(const uint8_t code_len[256], uint8_t *out)
++{
++    int last = 255;
++    while (last > 0 && code_len[last] == 0) last--;
++    size_t n = (size_t)last + 1;
++    size_t nib = (n + 1) / 2;
++    out[0] = (uint8_t)last;
++    /* One length for every symbol: no payload. */
++    int same = 1;
++    for (size_t s = 1; s < n; s++) {
++        if (code_len[s] != code_len[0]) same = 0;
++    }
++    if (same) {
++        out[1] = (uint8_t)(128 + code_len[0]);
++        return 2;
++    }
++#ifdef PIVCO_HAS_FSE
++    /* FSE-coded lengths when they beat the nibbles (0 = would not fit). */
++    size_t r = FSE_compress2(out + 2, nib - 1, code_len, n, PIVCO_MAX_CODE_LEN, 6);
++    if (!FSE_isError(r) && r > 1) {
++        out[1] = (uint8_t)r;
++        return 2 + r;
++    }
++#endif
++    out[1] = 0;
++    for (size_t i = 0; i < nib; i++) {
++        uint8_t lo = code_len[2*i]     & 0x0F;
++        uint8_t hi = code_len[2*i + 1] & 0x0F;
++        out[2 + i] = (uint8_t)(lo | (hi << 4));
++    }
++    return 2 + nib;
++}
++
++size_t pivcohuf_read_code_lengths(const uint8_t *p, size_t avail,
++                                  uint8_t code_len[256])
++{
++    if (avail < 2) return 0;
++    size_t n = (size_t)p[0] + 1;
++    uint8_t mode = p[1];
++    memset(code_len, 0, 256);
++    if (mode >= 128) {
++        if (mode - 128 > PIVCO_MAX_CODE_LEN) return 0;
++        memset(code_len, mode - 128, n);
++        return 2;
++    }
++    if (mode == 0) {
++        size_t nib = (n + 1) / 2;
++        if (avail < 2 + nib) return 0;
++        for (size_t i = 0; i < nib; i++) {
++            code_len[2*i]     = p[2 + i] & 0x0F;
++            code_len[2*i + 1] = (p[2 + i] >> 4) & 0x0F;
++        }
++        if (n & 1) code_len[n] = 0;   /* the pad nibble is not a code */
++        return 2 + nib;
++    }
++#ifdef PIVCO_HAS_FSE
++    if (avail < 2 + (size_t)mode) return 0;
++    FSE_DTable dt[FSE_DTABLE_SIZE_U32(6)];
++    size_t r = FSE_decompress_wksp(code_len, n, p + 2, mode, dt, 6);
++    if (FSE_isError(r) || r != n) return 0;
++    for (size_t s = 0; s < n; s++) {
++        if (code_len[s] > PIVCO_MAX_CODE_LEN) return 0;
++    }
++    return 2 + (size_t)mode;
++#else
++    return 0;
++#endif
++}
++
++/* Pre-v0.11 CODE_LENGTHS: 128 bytes of nibbles. */
++static size_t read_nibble_lengths(const uint8_t *p, size_t avail,
++                                  uint8_t code_len[256])
++{
++    if (avail < 128) return 0;
++    for (int i = 0; i < 128; i++) {
++        code_len[2*i]     = p[i] & 0x0F;
++        code_len[2*i + 1] = (p[i] >> 4) & 0x0F;
++    }
++    return 128;
++}
++
+ size_t pivcohuf_compress_bound_seg(size_t in_len, size_t block_size,
+                                    size_t seg_blocks)
+ {
+@@ -127,8 +215,9 @@ size_t pivcohuf_compress_bound_seg(size_t in_len, size_t block_size,
+     size_t nsegs = seg_blocks ? (nblocks + seg_blocks - 1) / seg_blocks : 1;
+     return PIVCOHUF_HEADER_SIZE      /* header */
+          + 8 + 2 + 1                  /* body header: usize + blk + flags */
+-         + nsegs * 128                /* one code-length table per segment
+-                                       * (body header, then inline) */
++         + nsegs * PIVCOHUF_CODE_LENGTHS_MAX   /* one code-length table per
++                                                * segment (body header, then
++                                                * inline) */
+          + nblocks * worst_per_block;
+ }
+ 
+@@ -249,14 +338,8 @@ static int pivcohuf_compress_impl(pivco_encoder_t *enc_ctx,
+             PROF_TOC(PROF_FILE_BUILD_TABLE_SYN, 1); TOC(tm, build_ns, t0);
+ 
+             if (!have_table) {
+-                /* The first table goes into the body header: CODE_LENGTHS
+-                 * packed as 4-bit nibbles, sym 2i in low nibble. */
+-                for (int i = 0; i < 128; i++) {
+-                    uint8_t lo = table.code_len[2*i]     & 0x0F;
+-                    uint8_t hi = table.code_len[2*i + 1] & 0x0F;
+-                    p[i] = (uint8_t)(lo | (hi << 4));
+-                }
+-                p += 128;
++                /* The first table goes into the body header. */
++                p += write_code_lengths(table.code_len, p);
+                 have_table = 1;
+             }
+             if (in_len == 0) break;   /* header only, no blocks */
+@@ -282,14 +365,9 @@ static int pivcohuf_compress_impl(pivco_encoder_t *enc_ctx,
+           (void)block_buf;  /* padding path retired */
+           len_field = p; p += 4;
+           if (table_pending) {
+-              /* This block starts a new table: its CODE_LENGTHS nibbles
+-               * sit between the length field and the payload. */
+-              for (int i = 0; i < 128; i++) {
+-                  uint8_t lo = table.code_len[2*i]     & 0x0F;
+-                  uint8_t hi = table.code_len[2*i + 1] & 0x0F;
+-                  p[i] = (uint8_t)(lo | (hi << 4));
+-              }
+-              p += 128;
++              /* This block starts a new table: its CODE_LENGTHS record
++               * sits between the length field and the payload. */
++              p += write_code_lengths(table.code_len, p);
+           }
+           PROF_TOC(PROF_FILE_BLOCK_PROLOGUE, (uint64_t)this_n); }
+ 
+@@ -470,9 +548,9 @@ static int pivcohuf_decompress_impl(pivco_decoder_t *dec_ctx,
+     /* BODY_CHECKSUM verification disabled (2026-05-12). */
+ 
+     /* Parse body header: UNCOMPRESSED_SIZE(8) + BLOCK_SIZE(2) +
+-     * FLAGS(1, v0.9+) + nibbles(128). */
++     * FLAGS(1, v0.9+) + CODE_LENGTHS. */
+     size_t flags_size = (minor >= 9) ? 1 : 0;
+-    if (body_len < 8 + 2 + flags_size + 128) return PIVCOHUF_ERR_TOO_SHORT;
++    if (body_len < 8 + 2 + flags_size + 2) return PIVCOHUF_ERR_TOO_SHORT;
+     size_t uncomp_size = (size_t)get_u64(body);
+     uint16_t file_blk = get_u16(body + 8);
+     uint8_t flags = 0;
+@@ -498,11 +576,11 @@ static int pivcohuf_decompress_impl(pivco_decoder_t *dec_ctx,
+      * the stream, not this build's defaults: v0.8 streams and v0.9 streams
+      * without the flag have natural flat regions. */
+     uint8_t code_lens[256];
+-    const uint8_t *nibbles = body + 10 + flags_size;
+-    for (int i = 0; i < 128; i++) {
+-        code_lens[2*i]     = nibbles[i] & 0x0F;
+-        code_lens[2*i + 1] = (nibbles[i] >> 4) & 0x0F;
+-    }
++    const uint8_t *tab = body + 10 + flags_size;
++    size_t tab_len = minor >= 11
++        ? pivcohuf_read_code_lengths(tab, body_len - (10 + flags_size), code_lens)
++        : read_nibble_lengths(tab, body_len - (10 + flags_size), code_lens);
++    if (!tab_len) return PIVCOHUF_ERR_TOO_SHORT;   /* truncated or malformed */
+ 
+     pivco_cfg_t cfg = pivco_cfg_default;
+     cfg.flat_layout = (pivco_flat_layout_t)(flags & PIVCOHUF_FLAGS_LAYOUT_MASK);
+@@ -525,7 +603,7 @@ static int pivcohuf_decompress_impl(pivco_decoder_t *dec_ctx,
+     uint8_t *block_buf = (uint8_t *)malloc(B);
+     TOC(tm, malloc_ns, _tm);
+     if (!block_buf) return PIVCOHUF_ERR_INTERNAL;
+-    const uint8_t *p = body + 10 + flags_size + 128;
++    const uint8_t *p = tab + tab_len;
+     const uint8_t *body_end = body + body_len;
+     size_t written = 0;
+     int err = 0;
+@@ -544,14 +622,13 @@ static int pivcohuf_decompress_impl(pivco_decoder_t *dec_ctx,
+           if ((bflags & (uint8_t)~PIVCOHUF_BLOCK_FLAG_NEW_TABLE) || (bflags && minor < 10)) {
+               err = PIVCOHUF_ERR_BAD_VERSION; break; }
+           if (bflags & PIVCOHUF_BLOCK_FLAG_NEW_TABLE) {
+-              /* This block starts a new table: unpack its CODE_LENGTHS
+-               * nibbles and rebuild before decoding the payload. */
+-              if (p + 128 > body_end) { err = PIVCOHUF_ERR_TOO_SHORT; break; }
+-              for (int i = 0; i < 128; i++) {
+-                  code_lens[2*i]     = p[i] & 0x0F;
+-                  code_lens[2*i + 1] = (p[i] >> 4) & 0x0F;
+-              }
+-              p += 128;
++              /* This block starts a new table: read its CODE_LENGTHS
++               * record and rebuild before decoding the payload. */
++              size_t tl = minor >= 11
++                  ? pivcohuf_read_code_lengths(p, (size_t)(body_end - p), code_lens)
++                  : read_nibble_lengths(p, (size_t)(body_end - p), code_lens);
++              if (!tl) { err = PIVCOHUF_ERR_TOO_SHORT; break; }   /* truncated or malformed */
++              p += tl;
+               double t0 = TIC(tm);
+               if (pivco_build_codec_table(&cfg, code_lens, &table) != PIVCO_OK) {
+                   err = PIVCOHUF_ERR_INTERNAL; break; }
+diff --git a/test/test_edge_cases.c b/test/test_edge_cases.c
+index d6f827c..aa1bdbd 100644
+--- a/test/test_edge_cases.c
++++ b/test/test_edge_cases.c
+@@ -675,12 +675,17 @@ static int test_fse_kn_wire(int k)
+  * (BLOCK_FLAGS NEW_TABLE, v0.10). */
+ static size_t count_table_blocks(const uint8_t *stream, size_t len)
+ {
+-    size_t p = PIVCOHUF_HEADER_SIZE + 11 + 128, n = 0;
++    uint8_t lens[256];
++    size_t p = PIVCOHUF_HEADER_SIZE + 11, n = 0;
++    p += pivcohuf_read_code_lengths(stream + p, len - p, lens);
+     while (p + 4 <= len) {
+         uint32_t f = (uint32_t)stream[p] | ((uint32_t)stream[p + 1] << 8)
+                    | ((uint32_t)stream[p + 2] << 16) | ((uint32_t)stream[p + 3] << 24);
+         p += 4;
+-        if ((f >> PIVCOHUF_BLOCK_FLAGS_SHIFT) & PIVCOHUF_BLOCK_FLAG_NEW_TABLE) { n++; p += 128; }
++        if ((f >> PIVCOHUF_BLOCK_FLAGS_SHIFT) & PIVCOHUF_BLOCK_FLAG_NEW_TABLE) {
++            n++;
++            p += pivcohuf_read_code_lengths(stream + p, len - p, lens);
++        }
+         p += f & PIVCOHUF_BLOCK_LEN_MASK;
+     }
+     return n;
+@@ -769,8 +774,9 @@ static int test_flat_layout_file(void)
+              arm_len[0], arm_len[1], arm_len[2]);
+ 
+     /* Synthetic v0.8: a natural stream with one table for the whole
+-     * input (v0.8 has no segments), drop the FLAGS byte, relabel the
+-     * minor, shrink BODY_LENGTH. */
++     * input (v0.8 has no segments), the table as 128 nibble bytes in
++     * place of the v0.11 record, drop the FLAGS byte, relabel the
++     * minor, fix BODY_LENGTH. */
+     {
+         pivco_cfg_t cfg = pivco_cfg_default;
+         cfg.fse_nibble_enabled = 1;
+@@ -781,13 +787,18 @@ static int test_flat_layout_file(void)
+                                        PIVCO_BLOCK_SIZE, 0, NULL);
+         if (rc != PIVCOHUF_OK || enc[FLAGS_OFF] != 0 || count_table_blocks(enc, enc_len) != 0)
+             FAIL("v0.8 synth: re-compress rc=%d flags %02x", rc, enc[FLAGS_OFF]);
+-        memmove(enc + FLAGS_OFF, enc + FLAGS_OFF + 1,
+-                enc_len - FLAGS_OFF - 1);
+-        enc_len -= 1;
++        uint8_t lens[256];
++        size_t tab = pivcohuf_read_code_lengths(enc + FLAGS_OFF + 1, enc_len - FLAGS_OFF - 1, lens);
++        if (!tab) FAIL("v0.8 synth: unreadable CODE_LENGTHS");
++        memmove(enc + FLAGS_OFF + 128, enc + FLAGS_OFF + 1 + tab,
++                enc_len - FLAGS_OFF - 1 - tab);
++        for (int i = 0; i < 128; i++)
++            enc[FLAGS_OFF + i] = (uint8_t)(lens[2*i] | (lens[2*i + 1] << 4));
++        enc_len = enc_len - 1 - tab + 128;
+         enc[9] = 8;                            /* MINOR_VERSION */
+         uint64_t bl = 0;
+         for (int b = 7; b >= 0; b--) bl = (bl << 8) | enc[10 + b];
+-        bl -= 1;
++        bl = bl - 1 - tab + 128;
+         for (int b = 0; b < 8; b++) enc[10 + b] = (uint8_t)(bl >> (8 * b));
+         size_t dec_len = N;
+         rc = pivcohuf_decompress(enc, enc_len, dec, &dec_len);

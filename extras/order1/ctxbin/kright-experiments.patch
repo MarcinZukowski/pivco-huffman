@@ -1,0 +1,730 @@
+diff --git a/src/pivco_huffman_codec.c b/src/pivco_huffman_codec.c
+index 3a4b88e..796a745 100644
+--- a/src/pivco_huffman_codec.c
++++ b/src/pivco_huffman_codec.c
+@@ -64,6 +64,267 @@ static uint8_t *decode_scratch_ensure(pivco_scratch_t *sc, size_t need)
+  * caller's `symbols` buffer, which guarantees none, is only ever a
+  * merge destination (writes are exact). */
+ #define MERGE_OVERREAD ((size_t)PIVCO_PRIM_MERGE_OVERREAD)
++
++/* Experiment: no K_right on the wire.  Each node's bitmap goes ahead of
++ * its children's regions and the decoder popcounts it for K_right. */
++#ifndef PIVCO_WIRE_KR_POPCOUNT
++#define PIVCO_WIRE_KR_POPCOUNT 0
++#endif
++/* Experiment: one bit-packed block prefix carries, per region in walk
++ * order, the FSE flag (+ marker byte), the bits of the region's last
++ * partial byte, and the node's K_right in ceil(log2(n+1)) bits.  Regions
++ * then hold whole bytes only; the merges run on those and the codec
++ * finishes the <8 tail symbols from the prefix. */
++#ifndef PIVCO_WIRE_PACKED_HDR
++#define PIVCO_WIRE_PACKED_HDR 0
++#endif
++#if PIVCO_WIRE_PACKED_HDR && PIVCO_WIRE_KR_POPCOUNT
++#error "PIVCO_WIRE_PACKED_HDR and PIVCO_WIRE_KR_POPCOUNT are exclusive"
++#endif
++#if PIVCO_WIRE_PACKED_HDR
++/* Sub-experiment: PIVCO_WIRE_PACKED_TAILS=0 keeps regions byte-rounded and
++ * carries only the flag and K_right in the prefix. */
++#ifndef PIVCO_WIRE_PACKED_TAILS
++#define PIVCO_WIRE_PACKED_TAILS 1
++#endif
++#if PIVCO_WIRE_PACKED_TAILS
++#define PK_TAIL_BITS(bits) ((bits) & 7)
++#else
++#define PK_TAIL_BITS(bits) 0
++#endif
++#define META_PARAMS , uint8_t *node_tail, int *node_kr
++#define META_ARGS   , node_tail, node_kr
++#define DEC_PARAMS  , br_t *br
++#define DEC_ARGS    , br
++#define BLOCK_CONSUMED (in_len)
++
++typedef struct { uint8_t *p; uint64_t acc; int nb; } bw_t;
++static inline void bw_put(bw_t *w, uint32_t v, int bits)
++{
++    w->acc |= (uint64_t)v << w->nb;
++    w->nb += bits;
++    while (w->nb >= 8) {
++        *w->p++ = (uint8_t)w->acc;
++        w->acc >>= 8;
++        w->nb -= 8;
++    }
++}
++static inline uint8_t *bw_flush(bw_t *w)
++{
++    if (w->nb) *w->p++ = (uint8_t)w->acc;
++    return w->p;
++}
++/* The prefix sits at the block's end, byte-reversed, so the decoder
++ * reads it backwards from in + in_len and needs no length field.  One
++ * refill per node tops the accumulator up to 56..63 bits with a single
++ * 8-byte load (byte loop only within 8 bytes of the block start). */
++typedef struct { const uint8_t *p; const uint8_t *lo; uint64_t acc; int nb; } br_t;
++static inline void br_refill(br_t *r)
++{
++    if (r->p - 8 >= r->lo) {
++        uint64_t w;
++        memcpy(&w, r->p - 8, 8);
++        w = __builtin_bswap64(w);
++        r->acc |= w << r->nb;
++        r->p -= (63 - r->nb) >> 3;
++        r->nb |= 56;
++    } else {
++        while (r->nb <= 56 && r->p > r->lo) {
++            r->acc |= (uint64_t)*(--r->p) << r->nb;
++            r->nb += 8;
++        }
++    }
++}
++static inline uint32_t br_take(br_t *r, int bits)
++{
++    uint32_t v = (uint32_t)(r->acc & ((1ull << bits) - 1));
++    r->acc >>= bits;
++    r->nb -= bits;
++    return v;
++}
++/* Bits for a value in [0, n]. */
++static inline int bits_for(int n) { return n ? 32 - __builtin_clz((unsigned)n) : 0; }
++
++/* The prefix, in the walk's order (larger child first, like the regions). */
++static void packed_write_rec(bw_t *w, const pivco_table_t *t, int rec, int K,
++                             const uint8_t *mk, const uint8_t *tail, const int *kr)
++{
++    if (K == 0) return;
++    const pivco_sched_rec_t *r = &t->dec.sched[rec];
++    int kind = pivco_sched_kind(r);
++    int bits = (kind == PIVCO_SCHED_FLAT) ? K * pivco_sched_flat_depth(r) : K;
++    int has_kr = kind == PIVCO_SCHED_FULL || kind == PIVCO_SCHED_LEAF_LEFT;
++    int K_right = has_kr ? kr[rec] : 0;
++    /* One field the decoder fetches at once: flag, tail bits (zero for an
++     * FSE region), K_right; then the marker byte only when flagged. */
++    uint32_t v = (uint32_t)(mk[rec] != 0) | ((uint32_t)tail[rec] << 1)
++               | ((uint32_t)K_right << (1 + PK_TAIL_BITS(bits)));
++    bw_put(w, v, 1 + PK_TAIL_BITS(bits) + (has_kr ? bits_for(K) : 0));
++    if (mk[rec]) bw_put(w, mk[rec], 8);
++    if (!has_kr) return;
++    if (kind == PIVCO_SCHED_LEAF_LEFT) {
++        packed_write_rec(w, t, rec + 1, K_right, mk, tail, kr);
++        return;
++    }
++    int K_left = K - K_right;
++    int left = rec + 1;
++    int right = rec + r->right;
++    if (K_right > K_left) {
++        packed_write_rec(w, t, right, K_right, mk, tail, kr);
++        packed_write_rec(w, t, left,  K_left,  mk, tail, kr);
++    } else {
++        packed_write_rec(w, t, left,  K_left,  mk, tail, kr);
++        packed_write_rec(w, t, right, K_right, mk, tail, kr);
++    }
++}
++static size_t write_packed_prefix(uint8_t *out, const pivco_table_t *t, int N,
++                                  const uint8_t *mk, const uint8_t *tail, const int *kr)
++{
++    bw_t w = { out, 0, 0 };
++    packed_write_rec(&w, t, 0, N, mk, tail, kr);
++    return (size_t)(bw_flush(&w) - out);
++}
++/* A node's fields, read where the walk enters it. */
++static inline void packed_read_node(br_t *r, int kind, int K, int D,
++                                    uint8_t *marker, uint8_t *tail, int *K_right)
++{
++    int bits = (kind == PIVCO_SCHED_FLAT) ? K * D : K;
++    int t = PK_TAIL_BITS(bits);
++    int kb = (kind == PIVCO_SCHED_FULL || kind == PIVCO_SCHED_LEAF_LEFT) ? bits_for(K) : 0;
++    br_refill(r);
++    uint32_t v = br_take(r, 1 + t + kb);
++    *tail = (uint8_t)((v >> 1) & ((1u << t) - 1));
++    int kr = (int)(v >> (1 + t));
++    *K_right = kr > K ? K : kr;   /* corrupt stream: stay in bounds */
++    *marker = 0;
++    if (v & 1) {
++        br_refill(r);
++        *marker = (uint8_t)br_take(r, 8);
++    }
++}
++
++/* Raw regions: whole bytes from the stream, the merge runs on Kp = K & ~7
++ * symbols and the tail helpers finish the rest from the prefix bits.  FSE
++ * regions decode in full into scratch as before. */
++static inline const uint8_t *packed_read_bitmap(const uint8_t **in_ptr, int n,
++                                                uint8_t *scratch, uint8_t marker, int *kp)
++{
++    if (marker == 0) {
++        const uint8_t *bm = *in_ptr;
++#if PIVCO_WIRE_PACKED_TAILS
++        *in_ptr += n >> 3;
++        *kp = n & ~7;
++#else
++        *in_ptr += (n + 7) >> 3;
++        *kp = n;
++#endif
++        return bm;
++    }
++    *kp = n;
++    return wire_read_bitmap(in_ptr, n, scratch, marker);
++}
++static inline void tail_cst_cst(uint8_t *out, int Kp, int K, uint8_t tail,
++                                uint8_t ls, uint8_t rs)
++{
++    for (int j = Kp; j < K; j++) out[j] = ((tail >> (j - Kp)) & 1) ? rs : ls;
++}
++static inline void tail_cst_vec(uint8_t *out, int Kp, int K, uint8_t tail,
++                                uint8_t ls, const uint8_t *right, int K_right)
++{
++    int rc = K_right - __builtin_popcount(tail);
++    for (int j = Kp; j < K; j++) out[j] = ((tail >> (j - Kp)) & 1) ? right[rc++] : ls;
++}
++static inline void tail_vec_vec(uint8_t *out, int Kp, int K, uint8_t tail,
++                                const uint8_t *left, const uint8_t *right, int K_right)
++{
++    int ones = __builtin_popcount(tail);
++    int rc = K_right - ones;
++    int lc = (K - K_right) - ((K - Kp) - ones);
++    for (int j = Kp; j < K; j++) out[j] = ((tail >> (j - Kp)) & 1) ? right[rc++] : left[lc++];
++}
++/* A flat region: FSE form as before (natural-packed, full); raw form as
++ * whole bytes, the vertical spans (byte-exact by construction) through
++ * prim_merge_flat, the natural remainder's whole-byte symbols through
++ * prim_merge_flat_natural and its last symbols from the prefix tail. */
++static void packed_flat_decode(uint8_t *out, int K, int D, const uint8_t *c2s,
++                               int layout, const uint8_t **in_ptr,
++                               uint8_t marker, uint8_t tail)
++{
++    int total_bits = K * D;
++    if (marker) {
++        int nbytes = (total_bits + 7) >> 3;
++        uint16_t fse_len;
++        memcpy(&fse_len, *in_ptr, 2);
++        *in_ptr += 2;
++#ifdef PIVCO_HAS_FSE
++        uint8_t *buf = (uint8_t *)malloc((size_t)nbytes + PIVCO_FLAT_FSE_SLACK);
++        if (!buf) { *in_ptr += fse_len; return; }
++        memset(buf + nbytes, 0, PIVCO_FLAT_FSE_SLACK);
++        size_t out_len = 0;
++        (void)pivco_fse_decompress(marker & 0x7F, *in_ptr, fse_len,
++                                    buf, (size_t)nbytes, (size_t)nbytes, &out_len);
++        *in_ptr += fse_len;
++        prim_merge_flat_natural(out, K, buf, D, c2s);
++        free(buf);
++#else
++        *in_ptr += fse_len;
++#endif
++        return;
++    }
++    const uint8_t *bm = *in_ptr;
++#if !PIVCO_WIRE_PACKED_TAILS
++    *in_ptr += (total_bits + 7) >> 3;
++    prim_merge_flat(out, K, bm, D, c2s, layout);
++    (void)tail;
++    return;
++#endif
++    *in_ptr += total_bits >> 3;
++    int n5 = layout == PIVCO_FLAT_VERTICAL ? pivco_vert_n512(K, D) : 0;
++    int nv = layout != PIVCO_FLAT_NATURAL ? pivco_vert_n(K - n5, D) : 0;
++    int nvert = n5 + nv;
++    if (nvert) prim_merge_flat(out, nvert, bm, D, c2s, layout);
++    int nat = K - nvert;
++    const uint8_t *bm1 = bm + (((size_t)nvert * D) >> 3);
++    int whole = (nat * D) & ~7;        /* bits inside whole bytes */
++    int nfull = whole / D;             /* symbols entirely inside them */
++    if (nfull) prim_merge_flat_natural(out + nvert, nfull, bm1, D, c2s);
++    int pos = nfull * D;
++    uint64_t v = 0;
++    int nb = (whole >> 3) - (pos >> 3);
++    if (nb > 0) memcpy(&v, bm1 + (pos >> 3), (size_t)nb);
++    v >>= (pos & 7);
++    v |= (uint64_t)tail << (whole - pos);
++    for (int s = nfull; s < nat; s++, v >>= D) out[nvert + s] = c2s[v & ((1u << D) - 1)];
++}
++#else
++#define META_PARAMS
++#define META_ARGS
++#define DEC_PARAMS
++#define DEC_ARGS
++#define BLOCK_CONSUMED ((size_t)(ptr - in))
++#endif
++
++#if PIVCO_WIRE_KR_POPCOUNT
++/* Ones among the first n bits of bm (LSB-first): the node's K_right. */
++static inline int bitmap_popcount(const uint8_t *bm, int n)
++{
++    int cnt = 0;
++    int full = n >> 6;
++    for (int i = 0; i < full; i++) {
++        uint64_t w;
++        memcpy(&w, bm + 8 * i, 8);
++        cnt += __builtin_popcountll(w);
++    }
++    int rest = n & 63;
++    if (rest) {
++        uint64_t w = 0;
++        memcpy(&w, bm + 8 * full, (size_t)((rest + 7) >> 3));
++        w &= (1ULL << rest) - 1;
++        cnt += __builtin_popcountll(w);
++    }
++    return cnt;
++}
++#endif
+ _Static_assert(PIVCO_PRIM_MERGE_OVERREAD <= PIVCO_FLAT_FSE_SLACK,
+                "wire_read_flat_region's slack must cover the merges' overread");
+ 
+@@ -459,7 +720,7 @@ static void codec_encode_node(const pivco_table_t *table,
+                                int depth,
+                                uint8_t **out_ptr,
+                                uint8_t *tmp,
+-                               uint8_t *node_markers)
++                               uint8_t *node_markers META_PARAMS)
+ {
+     if (n == 0) return;
+     PROF_COUNT_ONLY(PROF_ENC_NODE_VISIT, n);
+@@ -472,6 +733,35 @@ static void codec_encode_node(const pivco_table_t *table,
+      * node's, so the wire layout does not depend on the encoder's FSE
+      * settings; codec_fse_try may then replace the packed bits
+      * with an FSE record in place. */
++#if PIVCO_WIRE_PACKED_HDR
++    if (kind == PIVCO_SCHED_FLAT) {
++        int D = pivco_sched_flat_depth(rec);
++        uint8_t base = rec->param;
++        int total_bytes = (n * D + 7) >> 3;
++        uint8_t *marker_slot = &node_markers[rec_idx];
++        *marker_slot = 0;
++        uint8_t *body = *out_ptr;
++        *out_ptr += total_bytes;
++        int try_fse = codec_flat_fse_eligible(table, total_bytes);
++        if (try_fse) prim_enc_pack_dN_natural(ranks, n, D, base, body);
++        else         prim_enc_pack_dN(ranks, n, D, base, body, table->flat_layout);
++        if (try_fse) {
++            if (codec_fse_try(0, table->fse_nibble_enabled,
++                              table->fse_k1_enabled, table->fse_k2_enabled,
++                              marker_slot, body, total_bytes,
++                              0, 0, 0, 0, out_ptr))
++                return;
++            if (table->flat_layout != PIVCO_FLAT_NATURAL)
++                prim_enc_pack_dN(ranks, n, D, base, body, table->flat_layout);
++        }
++        int t = PK_TAIL_BITS(n * D);
++        if (t) {
++            node_tail[rec_idx] = (uint8_t)(body[total_bytes - 1] & ((1u << t) - 1));
++            *out_ptr -= 1;
++        }
++        return;
++    }
++#else
+     if (kind == PIVCO_SCHED_FLAT) {
+         int D = pivco_sched_flat_depth(rec);
+         uint8_t base = rec->param;
+@@ -508,6 +798,7 @@ static void codec_encode_node(const pivco_table_t *table,
+         }
+         return;
+     }
++#endif
+ 
+     /* Non-flat internal node.  codec.c owns: K_right header, FSE marker
+      * byte, optional FSE-attempt on the raw bitmap.  The arch-specific
+@@ -540,10 +831,26 @@ static void codec_encode_node(const pivco_table_t *table,
+     PROF_TOC(PROF_ENC_NODE_FULL, n);
+     int n_left  = n - n_right;
+ 
++#if PIVCO_WIRE_KR_POPCOUNT
++    /* The bitmap goes ahead of the children; the decoder popcounts it
++     * for K_right.  The FSE attempt may rewrite it in place. */
++    node_markers[rec_idx] = 0;
++    uint8_t *bm = *out_ptr;
++    memcpy(bm, bm_stage, (size_t)nbytes);
++    *out_ptr += nbytes;
++    if (table->fse_enabled)
++        codec_fse_try(table->fse_static_enabled, table->fse_nibble_enabled,
++                      table->fse_k1_enabled, table->fse_k2_enabled,
++                      &node_markers[rec_idx], bm, nbytes,
++                      n, n_left, n_right, depth, out_ptr);
++#elif PIVCO_WIRE_PACKED_HDR
++    node_kr[rec_idx] = n_right;
++#else
+     /* One K_right header per recursion site, consumed by the decoder
+      * at node entry so it can size both children before their regions
+      * arrive. */
+     wire_write_kr_header(table, (int16_t)rec_idx, out_ptr, n_right);
++#endif
+ 
+     /* Emit the larger-K child's region first: the decoder can then
+      * decode it into scratch that the smaller, not-yet-decoded
+@@ -555,23 +862,24 @@ static void codec_encode_node(const pivco_table_t *table,
+      * decoder reorders. */
+     if (kind == PIVCO_SCHED_LEAF_LEFT) {
+         codec_encode_node(table, rec_idx + 1, tmp, n_right, depth + 1,
+-                           out_ptr, tmp + n_right, node_markers);
++                           out_ptr, tmp + n_right, node_markers META_ARGS);
+     } else if (kind == PIVCO_SCHED_FULL) {
+         int left = rec_idx + 1;
+         int right = rec_idx + rec->right;
+         if (n_right > n_left) {
+             codec_encode_node(table, right, tmp,   n_right, depth + 1,
+-                               out_ptr, tmp + n_right, node_markers);
++                               out_ptr, tmp + n_right, node_markers META_ARGS);
+             codec_encode_node(table, left,  ranks, n_left,  depth + 1,
+-                               out_ptr, tmp + n_right, node_markers);
++                               out_ptr, tmp + n_right, node_markers META_ARGS);
+         } else {
+             codec_encode_node(table, left,  ranks, n_left,  depth + 1,
+-                               out_ptr, tmp + n_right, node_markers);
++                               out_ptr, tmp + n_right, node_markers META_ARGS);
+             codec_encode_node(table, right, tmp,   n_right, depth + 1,
+-                               out_ptr, tmp + n_right, node_markers);
++                               out_ptr, tmp + n_right, node_markers META_ARGS);
+         }
+     }
+ 
++#if !PIVCO_WIRE_KR_POPCOUNT
+     /* Emit this node's bitmap (marker-less: the marker goes to the block
+      * prefix via node_markers[rec_idx]).  The FSE attempt may rewrite the
+      * bitmap in place with [fse_len][payload] and set the marker slot. */
+@@ -584,6 +892,14 @@ static void codec_encode_node(const pivco_table_t *table,
+                       table->fse_k1_enabled, table->fse_k2_enabled,
+                       &node_markers[rec_idx], bm, nbytes,
+                       n, n_left, n_right, depth, out_ptr);
++#if PIVCO_WIRE_PACKED_HDR
++    /* Raw region: the last partial byte's bits go to the prefix. */
++    if (node_markers[rec_idx] == 0 && PK_TAIL_BITS(n)) {
++        node_tail[rec_idx] = (uint8_t)(bm[n >> 3] & ((1u << (n & 7)) - 1));
++        *out_ptr -= 1;
++    }
++#endif
++#endif
+ }
+ 
+ /* Write this block's marker prefix at `out`; returns its length.  Empty (0
+@@ -667,17 +983,31 @@ int CODEC_ENCODE_ENTRY(pivco_encoder_t *enc_ctx, const pivco_table_t *table, con
+ 
+     uint8_t node_markers[PIVCO_MAX_SYMBOLS];
+     memset(node_markers, 0, (size_t)table->dec.sched_len);
++#if PIVCO_WIRE_PACKED_HDR
++    uint8_t node_tail[PIVCO_MAX_SYMBOLS];
++    int node_kr[PIVCO_MAX_SYMBOLS];
++    memset(node_tail, 0, sizeof node_tail);
++#endif
+     uint8_t *rptr = region_buf;
+-    codec_encode_node(table, 0, ranks, N, 0, &rptr, tmp, node_markers);
++    codec_encode_node(table, 0, ranks, N, 0, &rptr, tmp, node_markers META_ARGS);
+     size_t region_len = (size_t)(rptr - region_buf);
+ 
+     /* [block_N][marker prefix][marker-less regions]. */
+     uint8_t *ptr = out;
+     wire_write_block_n(ptr, N);
+     ptr += PIVCO_BLOCK_N_BYTES;
++#if PIVCO_WIRE_PACKED_HDR
++    memcpy(ptr, region_buf, region_len);
++    ptr += region_len;
++    uint8_t pfx[PIVCO_MAX_SYMBOLS * 4];
++    size_t pfx_len = write_packed_prefix(pfx, table, N, node_markers, node_tail, node_kr);
++    for (size_t i = 0; i < pfx_len; i++) ptr[i] = pfx[pfx_len - 1 - i];
++    ptr += pfx_len;
++#else
+     ptr += write_marker_prefix(ptr, table, node_markers);
+     memcpy(ptr, region_buf, region_len);
+     ptr += region_len;
++#endif
+ 
+     *out_len = (size_t)(ptr - out);
+     return PIVCO_OK;
+@@ -728,24 +1058,36 @@ static void codec_decode_subtree(const pivco_table_t *table,
+                                    int rec_idx, int K,
+                                    uint8_t *out, uint8_t *tmp,
+                                    const uint8_t **in_ptr,
+-                                   const uint8_t *node_markers)
++                                   const uint8_t *node_markers DEC_PARAMS)
+ {
+     if (K == 0) return;
+ 
+     const pivco_sched_rec_t *rec = &table->dec.sched[rec_idx];
+     const uint8_t *r2s = table->dec.rank_to_sym;
++#if PIVCO_WIRE_PACKED_HDR
++    uint8_t pk_marker, pk_tail;
++    int pk_kr;
++    packed_read_node(br, pivco_sched_kind(rec), K,
++                     pivco_sched_kind(rec) == PIVCO_SCHED_FLAT ? pivco_sched_flat_depth(rec) : 0,
++                     &pk_marker, &pk_tail, &pk_kr);
++#endif
+ 
+     switch (pivco_sched_kind(rec)) {
+ 
+     case PIVCO_SCHED_FLAT: {
+         int D = pivco_sched_flat_depth(rec);
++        const uint8_t *c2s = &r2s[rec->param];
++#if PIVCO_WIRE_PACKED_HDR
++        packed_flat_decode(out, K, D, c2s, table->flat_layout, in_ptr,
++                           pk_marker, pk_tail);
++        return;
++#endif
+         int total_bytes = (K * D + 7) >> 3;
+         uint8_t *owned = NULL;
+         int fse_coded = 0;
+         const uint8_t *bm = wire_read_flat_region(in_ptr, total_bytes,
+                                                    &owned, &fse_coded);
+         if (!bm) return;   /* allocation failure; caller sees short output */
+-        const uint8_t *c2s = &r2s[rec->param];
+         /* An FSE-coded region is always natural-packed, whatever the
+          * table's configured layout (see codec_fse_try). */
+         if (fse_coded) prim_merge_flat_natural(out, K, bm, D, c2s);
+@@ -757,8 +1099,15 @@ static void codec_decode_subtree(const pivco_table_t *table,
+     case PIVCO_SCHED_BOTH_LEAVES: {
+         /* No K_right header (kr_header_needed returns false). */
+         uint8_t bm_scratch[(size_t)bitmap_bytes(K) + 16];
++#if PIVCO_WIRE_PACKED_HDR
++        int Kp;
++        const uint8_t *bm = packed_read_bitmap(in_ptr, K, bm_scratch, pk_marker, &Kp);
++        prim_merge_cst_cst(bm, Kp, r2s[rec->param], r2s[rec->param + 1], out);
++        tail_cst_cst(out, Kp, K, pk_tail, r2s[rec->param], r2s[rec->param + 1]);
++#else
+         const uint8_t *bm = wire_read_bitmap(in_ptr, K, bm_scratch, node_markers[rec_idx]);
+         prim_merge_cst_cst(bm, K, r2s[rec->param], r2s[rec->param + 1], out);
++#endif
+         return;
+     }
+ 
+@@ -767,13 +1116,29 @@ static void codec_decode_subtree(const pivco_table_t *table,
+          * contributes the K_left symbols the merge fills into out's
+          * prefix.  The right child decodes in place into out's tail,
+          * whatever its share of K. */
++        uint8_t bm_scratch[(size_t)bitmap_bytes(K) + 16];
++#if PIVCO_WIRE_KR_POPCOUNT
++        const uint8_t *bm = wire_read_bitmap(in_ptr, K, bm_scratch, node_markers[rec_idx]);
++        int K_right = bitmap_popcount(bm, K);
++#elif PIVCO_WIRE_PACKED_HDR
++        int K_right = pk_kr;
++#else
+         int K_right = wire_read_kr_header(table, (int16_t)rec_idx, in_ptr);
++#endif
+         uint8_t *right_buf = out + (K - K_right);
+         codec_decode_subtree(table, rec_idx + 1, K_right,
+-                              right_buf, tmp, in_ptr, node_markers);
++                              right_buf, tmp, in_ptr, node_markers DEC_ARGS);
+ 
+-        uint8_t bm_scratch[(size_t)bitmap_bytes(K) + 16];
++#if PIVCO_WIRE_PACKED_HDR
++        int Kp;
++        const uint8_t *bm = packed_read_bitmap(in_ptr, K, bm_scratch, pk_marker, &Kp);
++        prim_merge_cst_vec(bm, Kp, r2s[rec->param], right_buf, out);
++        tail_cst_vec(out, Kp, K, pk_tail, r2s[rec->param], right_buf, K_right);
++        return;
++#endif
++#if !PIVCO_WIRE_KR_POPCOUNT && !PIVCO_WIRE_PACKED_HDR
+         const uint8_t *bm = wire_read_bitmap(in_ptr, K, bm_scratch, node_markers[rec_idx]);
++#endif
+         prim_merge_cst_vec(bm, K, r2s[rec->param], right_buf, out);
+         return;
+     }
+@@ -783,7 +1148,15 @@ static void codec_decode_subtree(const pivco_table_t *table,
+         /* Both children internal.  Stream order == decode order ==
+          * larger first (strict >, ties left-first — must match the
+          * encoder). */
++        uint8_t bm_scratch[(size_t)bitmap_bytes(K) + 16];
++#if PIVCO_WIRE_KR_POPCOUNT
++        const uint8_t *bm = wire_read_bitmap(in_ptr, K, bm_scratch, node_markers[rec_idx]);
++        int K_right = bitmap_popcount(bm, K);
++#elif PIVCO_WIRE_PACKED_HDR
++        int K_right = pk_kr;
++#else
+         int K_right = wire_read_kr_header(table, (int16_t)rec_idx, in_ptr);
++#endif
+         int K_left  = K - K_right;
+         int left  = rec_idx + 1;
+         int right = rec_idx + rec->right;
+@@ -792,20 +1165,28 @@ static void codec_decode_subtree(const pivco_table_t *table,
+             right_buf = out + K_left;            /* larger, in place    */
+             left_buf  = tmp;                     /* smaller, ping-pong  */
+             codec_decode_subtree(table, right, K_right,
+-                                  right_buf, tmp, in_ptr, node_markers);
++                                  right_buf, tmp, in_ptr, node_markers DEC_ARGS);
+             codec_decode_subtree(table, left,  K_left,
+-                                  left_buf,  out, in_ptr, node_markers);
++                                  left_buf,  out, in_ptr, node_markers DEC_ARGS);
+         } else {
+             left_buf  = out + K_right;           /* larger, in place    */
+             right_buf = tmp;                     /* smaller, ping-pong  */
+             codec_decode_subtree(table, left,  K_left,
+-                                  left_buf,  tmp, in_ptr, node_markers);
++                                  left_buf,  tmp, in_ptr, node_markers DEC_ARGS);
+             codec_decode_subtree(table, right, K_right,
+-                                  right_buf, out, in_ptr, node_markers);
++                                  right_buf, out, in_ptr, node_markers DEC_ARGS);
+         }
+ 
+-        uint8_t bm_scratch[(size_t)bitmap_bytes(K) + 16];
++#if PIVCO_WIRE_PACKED_HDR
++        int Kp;
++        const uint8_t *bm = packed_read_bitmap(in_ptr, K, bm_scratch, pk_marker, &Kp);
++        prim_merge_vec_vec(bm, Kp, left_buf, right_buf, out);
++        tail_vec_vec(out, Kp, K, pk_tail, left_buf, right_buf, K_right);
++        return;
++#endif
++#if !PIVCO_WIRE_KR_POPCOUNT && !PIVCO_WIRE_PACKED_HDR
+         const uint8_t *bm = wire_read_bitmap(in_ptr, K, bm_scratch, node_markers[rec_idx]);
++#endif
+         prim_merge_vec_vec(bm, K, left_buf, right_buf, out);
+         return;
+     }
+@@ -815,8 +1196,10 @@ static void codec_decode_subtree(const pivco_table_t *table,
+ int CODEC_DECODE_ENTRY(pivco_decoder_t *dec_ctx, const pivco_table_t *table, const uint8_t *in, size_t in_len, uint8_t *symbols, size_t *consumed)
+ {
+     if (!in || !table || !symbols || !consumed) return PIVCO_ERR_NULL;
+-    (void)in_len;
+     prim_codec_init();
++#if !PIVCO_WIRE_PACKED_HDR
++    (void)in_len;
++#endif
+ 
+     /* Block header: first 2 bytes are N (symbol count for this block). */
+     const uint8_t *ptr = in;
+@@ -830,7 +1213,18 @@ int CODEC_DECODE_ENTRY(pivco_decoder_t *dec_ctx, const pivco_table_t *table, con
+      * the walk looks each marker up by record index (no cursor threading).
+      * The prefix is empty for a flat root (mk_count == 0). */
+     uint8_t node_markers[PIVCO_MAX_SYMBOLS];
++#if PIVCO_WIRE_PACKED_HDR
++    br_t br_store = { in + in_len, in, 0, 0 };
++    br_t *br = &br_store;
++    uint8_t pk_marker, pk_tail;
++    int pk_kr;
++    packed_read_node(br, root_kind, N,
++                     root_kind == PIVCO_SCHED_FLAT ? pivco_sched_flat_depth(root) : 0,
++                     &pk_marker, &pk_tail, &pk_kr);
++    (void)node_markers;
++#else
+     read_marker_prefix(&ptr, table, node_markers);
++#endif
+ 
+     /* Fast path: BOTH_LEAVES at root — a 2-symbol (or single-symbol, two ranks
+      * of one symbol) tree, where the whole block collapses to "read the
+@@ -842,10 +1236,17 @@ int CODEC_DECODE_ENTRY(pivco_decoder_t *dec_ctx, const pivco_table_t *table, con
+      * optimization. */
+     if (root_kind == PIVCO_SCHED_BOTH_LEAVES) {
+         uint8_t bm_scratch[(size_t)bitmap_bytes(N) + 16];
++#if PIVCO_WIRE_PACKED_HDR
++        int Kp;
++        const uint8_t *bm = packed_read_bitmap(&ptr, N, bm_scratch, pk_marker, &Kp);
++        prim_merge_cst_cst(bm, Kp, r2s[root->param], r2s[root->param + 1], symbols);
++        tail_cst_cst(symbols, Kp, N, pk_tail, r2s[root->param], r2s[root->param + 1]);
++#else
+         const uint8_t *bm = wire_read_bitmap(&ptr, N, bm_scratch, node_markers[0]);
+         prim_merge_cst_cst(bm, N, r2s[root->param], r2s[root->param + 1],
+                            symbols);
+-        *consumed = (size_t)(ptr - in);
++#endif
++        *consumed = BLOCK_CONSUMED;
+         return PIVCO_OK;
+     }
+ 
+@@ -853,6 +1254,12 @@ int CODEC_DECODE_ENTRY(pivco_decoder_t *dec_ctx, const pivco_table_t *table, con
+      * straight into symbols (exact writes, no merge, no scratch). */
+     if (root_kind == PIVCO_SCHED_FLAT) {
+         int D = pivco_sched_flat_depth(root);
++#if PIVCO_WIRE_PACKED_HDR
++        packed_flat_decode(symbols, N, D, &r2s[root->param], table->flat_layout,
++                           &ptr, pk_marker, pk_tail);
++        *consumed = BLOCK_CONSUMED;
++        return PIVCO_OK;
++#endif
+         int total_bytes = (N * D + 7) >> 3;
+         uint8_t *owned = NULL;
+         int fse_coded = 0;
+@@ -864,7 +1271,7 @@ int CODEC_DECODE_ENTRY(pivco_decoder_t *dec_ctx, const pivco_table_t *table, con
+         else           prim_merge_flat(symbols, N, bm, D, root_c2s,
+                                        table->flat_layout);
+         free(owned);
+-        *consumed = (size_t)(ptr - in);
++        *consumed = BLOCK_CONSUMED;
+         return PIVCO_OK;
+     }
+ 
+@@ -890,16 +1297,33 @@ int CODEC_DECODE_ENTRY(pivco_decoder_t *dec_ctx, const pivco_table_t *table, con
+         /* One internal child: it decodes at the arena base with the
+          * space after it as ping-pong partner; the cst_vec merge fills
+          * symbols. */
++        uint8_t bm_scratch[(size_t)bitmap_bytes(N) + 16];
++#if PIVCO_WIRE_KR_POPCOUNT
++        const uint8_t *bm = wire_read_bitmap(&ptr, N, bm_scratch, node_markers[0]);
++        int K_right = bitmap_popcount(bm, N);
++#elif PIVCO_WIRE_PACKED_HDR
++        int K_right = pk_kr;
++#else
+         int K_right = wire_read_kr_header(table, 0, &ptr);
++#endif
+         uint8_t *scratch = decode_scratch_ensure((pivco_scratch_t *)dec_ctx->internal, need);
+         if (!scratch) return PIVCO_ERR_NULL;
+         codec_decode_subtree(table, 1, K_right,
+-                              scratch, scratch + K_right, &ptr, node_markers);
+-
+-        uint8_t bm_scratch[(size_t)bitmap_bytes(N) + 16];
++                              scratch, scratch + K_right, &ptr, node_markers DEC_ARGS);
++
++#if PIVCO_WIRE_PACKED_HDR
++        int Kp;
++        const uint8_t *bm = packed_read_bitmap(&ptr, N, bm_scratch, pk_marker, &Kp);
++        prim_merge_cst_vec(bm, Kp, r2s[root->param], scratch, symbols);
++        tail_cst_vec(symbols, Kp, N, pk_tail, r2s[root->param], scratch, K_right);
++        *consumed = BLOCK_CONSUMED;
++        return PIVCO_OK;
++#endif
++#if !PIVCO_WIRE_KR_POPCOUNT && !PIVCO_WIRE_PACKED_HDR
+         const uint8_t *bm = wire_read_bitmap(&ptr, N, bm_scratch, node_markers[0]);
++#endif
+         prim_merge_cst_vec(bm, N, r2s[root->param], scratch, symbols);
+-        *consumed = (size_t)(ptr - in);
++        *consumed = BLOCK_CONSUMED;
+         return PIVCO_OK;
+     }
+ 
+@@ -911,7 +1335,15 @@ int CODEC_DECODE_ENTRY(pivco_decoder_t *dec_ctx, const pivco_table_t *table, con
+      * outgrows that slot, the partner writes spill past N into fresh
+      * arena.  The smaller root child then decodes into its slot with a
+      * fresh partner beyond N. */
++    uint8_t bm_scratch[(size_t)bitmap_bytes(N) + 16];
++#if PIVCO_WIRE_KR_POPCOUNT
++    const uint8_t *bm = wire_read_bitmap(&ptr, N, bm_scratch, node_markers[0]);
++    int K_right = bitmap_popcount(bm, N);
++#elif PIVCO_WIRE_PACKED_HDR
++    int K_right = pk_kr;
++#else
+     int K_right = wire_read_kr_header(table, 0, &ptr);
++#endif
+     int K_left  = N - K_right;
+     int left  = 1;
+     int right = root->right;
+@@ -923,22 +1355,30 @@ int CODEC_DECODE_ENTRY(pivco_decoder_t *dec_ctx, const pivco_table_t *table, con
+         buf_right = scratch;
+         buf_left  = scratch + K_right;
+         codec_decode_subtree(table, right, K_right,
+-                              buf_right, /*tmp=*/buf_left, &ptr, node_markers);
++                              buf_right, /*tmp=*/buf_left, &ptr, node_markers DEC_ARGS);
+         codec_decode_subtree(table, left,  K_left,
+-                              buf_left,  /*tmp=*/scratch + N, &ptr, node_markers);
++                              buf_left,  /*tmp=*/scratch + N, &ptr, node_markers DEC_ARGS);
+     } else {
+         buf_left  = scratch;
+         buf_right = scratch + K_left;
+         codec_decode_subtree(table, left,  K_left,
+-                              buf_left,  /*tmp=*/buf_right, &ptr, node_markers);
++                              buf_left,  /*tmp=*/buf_right, &ptr, node_markers DEC_ARGS);
+         codec_decode_subtree(table, right, K_right,
+-                              buf_right, /*tmp=*/scratch + N, &ptr, node_markers);
++                              buf_right, /*tmp=*/scratch + N, &ptr, node_markers DEC_ARGS);
+     }
+ 
+-    uint8_t bm_scratch[(size_t)bitmap_bytes(N) + 16];
++#if PIVCO_WIRE_PACKED_HDR
++    int Kp;
++    const uint8_t *bm = packed_read_bitmap(&ptr, N, bm_scratch, pk_marker, &Kp);
++    prim_merge_vec_vec(bm, Kp, buf_left, buf_right, symbols);
++    tail_vec_vec(symbols, Kp, N, pk_tail, buf_left, buf_right, K_right);
++#else
++#if !PIVCO_WIRE_KR_POPCOUNT
+     const uint8_t *bm = wire_read_bitmap(&ptr, N, bm_scratch, node_markers[0]);
++#endif
+     prim_merge_vec_vec(bm, N, buf_left, buf_right, symbols);
++#endif
+ 
+-    *consumed = (size_t)(ptr - in);
++    *consumed = BLOCK_CONSUMED;
+     return PIVCO_OK;
+ }

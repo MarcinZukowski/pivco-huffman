@@ -157,7 +157,7 @@ streams ── entropy layer ──▶  container    zstd: order-0 FSE/Huffman �
   <h3>Files &amp; recipes</h3>
   <div class="tablewrap"><table>
   <tr><th>file</th><th>what it is</th></tr>
-  <tr><td><code>RESULTS.html</code></td><td>The Order-1 Ledger — three parts, §1–§25 (live artifact, URL above)</td></tr>
+  <tr><td><code>RESULTS.html</code></td><td>The Order-1 Ledger — three parts, §1–§28 (live artifact, URL above)</td></tr>
   <tr><td><code>o2demux.c</code></td><td>demux kernel shootout: all K=2/K=4 kernels incl. champions (k2g/k2q/k2p, GEN_K2C compaction, k4x/k4v, scalar walks), selftests + byte-exact verify, <code>ONLY=</code> filter</td></tr>
   <tr><td><code>o3huf.c</code></td><td>fused order-1 Huffman (per-class bitstreams, ctx-switched decode) — first roundtrip order-1 coder; fused-K4 ≥ two-pass on all platforms</td></tr>
   <tr><td><code>o4tans.c</code></td><td>tANS window walk + MZ's grouped-w extensions (prepacked width arrays, w\</td><td>state measurement)</td></tr>
@@ -170,6 +170,11 @@ streams ── entropy layer ──▶  container    zstd: order-0 FSE/Huffman �
   <tr><td><code>litfse.py</code></td><td>literals Shannon vs Huffman, order-0 and K=2 (decisive negative)</td></tr>
   <tr><td><code>seqk2.py</code>, <code>seqk2b.py</code></td><td>K=2 on code streams; seqk2b's FSE accounting exposed ll self-structure hidden by the 1-bit floor</td></tr>
   <tr><td><code>phbias.py</code></td><td>traffic-weighted PH-tree bitmap bias (closed the o5-on-PHA niche)</td></tr>
+  <tr><td><code>ctxbin/kbin.c</code></td><td>§27: Duda's greedy context binning on zstd's ll/ml/of over the files given on the command line (single-field, cross-field, own-history and nested contexts); per model and B: unmerged bound, per-file map, first-half/second-half split, leave-one-file-out pooled, map bytes</td></tr>
+  <tr><td><code>ctxbin/kbinmaps.c</code></td><td>§27: emits the built-in bin maps (<code>extras/phaz/phaz_ctxmaps.h</code>) from pooled parses</td></tr>
+  <tr><td><code>ctxbin/code-length-record-v0.11.patch</code>, <code>kright-experiments.patch</code></td><td>§28.2: the compact code-length record (container v0.11) and the two K_right wire experiments (popcount, packed prefix), measured and not adopted; apply to main to reproduce</td></tr>
+  <tr><td><code>ctxbin/fused-route.patch</code></td><td>§27.3: the chain-free routing moved inside phaz's sequence-execution loop; no gain, not kept; applies on top of the phaz context coder</td></tr>
+  <tr><td><i>not kept</i></td><td>the §28 one-off probes (per-zstd-block coding with a byte breakdown, region-size histogram, order-k bit-context pricing on dumped regions) built against the dropped v0.11 record or a temporary region dump hook; their numbers are in §28.1 and §28.3</td></tr>
   <tr><td><code>notes/2026-08-15-o1demux-k4/</code> (2026-09-08 tools, not yet copied here)</td><td><code>sessionratio{,_blk,_rep}.c</code> real-FSE ratio for the kN gM family (whole-stream / per-block / repeat-mode + argmax); <code>sessionspeed.c</code> end-to-end decode; <code>g4merge.c</code>, <code>planefse{,4}.c</code> reconstruction + plane decode; <code>bmdump.c</code> + <code>coderbench.c</code> id 51 on its real regions; <code>xfield_demux.py</code> + <code>fsesum.c</code> cross-field in FSE bytes; <code>k8_crossfield.py</code> K=8 accounting</td></tr>
   </table></div>
   <p>Inputs are Silesia stream dumps + class maps (not committed; ~25 MB bundle in <code>data/o1bundle.tgz</code>, gitignored, also on test-c8a:/tmp/o1bundle.tgz):</p>
@@ -219,6 +224,8 @@ perf stat -x, -e cycles:u,instructions:u env ONLY=zzzz ./o2demux</pre>
   <div><span class="n">24</span><a href="#s24">Assembled design (L3 era)</a></div>
   <div><span class="n">25</span><a href="#s25">Settled negatives registry</a></div>
   <div><span class="n">26</span><a href="#s26">The digest (retired README)</a></div>
+  <div><span class="n">27</span><a href="#s27">Context binning of the sequence codes (Duda)</a></div>
+  <div><span class="n">28</span><a href="#s28">Where phaz's bytes go: segments, headers, ceilings</a></div>
 </nav>
 
 <section class="part">
@@ -1838,9 +1845,387 @@ decode walk (pair context, chain identical to order-0):
   <p>The pivco-huffman session's parallel thread (PR #30 → the ctx coder family → phaz e2e → xbits) is digested in <code>PH-CTX-SESSION.md</code> here. Headlines of the merge, measured on identical dumps (details there):</p>
   <ul class="lessons"><li><b>Convergent findings</b> (independently measured twice, now settled): literal-tree bitmaps carry no bias (<code>phbias.py</code> ≡ the p_major histogram); Huffman ≈ Shannon on literals (<code>litfse.py</code> ≡ the #29 study); contexts must select static tables, never adaptive state; per-set table builds dominate decode unless bounded (o5's canonical p-levels ≡ the ctx parameter dictionary); x-ray wants lag-2.</li><li><b>Complementarity law</b>: their within-stream carry-context coder and o6's cross-field contexts capture different information.  ctx wins ml/ll-class streams (its per-block bitmaps add free nonstationarity adaptation that global tables lack); o6 wins where cross-field correlation dominates (x-ray ml|ll at L3: 16.8 KB vs ctx's 29.8 KB; x-ray of|ml at L19: −6.9%).  Which pair carries the correlation MOVES with the parse level → per-stream argmax over the full menu, never a fixed recipe.  New L19 o6 numbers (open-work item 4, now partially done) are in <code>PH-CTX-SESSION.md</code>.</li><li><b>The fused-phaz × xbits composition</b> is the standout joint design: FUSED-PHAZ's per-code leaf runs ARE the per-(stream,width) classes the xbits analysis needs; coding each leaf's top byte inside that structure adds ~0.4pp of corpus ratio to the extract-free decode.</li><li>Revised open-work ranking: (1) cross-field × per-block (o6-style route-conditioned table select inside the per-node marker machinery — the largest untried cell); (2) fused-phaz rebase + top-byte leaves; (3) kernel-law transfer to the ctx decode loop; (4) grouped-w roundtrip only if its xml-class gains survive L19 re-dump.</li></ul>
 
+  <h3>26.8 · Session digest: context binning of the sequence codes (2026-09-17…22)</h3>
+  <p>Filed as §27 (Duda's context binning on ll/ml/of: accounting on 12 files, bin sweep, the phaz prototype with
+  five arms and its decode-cost analysis) and §28 (segmentation versus precision, the header experiments, the
+  bit-context ceiling, turbobench and lzma/brotli reference points). Headlines: per-file product-form context
+  maps make phaz 1.2–2.7% smaller at 1.2–1.3× zstd decode for under 300 bytes of map per file; tables per zstd
+  block, not coder precision, are the other lever; bit-context depth beyond k2 is closed.</p>
+
   <h3>26.7 · Session digest: plane-on-wire literals, #30 (2026-09-08…09)</h3>
   <p>Two days in the pivco-huffman session; full record in ledger §1.3, §4.3, §8.6, §9.1, §16.1–16.2, §23.1; session notes in <code>notes/2026-09-08-k2g4-k4g16-order1-literals.md</code>.</p>
   <ul class="lessons"><li><b>PR #30 landed on main</b> (3bfef16, co-authored with Nick) as the <i>nibble table</i>: <code>fse_nibble_enabled</code> opt-in, encoder tableLog 7 / decoder cap 10, harness and histogram over-read fixes, flat regions coded natural-packed under an inline marker.  Byte-identical output on M4 / Graviton 4 / Zen 5 / Granite Rapids.</li><li><b>The kN gM family</b> (N classes, M residue contexts; class plane on the wire, residues = within-class rank): k4g16 is the literal-side ratio winner in real FSE (1.2–7.0% under order-0, beats K4serial on binaries), k2g4 ≈ K2serial at a parallel decode, k2g2 weakest, k4g4 dead. Reconstruction = production merges (0.16 ns/B + ~0.14 gather on M4); end-to-end within 1.4× of order-0.  <b>Joint-split optimization flopped in FSE</b> — retracted.</li><li><b>Per-block headers erode it</b> (16K blocks, real FSE): 16 tables eat k4g16's gain everywhere but x-ray; per-block <i>order-0 adaptation</i> is the biggest effect on nonstationary binaries (samba 96.7 → 89.9); NCount repeat-mode recovers 1.2–1.8 pp; deployable per-block argmax {o0, K4serial} = 0.8–2.3 pp.  The lever is cheap table transmission.</li><li><b>Cross-field class context on the code streams, in bytes</b>: ml | ll summed −9.1% vs order-0 (mozilla −12.3%, 3-way −14.4%), x-ray ll | ml −8.1%, <code>of</code> unresponsive.  Whole-file tables (phaz's policy).  Build-order #1 confirmed with real FSE.</li><li><b>ctx vs k4g16 on literals are complementary</b>: ctx x-ray 70.7% of raw (−9.4% vs nibble) vs k4g16 81.2; class order-1 wins text by ~3.5 pp.</li><li><b>id 51 on its real regions</b>: straight-to-bytes decode −20% (no wire change); byte-FSE decodes 3–4× faster on the same bytes (the cost is 2× steps + per-region build); a byte table wins large flat regions; <code>FSE_compress2</code> bails to raw on extreme skew (calgary_pic −4.5 pp recoverable); pos2 killed a second time; pair product table = same bytes, build-bound standalone.</li><li><b>4-way merge wants per-arch dispatch</b>: one-go wins AVX-512 1.4–1.9×, three binary merges win NEON 2.3×; wire-compatible; serves the quad node and k2g4/k4g16s4.</li><li>Revised open-work ranking: (1) cross-field class-context sequence coder (ml | ll, 3-way) with whole-file tables; (2) cheap table transmission — repeat-mode flag now, catalog / canonical sets next (unlocks per-block k4g16, pair decode, the ctx speed program); (3) id 51 straight-to-bytes decode, byte table on large flats, extreme-skew bail-out; (4) per-block mode argmax for literals; (5) per-arch 4-way merge dispatch; (6) stack order-1 class trees with ctx bitmaps.</li></ul>
 
+</section>
+
+<section id="s27">
+  <p class="eyebrow">ctxbin/ tools · accounting, then a roundtrip prototype in extras/phaz · 2026-09-17…22</p>
+  <h2>27 · Context binning of the sequence codes — Duda's method applied to zstd's ll/ml/of</h2>
+
+  <p><b>Background, for a reader who has not seen the rest of this document.</b>
+  zstd turns its input into a list of <i>sequences</i>. Each sequence is "copy <i>n</i> literal bytes, then copy
+  <i>m</i> bytes from <i>d</i> bytes back". The three numbers are sent as three small <i>codes</i> (a literal-length
+  code <code>ll</code>, 36 values; a match-length code <code>ml</code>, 53 values; an offset code <code>of</code>,
+  32 values) plus raw extra bits that refine each code. zstd entropy-codes each of the three code streams with its own
+  <i>order-0</i> table: one probability table per stream, the same for every symbol, independent of its
+  neighbours. <i>phaz</i> is our test compressor: it keeps zstd's parser byte-for-byte and replaces only the
+  entropy coding of the four streams (ll, ml, of, literals) with our SIMD Huffman coder (PH) or with PH plus
+  ANS-coded partition bitmaps (PHA). So every phaz-vs-zstd difference below is an entropy-stage difference.
+  The corpus is Silesia (12 files, 212 MB); "level" is zstd's compression level, which sets the parser.</p>
+
+  <p><b>The question.</b> The three codes of one sequence, and of the neighbouring sequences, are not independent:
+  a short match tends to follow a long literal run, a repeated offset tends to come with a short literal length, and
+  so on. lzma exploits this with a hand-built state machine; brotli picks one of four offset tables by copy length;
+  zstd exploits none of it. How much is there, and can a table-driven decoder take it without becoming
+  sequential?</p>
+
+  <p><b>Duda's method, in plain words</b> (J. Duda, "Context binning, model clustering and adaptivity for data
+  compression of genetic data", arXiv:2201.05028). A <i>context</i> is some already-known information about the
+  symbol about to be coded, here a pair of other codes. With thousands of possible contexts a table per context is
+  too expensive to send and too sparse to estimate. His <i>context binning</i> starts with one bin per context and
+  repeatedly merges the two bins whose union raises the total coding cost the least, until a chosen number of
+  bins <i>B</i> remains. The result is a map context → bin; each bin gets one table. His <i>nested binning</i>
+  builds a higher-order model on a fixed state budget: bin one pair of values to 32 states, bin a second pair to
+  32 states, then bin the 32×32 combinations to <i>B</i>.</p>
+
+  <p><b>What we did with it.</b> For each code stream we chose a context made of the other fields, binned it with
+  his greedy merge, and coded the stream as <i>B</i> sub-streams, one per bin, each with its own table.
+  The decoder decodes every sub-stream in bulk, then routes: for sequence <i>i</i> it computes the bin from the
+  fields it already has and pulls the next symbol from that bin's sub-stream. Decode order per sequence is
+  of, then ml, then ll. Two context families were measured:</p>
+  <ul class="lessons">
+    <li><b>Same-sequence pairs</b> ("pair"): ll given (ml, of) of the same sequence; ml given (of of this sequence,
+    ll of the previous one); of given (ll, ml) of the previous sequence.</li>
+    <li><b>Nested with the previous sequence</b> ("nested"): the same pair as stage one, and the previous
+    sequence's pair as stage two, combined as Duda's 32×32 → <i>B</i> map.</li>
+  </ul>
+  <p>Maps can be <b>fixed in the format</b> (fit once on a training corpus, compiled into encoder and decoder, nothing
+  sent, like zstd's predefined tables) or <b>per file</b> (fit by the encoder on the file being coded and sent,
+  2–8 KB at fixed-width packing). Both were measured. All costs below include the per-bin tables.</p>
+
+  <h3>27.1 · Accounting on all 12 Silesia files (level 19, B = 64)</h3>
+  <p>Method: for a per-file test ("split"), the map is fit on the first half of the file's sequences and the cost is
+  measured on the second half, with each bin's table built from the data it codes and charged at (alphabet+2)/2
+  bytes. For a transfer test ("pooled"), the map is fit on the other 11 files pooled and applied to the whole
+  file. Numbers are % of the stream's plain order-0 cost; below 100 is a gain. Static entropy, no coder; a real
+  coder adds its own small loss (§27.3 has the real sizes).</p>
+  <div class="tablewrap"><table>
+    <caption>kbin · accounting · % of order-0 cost per stream, B=64</caption>
+    <tr><th>target and context</th><th>fit</th><th>dickens</th><th>mozilla</th><th>mr</th><th>nci</th><th>ooffice</th><th>osdb</th><th>reymont</th><th>samba</th><th>sao</th><th>webster</th><th>x-ray</th><th>xml</th></tr>
+    <tr><td rowspan="2">ll | (ml, of)</td><td>split</td><td>102.7</td><td class="w">76.6</td><td>98.9</td><td class="w">88.3</td><td>94.2</td><td class="w">70.6</td><td>99.4</td><td class="w">80.9</td><td class="w">77.6</td><td>98.5</td><td>103.3</td><td>98.4</td></tr>
+    <tr><td>pooled</td><td>100.7</td><td class="w">83.5</td><td>96.6</td><td>93.1</td><td>95.3</td><td class="w">77.9</td><td>98.1</td><td class="w">81.6</td><td class="w">78.8</td><td>99.1</td><td>99.1</td><td>95.5</td></tr>
+    <tr><td rowspan="2">ll | (ml, of) + previous pair, nested</td><td>split</td><td>101.9</td><td class="w">72.4</td><td>96.8</td><td class="w">76.6</td><td>92.8</td><td class="w">50.6</td><td>98.9</td><td class="w">71.0</td><td class="w">45.8</td><td>97.6</td><td>102.5</td><td>100.0</td></tr>
+    <tr><td>pooled</td><td>100.9</td><td>90.2</td><td>96.7</td><td>95.2</td><td>96.8</td><td class="w">75.3</td><td>99.3</td><td class="w">79.4</td><td class="w">80.0</td><td>99.6</td><td>98.8</td><td>97.3</td></tr>
+    <tr><td rowspan="2">ml | (of, ll−1)</td><td>split</td><td>96.7</td><td>94.9</td><td>92.6</td><td>91.9</td><td>95.7</td><td class="w">79.5</td><td>92.1</td><td>93.6</td><td class="w">73.7</td><td>97.6</td><td class="w">74.5</td><td>97.8</td></tr>
+    <tr><td>pooled</td><td>95.7</td><td>94.7</td><td>92.4</td><td>92.2</td><td>95.9</td><td class="w">79.7</td><td>90.5</td><td>93.2</td><td class="w">75.3</td><td>97.6</td><td class="w">63.1</td><td>96.5</td></tr>
+    <tr><td rowspan="2">ml | (of, ll−1) + previous pair, nested</td><td>split</td><td>96.8</td><td class="w">88.9</td><td class="w">72.9</td><td class="w">80.7</td><td>93.4</td><td class="w">68.4</td><td>91.3</td><td>90.7</td><td class="w">60.9</td><td>96.5</td><td class="w">70.6</td><td>96.6</td></tr>
+    <tr><td>pooled</td><td>96.8</td><td>94.2</td><td class="w">78.4</td><td>92.7</td><td>95.6</td><td class="w">82.1</td><td>92.3</td><td>92.7</td><td class="w">80.2</td><td>97.8</td><td class="w">62.4</td><td>96.0</td></tr>
+    <tr><td rowspan="2">of | (ll−1, ml−1)</td><td>split</td><td>100.2</td><td>96.8</td><td>99.9</td><td>97.6</td><td>98.5</td><td>99.1</td><td>98.4</td><td>95.2</td><td>92.3</td><td>99.6</td><td>100.0</td><td>97.0</td></tr>
+    <tr><td>pooled</td><td>99.9</td><td>96.9</td><td>99.7</td><td>98.3</td><td>98.9</td><td>97.6</td><td>98.5</td><td>95.2</td><td>94.2</td><td>99.7</td><td>99.2</td><td>96.4</td></tr>
+    <tr><td rowspan="2">of | (ll−1, ml−1) + previous pair, nested</td><td>split</td><td>100.3</td><td>95.4</td><td>99.8</td><td>96.7</td><td>97.7</td><td>98.8</td><td>98.1</td><td>93.8</td><td>88.9</td><td>99.5</td><td>99.8</td><td>96.8</td></tr>
+    <tr><td>pooled</td><td>100.0</td><td>97.7</td><td>99.8</td><td>99.4</td><td>98.8</td><td>98.7</td><td>99.4</td><td>95.7</td><td>95.5</td><td>99.9</td><td>98.9</td><td>96.8</td></tr>
+  </table></div>
+  <ul class="lessons">
+    <li><b>The same-sequence structure is universal and transfers.</b> A single map fit on the other files
+    recovers nearly all of the per-file gain for the pair contexts, on every file. The size of the gain depends on
+    the data: binary and mixed files (osdb, sao, mozilla, samba, nci, x-ray) lose 10–30% of a stream, text files
+    (dickens, webster, reymont) lose nothing, because zstd's parse leaves their codes memoryless.</li>
+    <li><b>The previous-sequence structure is file-specific.</b> Nested maps add 3–25 points when fit on the file
+    itself and lose most of that when pooled; on mozilla the pooled nested map is worse than the pooled pair map.
+    Unbinned four-field contexts (not shown) look 20–70% better in sample and vanish out of sample: the binning is
+    what makes the second pair pay.</li>
+    <li><b>ml gains on every file, ll gains most, of gains least.</b></li>
+  </ul>
+
+  <h3>27.2 · How many bins, with the wire overhead counted</h3>
+  <p>Same accounting, bin count swept, with each bin charged a code-length table at (alphabet+2)/2 bytes plus 8
+  bytes of sub-stream framing, and per-file maps charged their raw bits. Savings are summed over the corpus and
+  expressed as % of phaz's level-19 output and as phaz's resulting size relative to zstd 1.5.7 (phaz today:
+  +1.13%).</p>
+  <div class="tablewrap"><table>
+    <caption>kbin · accounting · Silesia, level 19</caption>
+    <tr><th>B</th><th>pair, fixed pooled maps</th><th>nested, per-file maps</th><th>best of pair / nested / order-0 per stream</th></tr>
+    <tr><td>16</td><td>−1.26% of output → −0.14% vs zstd</td><td>−2.48% → −1.37%</td><td>−2.57% → −1.47%</td></tr>
+    <tr><td>32</td><td>−1.47% → −0.35%</td><td>−2.60% → −1.50%</td><td>−2.71% → −1.61%</td></tr>
+    <tr><td>64</td><td>−1.66% → −0.55%</td><td class="w">−2.62% → −1.51%</td><td class="w">−2.77% → −1.66%</td></tr>
+    <tr><td>128</td><td class="w">−1.72% → −0.60%</td><td>−2.50% → −1.39%</td><td>−2.72% → −1.61%</td></tr>
+    <tr><td>256</td><td>−1.60% → −0.48%</td><td>−2.13% → −1.02%</td><td>−2.52% → −1.41%</td></tr>
+  </table></div>
+  <p>The optimum is flat between 32 and 128 bins. Above 64 the overhead beats the gain on small files: xml
+  (185 KB of codes) goes negative at 256 bins with fixed maps and already at 32 with per-file maps; dickens and
+  reymont follow at 128–256. Big binary files keep gaining to 128–256. The merge tree gives every bin count for
+  free, so the encoder can choose <i>B</i> per file and per stream.</p>
+
+  <h3>27.3 · The prototype in phaz: real sizes, real decode</h3>
+  <p><b>Wire.</b> Per code stream one byte says order-0 (as before) or context mode; context mode carries the map
+  kind (fixed pair map, per-file pair map, per-file nested map), the bin count, a routing-lane count, the map when it
+  is per file (fixed-width packed: 0.5–8 KB for a full map, 56–288 bytes for a product-form map, below), and
+  then per bin: the sub-stream length, the lane counts, and the sub-stream itself as an ordinary PH/PHA stream.
+  The encoder tries order-0, the fixed map, and per-file pair, nested and product-form maps at 16, 32 and 64
+  bins, and keeps the smallest actual output per stream. Decoding roundtrips byte-exact on all 36 (file, level)
+  cases below.</p>
+  <p><b>Routing has a cost that binning cannot hide.</b> When a stream's context includes values that were
+  themselves routed (ml given ll−1, of given ll−1 and ml−1), the routing of one sequence waits for the previous
+  one: a chain of dependent table and cursor lookups, about 22 ns per sequence on Apple M4 with one lane, 11 ns
+  with two or more independent lanes over disjoint ranges of the sequence index, no better at 4 or 8. So a
+  <b>chain-free</b> variant was added: of stays order-0, ml is conditioned on (of, of−1) [nested: plus
+  (of−2, of−3)], ll on (ml, of) [nested: plus (ml−1, of−1)]. Every routing pass then depends only on streams
+  already materialized and is a plain gather, at ~5 cycles per routed symbol. Moving that gather inside the
+  sequence-execution loop changed nothing (mozilla 34.0 ms fused vs 34.9 ms separate): the lookups sit in front
+  of the extra-bits reader, which is the loop's serial chain; the fused form was not kept (patch in
+  <code>ctxbin/fused-route.patch</code>).</p>
+  <p><b>Product-form maps make the bin pass vectorizable.</b> Of the ~5 cycles per routed symbol, 3–4 were
+  the bin computation (two byte loads, a multiply-add, one to three lookups in tables of up to 1,700 entries, all
+  scalar) and ~2 the gather. In the product form each field of a pair is binned on its own to 8 states with the
+  same greedy merge and the 8×8 combinations are binned to <i>B</i> (nested: each stage to 8 states, the 8×8 stage
+  combinations to <i>B</i>). Every table then has at most 64 entries, so NEON computes 16 bins per step with
+  three table lookups, and the whole map is 56–288 bytes instead of 2–8 KB. Measured: ~2.4 cycles per routed
+  symbol, mozilla's routing 10.0 → 4.4 ms, and the product form gives up 0.0–0.3 points of size against the full
+  maps. The tiny maps also let small files use contexts on both streams (xml: +4.74% → +4.40%). The chained arm has
+  no such fix: its cost is a dependency chain through values routed one sequence earlier, and lanes already
+  bought the 2× the chain allows.</p>
+  <div class="tablewrap"><table>
+    <caption>phaz stats · roundtrip · Silesia totals on Apple M4; size vs zstd 1.5.7, fused decode speed vs zstd's decoder</caption>
+    <tr><th>arm</th><th>L19 size</th><th>decode</th><th>L3 size</th><th>decode</th><th>L1 size</th><th>decode</th></tr>
+    <tr><td>order-0 (phaz before this work)</td><td>+1.20%</td><td>1.46×</td><td>+0.20%</td><td>1.55×</td><td>−1.54%</td><td>1.54×</td></tr>
+    <tr><td>fixed maps, chain-free</td><td>+0.45%</td><td>1.16×</td><td>−0.91%</td><td>1.17×</td><td>−2.42%</td><td>1.18×</td></tr>
+    <tr><td>fixed maps, chained</td><td>+0.28%</td><td class="l">0.91×</td><td>−0.98%</td><td class="l">0.79×</td><td>−2.48%</td><td class="l">0.89×</td></tr>
+    <tr><td class="a">per-file product maps, chain-free</td><td>−0.04%</td><td class="w">1.21×</td><td>−1.19%</td><td class="w">1.28×</td><td>−2.68%</td><td class="w">1.33×</td></tr>
+    <tr><td>per-file maps, chain-free, best of full and product</td><td>−0.13%</td><td>1.10×</td><td>−1.30%</td><td>1.14×</td><td>−2.79%</td><td>1.14×</td></tr>
+    <tr><td>per-file maps, chained</td><td class="w">−0.77%</td><td class="l">0.59×</td><td class="w">−1.96%</td><td class="l">0.53×</td><td class="w">−3.28%</td><td class="l">0.62×</td></tr>
+  </table></div>
+  <p class="fnote">Decode multipliers are best-of-50 fused decodes against zstd's decoder in the same run; the
+  order-0 row moved from 1.51/1.61/1.61× in the first sweep to 1.46/1.55/1.54× in this one, which is the
+  run-to-run spread on M4. Compare arms within a row set, not across sweeps.</p>
+  <div class="tablewrap"><table>
+    <caption>level 19 per file · size vs zstd (order-0 / per-file product chain-free / per-file full chain-free / per-file chained) · decode vs zstd (order-0 / product / full chain-free) · product map bytes</caption>
+    <tr><th>file</th><th>order-0</th><th>product, cf</th><th>full, cf</th><th>chained</th><th>decode</th><th>map</th></tr>
+    <tr><td>dickens</td><td>+0.53%</td><td>+0.22%</td><td>+0.22%</td><td>+0.24%</td><td>1.54 / 1.30 / 1.37×</td><td>128 B</td></tr>
+    <tr><td>mozilla</td><td>+2.52%</td><td>+1.15%</td><td>+0.99%</td><td class="w">+0.13%</td><td>1.50 / 1.26 / 1.07×</td><td>272 B</td></tr>
+    <tr><td>mr</td><td>+1.19%</td><td>+0.77%</td><td>+0.77%</td><td class="w">−0.48%</td><td>1.66 / 1.31 / 1.30×</td><td>272 B</td></tr>
+    <tr><td>nci</td><td>+0.05%</td><td class="w">−1.82%</td><td class="w">−2.16%</td><td class="w">−3.76%</td><td>1.35 / 1.14 / 1.11×</td><td>272 B</td></tr>
+    <tr><td>ooffice</td><td>+1.30%</td><td>+0.61%</td><td>+0.61%</td><td>+0.60%</td><td>1.49 / 1.27 / 1.23×</td><td>200 B</td></tr>
+    <tr><td>osdb</td><td>+0.50%</td><td class="w">−2.69%</td><td class="w">−2.80%</td><td class="w">−4.99%</td><td>1.42 / 1.16 / 1.06×</td><td>280 B</td></tr>
+    <tr><td>reymont</td><td>+0.83%</td><td>−0.44%</td><td>−0.44%</td><td>−0.36%</td><td>1.22 / 1.01 / 1.02×</td><td>272 B</td></tr>
+    <tr><td>samba</td><td>+1.73%</td><td>+1.34%</td><td>+1.32%</td><td>+1.02%</td><td>1.33 / 1.19 / 1.15×</td><td>144 B</td></tr>
+    <tr><td>sao</td><td>+0.18%</td><td class="w">−2.86%</td><td class="w">−3.01%</td><td class="w">−4.19%</td><td>1.76 / 1.38 / 1.15×</td><td>280 B</td></tr>
+    <tr><td>webster</td><td>+0.36%</td><td>−0.04%</td><td>−0.07%</td><td>−0.10%</td><td>1.36 / 1.10 / 0.98×</td><td>200 B</td></tr>
+    <tr><td>x-ray</td><td>+0.26%</td><td>−0.95%</td><td>−0.95%</td><td>−1.04%</td><td>1.51 / 1.18 / 1.18×</td><td>200 B</td></tr>
+    <tr><td>xml</td><td>+4.97%</td><td>+4.40%</td><td>+4.40%</td><td>+4.58%</td><td>1.34 / 1.09 / 1.17×</td><td>272 B</td></tr>
+  </table></div>
+  <p>At level 3 the same arm (product, chain-free) is −1.19% on the corpus at 1.28× with nci −4.5%, osdb −3.1%,
+  mr −3.1%, mozilla −0.1%; at level 1, −2.68% at 1.33× with nci −6.1%, mozilla −0.7%. Text files stay within
+  ±0.6% of zstd at every level. Product maps cost 56–288 bytes per file for all streams together.</p>
+  <p>The fixed maps used by the prototype were fit on all 12 Silesia parses pooled, so their rows are in sample for
+  the map; §27.1's leave-one-out numbers bound that effect for the pair maps at 0–7 points of the stream gain. xml's
+  remaining +4.7% is a table-segmentation problem, not a context one (§28.1).</p>
+
+  <h3>27.4 · Which fields carry the information — single fields and own history</h3>
+  <p>The prototype fixes one context definition per routing form. This table asks which fields actually matter,
+  per stream, with the same greedy binning at B&nbsp;=&nbsp;64 and static per-bin tables (table cost counted,
+  map cost not). Corpus numbers are the 12 files weighted by each stream's order-0 bytes (ll 2.33&nbsp;MB,
+  ml 6.24&nbsp;MB, of 6.98&nbsp;MB); 100 = order-0. "per-file map" is fit and costed on the whole file (what the
+  prototype transmits), "split" fits on the first half and costs the second, "pooled" fits on the other 11
+  files. "cf" marks contexts the chain-free decoder can route as a gather; a stream's own history (ml−1 for
+  ml, of−1 for of) makes routing a serial walk within that stream.</p>
+  <div class="tablewrap"><table>
+    <caption>kbin · accounting · Silesia, level 19, B=64 · corpus % of order-0 per target stream</caption>
+    <tr><th>context</th><th>per-file map</th><th>split</th><th>pooled</th><th>per-file wins / losses (points)</th></tr>
+    <tr><td>ll | ml · cf</td><td>87.6</td><td>87.3</td><td>87.7</td><td></td></tr>
+    <tr><td>ll | of · cf</td><td>94.0</td><td>94.0</td><td>94.0</td><td>beats ml alone on samba, ooffice, xml</td></tr>
+    <tr><td>ll | ll−1</td><td>92.5</td><td>93.9</td><td>92.5</td><td></td></tr>
+    <tr><td>ll | ml, of · cf · shipped</td><td>82.2</td><td>83.1</td><td>86.9</td><td></td></tr>
+    <tr><td class="a">ll | ml, ml−1 · cf</td><td class="w">78.5</td><td class="w">80.1</td><td>88.6</td><td>osdb 46.7 vs 71.6, sao 59.4 vs 75.8, nci 79.8 vs 86.8, samba 72.5 vs 77.8; loses mozilla 77.6 vs 76.3, ooffice</td></tr>
+    <tr><td>ll | ml, ll−1</td><td>80.5</td><td>82.0</td><td>85.5</td><td></td></tr>
+    <tr><td>ll | ml, of + ml−1, of−1 · cf · shipped nested</td><td>72.2</td><td>74.9</td><td>89.8</td><td></td></tr>
+    <tr><td>ll | ml, ml−1 + of, of−1 · cf</td><td>72.4</td><td>75.1</td><td>88.9</td><td>same as the time-paired nesting</td></tr>
+    <tr><td>ml | of · cf</td><td>93.9</td><td>94.5</td><td>93.9</td><td>x-ray 62, sao 78; mozilla 96.4</td></tr>
+    <tr><td>ml | ml−1</td><td>94.8</td><td>95.3</td><td>94.8</td><td>mr 88, nci 90, osdb 80</td></tr>
+    <tr><td>ml | ll−1</td><td>98.1</td><td>98.1</td><td>98.1</td><td></td></tr>
+    <tr><td>ml | of, of−1 · cf · shipped chain-free</td><td>92.9</td><td>94.1</td><td>93.4</td><td></td></tr>
+    <tr><td>ml | of, ll−1 · shipped chained</td><td>92.1</td><td>93.1</td><td>92.6</td><td></td></tr>
+    <tr><td class="a">ml | of, ml−1</td><td class="w">88.6</td><td class="w">90.0</td><td>91.4</td><td>wins every file: x-ray 56, sao 70, osdb 71, mr 78</td></tr>
+    <tr><td>ml | of, ll−1 + of−1, ml−1 · shipped nested chained</td><td>85.9</td><td>88.1</td><td>92.2</td><td></td></tr>
+    <tr><td>of | of−1</td><td>97.2</td><td>97.5</td><td>97.2</td><td></td></tr>
+    <tr><td>of | ll−1, ml−1 · shipped</td><td>97.5</td><td>98.0</td><td>98.0</td><td></td></tr>
+    <tr><td class="a">of | of−1, ml−1</td><td class="w">96.0</td><td>96.8</td><td>96.8</td><td></td></tr>
+  </table></div>
+  <ul class="lessons">
+    <li><b>of contributes to both.</b> ll | ml alone is 87.6, with of 82.2; for ml, of is the best single field on
+      the corpus, carried by the binaries (x-ray, sao, osdb, reymont, mr), and worth only 3.6% on mozilla.</li>
+    <li><b>ll | (ml, ml−1) beats the shipped (ml, of)</b> on 10 of 12 files, 78.5 vs 82.2 on the corpus (about 83 KB,
+      0.16% of the zstd-19 output), and stays chain-free. It transfers worse than (ml, of) across files (pooled
+      88.6 vs 86.9), so it wants per-file maps, which the shipped form already uses. Its product form was not fit;
+      the full map is 53×53 cells, ~2 KB, which matters on xml and dickens.</li>
+    <li><b>Own history is the strongest second field for ml and of</b> (ml | of, ml−1 88.6 vs 92.1 chained /
+      92.9 chain-free, about 260 KB, 0.5% of the zstd-19 output), at the price of a serial walk within the stream:
+      the §7 multi-walk shape, ~0.6–0.7 ns per symbol with lanes on M4, between the gather and the ~11 ns
+      cross-field chain.</li>
+    <li><b>Once both pairs are in, the pairing does not matter</b>: (ml, ml−1) + (of, of−1) nests to 72.4, the
+      time-paired (ml, of) + (ml−1, of−1) to 72.2.</li>
+  </ul>
+  <p>These numbers suggest an encoder that tries a menu of context definitions per stream and keeps the smallest
+  under a decoder-class budget; that design is filed in <code>IDEAS.md</code> ("Context menu per code stream,
+  chosen under a decode-cost class").</p>
+
+  <div class="verdict"><b>Verdict</b>
+  Cross-field context binning of zstd's sequence codes is worth 1.2–2.7% of the compressed output on Silesia with
+  per-file product-form maps and no dependency chain, at a decode speed still 1.2–1.3× zstd's and with 56–288
+  bytes of map per file; the chained contexts add 0.7% and cost the speed advantage. It is the largest single
+  lever found in this thread, larger than aligned table segmentation, and it is where lzma's state machine and
+  rep-match contexts earn part of their 8%. The per-file chain-free form is the one to ship: it depends on
+  nothing outside the file and the encoder falls back to order-0 wherever a map does not pay. Text files get
+  nothing; binary files get 2–6%.</div>
+
+  <p><b>Novelty, honestly stated.</b> Conditioning LZ sequence symbols on other fields is old (lzma's state
+  machine and rep-match contexts, brotli's copy-length-dependent distance contexts); Duda's own paper cites CRAM's
+  model select as the same mechanism as his clustering. What we have not seen published is his binning used as the
+  automatic construction of those contexts for LZ77 sequence codes, with nested previous-sequence pairs, static
+  per-bin tables, bulk demux decoding, and the transfer result: the near-pair structure is semantic and survives a
+  fixed map, the previous-sequence structure does not.</p>
+
+  <p class="fnote">Tools: <code>ctxbin/kbin.c</code> (the binning accounting of §27.1, §27.2 and §27.4: unmerged bound,
+  per-file, split and pooled maps, map bytes, over any file list and B list), <code>ctxbin/kbinmaps.c</code> (built-in maps).
+  Prototype: <code>extras/phaz/phaz_codec.c</code> (context coder,
+  greedy fit, demux, routing), <code>phaz_ctxmaps.h</code> (built-in maps); off by default, enabled with
+  <code>PHAZ_CTX=1</code>, arms selected by <code>PHAZ_CTX_BUILTIN</code>, <code>PHAZ_CTX_CF</code>,
+  <code>PHAZ_CTX_PRODONLY</code>;
+  <code>phaz stats FILE -l L</code> prints all six arms. The NEON bin pass is in <code>ctx_bins_prod</code>; other
+  architectures take the scalar path. Inputs are <code>phaz dump</code> parses (create the output directory
+  first).</p>
+</section>
+
+<section id="s28">
+  <p class="eyebrow">alignseg2 / litab / kprice / kfse / turbobench · accounting and roundtrip · 2026-09-17…22</p>
+  <h2>28 · Where phaz's bytes go — segments, headers, and the bit-context ceiling</h2>
+  <p>The measurements that led to §27, and that correct an earlier reading. Same vocabulary as §27: PH is our
+  Huffman coder over per-node partition bitmaps, PHA adds ANS coding of those bitmaps, phaz is zstd's parser with
+  PH/PHA as the entropy stage.</p>
+
+  <h3>28.1 · Segmentation, not precision</h3>
+  <p>phaz was 1.2% behind zstd at level 19 and the code streams were 6–11% behind zstd's FSE. That was read as
+  coder precision. It is not. zstd builds a fresh table for every 128 KB block of <i>input</i>; at level 19 that
+  block holds only 1.8 KB of xml literals or 2,200 sequence codes, so zstd adapts its tables 60–70 times where
+  phaz, which sets a table every 128 KiB of the <i>pivoted stream</i>, sets one. The order-0 floors under the two
+  segmentations differ by 13–16% on the files that drift:</p>
+  <div class="tablewrap"><table>
+    <caption>accounting · level 19 · code streams ll+ml+of, bytes</caption>
+    <tr><th>file</th><th>floor under zstd's blocks</th><th>floor under 128 KiB segments</th><th>phaz PHA (128 KiB)</th><th>zstd's code bytes</th></tr>
+    <tr><td>xml</td><td>159,169</td><td>184,085</td><td>177,710</td><td>163,366</td></tr>
+    <tr><td>samba</td><td>1,075,915</td><td>1,218,249</td><td>1,150,234</td><td>1,100,706</td></tr>
+    <tr><td>mozilla</td><td>4,160,129</td><td>4,706,698</td><td>4,559,720</td><td>4,270,607</td></tr>
+    <tr><td>dickens</td><td>881,998</td><td>890,286</td><td>905,762</td><td>890,215</td></tr>
+  </table></div>
+  <p>Literals tell the same story. On xml's level-19 literal stream, huff0 (zstd's Huffman) and PH are within
+  1% of each other at every table period, and PHA is below both; the 14% swing is between rows, not columns:</p>
+  <div class="tablewrap"><table>
+    <caption>accounting · xml, level 19, 115,055 literal bytes</caption>
+    <tr><th>one table per</th><th>huff0</th><th>PH</th><th>PHA</th></tr>
+    <tr><td>128 KiB of literals (1 table)</td><td>82,947</td><td>83,469</td><td>80,415</td></tr>
+    <tr><td>16 KiB (8 tables)</td><td>74,567</td><td>74,960</td><td>74,273</td></tr>
+    <tr><td>zstd's own blocks (65 tables)</td><td>72,768</td><td>~74,300</td><td>—</td></tr>
+  </table></div>
+  <p>Coding every stream per zstd block with PHA (each block a separate stream, file header removed) moves phaz at
+  level 19 from +4.83% to +1.87% on xml, +1.63% to +1.09% on samba, +2.40% to +1.64% on mozilla, and +0.50% to
+  +0.63% on dickens, whose statistics do not drift and which pays for tables it does not need. What remains is
+  per-block framing: about 50 bytes per (block, stream) above that block's floor against zstd's 17. Measured on
+  mozilla, level 19, bytes per block and stream:</p>
+  <div class="tablewrap"><table>
+    <caption>alignseg2 · accounting · mozilla, level 19, PHA aligned to zstd's blocks</caption>
+    <tr><th>stream</th><th>total over floor</th><th>table record</th><th>K_right</th><th>record + N header</th><th>marker prefix</th><th>byte rounding per region</th><th>coder residual</th></tr>
+    <tr><td>ll</td><td>38.8</td><td>7.8</td><td>9.1</td><td>6.0</td><td>1.3</td><td>3.1</td><td>11.4</td></tr>
+    <tr><td>ml</td><td>60.4</td><td>20.4</td><td>18.9</td><td>6.0</td><td>2.2</td><td>6.4</td><td>6.6</td></tr>
+    <tr><td>of</td><td>49.5</td><td>13.1</td><td>14.3</td><td>6.0</td><td>1.8</td><td>4.9</td><td>9.5</td></tr>
+    <tr><td>lit</td><td>121.8</td><td>66.3</td><td>25.4</td><td>6.0</td><td>2.5</td><td>7.7</td><td>14.0</td></tr>
+  </table></div>
+  <p>zstd's 17 is 12.4 bytes of FSE table description on average (most blocks reuse the previous table or a
+  predefined one), ~1.5 of headers shared by the three streams, and ~3.5 of precision loss and flush. The
+  no-reuse table and K_right are the two items with no zstd counterpart. Also found on the way: at low levels zstd
+  stores incompressible blocks raw (level 3: 150 blocks, 1.26 MB on Silesia) and phaz's capture sees them as
+  literals, which must be accounted for in any literal-only comparison.</p>
+
+  <h3>28.2 · Header experiments: table record, K_right, packed prefix</h3>
+  <ul class="lessons">
+    <li><b>Compact code-length record</b> (a container v0.11, decoder still reading v0.8–v0.10): the 256 code lengths
+    were 128 nibble bytes; the record became a last-symbol byte, a mode byte, and FSE-coded lengths when that beats
+    nibbles. A 2-byte input shrinks from a 173-byte file to 52; the first xml literal block's table from 128 bytes
+    to 48 against huff0's 41 for the same block. Corpus effect on phaz: −0.05 to −0.07% at every level. Decode:
+    reading an FSE-coded record costs 0.55–0.9 µs on M4, twice the table build; nothing at the default 128 KiB
+    table period (inside noise; the code streams' small alphabets never pick FSE), but +26% on a literal stream
+    with tables every 16 KiB. Measured and not adopted: too little for a wire version and an FSE dependency in the
+    container. Kept as <code>ctxbin/code-length-record-v0.11.patch</code>; the phaz sizes in §27–§28 were measured
+    with it on, a uniform 0.05–0.07%. The last-symbol byte with plain nibbles would take the code streams' tables
+    from 128 to ~20 bytes at no decode cost if a cheaper record is ever wanted.</li>
+    <li><b>K_right by popcount</b> (experiment, <code>PIVCO_WIRE_KR_POPCOUNT</code>): each node's bitmap goes ahead of
+    its children and the decoder popcounts it instead of reading a 2-byte count. Saves 0.1–0.5% of a PH stream,
+    0.15–0.2% of phaz's output at today's segmentation, 0.7–1.0% when aligned to zstd's blocks; costs 6–13% of PH
+    decode on M4 with a scalar count, 2–10% with FSE on. Not worth it as is.</li>
+    <li><b>Bit-packed block prefix</b> (experiment, <code>PIVCO_WIRE_PACKED_HDR</code>): one field per region with the
+    FSE flag, the last partial byte's bits (regions then hold whole bytes) and K_right in ceil(log2(n+1)) bits, where
+    n is known from the parent's split, so no lengths are sent. K_right averages 7.1–7.7 bits per slot instead of
+    16; tails cost 3.5 bits per region instead of 8; sizes −0.14 to −0.28% per stream. Three readers were
+    measured on four hosts:
+    <div class="tablewrap"><table>
+      <caption>pivco_huffman_bench · pivco_bu decode vs base, geometric mean over 9 distributions</caption>
+      <tr><th>reader</th><th>M4</th><th>Graviton 4</th><th>Granite Rapids</th><th>Zen 5 (noisy)</th></tr>
+      <tr><td>separate pre-pass into per-record arrays</td><td>−6.8%</td><td>−3.2%</td><td>−4.8%</td><td>−5.7%</td></tr>
+      <tr><td>inline at node entry, byte-loop refill, prefix at block end read backwards</td><td>−6.6%</td><td>−2.6%</td><td>−2.8%</td><td>−0.4%</td></tr>
+      <tr><td>inline, one fetch per node, branchless 8-byte refill</td><td>−4.5%</td><td>−1.6%</td><td>−0.6%</td><td>+2.9%</td></tr>
+    </table></div>
+    The tails are free (a variant carrying only flag and K_right costs the same); the whole cost is replacing a
+    2-byte aligned load with a variable-width fetch on the walk's critical path, and on M4 five extra cycles per
+    node is 4%. Untested alternative: byte planes (one low byte per node, a presence bitmap, sparse high bytes),
+    which unpacks with a memcpy and keeps ~40% of the K_right bytes.</li>
+  </ul>
+
+  <h3>28.3 · The bit-context ceiling</h3>
+  <p>PH codes each tree node's partition as a bitmap; PHA replaces a bitmap by an ANS-coded one when a static
+  table or a 2-bit-context table (k2) gains 20%. Question: would deeper contexts or transmitted tables help?
+  Priced on every region of the ll/ml/of/lit streams of xml, dickens, samba and mozilla (levels 1 and 19), as
+  % of the raw bitmap bits, per-region static model plus one byte per context, gated at 20% like k2:</p>
+  <div class="tablewrap"><table>
+    <caption>kprice · accounting · ideal static order-k bit contexts</caption>
+    <tr><th>k</th><th>codes L1</th><th>codes L19</th><th>literals L1</th><th>literals L19</th></tr>
+    <tr><td>0 (static table)</td><td>98.4%</td><td>95.7%</td><td>99.6%</td><td>99.7%</td></tr>
+    <tr><td>2 (today's k2, ideal)</td><td>94.0%</td><td>93.0%</td><td>99.2%</td><td>99.5%</td></tr>
+    <tr><td>4</td><td>92.9%</td><td>92.3%</td><td>99.1%</td><td>99.4%</td></tr>
+    <tr><td>6</td><td>93.8%</td><td>93.4%</td><td>99.3%</td><td>99.5%</td></tr>
+    <tr><td>adaptive, no table (bound)</td><td>86.8%</td><td>86.3%</td><td>96.8%</td><td>98.5%</td></tr>
+  </table></div>
+  <p>The real k2 lands at 94.8% (L1) and 93.5% (L19) on codes, 99.3–99.5% on literals: at its ideal. With real FSE
+  tables per context and no gate, k2 reaches 91.3–90.5% on codes (about 1% of output over today, almost all from
+  dropping the gate), k4 is worse than k2 once 16 contexts each carry a table, and a full 8-bit context loses
+  outright. Literals never give more than 1%, and that is structural: a node's bit says which subtree the symbol
+  went to, and Huffman already balances the split, so order-0 per node can only recover Huffman's redundancy
+  (0.6–1.9% of the bits on literals, 6% on the skewed code alphabets). Bits of the same node are a weak proxy for
+  byte context; xz's lc=0 versus lc=3 is 0.3% of its output on Silesia. The adaptive bound (2–3 points on
+  literals, 6 on codes) is within-block drift, i.e. the segmentation of §28.1 again, not context depth.</p>
+
+  <h3>28.4 · Reference points</h3>
+  <div class="tablewrap"><table>
+    <caption>turbobench · roundtrip · Silesia as one 12-block file, M4 · phz = phaz with the ANS coders off</caption>
+    <tr><th>codec</th><th>size</th><th>ratio %</th><th>D MB/s</th></tr>
+    <tr><td>lzma 9</td><td>48,752,819</td><td>23.0</td><td>164</td></tr>
+    <tr><td>brotli 11</td><td>49,383,220</td><td>23.3</td><td>598</td></tr>
+    <tr><td>zstd 19</td><td>52,910,505</td><td>25.0</td><td>1,974</td></tr>
+    <tr><td>phaz 19</td><td>53,528,210</td><td>25.3</td><td>2,965</td></tr>
+    <tr><td>phz 19</td><td>54,638,294</td><td>25.8</td><td>3,019</td></tr>
+    <tr><td>zstd 9</td><td>59,241,636</td><td>28.0</td><td>2,136</td></tr>
+    <tr><td>phaz 9</td><td>59,616,109</td><td>28.1</td><td>3,368</td></tr>
+    <tr><td>phaz 3</td><td>66,271,216</td><td>31.3</td><td>2,958</td></tr>
+    <tr><td>zstd 3</td><td>66,481,169</td><td>31.4</td><td>1,890</td></tr>
+    <tr><td>phaz 1</td><td>72,100,872</td><td>34.0</td><td>3,311</td></tr>
+    <tr><td>zstd 1</td><td>73,239,686</td><td>34.6</td><td>2,083</td></tr>
+    <tr><td>lz4 1</td><td>100,883,765</td><td>47.6</td><td>5,797</td></tr>
+  </table></div>
+  <p>On Zen 5 (2-vCPU VM) the same phaz rows decode at 1.26–1.36× zstd with AVX-512 and 1.18–1.24× with the AVX2
+  tier forced; zstd's decoder is at its strongest on x86. Plain PH instead of PHA buys 2–10% of decode for 2% of
+  size: the entropy stage is 8–26% of phaz's decode time, the sequence execution is the rest (45–61 ms of 55–69 on
+  Silesia, 3.5–4.8 GB/s on its own), which caps phaz below lz4's 5.6–5.8 GB/s whatever the coder.</p>
+  <p><b>What lzma's 8% over zstd 19 is made of</b> (xz 5.8.3, brotli 1.2.0, Silesia): window size is 1.2 points
+  (xz at zstd's 8 MiB window: −6.6% instead of −7.8%); the literal-context bits are 0.3 (lc=0: −7.4%); the
+  remaining 6.3 points are adaptive binary coding of literals, lengths, distances and rep matches plus a parse tuned
+  to that model. brotli 11 is −6.3% with static per-block Huffman plus context maps and a dictionary, −4.8% at a
+  4 MiB window. §27 takes 1.3–2.8 of those 8 points at table-decoder speed; the rest is priced in decode speed.</p>
 </section>
 </main>
