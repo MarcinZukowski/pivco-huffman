@@ -9,6 +9,8 @@
 #define PHAZ_CODEC_H
 
 #include <stddef.h>
+#include "pivco_huffman.h"
+#include "pivcohuf_file.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -22,6 +24,10 @@ typedef struct {
     double reconstruct_ms;   /* decompress: ZSTD_phazDecode (seq replay + copy) */
     size_t stream_raw[4];    /* raw per-stream byte counts */
     size_t stream_enc[4];    /* encoded per-stream byte counts */
+    int    ctx_mode[4];      /* code streams: 0 order-0, 1 built-in pair map, 2 pair map, 3 nested map */
+    int    ctx_bins[4];      /* code streams: bins used (1 = order-0) */
+    size_t ctx_map_bytes[4]; /* code streams: transmitted map bytes */
+    double route_ms;         /* decompress: bin routing of the code streams */
 } phaz_stats;
 
 extern const char *const phaz_stream_names[4];   /* {"ll","ml","of","lit"} */
@@ -45,6 +51,12 @@ size_t phaz_decompress(const void *src, size_t n, void *dst, size_t cap,
 
 /* Patched-libzstd capture-hook globals: a ZSTD_compress2 with g_phaz_dump=1
  * fills these with the pivoted ll/ml/of/lit streams + per-block metadata. */
+/* The PH/PHA stream coder's configuration (pivco_cfg_t: the FSE candidate
+ * menu) and the Huffman table period in blocks (0 = one table per stream).
+ * Defaults: sANS only, one table per PIVCOHUF_SEGMENT_BYTES_DEFAULT. */
+extern pivco_cfg_t g_phaz_cfg;
+extern size_t g_phaz_seg_blocks;
+extern size_t g_phaz_blk;   /* codec block size for the pivoted streams */
 extern int g_phaz_dump;
 extern unsigned char *g_phaz_llc, *g_phaz_mlc, *g_phaz_ofc, *g_phaz_lit, *g_phaz_xb;
 extern unsigned long long g_phaz_xbpos;
