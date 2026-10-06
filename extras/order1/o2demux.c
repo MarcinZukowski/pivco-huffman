@@ -87,7 +87,7 @@ static ENC *encode(const uint8_t *v, size_t n, int K, size_t segb, int shift) {
         size_t lo = s * segn, hi = (s == nseg - 1) ? n : (s + 1) * segn;
         for (int b = 0; b < K; b++) {          /* jitter page offsets: 1B/step
             walks keep same-offset pointers locked -> 4K-alias stalls */
-            E->raw[s][b] = malloc(hi - lo + 96);
+            E->raw[s][b] = malloc(hi - lo + 160);
             E->bk[s][b] = E->raw[s][b] + ((s * 5 + b * 3) & 7) * 8;
         }
         uint32_t c = 0;
@@ -96,7 +96,7 @@ static ENC *encode(const uint8_t *v, size_t n, int K, size_t segb, int shift) {
             c = v[j] >> shift;
         }
         for (int b = 0; b < K; b++)          /* pad for wide loads */
-            memset(E->bk[s][b] + E->bl[s][b], 0, 32);
+            memset(E->bk[s][b] + E->bl[s][b], 0, 96);
     }
     E->segoff[nseg] = n;
     return E;
@@ -425,6 +425,70 @@ static void build_k2p(void) {
 #define HAVE_K2Q 1
 #endif
 
+/* ------- k2s: mask-domain walk, one VBMI2 merge per group (x86 AVX-512) -- */
+/* The (6,6) step stops emitting.  Its entry holds the SIDE FRAGMENT of the
+ * bytes it would emit (bit j set when output byte j comes from R), nl, nr,
+ * len and the next side: 4 bytes per entry, 32 KB, L1-resident.  A group
+ * loads 64 B per side once, takes both class words with one vpmovb2m each,
+ * runs five steps from those two words in GPRs (shift each by its consumed
+ * count, S |= frag << out), then merges once from the loaded windows: the
+ * production merge_vec_vec_avx512 form (vpexpandb of L under ~S, of R under
+ * S) applied to registers, one 64 B store.  Five steps emit 30..60 B, so
+ * the store wants 64 B of output margin and the windows 64 B of read slack
+ * past each stream (encode pads 96). */
+static uint32_t k2s_meta[8192];   /* len(4b@0) nl(3b@4) nr(3b@10) cnext(1b@16) frag(12b@17) */
+static void build_k2s(void) {
+    for (uint32_t ix = 0; ix < 8192; ix++) {
+        uint32_t m = k2nt_meta[ix];
+        uint32_t cnt = m & 15, nl = (m >> 4) & 7, nr = (m >> 7) & 7, cnext = (m >> 10) & 1;
+        uint32_t frag = 0;
+        for (uint32_t j = 0; j < cnt; j++) frag |= (uint32_t)(k2nt_pat[ix][j] >> 3) << j;
+        k2s_meta[ix] = cnt | nl << 4 | nr << 10 | cnext << 16 | frag << 17;
+    }
+}
+
+#if !defined(__aarch64__) && defined(__AVX512VBMI2__) && defined(__AVX512BW__)
+#define K2S_STEP(hl, hr, S, ct, ol) { \
+    ITC \
+    uint32_t ix_ = ((uint32_t)(hl) & 63) | (((uint32_t)(hr) & 63) << 6) | (ct); \
+    HST(ix_) \
+    uint32_t m_ = k2s_meta[ix_]; \
+    uint32_t t_ = m_ >> 4; \
+    (hl) >>= t_ & 63; \
+    (hr) >>= (m_ >> 10) & 63; \
+    (S) |= (uint64_t)(m_ >> 17) << (ol); \
+    (ol) += m_ & 15; \
+    (ct) = t_ & 4096; \
+}
+/* packed state: P = ol (bits 0..5) | ct (bit 12) -- one register per chain less */
+#define K2S_STEPP(hl, hr, S, P) { \
+    ITC \
+    uint32_t ix_ = ((uint32_t)(hl) & 63) | (((uint32_t)(hr) & 63) << 6) | ((P) & 4096); \
+    HST(ix_) \
+    uint32_t m_ = k2s_meta[ix_]; \
+    uint32_t t_ = m_ >> 4; \
+    (hl) >>= t_ & 63; \
+    (hr) >>= (m_ >> 10) & 63; \
+    (S) |= (uint64_t)(m_ >> 17) << ((P) & 63); \
+    (P) = (((P) + (m_ & 15)) & 63) | (t_ & 4096); \
+}
+#define K2S_GROUP(LL, RR, cc, oo) do { \
+    __m512i lv_ = _mm512_loadu_si512((const void *)(LL)); \
+    __m512i rv_ = _mm512_loadu_si512((const void *)(RR)); \
+    uint64_t hl_ = _mm512_movepi8_mask(lv_), hr_ = _mm512_movepi8_mask(rv_); \
+    uint64_t S_ = 0; uint32_t ct_ = (cc) << 12, ol_ = 0; \
+    K2S_STEP(hl_, hr_, S_, ct_, ol_) K2S_STEP(hl_, hr_, S_, ct_, ol_) \
+    K2S_STEP(hl_, hr_, S_, ct_, ol_) K2S_STEP(hl_, hr_, S_, ct_, ol_) \
+    K2S_STEP(hl_, hr_, S_, ct_, ol_) \
+    __mmask64 kr_ = (__mmask64)S_; \
+    _mm512_storeu_si512((void *)(oo), _mm512_mask_expand_epi8( \
+        _mm512_maskz_expand_epi8(~kr_, lv_), kr_, rv_)); \
+    uint32_t nr_ = (uint32_t)__builtin_popcountll(S_); \
+    (RR) += nr_; (LL) += ol_ - nr_; (oo) += ol_; (cc) = ct_ >> 12; \
+} while (0)
+#define HAVE_K2S 1
+#endif
+
 #if !defined(__aarch64__) && defined(__BMI2__) && defined(__AVX512VBMI__)
 /* k2p: the k2g 2x16B double with pext indices + byte meta */
 #define K2P_STEP(LL, RR, cc, oo) do { \
@@ -741,6 +805,48 @@ static void NAME(const ENC *E, uint8_t *out) { \
     fin1_0: return; \
 }
 
+#define CLOADM(k, s, MG) { L##k = E->bk[s][0]; R##k = E->bk[s][1]; c##k = 0; \
+        o##k = out + E->segoff[s]; \
+        lim##k = out + E->segoff[(s) + 1] - (MG); }
+#define CDRAINM(k, MG) { const uint8_t *P_[2] = {L##k, R##k}; \
+    uint8_t *e_ = lim##k + (MG); uint32_t c_ = c##k; uint8_t *o_ = o##k; \
+    while (o_ < e_) { uint8_t b_ = *P_[c_]++; *o_++ = b_; c_ = b_ >> 7; } }
+#define CTICKM(n, k, MG) if (o##k > lim##k) { CDRAINM(k, MG) \
+        if (snext < nseg) { CLOADM(k, snext, MG) snext++; } \
+        else goto fin##n##_##k; }
+
+/* GEN_K2C with the output margin and the chain count (2 or 4) as parameters */
+#define GEN_K2CM(NAME, STEPM, MG, NCH) \
+static void NAME(const ENC *E, uint8_t *out) { \
+    CDECL(0) CDECL(1) CDECL(2) CDECL(3) \
+    int nseg = E->nseg, snext = 0; \
+    if (nseg < 1) return; \
+    CLOADM(0, 0, MG) snext = 1; if (nseg < 2) goto loop1; \
+    CLOADM(1, 1, MG) snext = 2; if ((NCH) == 2 || nseg < 3) goto loop2; \
+    CLOADM(2, 2, MG) snext = 3; if (nseg < 4) goto loop3; \
+    CLOADM(3, 3, MG) snext = 4; \
+    for (;;) { CTICKM(4, 0, MG) CTICKM(4, 1, MG) CTICKM(4, 2, MG) CTICKM(4, 3, MG) \
+               STEPM(0) STEPM(1) STEPM(2) STEPM(3) } \
+    fin4_0: CMOVE(0, 3) goto loop3; \
+    fin4_1: CMOVE(1, 3) goto loop3; \
+    fin4_2: CMOVE(2, 3) \
+    fin4_3: \
+    loop3: \
+    for (;;) { CTICKM(3, 0, MG) CTICKM(3, 1, MG) CTICKM(3, 2, MG) \
+               STEPM(0) STEPM(1) STEPM(2) } \
+    fin3_0: CMOVE(0, 2) goto loop2; \
+    fin3_1: CMOVE(1, 2) \
+    fin3_2: \
+    loop2: \
+    for (;;) { CTICKM(2, 0, MG) CTICKM(2, 1, MG) \
+               STEPM(0) STEPM(1) } \
+    fin2_0: CMOVE(0, 1) \
+    fin2_1: \
+    loop1: \
+    for (;;) { CTICKM(1, 0, MG) STEPM(0) } \
+    fin1_0: return; \
+}
+
 #define CS_NT(k) K2NT_STEP(L##k, R##k, c##k, o##k);
 GEN_K2C(dec_k2ntc_u4, CS_NT)
 #define CS_T(k) K2T_STEP(L##k, R##k, c##k, o##k);
@@ -759,6 +865,80 @@ GEN_K2(dec_k2q_u4, FOR4, 4, K2QS)
 GEN_K2(dec_k2q_u6, FOR6, 6, K2QS)
 #define CS_Q(k) K2Q_STEP(L##k, R##k, c##k, o##k);
 GEN_K2C(dec_k2qc_u4, CS_Q)
+#endif
+#ifdef HAVE_K2S
+#define CS_S(k) K2S_GROUP(L##k, R##k, c##k, o##k);
+GEN_K2CM(dec_k2sc_u4, CS_S, 64, 4)
+GEN_K2CM(dec_k2sc_u2, CS_S, 64, 2)
+
+/* k2sl: the same group in LOCKSTEP across the live chains -- windows for
+ * all chains, then step i of every chain before step i+1, then the merges.
+ * The group's five dependent steps are ~50 cycles; interleaving whole
+ * groups (~110 instructions each) puts the other chains' links too far
+ * apart for the reorder window, so k2sc runs at IPC ~2.5.  Step-level
+ * interleaving keeps the four independent links adjacent. */
+#define K2S_A(k) __m512i lv##k = _mm512_loadu_si512((const void *)L##k); \
+    __m512i rv##k = _mm512_loadu_si512((const void *)R##k); \
+    uint64_t hl##k = _mm512_movepi8_mask(lv##k), hr##k = _mm512_movepi8_mask(rv##k); \
+    uint64_t S##k = 0; uint32_t ct##k = c##k << 12, ol##k = 0;
+#define K2S_B(k) K2S_STEP(hl##k, hr##k, S##k, ct##k, ol##k)
+#define K2S_C(k) { __mmask64 kr_ = (__mmask64)S##k; \
+    _mm512_storeu_si512((void *)o##k, _mm512_mask_expand_epi8( \
+        _mm512_maskz_expand_epi8(~kr_, lv##k), kr_, rv##k)); \
+    uint32_t nr_ = (uint32_t)__builtin_popcountll(S##k); \
+    R##k += nr_; L##k += ol##k - nr_; o##k += ol##k; c##k = ct##k >> 12; }
+#define K2S_AP(k) __m512i lv##k = _mm512_loadu_si512((const void *)L##k); \
+    __m512i rv##k = _mm512_loadu_si512((const void *)R##k); \
+    uint64_t hl##k = _mm512_movepi8_mask(lv##k), hr##k = _mm512_movepi8_mask(rv##k); \
+    uint64_t S##k = 0; uint32_t P##k = c##k << 12;
+#define K2S_BP(k) K2S_STEPP(hl##k, hr##k, S##k, P##k)
+#define K2S_CP(k) { __mmask64 kr_ = (__mmask64)S##k; \
+    _mm512_storeu_si512((void *)o##k, _mm512_mask_expand_epi8( \
+        _mm512_maskz_expand_epi8(~kr_, lv##k), kr_, rv##k)); \
+    uint32_t nr_ = (uint32_t)__builtin_popcountll(S##k), ol_ = P##k & 63; \
+    R##k += nr_; L##k += ol_ - nr_; o##k += ol_; c##k = P##k >> 12; }
+#define K2S_LOCKP(F) { F(K2S_AP) F(K2S_BP) F(K2S_BP) F(K2S_BP) F(K2S_BP) F(K2S_BP) F(K2S_CP) }
+#define K2S_F1(X) X(0)
+#define K2S_F2(X) X(0) X(1)
+#define K2S_F3(X) X(0) X(1) X(2)
+#define K2S_F4(X) X(0) X(1) X(2) X(3)
+#define K2S_LOCK(F) { F(K2S_A) F(K2S_B) F(K2S_B) F(K2S_B) F(K2S_B) F(K2S_B) F(K2S_C) }
+
+#define GEN_K2S(NAME, NCH, LOCK) \
+static void NAME(const ENC *E, uint8_t *out) { \
+    CDECL(0) CDECL(1) CDECL(2) CDECL(3) \
+    int nseg = E->nseg, snext = 0; \
+    if (nseg < 1) return; \
+    CLOADM(0, 0, 64) snext = 1; if (nseg < 2) goto loop1; \
+    CLOADM(1, 1, 64) snext = 2; if ((NCH) == 2 || nseg < 3) goto loop2; \
+    CLOADM(2, 2, 64) snext = 3; if ((NCH) == 3 || nseg < 4) goto loop3; \
+    CLOADM(3, 3, 64) snext = 4; \
+    for (;;) { CTICKM(4, 0, 64) CTICKM(4, 1, 64) CTICKM(4, 2, 64) CTICKM(4, 3, 64) \
+               LOCK(K2S_F4) } \
+    fin4_0: CMOVE(0, 3) goto loop3; \
+    fin4_1: CMOVE(1, 3) goto loop3; \
+    fin4_2: CMOVE(2, 3) \
+    fin4_3: \
+    loop3: \
+    for (;;) { CTICKM(3, 0, 64) CTICKM(3, 1, 64) CTICKM(3, 2, 64) \
+               LOCK(K2S_F3) } \
+    fin3_0: CMOVE(0, 2) goto loop2; \
+    fin3_1: CMOVE(1, 2) \
+    fin3_2: \
+    loop2: \
+    for (;;) { CTICKM(2, 0, 64) CTICKM(2, 1, 64) \
+               LOCK(K2S_F2) } \
+    fin2_0: CMOVE(0, 1) \
+    fin2_1: \
+    loop1: \
+    for (;;) { CTICKM(1, 0, 64) LOCK(K2S_F1) } \
+    fin1_0: return; \
+}
+GEN_K2S(dec_k2sl_u4, 4, K2S_LOCK)
+GEN_K2S(dec_k2sl_u3, 3, K2S_LOCK)
+GEN_K2S(dec_k2sl_u2, 2, K2S_LOCK)
+GEN_K2S(dec_k2sp_u4, 4, K2S_LOCKP)
+GEN_K2S(dec_k2sp_u3, 3, K2S_LOCKP)
 #endif
 #ifdef HAVE_K2P
 #define K2PS(k) if (!done##k) K2P_STEP(L##k, R##k, c##k, o##k);
@@ -1450,6 +1630,11 @@ static void selftest(void) {
 #ifdef HAVE_K2P
         {dec_k2p_u4, e2, "k2p4"}, {dec_k2pc_u4, e2, "k2pc4"},
 #endif
+#ifdef HAVE_K2S
+        {dec_k2sc_u4, e2, "k2sc4"}, {dec_k2sc_u2, e2, "k2sc2"},
+        {dec_k2sl_u4, e2, "k2sl4"}, {dec_k2sl_u2, e2, "k2sl2"}, {dec_k2sl_u3, e2, "k2sl3"},
+        {dec_k2sp_u4, e2, "k2sp4"}, {dec_k2sp_u3, e2, "k2sp3"},
+#endif
         {dec_k2d_u8, e2, "k2d"}, {dec_k2e_u8, e2, "k2e"}, {dec_k2f_u8, e2, "k2f"},
         {dec_sc4a_u8, e4, "sc4a8"}, {dec_sc4a_u16, e4, "sc4a16"},
         {dec_sc4al_u16, e4, "sc4al16"}, {dec_sc4r_u8, e4, "sc4r8"},
@@ -1468,7 +1653,7 @@ static void selftest(void) {
 }
 
 int main(int argc, char **argv) {
-    build_h4(); build_w3(); build_k2(); build_k2g(); build_k2p();
+    build_h4(); build_w3(); build_k2(); build_k2g(); build_k2p(); build_k2s();
     build_k2d(); build_k2e(); build_k2f();
     for (int i = 0; i < 256; i++) { g_cls4[i] = (uint8_t)(i >> 6); g_cls2[i] = (uint8_t)(i >> 7); }
     /* gather constant identity-order check */
@@ -1569,6 +1754,15 @@ int main(int argc, char **argv) {
         run("k2q_u4", dec_k2q_u4, e2, v2, out);
         run("k2q_u6", dec_k2q_u6, e2, v2, out);
         run("k2qc_u4", dec_k2qc_u4, e2, v2, out);
+#endif
+#ifdef HAVE_K2S
+        run("k2sc_u4", dec_k2sc_u4, e2, v2, out);
+        run("k2sc_u2", dec_k2sc_u2, e2, v2, out);
+        run("k2sl_u4", dec_k2sl_u4, e2, v2, out);
+        run("k2sl_u2", dec_k2sl_u2, e2, v2, out);
+        run("k2sl_u3", dec_k2sl_u3, e2, v2, out);
+        run("k2sp_u4", dec_k2sp_u4, e2, v2, out);
+        run("k2sp_u3", dec_k2sp_u3, e2, v2, out);
 #endif
 #ifdef HAVE_K2P
         run("k2p_u4", dec_k2p_u4, e2, v2, out);

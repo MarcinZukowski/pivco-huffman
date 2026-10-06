@@ -158,7 +158,7 @@ streams ── entropy layer ──▶  container    zstd: order-0 FSE/Huffman �
   <div class="tablewrap"><table>
   <tr><th>file</th><th>what it is</th></tr>
   <tr><td><code>RESULTS.html</code></td><td>The Order-1 Ledger — three parts, §1–§28 (live artifact, URL above)</td></tr>
-  <tr><td><code>o2demux.c</code></td><td>demux kernel shootout: all K=2/K=4 kernels incl. champions (k2g/k2q/k2p, GEN_K2C compaction, k4x/k4v, scalar walks), selftests + byte-exact verify, <code>ONLY=</code> filter</td></tr>
+  <tr><td><code>o2demux.c</code></td><td>demux kernel shootout: all K=2/K=4 kernels incl. champions (k2g/k2q/k2p, GEN_K2C compaction, k2s mask-domain walk + vpexpandb merge, k4x/k4v, scalar walks), selftests + byte-exact verify, <code>ONLY=</code> filter</td></tr>
   <tr><td><code>o3huf.c</code></td><td>fused order-1 Huffman (per-class bitstreams, ctx-switched decode) — first roundtrip order-1 coder; fused-K4 ≥ two-pass on all platforms</td></tr>
   <tr><td><code>o4tans.c</code></td><td>tANS window walk + MZ's grouped-w extensions (prepacked width arrays, w\</td><td>state measurement)</td></tr>
   <tr><td><code>o5bans.c</code></td><td>binary tANS window walk for Bernoulli/bitmap groups, canonical p-levels</td></tr>
@@ -1030,6 +1030,7 @@ cursors += e.nl, e.nr</code></pre>
     <tr><td>GNR</td><td class="a">k2q_u6</td><td>0.207–0.287</td><td>webster 4.84 GB/s</td></tr>
     <tr><td>Graviton4</td><td class="a">k2ntc_u4</td><td>0.295–0.403</td><td>webster 3.39 GB/s</td></tr>
   </table></div>
+  <p class="fnote">Superseded on AVX-512 x86 by the mask-domain walk of §8.7 (k2sl_u4, 2026-09-22).</p>
 
   <ul class="lessons">
     <li><b>Instruction count is the currency; IPC walls are the exchange rate.</b> Every win and every loss of the
@@ -1074,6 +1075,62 @@ cursors += e.nl, e.nr</code></pre>
   K2serial's serial walk and the k2g4 merge are speed peers; the plane buys parallelism, not ns/B.
   k4g16s4 (4 streams + current-class table switch) is the ratio winner's decode form and is unbuilt —
   only its ratio is measured.</div>
+
+  <h3>8.7 · Mask-domain walk — the serial K=2 route without per-step patterns (2026-09-22)</h3>
+  <p><b>The idea.</b> Every K=2 kernel above emits per table step: the (6,6) entry carries a 16-byte shuffle
+  pattern, and each step costs a pattern load, a shuffle and a store. The mask-domain form keeps the walk and
+  drops the emitting. The entry shrinks to 4 bytes: the <i>side fragment</i> (bit j set when output byte j comes
+  from R), nl, nr, the output length and the next side — 32 KB for the whole table, L1-resident. A group loads
+  64 B per side once, takes both class words with one <code>vpmovb2m</code> each, runs five steps from those two
+  words in GPRs (shift each by its consumed count, <code>S |= frag &lt;&lt; out</code>), then emits once from the
+  loaded registers: <code>vpexpandb</code> of L under ~S and of R under S — the production
+  <code>merge_vec_vec_avx512</code> form applied to registers — and one 64-byte store per 30–60 output bytes.
+  The walk is scalar and the merge is the plane merge of §8.6, so this is the serial route reaching the plane's
+  emit cost without a plane on the wire.</p>
+  <div class="tablewrap"><table>
+    <caption>o2demux · k2sl_u4 vs the x86 champion k2qc_u4 · clang 15, same run · level-19 literal streams, raw top-bit class · ns/B</caption>
+    <tr><th>stream</th><th>GNR k2qc</th><th>GNR k2sl</th><th>×</th><th>Zen5 k2qc</th><th>Zen5 k2sl</th><th>×</th></tr>
+    <tr><td>dickens</td><td>0.303</td><td class="w">0.264</td><td>1.15</td><td>0.238</td><td class="w">0.208</td><td>1.14</td></tr>
+    <tr><td>webster</td><td>0.303</td><td class="w">0.260</td><td>1.17</td><td>0.252</td><td class="w">0.212</td><td>1.19</td></tr>
+    <tr><td>xml</td><td>0.302</td><td class="w">0.276</td><td>1.09</td><td>0.244</td><td class="w">0.207</td><td>1.18</td></tr>
+    <tr><td>samba</td><td>0.253</td><td class="w">0.199</td><td>1.27</td><td>0.210</td><td class="w">0.163</td><td>1.29</td></tr>
+    <tr><td>x-ray</td><td>0.264</td><td class="w">0.206</td><td>1.28</td><td>0.221</td><td class="w">0.170</td><td>1.30</td></tr>
+    <tr><td>mozilla</td><td>0.241</td><td class="w">0.187</td><td>1.29</td><td>0.202</td><td class="w">0.156</td><td>1.29</td></tr>
+  </table></div>
+  <p class="fnote">Peak 5.3 GB/s on GNR, 6.4 GB/s on Zen5; byte-exact on all six and the random selftest. gcc 11
+  keeps the ordering (GNR 0.222 vs k2q_u4 0.280 on mozilla, Zen5 0.159 vs 0.207) and still mangles k2qc as in
+  §8.4. These inputs are the level-19 parses with the raw top bit as class, not the August map2 set of §8.5, so
+  only same-run pairs compare.</p>
+  <div class="tablewrap"><table>
+    <caption>mozilla · perf counters, setup baseline subtracted, clang · per output byte</caption>
+    <tr><th>arch</th><th>kernel</th><th>instr/B</th><th>cyc/B</th><th>IPC</th><th>ns/B</th></tr>
+    <tr><td>GNR</td><td>k2q_u4 (pattern, pext index)</td><td>3.93</td><td>0.97</td><td>4.1</td><td>0.248</td></tr>
+    <tr><td>GNR</td><td>k2sc_u4 — mask walk, whole groups interleaved</td><td class="w">2.62</td><td>1.02</td><td>2.6</td><td>0.255</td></tr>
+    <tr><td>GNR</td><td class="a">k2sl_u4 — mask walk, steps interleaved</td><td>2.96</td><td class="w">0.74</td><td>4.0</td><td class="w">0.187</td></tr>
+    <tr><td>Zen5</td><td>k2q_u4</td><td>3.93</td><td>0.96</td><td>4.1</td><td>0.205</td></tr>
+    <tr><td>Zen5</td><td>k2sc_u4</td><td class="w">2.71</td><td>1.06</td><td>2.6</td><td>0.232</td></tr>
+    <tr><td>Zen5</td><td class="a">k2sl_u4</td><td>2.92</td><td class="w">0.73</td><td>4.0</td><td class="w">0.157</td></tr>
+  </table></div>
+  <ul class="lessons">
+    <li><b>Fewer instructions bought nothing until the chain was exposed.</b> The first form cut instructions by
+      30% and ran at the same wall: a group is five dependent steps, ~65 cycles with the load → <code>vpmovb2m</code>
+      in front, and interleaving whole ~110-instruction groups puts the other chains' links outside the reorder
+      window (IPC 2.6). Interleaving at step granularity — step i of all four chains, then i+1 — restores IPC 4
+      and delivers the 1.3×. Same §8.3 currency: cycles = instructions ÷ the IPC wall, and the wall is what moved.</li>
+    <li><b>Chain count.</b> u2 and u3 are chain-bound (GNR 0.295 / 0.218 on mozilla); u4 wins. A packed
+      (offset | side) state register to relieve pressure is a wash; the cheaper entry layout (next side in the
+      same field as nl) is worth ~3%. Of ~27 instructions per 9-byte step, ~21 are written; the rest are spills from
+      four chains × five live GPRs.</li>
+    <li><b>Where it stands.</b> A kernel result for the serial-walk form only: §8.6's plane-on-wire merge is a
+      speed peer at equal ratio, and reconstruction is ~10% of this family's end-to-end decode. The NEON form
+      (<code>vcntq_u8</code> prefix counts, <code>vqtbl4q</code> over {L32, R32}) is unwritten; Graviton's index
+      extraction is already one <code>ubfx</code> and its merge floor is 0.163, so less headroom there. Next lever
+      if ever wanted: the walk itself in SIMD lanes (eight chains per zmm, <code>vpsrlvq</code> shifts, one 8-lane
+      gather per step round), 7–8 instructions per step.</li>
+  </ul>
+  <div class="verdict"><b>Verdict</b>
+  On AVX-512 x86 the serial K=2 route is k2sl_u4: 1.09–1.30× over k2q across the six streams, 0.187 ns/B
+  (GNR) and 0.156 (Zen5) on mozilla. The §8.5 dispatch stands elsewhere.</div>
 </section>
 
 <section id="s9">
