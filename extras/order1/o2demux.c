@@ -1,8 +1,8 @@
 /* o2demux.c -- order-1 demux kernel shootout on M4 (NEON).
  *
- * Problem: literals were split into K bucket streams by residence class
+ * Problem: literals were split into C bucket streams by residence class
  * (class of the PREVIOUS byte); reconstruct the original order.  Classes are
- * raw top bits: K=4 -> byte>>6, K=2 -> byte>>7.  Segments restart context
+ * raw top bits: C=4 -> byte>>6, C=2 -> byte>>7.  Segments restart context
  * (c=0) and give the lockstep harness independent chains.
  *
  * Kernels (all emit-per-dependent-lookup machines; the table walk consumes
@@ -10,14 +10,14 @@
  * terminal element whose position is determined but class unknown -- its
  * class is extracted from the already-loaded window at runtime):
  *
- *  heads4  K=4, visibility = head class of each bucket (user's scheme,
+ *  heads4  C=4, visibility = head class of each bucket (user's scheme,
  *          simplified: per-lookup shuffle+8B store instead of batched concat).
  *          idx = 4 head classes (8b) + cur bucket (2b) -> 1024 entries.
- *  win4d3  K=4, visibility = 3 elements deep in CURRENT bucket + heads of
+ *  win4d3  C=4, visibility = 3 elements deep in CURRENT bucket + heads of
  *          the other three.  idx = deep(6b)+others(6b)+cur(2b) -> 16384.
- *  k2nt    K=2 (6,6) window kernel, replica of the o1demux winner (no
+ *  c2nt    C=2 (6,6) window kernel, replica of the o1demux winner (no
  *          terminal): idx = 6+6 class bits + side -> 8192.
- *  k2t     same + terminal emit (+1 byte/iter, class read from window).
+ *  c2t     same + terminal emit (+1 byte/iter, class read from window).
  *
  * Harness: u1 (single chain, latency wall), u4 / u8 (lockstep hard-unrolled).
  * Verify: full memcmp vs input every kernel/file.  Self-test on random data.
@@ -53,7 +53,7 @@
     ((((uintptr_t)(a)) ^ ((uintptr_t)(b))) & (uintptr_t)-(uintptr_t)(cond1))))
 #endif
 
-#define MARGIN 32   /* k2g pair-step writes reach o + 12 + 16 = o+28 */
+#define MARGIN 32   /* c2g pair-step writes reach o + 12 + 16 = o+28 */
 #ifdef PROF
 static uint64_t g_it;
 static uint64_t g_hist[16384];
@@ -65,7 +65,7 @@ static uint64_t g_hist[16384];
 #endif
 
 typedef struct {
-    int K, nseg;
+    int C, nseg;
     size_t N;
     size_t *segoff;          /* nseg+1 */
     uint8_t *(*bk)[16];      /* per segment (jittered start) */
@@ -73,10 +73,10 @@ typedef struct {
     size_t (*bl)[16];
 } ENC;
 
-static ENC *encode(const uint8_t *v, size_t n, int K, size_t segb, int shift) {
+static ENC *encode(const uint8_t *v, size_t n, int C, size_t segb, int shift) {
     ENC *E = calloc(1, sizeof *E);
     int nseg = (int)((n + segb - 1) / segb); if (nseg < 1) nseg = 1;
-    E->K = K; E->nseg = nseg; E->N = n;
+    E->C = C; E->nseg = nseg; E->N = n;
     E->segoff = malloc((nseg + 1) * sizeof *E->segoff);
     E->bk = calloc(nseg, sizeof *E->bk);
     E->raw = calloc(nseg, sizeof *E->raw);
@@ -85,7 +85,7 @@ static ENC *encode(const uint8_t *v, size_t n, int K, size_t segb, int shift) {
     for (int s = 0; s < nseg; s++) {
         E->segoff[s] = s * segn;
         size_t lo = s * segn, hi = (s == nseg - 1) ? n : (s + 1) * segn;
-        for (int b = 0; b < K; b++) {          /* jitter page offsets: 1B/step
+        for (int b = 0; b < C; b++) {          /* jitter page offsets: 1B/step
             walks keep same-offset pointers locked -> 4K-alias stalls */
             E->raw[s][b] = malloc(hi - lo + 160);
             E->bk[s][b] = E->raw[s][b] + ((s * 5 + b * 3) & 7) * 8;
@@ -95,7 +95,7 @@ static ENC *encode(const uint8_t *v, size_t n, int K, size_t segb, int shift) {
             E->bk[s][c][E->bl[s][c]++] = v[j];
             c = v[j] >> shift;
         }
-        for (int b = 0; b < K; b++)          /* pad for wide loads */
+        for (int b = 0; b < C; b++)          /* pad for wide loads */
             memset(E->bk[s][b] + E->bl[s][b], 0, 96);
     }
     E->segoff[nseg] = n;
@@ -103,7 +103,7 @@ static ENC *encode(const uint8_t *v, size_t n, int K, size_t segb, int shift) {
 }
 static void enc_free(ENC *E) {
     for (int s = 0; s < E->nseg; s++)
-        for (int b = 0; b < E->K; b++) free(E->raw[s][b]);
+        for (int b = 0; b < E->C; b++) free(E->raw[s][b]);
     free(E->segoff); free(E->bk); free(E->raw); free(E->bl); free(E);
 }
 
@@ -219,8 +219,8 @@ static void build_w3(void) {
 /* idx: 6 L class bits | 6 R class bits <<6 | cur <<12 -> 8192.
  * nt meta: cnt(4b@0) nl(3b@4) nr(3b@7) cnext(1b@10)
  * t  meta: cnt(4b@0) nl(3b@4) nr(3b@7) tshift(6b@10) sel(1b@16) */
-static uint32_t k2nt_meta[8192], k2t_meta[8192];
-static uint8_t  k2nt_pat[8192][16], k2t_pat[8192][16];
+static uint32_t c2nt_meta[8192], c2t_meta[8192];
+static uint8_t  c2nt_pat[8192][16], c2t_pat[8192][16];
 
 static void build_k2(void) {
     for (uint32_t ix = 0; ix < 8192; ix++) {
@@ -231,56 +231,56 @@ static void build_k2(void) {
             if (cur == 0) { if (nl >= 6) break; pat[cnt++] = nl; cur = (ix >> nl) & 1; nl++; }
             else          { if (nr >= 6) break; pat[cnt++] = 8 + nr; cur = (ix >> (6 + nr)) & 1; nr++; }
         }
-        k2nt_meta[ix] = cnt | nl << 4 | nr << 7 | cur << 10;
-        memcpy(k2nt_pat[ix], pat, 16);
+        c2nt_meta[ix] = cnt | nl << 4 | nr << 7 | cur << 10;
+        memcpy(c2nt_pat[ix], pat, 16);
         /* terminal variant: emit the stopper too, class read at runtime */
         uint32_t tshift, sel;
         if (cur == 0) { pat[cnt++] = nl; tshift = nl * 8 + 7; sel = 0; nl++; }
         else          { pat[cnt++] = 8 + nr; tshift = nr * 8 + 7; sel = 1; nr++; }
-        k2t_meta[ix] = cnt | nl << 4 | nr << 7 | tshift << 10 | sel << 16;
-        memcpy(k2t_pat[ix], pat, 16);
+        c2t_meta[ix] = cnt | nl << 4 | nr << 7 | tshift << 10 | sel << 16;
+        memcpy(c2t_pat[ix], pat, 16);
     }
 }
 
 #define BB  0x0101010101010101ULL
 #define MUL 0x0102040810204080ULL
 
-#define K2NT_STEP(LL, RR, cc, oo) do { \
+#define C2NT_STEP(LL, RR, cc, oo) do { \
     ITC \
     uint64_t l8_, r8_; memcpy(&l8_, LL, 8); memcpy(&r8_, RR, 8); \
     uint32_t gl_ = (uint32_t)((((l8_ >> 7) & BB) * MUL) >> 56) & 63; \
     uint32_t gr_ = (uint32_t)((((r8_ >> 7) & BB) * MUL) >> 56) & 63; \
     uint32_t ix_ = gl_ | (gr_ << 6) | ((cc) << 12); \
     HST(ix_) \
-    uint32_t m_ = k2nt_meta[ix_]; \
-    SHUF16(oo, l8_, r8_, k2nt_pat[ix_]); \
+    uint32_t m_ = c2nt_meta[ix_]; \
+    SHUF16(oo, l8_, r8_, c2nt_pat[ix_]); \
     LL += (m_ >> 4) & 7; RR += (m_ >> 7) & 7; \
     (cc) = (m_ >> 10) & 1; \
     (oo) += m_ & 15; \
 } while (0)
 
-#define K2T_STEP(LL, RR, cc, oo) do { \
+#define C2T_STEP(LL, RR, cc, oo) do { \
     ITC \
     uint64_t l8_, r8_; memcpy(&l8_, LL, 8); memcpy(&r8_, RR, 8); \
     uint32_t gl_ = (uint32_t)((((l8_ >> 7) & BB) * MUL) >> 56) & 63; \
     uint32_t gr_ = (uint32_t)((((r8_ >> 7) & BB) * MUL) >> 56) & 63; \
     uint32_t ix_ = gl_ | (gr_ << 6) | ((cc) << 12); \
-    uint32_t m_ = k2t_meta[ix_]; \
-    SHUF16(oo, l8_, r8_, k2t_pat[ix_]); \
+    uint32_t m_ = c2t_meta[ix_]; \
+    SHUF16(oo, l8_, r8_, c2t_pat[ix_]); \
     LL += (m_ >> 4) & 7; RR += (m_ >> 7) & 7; \
     uint64_t sel_ = MUX64((m_ >> 16) & 1, l8_, r8_); \
     (cc) = (uint32_t)(sel_ >> ((m_ >> 10) & 63)) & 1; \
     (oo) += m_ & 15; \
 } while (0)
 
-/* ------- k2d: MZ's (4,4)x2 double-step, 9-bit index, 12KB tables --------- */
+/* ------- c2d: MZ's (4,4)x2 double-step, 9-bit index, 12KB tables --------- */
 /* idx: 4 L class bits | 4 R class bits <<4 | cur <<8 -> 512 entries.
  * Two chained lookups share one 8B+8B source load + one header computation;
  * second shuffle pattern is offset by step-1 consumption (per-side add). */
-static uint32_t k2d_meta[512];      /* cnt(4b@0) cl(3b@4) cr(3b@7) cnext(1b@10) */
-static uint64_t k2d_pat[512];
+static uint32_t c2d_meta[512];      /* cnt(4b@0) cl(3b@4) cr(3b@7) cnext(1b@10) */
+static uint64_t c2d_pat[512];
 
-static void build_k2d(void) {
+static void build_c2d(void) {
     for (uint32_t ix = 0; ix < 512; ix++) {
         uint32_t c0 = ix >> 8, nl = 0, nr = 0, cnt = 0, cur = c0;
         uint64_t pat = 0;
@@ -289,41 +289,41 @@ static void build_k2d(void) {
             else          { if (nr >= 4) break; pat |= (uint64_t)(8 + nr) << (8 * cnt); cur = (ix >> (4 + nr)) & 1; nr++; }
             cnt++;
         }
-        k2d_meta[ix] = cnt | nl << 4 | nr << 7 | cur << 10;
-        k2d_pat[ix] = pat;
+        c2d_meta[ix] = cnt | nl << 4 | nr << 7 | cur << 10;
+        c2d_pat[ix] = pat;
     }
 }
 
 #if defined(__aarch64__)
-#define K2D_STEP(LL, RR, cc, oo) do {     uint64_t l8_, r8_; memcpy(&l8_, LL, 8); memcpy(&r8_, RR, 8);     uint32_t gl_ = (uint32_t)((((l8_ >> 7) & BB) * MUL) >> 56);     uint32_t gr_ = (uint32_t)((((r8_ >> 7) & BB) * MUL) >> 56);     uint8x16_t W_ = vcombine_u8(vcreate_u8(l8_), vcreate_u8(r8_));     uint32_t i1_ = (gl_ & 15) | ((gr_ & 15) << 4) | ((cc) << 8);     uint32_t m1_ = k2d_meta[i1_];     vst1_u8(oo, vqtbl1_u8(W_, vcreate_u8(k2d_pat[i1_])));     uint32_t c1_ = m1_ & 15, cl1_ = (m1_ >> 4) & 7, cr1_ = (m1_ >> 7) & 7;     uint32_t i2_ = ((gl_ >> cl1_) & 15) | (((gr_ >> cr1_) & 15) << 4) | (((m1_ >> 10) & 1) << 8);     uint32_t m2_ = k2d_meta[i2_];     uint8x8_t p2_ = vcreate_u8(k2d_pat[i2_]);     uint8x8_t ad_ = vbsl_u8(vcge_u8(p2_, vdup_n_u8(8)), vdup_n_u8((uint8_t)cr1_), vdup_n_u8((uint8_t)cl1_));     vst1_u8((oo) + c1_, vqtbl1_u8(W_, vadd_u8(p2_, ad_)));     LL += cl1_ + ((m2_ >> 4) & 7); RR += cr1_ + ((m2_ >> 7) & 7);     (cc) = (m2_ >> 10) & 1;     (oo) += c1_ + (m2_ & 15); } while (0)
+#define C2D_STEP(LL, RR, cc, oo) do {     uint64_t l8_, r8_; memcpy(&l8_, LL, 8); memcpy(&r8_, RR, 8);     uint32_t gl_ = (uint32_t)((((l8_ >> 7) & BB) * MUL) >> 56);     uint32_t gr_ = (uint32_t)((((r8_ >> 7) & BB) * MUL) >> 56);     uint8x16_t W_ = vcombine_u8(vcreate_u8(l8_), vcreate_u8(r8_));     uint32_t i1_ = (gl_ & 15) | ((gr_ & 15) << 4) | ((cc) << 8);     uint32_t m1_ = c2d_meta[i1_];     vst1_u8(oo, vqtbl1_u8(W_, vcreate_u8(c2d_pat[i1_])));     uint32_t c1_ = m1_ & 15, cl1_ = (m1_ >> 4) & 7, cr1_ = (m1_ >> 7) & 7;     uint32_t i2_ = ((gl_ >> cl1_) & 15) | (((gr_ >> cr1_) & 15) << 4) | (((m1_ >> 10) & 1) << 8);     uint32_t m2_ = c2d_meta[i2_];     uint8x8_t p2_ = vcreate_u8(c2d_pat[i2_]);     uint8x8_t ad_ = vbsl_u8(vcge_u8(p2_, vdup_n_u8(8)), vdup_n_u8((uint8_t)cr1_), vdup_n_u8((uint8_t)cl1_));     vst1_u8((oo) + c1_, vqtbl1_u8(W_, vadd_u8(p2_, ad_)));     LL += cl1_ + ((m2_ >> 4) & 7); RR += cr1_ + ((m2_ >> 7) & 7);     (cc) = (m2_ >> 10) & 1;     (oo) += c1_ + (m2_ & 15); } while (0)
 #else
-#define K2D_STEP(LL, RR, cc, oo) do {     uint64_t l8_, r8_; memcpy(&l8_, LL, 8); memcpy(&r8_, RR, 8);     __m128i W_ = _mm_set_epi64x((long long)r8_, (long long)l8_);     uint32_t hb_ = (uint32_t)_mm_movemask_epi8(W_);     uint32_t gl_ = hb_ & 255, gr_ = (hb_ >> 8) & 255;     uint32_t i1_ = (gl_ & 15) | ((gr_ & 15) << 4) | ((cc) << 8);     uint32_t m1_ = k2d_meta[i1_];     _mm_storel_epi64((__m128i *)(void *)(oo),         _mm_shuffle_epi8(W_, _mm_cvtsi64_si128((long long)k2d_pat[i1_])));     uint32_t c1_ = m1_ & 15, cl1_ = (m1_ >> 4) & 7, cr1_ = (m1_ >> 7) & 7;     uint32_t i2_ = ((gl_ >> cl1_) & 15) | (((gr_ >> cr1_) & 15) << 4) | (((m1_ >> 10) & 1) << 8);     uint32_t m2_ = k2d_meta[i2_];     __m128i p2_ = _mm_cvtsi64_si128((long long)k2d_pat[i2_]);     __m128i ms_ = _mm_cmpgt_epi8(p2_, _mm_set1_epi8(7));     __m128i ad_ = _mm_blendv_epi8(_mm_set1_epi8((char)cl1_), _mm_set1_epi8((char)cr1_), ms_);     _mm_storel_epi64((__m128i *)(void *)((oo) + c1_),         _mm_shuffle_epi8(W_, _mm_add_epi8(p2_, ad_)));     LL += cl1_ + ((m2_ >> 4) & 7); RR += cr1_ + ((m2_ >> 7) & 7);     (cc) = (m2_ >> 10) & 1;     (oo) += c1_ + (m2_ & 15); } while (0)
-/* k2m: the (6,6) kernel with one movemask replacing two multiply-gathers */
-#define K2M_STEP(LL, RR, cc, oo) do {     uint64_t l8_, r8_; memcpy(&l8_, LL, 8); memcpy(&r8_, RR, 8);     __m128i W_ = _mm_set_epi64x((long long)r8_, (long long)l8_);     uint32_t hb_ = (uint32_t)_mm_movemask_epi8(W_);     uint32_t ix_ = (hb_ & 63) | (((hb_ >> 8) & 63) << 6) | ((cc) << 12);     uint32_t m_ = k2nt_meta[ix_];     _mm_storeu_si128((__m128i *)(void *)(oo),         _mm_shuffle_epi8(W_, _mm_loadu_si128((const __m128i *)(const void *)k2nt_pat[ix_])));     LL += (m_ >> 4) & 7; RR += (m_ >> 7) & 7;     (cc) = (m_ >> 10) & 1;     (oo) += m_ & 15; } while (0)
+#define C2D_STEP(LL, RR, cc, oo) do {     uint64_t l8_, r8_; memcpy(&l8_, LL, 8); memcpy(&r8_, RR, 8);     __m128i W_ = _mm_set_epi64x((long long)r8_, (long long)l8_);     uint32_t hb_ = (uint32_t)_mm_movemask_epi8(W_);     uint32_t gl_ = hb_ & 255, gr_ = (hb_ >> 8) & 255;     uint32_t i1_ = (gl_ & 15) | ((gr_ & 15) << 4) | ((cc) << 8);     uint32_t m1_ = c2d_meta[i1_];     _mm_storel_epi64((__m128i *)(void *)(oo),         _mm_shuffle_epi8(W_, _mm_cvtsi64_si128((long long)c2d_pat[i1_])));     uint32_t c1_ = m1_ & 15, cl1_ = (m1_ >> 4) & 7, cr1_ = (m1_ >> 7) & 7;     uint32_t i2_ = ((gl_ >> cl1_) & 15) | (((gr_ >> cr1_) & 15) << 4) | (((m1_ >> 10) & 1) << 8);     uint32_t m2_ = c2d_meta[i2_];     __m128i p2_ = _mm_cvtsi64_si128((long long)c2d_pat[i2_]);     __m128i ms_ = _mm_cmpgt_epi8(p2_, _mm_set1_epi8(7));     __m128i ad_ = _mm_blendv_epi8(_mm_set1_epi8((char)cl1_), _mm_set1_epi8((char)cr1_), ms_);     _mm_storel_epi64((__m128i *)(void *)((oo) + c1_),         _mm_shuffle_epi8(W_, _mm_add_epi8(p2_, ad_)));     LL += cl1_ + ((m2_ >> 4) & 7); RR += cr1_ + ((m2_ >> 7) & 7);     (cc) = (m2_ >> 10) & 1;     (oo) += c1_ + (m2_ & 15); } while (0)
+/* c2m: the (6,6) kernel with one movemask replacing two multiply-gathers */
+#define C2M_STEP(LL, RR, cc, oo) do {     uint64_t l8_, r8_; memcpy(&l8_, LL, 8); memcpy(&r8_, RR, 8);     __m128i W_ = _mm_set_epi64x((long long)r8_, (long long)l8_);     uint32_t hb_ = (uint32_t)_mm_movemask_epi8(W_);     uint32_t ix_ = (hb_ & 63) | (((hb_ >> 8) & 63) << 6) | ((cc) << 12);     uint32_t m_ = c2nt_meta[ix_];     _mm_storeu_si128((__m128i *)(void *)(oo),         _mm_shuffle_epi8(W_, _mm_loadu_si128((const __m128i *)(const void *)c2nt_pat[ix_])));     LL += (m_ >> 4) & 7; RR += (m_ >> 7) & 7;     (cc) = (m_ >> 10) & 1;     (oo) += m_ & 15; } while (0)
 #endif
 
-/* ------- k2g: MZ's 2x16B double -- one load pair, two (6,6) steps -------- */
+/* ------- c2g: MZ's 2x16B double -- one load pair, two (6,6) steps -------- */
 /* Load 16 bytes per side ONCE, gather all 16 top bits per side ONCE, then
  * run TWO full (6,6) table steps out of the registers.  Step 2's 6+6 index
  * bits are just (gl>>nl1, gr>>nr1) of the same header words -- the second
  * stream load + movemask/gather drops off the dependency chain entirely
- * (that chained-adjust shift is what killed k2d/k2e, but those also paid
+ * (that chained-adjust shift is what killed c2d/c2e, but those also paid
  * for it with crippled (4,4) windows; here both steps keep full yield and
- * reuse k2nt_meta unchanged).  Emit shuffles from the 32B {L16,R16} pair
- * via k2g_pat (R lanes stored at +16); step 2 adds +nl1 to L lanes and
+ * reuse c2nt_meta unchanged).  Emit shuffles from the 32B {L16,R16} pair
+ * via c2g_pat (R lanes stored at +16); step 2 adds +nl1 to L lanes and
  * +nr1 to R lanes of its pattern.  Consumption per pair <= 12/side, so
  * the 16B loads always cover both steps. */
-static uint8_t k2g_pat[8192][16];
-static void build_k2g(void) {
+static uint8_t c2g_pat[8192][16];
+static void build_c2g(void) {
     for (uint32_t ix = 0; ix < 8192; ix++)
         for (int j = 0; j < 16; j++) {
-            uint8_t v = k2nt_pat[ix][j];
-            k2g_pat[ix][j] = v < 8 ? v : (uint8_t)(16 + (v - 8));
+            uint8_t v = c2nt_pat[ix][j];
+            c2g_pat[ix][j] = v < 8 ? v : (uint8_t)(16 + (v - 8));
         }
 }
 
 #if defined(__aarch64__)
-#define K2G_STEP(LL, RR, cc, oo) do { \
+#define C2G_STEP(LL, RR, cc, oo) do { \
     ITC \
     uint64_t la_, lb_, ra_, rb_; \
     memcpy(&la_, LL, 8); memcpy(&lb_, (LL) + 8, 8); \
@@ -336,14 +336,14 @@ static void build_k2g(void) {
     W_.val[0] = vcombine_u8(vcreate_u8(la_), vcreate_u8(lb_)); \
     W_.val[1] = vcombine_u8(vcreate_u8(ra_), vcreate_u8(rb_)); \
     uint32_t i1_ = (gl_ & 63) | ((gr_ & 63) << 6) | ((cc) << 12); \
-    uint32_t m1_ = k2nt_meta[i1_]; \
-    vst1q_u8((oo), vqtbl2q_u8(W_, vld1q_u8(k2g_pat[i1_]))); \
+    uint32_t m1_ = c2nt_meta[i1_]; \
+    vst1q_u8((oo), vqtbl2q_u8(W_, vld1q_u8(c2g_pat[i1_]))); \
     uint32_t c1_ = m1_ & 15, nl_ = (m1_ >> 4) & 7, nr_ = (m1_ >> 7) & 7; \
     ITC \
     uint32_t i2_ = ((gl_ >> nl_) & 63) | (((gr_ >> nr_) & 63) << 6) \
                  | (((m1_ >> 10) & 1) << 12); \
-    uint32_t m2_ = k2nt_meta[i2_]; \
-    uint8x16_t p2_ = vld1q_u8(k2g_pat[i2_]); \
+    uint32_t m2_ = c2nt_meta[i2_]; \
+    uint8x16_t p2_ = vld1q_u8(c2g_pat[i2_]); \
     uint8x16_t ad_ = vbslq_u8(vcgeq_u8(p2_, vdupq_n_u8(16)), \
                               vdupq_n_u8((uint8_t)nr_), vdupq_n_u8((uint8_t)nl_)); \
     vst1q_u8((oo) + c1_, vqtbl2q_u8(W_, vaddq_u8(p2_, ad_))); \
@@ -351,9 +351,9 @@ static void build_k2g(void) {
     (cc) = (m2_ >> 10) & 1; \
     (oo) += c1_ + (m2_ & 15); \
 } while (0)
-#define HAVE_K2G 1
+#define HAVE_C2G 1
 #elif defined(__AVX512VBMI__)
-#define K2G_STEP(LL, RR, cc, oo) do { \
+#define C2G_STEP(LL, RR, cc, oo) do { \
     ITC \
     __m128i XL_ = _mm_loadu_si128((const __m128i *)(const void *)(LL)); \
     __m128i XR_ = _mm_loadu_si128((const __m128i *)(const void *)(RR)); \
@@ -361,17 +361,17 @@ static void build_k2g(void) {
     uint32_t gr_ = (uint32_t)_mm_movemask_epi8(XR_); \
     __m256i S_ = _mm256_inserti128_si256(_mm256_castsi128_si256(XL_), XR_, 1); \
     uint32_t i1_ = (gl_ & 63) | ((gr_ & 63) << 6) | ((cc) << 12); \
-    uint32_t m1_ = k2nt_meta[i1_]; \
+    uint32_t m1_ = c2nt_meta[i1_]; \
     _mm_storeu_si128((__m128i *)(void *)(oo), \
         _mm256_castsi256_si128(_mm256_permutexvar_epi8( \
             _mm256_castsi128_si256( \
-                _mm_loadu_si128((const __m128i *)(const void *)k2g_pat[i1_])), S_))); \
+                _mm_loadu_si128((const __m128i *)(const void *)c2g_pat[i1_])), S_))); \
     uint32_t c1_ = m1_ & 15, nl_ = (m1_ >> 4) & 7, nr_ = (m1_ >> 7) & 7; \
     ITC \
     uint32_t i2_ = ((gl_ >> nl_) & 63) | (((gr_ >> nr_) & 63) << 6) \
                  | (((m1_ >> 10) & 1) << 12); \
-    uint32_t m2_ = k2nt_meta[i2_]; \
-    __m128i p2_ = _mm_loadu_si128((const __m128i *)(const void *)k2g_pat[i2_]); \
+    uint32_t m2_ = c2nt_meta[i2_]; \
+    __m128i p2_ = _mm_loadu_si128((const __m128i *)(const void *)c2g_pat[i2_]); \
     __m128i ms_ = _mm_cmpgt_epi8(p2_, _mm_set1_epi8(15)); \
     __m128i ad_ = _mm_blendv_epi8(_mm_set1_epi8((char)nl_), \
                                   _mm_set1_epi8((char)nr_), ms_); \
@@ -382,10 +382,10 @@ static void build_k2g(void) {
     (cc) = (m2_ >> 10) & 1; \
     (oo) += c1_ + (m2_ & 15); \
 } while (0)
-#define HAVE_K2G 1
+#define HAVE_C2G 1
 #endif
 
-/* ------- k2p/k2q: pext indices + byte-packed meta (x86 BMI2) ------------- */
+/* ------- c2p/c2q: pext indices + byte-packed meta (x86 BMI2) ------------- */
 /* Counter data: post-compaction ~11 of ~34 instr/step are field/index
  * bit-extraction (x86 pays shr+and per field; aarch64 has ubfx so this
  * lever is x86-only).  Two fixes: (1) meta repacked at byte offsets --
@@ -396,36 +396,36 @@ static void build_k2g(void) {
  * 0x3F<<nl1 | 0x3F<<(16+nr1) is PRE-COMPUTED per step-1 table entry --
  * the whole chained-adjust shift/mask/or collapses into one table load
  * (parallel with meta) + one 3-cycle pext. */
-static uint32_t k2p_meta[8192];   /* cnt | nl<<8 | nr<<16 | cnext<<24 */
-static uint32_t k2p_mask[8192];   /* step-2 pext mask for this entry */
-static void build_k2p(void) {
+static uint32_t c2p_meta[8192];   /* cnt | nl<<8 | nr<<16 | cnext<<24 */
+static uint32_t c2p_mask[8192];   /* step-2 pext mask for this entry */
+static void build_c2p(void) {
     for (uint32_t ix = 0; ix < 8192; ix++) {
-        uint32_t m = k2nt_meta[ix];
+        uint32_t m = c2nt_meta[ix];
         uint32_t nl = (m >> 4) & 7, nr = (m >> 7) & 7;
-        k2p_meta[ix] = (m & 15) | nl << 8 | nr << 16 | ((m >> 10) & 1) << 24;
-        k2p_mask[ix] = (0x3Fu << nl) | (0x3Fu << (16 + nr));
+        c2p_meta[ix] = (m & 15) | nl << 8 | nr << 16 | ((m >> 10) & 1) << 24;
+        c2p_mask[ix] = (0x3Fu << nl) | (0x3Fu << (16 + nr));
     }
 }
 
 #if !defined(__aarch64__) && defined(__BMI2__)
-/* k2q: the k2m single step with pext index + byte meta */
-#define K2Q_STEP(LL, RR, cc, oo) do { \
+/* c2q: the c2m single step with pext index + byte meta */
+#define C2Q_STEP(LL, RR, cc, oo) do { \
     ITC \
     uint64_t l8_, r8_; memcpy(&l8_, LL, 8); memcpy(&r8_, RR, 8); \
     __m128i W_ = _mm_set_epi64x((long long)r8_, (long long)l8_); \
     uint32_t hb_ = (uint32_t)_mm_movemask_epi8(W_); \
     uint32_t ix_ = _pext_u32(hb_, 0x3F3Fu) | ((cc) << 12); \
-    uint32_t m_ = k2p_meta[ix_]; \
+    uint32_t m_ = c2p_meta[ix_]; \
     _mm_storeu_si128((__m128i *)(void *)(oo), \
-        _mm_shuffle_epi8(W_, _mm_loadu_si128((const __m128i *)(const void *)k2nt_pat[ix_]))); \
+        _mm_shuffle_epi8(W_, _mm_loadu_si128((const __m128i *)(const void *)c2nt_pat[ix_]))); \
     LL += (m_ >> 8) & 255; RR += (m_ >> 16) & 255; \
     (cc) = m_ >> 24; \
     (oo) += m_ & 255; \
 } while (0)
-#define HAVE_K2Q 1
+#define HAVE_C2Q 1
 #endif
 
-/* ------- k2s: mask-domain walk, one VBMI2 merge per group (x86 AVX-512) -- */
+/* ------- c2s: mask-domain walk, one VBMI2 merge per group (x86 AVX-512) -- */
 /* The (6,6) step stops emitting.  Its entry holds the SIDE FRAGMENT of the
  * bytes it would emit (bit j set when output byte j comes from R), nl, nr,
  * len and the next side: 4 bytes per entry, 32 KB, L1-resident.  A group
@@ -436,23 +436,23 @@ static void build_k2p(void) {
  * S) applied to registers, one 64 B store.  Five steps emit 30..60 B, so
  * the store wants 64 B of output margin and the windows 64 B of read slack
  * past each stream (encode pads 96). */
-static uint32_t k2s_meta[8192];   /* len(4b@0) nl(3b@4) nr(3b@10) cnext(1b@16) frag(12b@17) */
-static void build_k2s(void) {
+static uint32_t c2s_meta[8192];   /* len(4b@0) nl(3b@4) nr(3b@10) cnext(1b@16) frag(12b@17) */
+static void build_c2s(void) {
     for (uint32_t ix = 0; ix < 8192; ix++) {
-        uint32_t m = k2nt_meta[ix];
+        uint32_t m = c2nt_meta[ix];
         uint32_t cnt = m & 15, nl = (m >> 4) & 7, nr = (m >> 7) & 7, cnext = (m >> 10) & 1;
         uint32_t frag = 0;
-        for (uint32_t j = 0; j < cnt; j++) frag |= (uint32_t)(k2nt_pat[ix][j] >> 3) << j;
-        k2s_meta[ix] = cnt | nl << 4 | nr << 10 | cnext << 16 | frag << 17;
+        for (uint32_t j = 0; j < cnt; j++) frag |= (uint32_t)(c2nt_pat[ix][j] >> 3) << j;
+        c2s_meta[ix] = cnt | nl << 4 | nr << 10 | cnext << 16 | frag << 17;
     }
 }
 
 #if !defined(__aarch64__) && defined(__AVX512VBMI2__) && defined(__AVX512BW__)
-#define K2S_STEP(hl, hr, S, ct, ol) { \
+#define C2S_STEP(hl, hr, S, ct, ol) { \
     ITC \
     uint32_t ix_ = ((uint32_t)(hl) & 63) | (((uint32_t)(hr) & 63) << 6) | (ct); \
     HST(ix_) \
-    uint32_t m_ = k2s_meta[ix_]; \
+    uint32_t m_ = c2s_meta[ix_]; \
     uint32_t t_ = m_ >> 4; \
     (hl) >>= t_ & 63; \
     (hr) >>= (m_ >> 10) & 63; \
@@ -461,37 +461,37 @@ static void build_k2s(void) {
     (ct) = t_ & 4096; \
 }
 /* packed state: P = ol (bits 0..5) | ct (bit 12) -- one register per chain less */
-#define K2S_STEPP(hl, hr, S, P) { \
+#define C2S_STEPP(hl, hr, S, P) { \
     ITC \
     uint32_t ix_ = ((uint32_t)(hl) & 63) | (((uint32_t)(hr) & 63) << 6) | ((P) & 4096); \
     HST(ix_) \
-    uint32_t m_ = k2s_meta[ix_]; \
+    uint32_t m_ = c2s_meta[ix_]; \
     uint32_t t_ = m_ >> 4; \
     (hl) >>= t_ & 63; \
     (hr) >>= (m_ >> 10) & 63; \
     (S) |= (uint64_t)(m_ >> 17) << ((P) & 63); \
     (P) = (((P) + (m_ & 15)) & 63) | (t_ & 4096); \
 }
-#define K2S_GROUP(LL, RR, cc, oo) do { \
+#define C2S_GROUP(LL, RR, cc, oo) do { \
     __m512i lv_ = _mm512_loadu_si512((const void *)(LL)); \
     __m512i rv_ = _mm512_loadu_si512((const void *)(RR)); \
     uint64_t hl_ = _mm512_movepi8_mask(lv_), hr_ = _mm512_movepi8_mask(rv_); \
     uint64_t S_ = 0; uint32_t ct_ = (cc) << 12, ol_ = 0; \
-    K2S_STEP(hl_, hr_, S_, ct_, ol_) K2S_STEP(hl_, hr_, S_, ct_, ol_) \
-    K2S_STEP(hl_, hr_, S_, ct_, ol_) K2S_STEP(hl_, hr_, S_, ct_, ol_) \
-    K2S_STEP(hl_, hr_, S_, ct_, ol_) \
+    C2S_STEP(hl_, hr_, S_, ct_, ol_) C2S_STEP(hl_, hr_, S_, ct_, ol_) \
+    C2S_STEP(hl_, hr_, S_, ct_, ol_) C2S_STEP(hl_, hr_, S_, ct_, ol_) \
+    C2S_STEP(hl_, hr_, S_, ct_, ol_) \
     __mmask64 kr_ = (__mmask64)S_; \
     _mm512_storeu_si512((void *)(oo), _mm512_mask_expand_epi8( \
         _mm512_maskz_expand_epi8(~kr_, lv_), kr_, rv_)); \
     uint32_t nr_ = (uint32_t)__builtin_popcountll(S_); \
     (RR) += nr_; (LL) += ol_ - nr_; (oo) += ol_; (cc) = ct_ >> 12; \
 } while (0)
-#define HAVE_K2S 1
+#define HAVE_C2S 1
 #endif
 
 #if !defined(__aarch64__) && defined(__BMI2__) && defined(__AVX512VBMI__)
-/* k2p: the k2g 2x16B double with pext indices + byte meta */
-#define K2P_STEP(LL, RR, cc, oo) do { \
+/* c2p: the c2g 2x16B double with pext indices + byte meta */
+#define C2P_STEP(LL, RR, cc, oo) do { \
     ITC \
     __m128i XL_ = _mm_loadu_si128((const __m128i *)(const void *)(LL)); \
     __m128i XR_ = _mm_loadu_si128((const __m128i *)(const void *)(RR)); \
@@ -499,16 +499,16 @@ static void build_k2s(void) {
                 | ((uint32_t)_mm_movemask_epi8(XR_) << 16); \
     __m256i S_ = _mm256_inserti128_si256(_mm256_castsi128_si256(XL_), XR_, 1); \
     uint32_t i1_ = _pext_u32(h_, 0x003F003Fu) | ((cc) << 12); \
-    uint32_t m1_ = k2p_meta[i1_]; \
+    uint32_t m1_ = c2p_meta[i1_]; \
     _mm_storeu_si128((__m128i *)(void *)(oo), \
         _mm256_castsi256_si128(_mm256_permutexvar_epi8( \
             _mm256_castsi128_si256( \
-                _mm_loadu_si128((const __m128i *)(const void *)k2g_pat[i1_])), S_))); \
+                _mm_loadu_si128((const __m128i *)(const void *)c2g_pat[i1_])), S_))); \
     uint32_t c1_ = m1_ & 255, nl_ = (m1_ >> 8) & 255, nr_ = (m1_ >> 16) & 255; \
     ITC \
-    uint32_t i2_ = _pext_u32(h_, k2p_mask[i1_]) | ((m1_ >> 24) << 12); \
-    uint32_t m2_ = k2p_meta[i2_]; \
-    __m128i p2_ = _mm_loadu_si128((const __m128i *)(const void *)k2g_pat[i2_]); \
+    uint32_t i2_ = _pext_u32(h_, c2p_mask[i1_]) | ((m1_ >> 24) << 12); \
+    uint32_t m2_ = c2p_meta[i2_]; \
+    __m128i p2_ = _mm_loadu_si128((const __m128i *)(const void *)c2g_pat[i2_]); \
     __m128i ms_ = _mm_cmpgt_epi8(p2_, _mm_set1_epi8(15)); \
     __m128i ad_ = _mm_blendv_epi8(_mm_set1_epi8((char)nl_), \
                                   _mm_set1_epi8((char)nr_), ms_); \
@@ -519,17 +519,17 @@ static void build_k2s(void) {
     (cc) = m2_ >> 24; \
     (oo) += c1_ + (m2_ & 255); \
 } while (0)
-#define HAVE_K2P 1
+#define HAVE_C2P 1
 #endif
 
-/* ------- k2e: MZ's fused double -- combo id in 2nd index, one shuffle ----- */
+/* ------- c2e: MZ's fused double -- combo id in 2nd index, one shuffle ----- */
 /* t1: 9-bit idx -> combo(4b@0) c1(1b@4) cl1(3b@5) cr1(3b@8) + zero-padded 16B
  * pattern.  t2: combo | nextL4<<4 | nextR4<<8 | c1<<12 -> pattern PRE-offset
  * (+cl1/+cr1) and PRE-positioned at byte cnt1, zeros below.  P = P1|P2. */
-static uint32_t k2e1_meta[512];  static uint8_t k2e1_pat[512][16];
-static uint32_t k2e2_meta[8192]; static uint8_t k2e2_pat[8192][16];
+static uint32_t c2e1_meta[512];  static uint8_t c2e1_pat[512][16];
+static uint32_t c2e2_meta[8192]; static uint8_t c2e2_pat[8192][16];
 
-static void build_k2e(void) {
+static void build_c2e(void) {
     for (uint32_t ix = 0; ix < 512; ix++) {
         uint32_t c0 = ix >> 8, nl = 0, nr = 0, cnt = 0, cur = c0;
         uint8_t pat[16] = {0};
@@ -539,8 +539,8 @@ static void build_k2e(void) {
             cnt++;
         }
         uint32_t combo = (nl == 4) ? nr : 5 + nl;      /* 9 reachable ids */
-        k2e1_meta[ix] = combo | cur << 4 | nl << 5 | nr << 8;
-        memcpy(k2e1_pat[ix], pat, 16);
+        c2e1_meta[ix] = combo | cur << 4 | nl << 5 | nr << 8;
+        memcpy(c2e1_pat[ix], pat, 16);
     }
     for (uint32_t ix = 0; ix < 8192; ix++) {
         uint32_t combo = ix & 15;
@@ -555,63 +555,63 @@ static void build_k2e(void) {
             else          { if (nr >= 4) break; pat[cnt1 + cnt] = 8 + cr1 + nr; cur = (R4 >> nr) & 1; nr++; }
             cnt++;
         }
-        k2e2_meta[ix] = cnt | nl << 4 | nr << 7 | cur << 10;
-        memcpy(k2e2_pat[ix], pat, 16);
+        c2e2_meta[ix] = cnt | nl << 4 | nr << 7 | cur << 10;
+        memcpy(c2e2_pat[ix], pat, 16);
     }
 }
 
 #if defined(__aarch64__)
-#define K2E_STEP(LL, RR, cc, oo) do {     uint64_t l8_, r8_; memcpy(&l8_, LL, 8); memcpy(&r8_, RR, 8);     uint32_t gl_ = (uint32_t)((((l8_ >> 7) & BB) * MUL) >> 56);     uint32_t gr_ = (uint32_t)((((r8_ >> 7) & BB) * MUL) >> 56);     uint32_t i1_ = (gl_ & 15) | ((gr_ & 15) << 4) | ((cc) << 8);     uint32_t m1_ = k2e1_meta[i1_];     uint32_t cl1_ = (m1_ >> 5) & 7, cr1_ = (m1_ >> 8) & 7;     uint32_t i2_ = (m1_ & 15) | (((gl_ >> cl1_) & 15) << 4)                  | (((gr_ >> cr1_) & 15) << 8) | (((m1_ >> 4) & 1) << 12);     uint32_t m2_ = k2e2_meta[i2_];     uint8x16_t P_ = vorrq_u8(vld1q_u8(k2e1_pat[i1_]), vld1q_u8(k2e2_pat[i2_]));     vst1q_u8(oo, vqtbl1q_u8(vcombine_u8(vcreate_u8(l8_), vcreate_u8(r8_)), P_));     LL += cl1_ + ((m2_ >> 4) & 7); RR += cr1_ + ((m2_ >> 7) & 7);     (cc) = (m2_ >> 10) & 1;     (oo) += cl1_ + cr1_ + (m2_ & 15); } while (0)
+#define C2E_STEP(LL, RR, cc, oo) do {     uint64_t l8_, r8_; memcpy(&l8_, LL, 8); memcpy(&r8_, RR, 8);     uint32_t gl_ = (uint32_t)((((l8_ >> 7) & BB) * MUL) >> 56);     uint32_t gr_ = (uint32_t)((((r8_ >> 7) & BB) * MUL) >> 56);     uint32_t i1_ = (gl_ & 15) | ((gr_ & 15) << 4) | ((cc) << 8);     uint32_t m1_ = c2e1_meta[i1_];     uint32_t cl1_ = (m1_ >> 5) & 7, cr1_ = (m1_ >> 8) & 7;     uint32_t i2_ = (m1_ & 15) | (((gl_ >> cl1_) & 15) << 4)                  | (((gr_ >> cr1_) & 15) << 8) | (((m1_ >> 4) & 1) << 12);     uint32_t m2_ = c2e2_meta[i2_];     uint8x16_t P_ = vorrq_u8(vld1q_u8(c2e1_pat[i1_]), vld1q_u8(c2e2_pat[i2_]));     vst1q_u8(oo, vqtbl1q_u8(vcombine_u8(vcreate_u8(l8_), vcreate_u8(r8_)), P_));     LL += cl1_ + ((m2_ >> 4) & 7); RR += cr1_ + ((m2_ >> 7) & 7);     (cc) = (m2_ >> 10) & 1;     (oo) += cl1_ + cr1_ + (m2_ & 15); } while (0)
 #else
-#define K2E_STEP(LL, RR, cc, oo) do {     uint64_t l8_, r8_; memcpy(&l8_, LL, 8); memcpy(&r8_, RR, 8);     __m128i W_ = _mm_set_epi64x((long long)r8_, (long long)l8_);     uint32_t hb_ = (uint32_t)_mm_movemask_epi8(W_);     uint32_t gl_ = hb_ & 255, gr_ = (hb_ >> 8) & 255;     uint32_t i1_ = (gl_ & 15) | ((gr_ & 15) << 4) | ((cc) << 8);     uint32_t m1_ = k2e1_meta[i1_];     uint32_t cl1_ = (m1_ >> 5) & 7, cr1_ = (m1_ >> 8) & 7;     uint32_t i2_ = (m1_ & 15) | (((gl_ >> cl1_) & 15) << 4)                  | (((gr_ >> cr1_) & 15) << 8) | (((m1_ >> 4) & 1) << 12);     uint32_t m2_ = k2e2_meta[i2_];     __m128i P_ = _mm_or_si128(         _mm_loadu_si128((const __m128i *)(const void *)k2e1_pat[i1_]),         _mm_loadu_si128((const __m128i *)(const void *)k2e2_pat[i2_]));     _mm_storeu_si128((__m128i *)(void *)(oo), _mm_shuffle_epi8(W_, P_));     LL += cl1_ + ((m2_ >> 4) & 7); RR += cr1_ + ((m2_ >> 7) & 7);     (cc) = (m2_ >> 10) & 1;     (oo) += cl1_ + cr1_ + (m2_ & 15); } while (0)
+#define C2E_STEP(LL, RR, cc, oo) do {     uint64_t l8_, r8_; memcpy(&l8_, LL, 8); memcpy(&r8_, RR, 8);     __m128i W_ = _mm_set_epi64x((long long)r8_, (long long)l8_);     uint32_t hb_ = (uint32_t)_mm_movemask_epi8(W_);     uint32_t gl_ = hb_ & 255, gr_ = (hb_ >> 8) & 255;     uint32_t i1_ = (gl_ & 15) | ((gr_ & 15) << 4) | ((cc) << 8);     uint32_t m1_ = c2e1_meta[i1_];     uint32_t cl1_ = (m1_ >> 5) & 7, cr1_ = (m1_ >> 8) & 7;     uint32_t i2_ = (m1_ & 15) | (((gl_ >> cl1_) & 15) << 4)                  | (((gr_ >> cr1_) & 15) << 8) | (((m1_ >> 4) & 1) << 12);     uint32_t m2_ = c2e2_meta[i2_];     __m128i P_ = _mm_or_si128(         _mm_loadu_si128((const __m128i *)(const void *)c2e1_pat[i1_]),         _mm_loadu_si128((const __m128i *)(const void *)c2e2_pat[i2_]));     _mm_storeu_si128((__m128i *)(void *)(oo), _mm_shuffle_epi8(W_, P_));     LL += cl1_ + ((m2_ >> 4) & 7); RR += cr1_ + ((m2_ >> 7) & 7);     (cc) = (m2_ >> 10) & 1;     (oo) += cl1_ + cr1_ + (m2_ & 15); } while (0)
 #endif
 
-/* ------- k2f: MZ's big-table completion -- ONE chained load ---------------
+/* ------- c2f: MZ's big-table completion -- ONE chained load ---------------
  * idx = c<<16 | hb (full 16 header bits): entry carries i2, total advances,
- * next c.  i1 is ALU-computable; patterns factored via k2e tables + OR.  */
-static uint32_t k2f_tab[1 << 17];   /* i2(13b@0) clT(4b@13) crT(4b@17) c(1b@21) */
+ * next c.  i1 is ALU-computable; patterns factored via c2e tables + OR.  */
+static uint32_t c2f_tab[1 << 17];   /* i2(13b@0) clT(4b@13) crT(4b@17) c(1b@21) */
 
-static void build_k2f(void) {       /* composed from the k2e sub-tables */
+static void build_c2f(void) {       /* composed from the c2e sub-tables */
     for (uint32_t c = 0; c < 2; c++)
         for (uint32_t hb = 0; hb < 65536; hb++) {
             uint32_t gl = hb & 255, gr = (hb >> 8) & 255;
             uint32_t i1 = (gl & 15) | ((gr & 15) << 4) | (c << 8);
-            uint32_t m1 = k2e1_meta[i1];
+            uint32_t m1 = c2e1_meta[i1];
             uint32_t cl1 = (m1 >> 5) & 7, cr1 = (m1 >> 8) & 7;
             uint32_t i2 = (m1 & 15) | (((gl >> cl1) & 15) << 4)
                         | (((gr >> cr1) & 15) << 8) | (((m1 >> 4) & 1) << 12);
-            uint32_t m2 = k2e2_meta[i2];
+            uint32_t m2 = c2e2_meta[i2];
             uint32_t clT = cl1 + ((m2 >> 4) & 7), crT = cr1 + ((m2 >> 7) & 7);
-            k2f_tab[(c << 16) | hb] = i2 | clT << 13 | crT << 17 | ((m2 >> 10) & 1) << 21;
+            c2f_tab[(c << 16) | hb] = i2 | clT << 13 | crT << 17 | ((m2 >> 10) & 1) << 21;
         }
 }
 
 #if defined(__aarch64__)
-#define K2F_STEP(LL, RR, cc, oo) do {     uint64_t l8_, r8_; memcpy(&l8_, LL, 8); memcpy(&r8_, RR, 8);     uint32_t gl_ = (uint32_t)((((l8_ >> 7) & BB) * MUL) >> 56);     uint32_t gr_ = (uint32_t)((((r8_ >> 7) & BB) * MUL) >> 56);     uint32_t hb_ = gl_ | (gr_ << 8);     uint32_t e_ = k2f_tab[((cc) << 16) | hb_];     uint32_t i1_ = (gl_ & 15) | ((gr_ & 15) << 4) | ((cc) << 8);     uint8x16_t P_ = vorrq_u8(vld1q_u8(k2e1_pat[i1_]), vld1q_u8(k2e2_pat[e_ & 8191]));     vst1q_u8(oo, vqtbl1q_u8(vcombine_u8(vcreate_u8(l8_), vcreate_u8(r8_)), P_));     uint32_t clT_ = (e_ >> 13) & 15, crT_ = (e_ >> 17) & 15;     LL += clT_; RR += crT_;     (cc) = (e_ >> 21) & 1;     (oo) += clT_ + crT_; } while (0)
+#define C2F_STEP(LL, RR, cc, oo) do {     uint64_t l8_, r8_; memcpy(&l8_, LL, 8); memcpy(&r8_, RR, 8);     uint32_t gl_ = (uint32_t)((((l8_ >> 7) & BB) * MUL) >> 56);     uint32_t gr_ = (uint32_t)((((r8_ >> 7) & BB) * MUL) >> 56);     uint32_t hb_ = gl_ | (gr_ << 8);     uint32_t e_ = c2f_tab[((cc) << 16) | hb_];     uint32_t i1_ = (gl_ & 15) | ((gr_ & 15) << 4) | ((cc) << 8);     uint8x16_t P_ = vorrq_u8(vld1q_u8(c2e1_pat[i1_]), vld1q_u8(c2e2_pat[e_ & 8191]));     vst1q_u8(oo, vqtbl1q_u8(vcombine_u8(vcreate_u8(l8_), vcreate_u8(r8_)), P_));     uint32_t clT_ = (e_ >> 13) & 15, crT_ = (e_ >> 17) & 15;     LL += clT_; RR += crT_;     (cc) = (e_ >> 21) & 1;     (oo) += clT_ + crT_; } while (0)
 #else
-#define K2F_STEP(LL, RR, cc, oo) do {     uint64_t l8_, r8_; memcpy(&l8_, LL, 8); memcpy(&r8_, RR, 8);     __m128i W_ = _mm_set_epi64x((long long)r8_, (long long)l8_);     uint32_t hb_ = (uint32_t)_mm_movemask_epi8(W_);     uint32_t e_ = k2f_tab[((cc) << 16) | hb_];     uint32_t i1_ = (hb_ & 15) | (((hb_ >> 8) & 15) << 4) | ((cc) << 8);     __m128i P_ = _mm_or_si128(         _mm_loadu_si128((const __m128i *)(const void *)k2e1_pat[i1_]),         _mm_loadu_si128((const __m128i *)(const void *)k2e2_pat[e_ & 8191]));     _mm_storeu_si128((__m128i *)(void *)(oo), _mm_shuffle_epi8(W_, P_));     uint32_t clT_ = (e_ >> 13) & 15, crT_ = (e_ >> 17) & 15;     LL += clT_; RR += crT_;     (cc) = (e_ >> 21) & 1;     (oo) += clT_ + crT_; } while (0)
+#define C2F_STEP(LL, RR, cc, oo) do {     uint64_t l8_, r8_; memcpy(&l8_, LL, 8); memcpy(&r8_, RR, 8);     __m128i W_ = _mm_set_epi64x((long long)r8_, (long long)l8_);     uint32_t hb_ = (uint32_t)_mm_movemask_epi8(W_);     uint32_t e_ = c2f_tab[((cc) << 16) | hb_];     uint32_t i1_ = (hb_ & 15) | (((hb_ >> 8) & 15) << 4) | ((cc) << 8);     __m128i P_ = _mm_or_si128(         _mm_loadu_si128((const __m128i *)(const void *)c2e1_pat[i1_]),         _mm_loadu_si128((const __m128i *)(const void *)c2e2_pat[e_ & 8191]));     _mm_storeu_si128((__m128i *)(void *)(oo), _mm_shuffle_epi8(W_, P_));     uint32_t clT_ = (e_ >> 13) & 15, crT_ = (e_ >> 17) & 15;     LL += clT_; RR += crT_;     (cc) = (e_ >> 21) & 1;     (oo) += clT_ + crT_; } while (0)
 #endif
 
-/* ------- k4r: MZ's register-arithmetic K=4 walk (no tables) ---------------
+/* ------- c4r: MZ's register-arithmetic C=4 walk (no tables) ---------------
  * H = 4x16-bit lanes of 8-deep 2-bit class headers; R = per-bucket next-ref
  * bytes (ref = 8c+n).  Identity: class shift = 2*ref.  8 elements/iteration,
  * unconditional (8-deep visibility per bucket => walk never stalls). */
 #if defined(__aarch64__)
-#define HAVE_K4R 1
-#define K4R_HDR(l_, lane_) do {     uint64_t t_ = ((l_) >> 6) & 0x0303030303030303ULL;     uint64_t lo_ = ((t_ & 0xFFFFFFFFULL) * 0x0104104000000000ULL) >> 56;     uint64_t hi_ = ((t_ >> 32) * 0x0104104000000000ULL) >> 56;     H_ |= (lo_ | (hi_ << 8)) << (16 * (lane_)); } while (0)
+#define HAVE_C4R 1
+#define C4R_HDR(l_, lane_) do {     uint64_t t_ = ((l_) >> 6) & 0x0303030303030303ULL;     uint64_t lo_ = ((t_ & 0xFFFFFFFFULL) * 0x0104104000000000ULL) >> 56;     uint64_t hi_ = ((t_ >> 32) * 0x0104104000000000ULL) >> 56;     H_ |= (lo_ | (hi_ << 8)) << (16 * (lane_)); } while (0)
 #elif defined(__AVX512VBMI__) && defined(__AVX512VL__)
-#define HAVE_K4R 1
+#define HAVE_C4R 1
 #endif
 
-#ifdef HAVE_K4R
-#define K4R_W(k) { uint32_t s3_ = c_ << 3;     uint32_t ref_ = (R_ >> s3_) & 255;     P_ |= (uint64_t)ref_ << (8 * (k));     c_ = (uint32_t)(H_ >> (ref_ << 1)) & 3;     R_ += 1u << s3_; }
+#ifdef HAVE_C4R
+#define C4R_W(k) { uint32_t s3_ = c_ << 3;     uint32_t ref_ = (R_ >> s3_) & 255;     P_ |= (uint64_t)ref_ << (8 * (k));     c_ = (uint32_t)(H_ >> (ref_ << 1)) & 3;     R_ += 1u << s3_; }
 
 #if defined(__aarch64__)
-#define K4R_STEP(A0, A1, A2, A3, cc, oo) do {     uint64_t l0_, l1_, l2_, l3_;     memcpy(&l0_, A0, 8); memcpy(&l1_, A1, 8); memcpy(&l2_, A2, 8); memcpy(&l3_, A3, 8);     uint64_t H_ = 0;     K4R_HDR(l0_, 0); K4R_HDR(l1_, 1); K4R_HDR(l2_, 2); K4R_HDR(l3_, 3);     uint32_t c_ = (cc), R_ = 0x18100800u; uint64_t P_ = 0;     K4R_W(0) K4R_W(1) K4R_W(2) K4R_W(3) K4R_W(4) K4R_W(5) K4R_W(6) K4R_W(7)     uint8x16x2_t T_ = {{ vcombine_u8(vcreate_u8(l0_), vcreate_u8(l1_)),                          vcombine_u8(vcreate_u8(l2_), vcreate_u8(l3_)) }};     vst1_u8(oo, vqtbl2_u8(T_, vcreate_u8(P_)));     uint32_t d_ = R_ - 0x18100800u;     A0 += d_ & 255; A1 += (d_ >> 8) & 255; A2 += (d_ >> 16) & 255; A3 += d_ >> 24;     (cc) = c_; (oo) += 8; } while (0)
+#define C4R_STEP(A0, A1, A2, A3, cc, oo) do {     uint64_t l0_, l1_, l2_, l3_;     memcpy(&l0_, A0, 8); memcpy(&l1_, A1, 8); memcpy(&l2_, A2, 8); memcpy(&l3_, A3, 8);     uint64_t H_ = 0;     C4R_HDR(l0_, 0); C4R_HDR(l1_, 1); C4R_HDR(l2_, 2); C4R_HDR(l3_, 3);     uint32_t c_ = (cc), R_ = 0x18100800u; uint64_t P_ = 0;     C4R_W(0) C4R_W(1) C4R_W(2) C4R_W(3) C4R_W(4) C4R_W(5) C4R_W(6) C4R_W(7)     uint8x16x2_t T_ = {{ vcombine_u8(vcreate_u8(l0_), vcreate_u8(l1_)),                          vcombine_u8(vcreate_u8(l2_), vcreate_u8(l3_)) }};     vst1_u8(oo, vqtbl2_u8(T_, vcreate_u8(P_)));     uint32_t d_ = R_ - 0x18100800u;     A0 += d_ & 255; A1 += (d_ >> 8) & 255; A2 += (d_ >> 16) & 255; A3 += d_ >> 24;     (cc) = c_; (oo) += 8; } while (0)
 #else
-#define K4R_STEP(A0, A1, A2, A3, cc, oo) do {     uint64_t l0_, l1_, l2_, l3_;     memcpy(&l0_, A0, 8); memcpy(&l1_, A1, 8); memcpy(&l2_, A2, 8); memcpy(&l3_, A3, 8);     __m128i W01_ = _mm_set_epi64x((long long)l1_, (long long)l0_);     __m128i W23_ = _mm_set_epi64x((long long)l3_, (long long)l2_);     uint32_t b7a_ = (uint32_t)_mm_movemask_epi8(W01_);     uint32_t b6a_ = (uint32_t)_mm_movemask_epi8(_mm_add_epi8(W01_, W01_));     uint32_t b7b_ = (uint32_t)_mm_movemask_epi8(W23_);     uint32_t b6b_ = (uint32_t)_mm_movemask_epi8(_mm_add_epi8(W23_, W23_));     uint64_t H_ = (uint64_t)(_pdep_u32(b7a_, 0xAAAAAAAAu) | _pdep_u32(b6a_, 0x55555555u))                 | ((uint64_t)(_pdep_u32(b7b_, 0xAAAAAAAAu) | _pdep_u32(b6b_, 0x55555555u)) << 32);     uint32_t c_ = (cc), R_ = 0x18100800u; uint64_t P_ = 0;     K4R_W(0) K4R_W(1) K4R_W(2) K4R_W(3) K4R_W(4) K4R_W(5) K4R_W(6) K4R_W(7)     __m256i S_ = _mm256_set_epi64x((long long)l3_, (long long)l2_, (long long)l1_, (long long)l0_);     __m256i I_ = _mm256_castsi128_si256(_mm_cvtsi64_si128((long long)P_));     _mm_storel_epi64((__m128i *)(void *)(oo),         _mm256_castsi256_si128(_mm256_permutexvar_epi8(I_, S_)));     uint32_t d_ = R_ - 0x18100800u;     A0 += d_ & 255; A1 += (d_ >> 8) & 255; A2 += (d_ >> 16) & 255; A3 += d_ >> 24;     (cc) = c_; (oo) += 8; } while (0)
+#define C4R_STEP(A0, A1, A2, A3, cc, oo) do {     uint64_t l0_, l1_, l2_, l3_;     memcpy(&l0_, A0, 8); memcpy(&l1_, A1, 8); memcpy(&l2_, A2, 8); memcpy(&l3_, A3, 8);     __m128i W01_ = _mm_set_epi64x((long long)l1_, (long long)l0_);     __m128i W23_ = _mm_set_epi64x((long long)l3_, (long long)l2_);     uint32_t b7a_ = (uint32_t)_mm_movemask_epi8(W01_);     uint32_t b6a_ = (uint32_t)_mm_movemask_epi8(_mm_add_epi8(W01_, W01_));     uint32_t b7b_ = (uint32_t)_mm_movemask_epi8(W23_);     uint32_t b6b_ = (uint32_t)_mm_movemask_epi8(_mm_add_epi8(W23_, W23_));     uint64_t H_ = (uint64_t)(_pdep_u32(b7a_, 0xAAAAAAAAu) | _pdep_u32(b6a_, 0x55555555u))                 | ((uint64_t)(_pdep_u32(b7b_, 0xAAAAAAAAu) | _pdep_u32(b6b_, 0x55555555u)) << 32);     uint32_t c_ = (cc), R_ = 0x18100800u; uint64_t P_ = 0;     C4R_W(0) C4R_W(1) C4R_W(2) C4R_W(3) C4R_W(4) C4R_W(5) C4R_W(6) C4R_W(7)     __m256i S_ = _mm256_set_epi64x((long long)l3_, (long long)l2_, (long long)l1_, (long long)l0_);     __m256i I_ = _mm256_castsi128_si256(_mm_cvtsi64_si128((long long)P_));     _mm_storel_epi64((__m128i *)(void *)(oo),         _mm256_castsi256_si128(_mm256_permutexvar_epi8(I_, S_)));     uint32_t d_ = R_ - 0x18100800u;     A0 += d_ & 255; A1 += (d_ >> 8) & 255; A2 += (d_ >> 16) & 255; A3 += d_ >> 24;     (cc) = c_; (oo) += 8; } while (0)
 #endif
-#endif /* HAVE_K4R */
+#endif /* HAVE_C4R */
 
 /* ---------------- lockstep generators ------------------------------------ */
 #define FOR1(X) X(0)
@@ -669,10 +669,10 @@ static void NAME(const ENC *E, uint8_t *out) { \
 GEN_K4(dec_h4_u1, FOR1, 1, H4S)
 GEN_K4(dec_h4_u4, FOR4, 4, H4S)
 GEN_K4(dec_h4_u8, FOR8, 8, H4S)
-#ifdef HAVE_K4R
-#define K4RS(k) if (!done##k) K4R_STEP(a0##k, a1##k, a2##k, a3##k, c##k, o##k);
-GEN_K4(dec_k4r_u4, FOR4, 4, K4RS)
-GEN_K4(dec_k4r_u8, FOR8, 8, K4RS)
+#ifdef HAVE_C4R
+#define C4RS(k) if (!done##k) C4R_STEP(a0##k, a1##k, a2##k, a3##k, c##k, o##k);
+GEN_K4(dec_c4r_u4, FOR4, 4, C4RS)
+GEN_K4(dec_c4r_u8, FOR8, 8, C4RS)
 #endif
 GEN_K4(dec_w3_u1, FOR1, 1, W3S)
 GEN_K4(dec_w3_u4, FOR4, 4, W3S)
@@ -703,52 +703,52 @@ static void NAME(const ENC *E, uint8_t *out) { \
         FORN(STEPM) \
     } \
 }
-#define K2NTS(k) if (!done##k) K2NT_STEP(L##k, R##k, c##k, o##k);
-#define K2TS(k)  if (!done##k) K2T_STEP(L##k, R##k, c##k, o##k);
+#define C2NTS(k) if (!done##k) C2NT_STEP(L##k, R##k, c##k, o##k);
+#define C2TS(k)  if (!done##k) C2T_STEP(L##k, R##k, c##k, o##k);
 
-GEN_K2(dec_k2nt_u8, FOR8, 8, K2NTS)
-GEN_K2(dec_k2t_u8,  FOR8, 8, K2TS)
-#define K2DS(k) if (!done##k) K2D_STEP(L##k, R##k, c##k, o##k);
-GEN_K2(dec_k2d_u8, FOR8, 8, K2DS)
-#define K2ES(k) if (!done##k) K2E_STEP(L##k, R##k, c##k, o##k);
-GEN_K2(dec_k2e_u8, FOR8, 8, K2ES)
-#define K2FS(k) if (!done##k) K2F_STEP(L##k, R##k, c##k, o##k);
-GEN_K2(dec_k2f_u8, FOR8, 8, K2FS)
+GEN_K2(dec_c2nt_u8, FOR8, 8, C2NTS)
+GEN_K2(dec_c2t_u8,  FOR8, 8, C2TS)
+#define C2DS(k) if (!done##k) C2D_STEP(L##k, R##k, c##k, o##k);
+GEN_K2(dec_c2d_u8, FOR8, 8, C2DS)
+#define C2ES(k) if (!done##k) C2E_STEP(L##k, R##k, c##k, o##k);
+GEN_K2(dec_c2e_u8, FOR8, 8, C2ES)
+#define C2FS(k) if (!done##k) C2F_STEP(L##k, R##k, c##k, o##k);
+GEN_K2(dec_c2f_u8, FOR8, 8, C2FS)
 #if !defined(__aarch64__)
-#define K2MS(k) if (!done##k) K2M_STEP(L##k, R##k, c##k, o##k);
-GEN_K2(dec_k2m_u8, FOR8, 8, K2MS)
+#define C2MS(k) if (!done##k) C2M_STEP(L##k, R##k, c##k, o##k);
+GEN_K2(dec_c2m_u8, FOR8, 8, C2MS)
 #endif
 
-/* Chain-count sweep for the K=2 (6,6)-window kernels.  The u8 interleave
- * was inherited from the o1demux winner and never questioned; the K=4
+/* Chain-count sweep for the C=2 (6,6)-window kernels.  The u8 interleave
+ * was inherited from the o1demux winner and never questioned; the C=4
  * scalar-walk sweep showed the default-8 was optimal on only one of four
  * platforms (Zen5) — optimum was 6 on M4/Graviton4 and 4 on GNR.  More
  * chains = more independent on-chain meta-table lookups in flight, until
  * register spills (each chain holds L,R,o,lim live) turn the tick block
  * into stack traffic. */
-GEN_K2(dec_k2t_u2,   FOR2,  2,  K2TS)
-GEN_K2(dec_k2t_u4,   FOR4,  4,  K2TS)
-GEN_K2(dec_k2t_u6,   FOR6,  6,  K2TS)
-GEN_K2(dec_k2t_u12,  FOR12, 12, K2TS)
-GEN_K2(dec_k2t_u16,  FOR16, 16, K2TS)
-GEN_K2(dec_k2nt_u2,  FOR2,  2,  K2NTS)
-GEN_K2(dec_k2nt_u4,  FOR4,  4,  K2NTS)
-GEN_K2(dec_k2nt_u6,  FOR6,  6,  K2NTS)
-GEN_K2(dec_k2nt_u12, FOR12, 12, K2NTS)
-GEN_K2(dec_k2nt_u16, FOR16, 16, K2NTS)
+GEN_K2(dec_c2t_u2,   FOR2,  2,  C2TS)
+GEN_K2(dec_c2t_u4,   FOR4,  4,  C2TS)
+GEN_K2(dec_c2t_u6,   FOR6,  6,  C2TS)
+GEN_K2(dec_c2t_u12,  FOR12, 12, C2TS)
+GEN_K2(dec_c2t_u16,  FOR16, 16, C2TS)
+GEN_K2(dec_c2nt_u2,  FOR2,  2,  C2NTS)
+GEN_K2(dec_c2nt_u4,  FOR4,  4,  C2NTS)
+GEN_K2(dec_c2nt_u6,  FOR6,  6,  C2NTS)
+GEN_K2(dec_c2nt_u12, FOR12, 12, C2NTS)
+GEN_K2(dec_c2nt_u16, FOR16, 16, C2NTS)
 #if !defined(__aarch64__)
-GEN_K2(dec_k2m_u2,   FOR2,  2,  K2MS)
-GEN_K2(dec_k2m_u4,   FOR4,  4,  K2MS)
-GEN_K2(dec_k2m_u6,   FOR6,  6,  K2MS)
-GEN_K2(dec_k2m_u12,  FOR12, 12, K2MS)
-GEN_K2(dec_k2m_u16,  FOR16, 16, K2MS)
+GEN_K2(dec_c2m_u2,   FOR2,  2,  C2MS)
+GEN_K2(dec_c2m_u4,   FOR4,  4,  C2MS)
+GEN_K2(dec_c2m_u6,   FOR6,  6,  C2MS)
+GEN_K2(dec_c2m_u12,  FOR12, 12, C2MS)
+GEN_K2(dec_c2m_u16,  FOR16, 16, C2MS)
 #endif
-#ifdef HAVE_K2G
-#define K2GS(k) if (!done##k) K2G_STEP(L##k, R##k, c##k, o##k);
-GEN_K2(dec_k2g_u2, FOR2, 2, K2GS)
-GEN_K2(dec_k2g_u4, FOR4, 4, K2GS)
-GEN_K2(dec_k2g_u6, FOR6, 6, K2GS)
-GEN_K2(dec_k2g_u8, FOR8, 8, K2GS)
+#ifdef HAVE_C2G
+#define C2GS(k) if (!done##k) C2G_STEP(L##k, R##k, c##k, o##k);
+GEN_K2(dec_c2g_u2, FOR2, 2, C2GS)
+GEN_K2(dec_c2g_u4, FOR4, 4, C2GS)
+GEN_K2(dec_c2g_u6, FOR6, 6, C2GS)
+GEN_K2(dec_c2g_u8, FOR8, 8, C2GS)
 #endif
 
 /* ------- cursor compaction (MZ): guard-free steady loop ------------------ */
@@ -774,7 +774,7 @@ GEN_K2(dec_k2g_u8, FOR8, 8, K2GS)
 #define CMOVE(d, s) { L##d = L##s; R##d = R##s; c##d = c##s; \
                       o##d = o##s; lim##d = lim##s; }
 
-#define GEN_K2C(NAME, STEPM) \
+#define GEN_C2C(NAME, STEPM) \
 static void NAME(const ENC *E, uint8_t *out) { \
     CDECL(0) CDECL(1) CDECL(2) CDECL(3) \
     int nseg = E->nseg, snext = 0; \
@@ -815,8 +815,8 @@ static void NAME(const ENC *E, uint8_t *out) { \
         if (snext < nseg) { CLOADM(k, snext, MG) snext++; } \
         else goto fin##n##_##k; }
 
-/* GEN_K2C with the output margin and the chain count (2 or 4) as parameters */
-#define GEN_K2CM(NAME, STEPM, MG, NCH) \
+/* GEN_C2C with the output margin and the chain count (2 or 4) as parameters */
+#define GEN_C2CM(NAME, STEPM, MG, NCH) \
 static void NAME(const ENC *E, uint8_t *out) { \
     CDECL(0) CDECL(1) CDECL(2) CDECL(3) \
     int nseg = E->nseg, snext = 0; \
@@ -847,64 +847,64 @@ static void NAME(const ENC *E, uint8_t *out) { \
     fin1_0: return; \
 }
 
-#define CS_NT(k) K2NT_STEP(L##k, R##k, c##k, o##k);
-GEN_K2C(dec_k2ntc_u4, CS_NT)
-#define CS_T(k) K2T_STEP(L##k, R##k, c##k, o##k);
-GEN_K2C(dec_k2tc_u4, CS_T)
+#define CS_NT(k) C2NT_STEP(L##k, R##k, c##k, o##k);
+GEN_C2C(dec_c2ntc_u4, CS_NT)
+#define CS_T(k) C2T_STEP(L##k, R##k, c##k, o##k);
+GEN_C2C(dec_c2tc_u4, CS_T)
 #if !defined(__aarch64__)
-#define CS_M(k) K2M_STEP(L##k, R##k, c##k, o##k);
-GEN_K2C(dec_k2mc_u4, CS_M)
+#define CS_M(k) C2M_STEP(L##k, R##k, c##k, o##k);
+GEN_C2C(dec_c2mc_u4, CS_M)
 #endif
-#ifdef HAVE_K2G
-#define CS_G(k) K2G_STEP(L##k, R##k, c##k, o##k);
-GEN_K2C(dec_k2gc_u4, CS_G)
+#ifdef HAVE_C2G
+#define CS_G(k) C2G_STEP(L##k, R##k, c##k, o##k);
+GEN_C2C(dec_c2gc_u4, CS_G)
 #endif
-#ifdef HAVE_K2Q
-#define K2QS(k) if (!done##k) K2Q_STEP(L##k, R##k, c##k, o##k);
-GEN_K2(dec_k2q_u4, FOR4, 4, K2QS)
-GEN_K2(dec_k2q_u6, FOR6, 6, K2QS)
-#define CS_Q(k) K2Q_STEP(L##k, R##k, c##k, o##k);
-GEN_K2C(dec_k2qc_u4, CS_Q)
+#ifdef HAVE_C2Q
+#define C2QS(k) if (!done##k) C2Q_STEP(L##k, R##k, c##k, o##k);
+GEN_K2(dec_c2q_u4, FOR4, 4, C2QS)
+GEN_K2(dec_c2q_u6, FOR6, 6, C2QS)
+#define CS_Q(k) C2Q_STEP(L##k, R##k, c##k, o##k);
+GEN_C2C(dec_c2qc_u4, CS_Q)
 #endif
-#ifdef HAVE_K2S
-#define CS_S(k) K2S_GROUP(L##k, R##k, c##k, o##k);
-GEN_K2CM(dec_k2sc_u4, CS_S, 64, 4)
-GEN_K2CM(dec_k2sc_u2, CS_S, 64, 2)
+#ifdef HAVE_C2S
+#define CS_S(k) C2S_GROUP(L##k, R##k, c##k, o##k);
+GEN_C2CM(dec_c2sc_u4, CS_S, 64, 4)
+GEN_C2CM(dec_c2sc_u2, CS_S, 64, 2)
 
-/* k2sl: the same group in LOCKSTEP across the live chains -- windows for
+/* c2sl: the same group in LOCKSTEP across the live chains -- windows for
  * all chains, then step i of every chain before step i+1, then the merges.
  * The group's five dependent steps are ~50 cycles; interleaving whole
  * groups (~110 instructions each) puts the other chains' links too far
- * apart for the reorder window, so k2sc runs at IPC ~2.5.  Step-level
+ * apart for the reorder window, so c2sc runs at IPC ~2.5.  Step-level
  * interleaving keeps the four independent links adjacent. */
-#define K2S_A(k) __m512i lv##k = _mm512_loadu_si512((const void *)L##k); \
+#define C2S_A(k) __m512i lv##k = _mm512_loadu_si512((const void *)L##k); \
     __m512i rv##k = _mm512_loadu_si512((const void *)R##k); \
     uint64_t hl##k = _mm512_movepi8_mask(lv##k), hr##k = _mm512_movepi8_mask(rv##k); \
     uint64_t S##k = 0; uint32_t ct##k = c##k << 12, ol##k = 0;
-#define K2S_B(k) K2S_STEP(hl##k, hr##k, S##k, ct##k, ol##k)
-#define K2S_C(k) { __mmask64 kr_ = (__mmask64)S##k; \
+#define C2S_B(k) C2S_STEP(hl##k, hr##k, S##k, ct##k, ol##k)
+#define C2S_C(k) { __mmask64 kr_ = (__mmask64)S##k; \
     _mm512_storeu_si512((void *)o##k, _mm512_mask_expand_epi8( \
         _mm512_maskz_expand_epi8(~kr_, lv##k), kr_, rv##k)); \
     uint32_t nr_ = (uint32_t)__builtin_popcountll(S##k); \
     R##k += nr_; L##k += ol##k - nr_; o##k += ol##k; c##k = ct##k >> 12; }
-#define K2S_AP(k) __m512i lv##k = _mm512_loadu_si512((const void *)L##k); \
+#define C2S_AP(k) __m512i lv##k = _mm512_loadu_si512((const void *)L##k); \
     __m512i rv##k = _mm512_loadu_si512((const void *)R##k); \
     uint64_t hl##k = _mm512_movepi8_mask(lv##k), hr##k = _mm512_movepi8_mask(rv##k); \
     uint64_t S##k = 0; uint32_t P##k = c##k << 12;
-#define K2S_BP(k) K2S_STEPP(hl##k, hr##k, S##k, P##k)
-#define K2S_CP(k) { __mmask64 kr_ = (__mmask64)S##k; \
+#define C2S_BP(k) C2S_STEPP(hl##k, hr##k, S##k, P##k)
+#define C2S_CP(k) { __mmask64 kr_ = (__mmask64)S##k; \
     _mm512_storeu_si512((void *)o##k, _mm512_mask_expand_epi8( \
         _mm512_maskz_expand_epi8(~kr_, lv##k), kr_, rv##k)); \
     uint32_t nr_ = (uint32_t)__builtin_popcountll(S##k), ol_ = P##k & 63; \
     R##k += nr_; L##k += ol_ - nr_; o##k += ol_; c##k = P##k >> 12; }
-#define K2S_LOCKP(F) { F(K2S_AP) F(K2S_BP) F(K2S_BP) F(K2S_BP) F(K2S_BP) F(K2S_BP) F(K2S_CP) }
-#define K2S_F1(X) X(0)
-#define K2S_F2(X) X(0) X(1)
-#define K2S_F3(X) X(0) X(1) X(2)
-#define K2S_F4(X) X(0) X(1) X(2) X(3)
-#define K2S_LOCK(F) { F(K2S_A) F(K2S_B) F(K2S_B) F(K2S_B) F(K2S_B) F(K2S_B) F(K2S_C) }
+#define C2S_LOCKP(F) { F(C2S_AP) F(C2S_BP) F(C2S_BP) F(C2S_BP) F(C2S_BP) F(C2S_BP) F(C2S_CP) }
+#define C2S_F1(X) X(0)
+#define C2S_F2(X) X(0) X(1)
+#define C2S_F3(X) X(0) X(1) X(2)
+#define C2S_F4(X) X(0) X(1) X(2) X(3)
+#define C2S_LOCK(F) { F(C2S_A) F(C2S_B) F(C2S_B) F(C2S_B) F(C2S_B) F(C2S_B) F(C2S_C) }
 
-#define GEN_K2S(NAME, NCH, LOCK) \
+#define GEN_C2S(NAME, NCH, LOCK) \
 static void NAME(const ENC *E, uint8_t *out) { \
     CDECL(0) CDECL(1) CDECL(2) CDECL(3) \
     int nseg = E->nseg, snext = 0; \
@@ -914,37 +914,37 @@ static void NAME(const ENC *E, uint8_t *out) { \
     CLOADM(2, 2, 64) snext = 3; if ((NCH) == 3 || nseg < 4) goto loop3; \
     CLOADM(3, 3, 64) snext = 4; \
     for (;;) { CTICKM(4, 0, 64) CTICKM(4, 1, 64) CTICKM(4, 2, 64) CTICKM(4, 3, 64) \
-               LOCK(K2S_F4) } \
+               LOCK(C2S_F4) } \
     fin4_0: CMOVE(0, 3) goto loop3; \
     fin4_1: CMOVE(1, 3) goto loop3; \
     fin4_2: CMOVE(2, 3) \
     fin4_3: \
     loop3: \
     for (;;) { CTICKM(3, 0, 64) CTICKM(3, 1, 64) CTICKM(3, 2, 64) \
-               LOCK(K2S_F3) } \
+               LOCK(C2S_F3) } \
     fin3_0: CMOVE(0, 2) goto loop2; \
     fin3_1: CMOVE(1, 2) \
     fin3_2: \
     loop2: \
     for (;;) { CTICKM(2, 0, 64) CTICKM(2, 1, 64) \
-               LOCK(K2S_F2) } \
+               LOCK(C2S_F2) } \
     fin2_0: CMOVE(0, 1) \
     fin2_1: \
     loop1: \
-    for (;;) { CTICKM(1, 0, 64) LOCK(K2S_F1) } \
+    for (;;) { CTICKM(1, 0, 64) LOCK(C2S_F1) } \
     fin1_0: return; \
 }
-GEN_K2S(dec_k2sl_u4, 4, K2S_LOCK)
-GEN_K2S(dec_k2sl_u3, 3, K2S_LOCK)
-GEN_K2S(dec_k2sl_u2, 2, K2S_LOCK)
-GEN_K2S(dec_k2sp_u4, 4, K2S_LOCKP)
-GEN_K2S(dec_k2sp_u3, 3, K2S_LOCKP)
+GEN_C2S(dec_c2sl_u4, 4, C2S_LOCK)
+GEN_C2S(dec_c2sl_u3, 3, C2S_LOCK)
+GEN_C2S(dec_c2sl_u2, 2, C2S_LOCK)
+GEN_C2S(dec_c2sp_u4, 4, C2S_LOCKP)
+GEN_C2S(dec_c2sp_u3, 3, C2S_LOCKP)
 #endif
-#ifdef HAVE_K2P
-#define K2PS(k) if (!done##k) K2P_STEP(L##k, R##k, c##k, o##k);
-GEN_K2(dec_k2p_u4, FOR4, 4, K2PS)
-#define CS_P(k) K2P_STEP(L##k, R##k, c##k, o##k);
-GEN_K2C(dec_k2pc_u4, CS_P)
+#ifdef HAVE_C2P
+#define C2PS(k) if (!done##k) C2P_STEP(L##k, R##k, c##k, o##k);
+GEN_K2(dec_c2p_u4, FOR4, 4, C2PS)
+#define CS_P(k) C2P_STEP(L##k, R##k, c##k, o##k);
+GEN_C2C(dec_c2pc_u4, CS_P)
 #endif
 
 /* ------- traditional scalar multi-walk (non-SIMD, range-partitioned) ----- */
@@ -966,7 +966,7 @@ static uint8_t g_cls4[256], g_cls2[256];   /* same values as >>6 / >>7: forces
     while (o##k < e_) { uint8_t b_ = *P##k[c##k]++; *o##k++ = b_; c##k = b_ >> 6; } }
 #define D4ATICK(k, NCH) if (!done##k && o##k > lim##k) { \
         D4ADRAINC(k) si##k += NCH; D4ALOAD(k) }
-#define GEN_K4A(NAME, FORN, NCH, STEPM) \
+#define GEN_C4A(NAME, FORN, NCH, STEPM) \
 static void NAME(const ENC *E, uint8_t *out) { \
     FORN(D4ADECL) \
     for (;;) { FORN##_2(D4ATICK, NCH) \
@@ -990,14 +990,14 @@ static void NAME(const ENC *E, uint8_t *out) { \
     const uint8_t *p_ = MUXP(c##k, L##k, R##k); uint8_t b_ = *p_; \
     *o##k++ = b_; R##k += c##k; L##k += 1u - c##k; c##k = g_cls2[b_]; }
 
-/* generic-K scalar walk (array cursors, class = top bits) */
+/* generic-C scalar walk (array cursors, class = top bits) */
 #define DGADECL(k) \
     const uint8_t *P##k[16]; \
     uint32_t c##k = 0; int si##k = k, done##k = 0; \
     uint8_t *o##k = 0, *lim##k = 0; \
     DGALOAD(k)
 #define DGALOAD(k) if (si##k < E->nseg) { \
-        for (int q_ = 0; q_ < E->K; q_++) P##k[q_] = E->bk[si##k][q_]; \
+        for (int q_ = 0; q_ < E->C; q_++) P##k[q_] = E->bk[si##k][q_]; \
         c##k = 0; o##k = out + E->segoff[si##k]; \
         lim##k = out + E->segoff[si##k + 1] - MARGIN; \
     } else done##k = 1;
@@ -1026,7 +1026,7 @@ static const uint8_t *g_route;
     uint8_t *o##k = 0, *lim##k = 0; \
     DGRLOAD(k)
 #define DGRLOAD(k) if (si##k < E->nseg) { \
-        for (int q_ = 0; q_ < E->K; q_++) P##k[q_] = E->bk[si##k][q_]; \
+        for (int q_ = 0; q_ < E->C; q_++) P##k[q_] = E->bk[si##k][q_]; \
         o##k = out + E->segoff[si##k]; rt##k = g_route + E->segoff[si##k]; \
         lim##k = out + E->segoff[si##k + 1] - MARGIN; \
     } else done##k = 1;
@@ -1045,15 +1045,15 @@ static void NAME(const ENC *E, uint8_t *out) { \
 GEN_KGR(dec_scr8_u8, FOR8, 8)
 GEN_KGR(dec_scr8_u1, FOR1, 1)
 
-GEN_K4A(dec_sc4a_u2,   FOR2,  2,  SC4AS)
-GEN_K4A(dec_sc4a_u4c,  FOR4,  4,  SC4AS)
-GEN_K4A(dec_sc4a_u6,   FOR6,  6,  SC4AS)
-GEN_K4A(dec_sc4a_u12,  FOR12, 12, SC4AS)
-GEN_K4A(dec_sc4a_u24,  FOR24, 24, SC4AS)
-GEN_K4A(dec_sc4a_u8,   FOR8,  8,  SC4AS)
-GEN_K4A(dec_sc4al_u8,  FOR8,  8,  SC4ALS)
-GEN_K4A(dec_sc4a_u16,  FOR16, 16, SC4AS)
-GEN_K4A(dec_sc4al_u16, FOR16, 16, SC4ALS)
+GEN_C4A(dec_sc4a_u2,   FOR2,  2,  SC4AS)
+GEN_C4A(dec_sc4a_u4c,  FOR4,  4,  SC4AS)
+GEN_C4A(dec_sc4a_u6,   FOR6,  6,  SC4AS)
+GEN_C4A(dec_sc4a_u12,  FOR12, 12, SC4AS)
+GEN_C4A(dec_sc4a_u24,  FOR24, 24, SC4AS)
+GEN_C4A(dec_sc4a_u8,   FOR8,  8,  SC4AS)
+GEN_C4A(dec_sc4al_u8,  FOR8,  8,  SC4ALS)
+GEN_C4A(dec_sc4a_u16,  FOR16, 16, SC4AS)
+GEN_C4A(dec_sc4al_u16, FOR16, 16, SC4ALS)
 GEN_K4(dec_sc4r_u8,    FOR8,  8,  SC4RS)
 GEN_K4(dec_sc4r_u16,   FOR16, 16, SC4RS)
 GEN_K2(dec_sc2r_u8,    FOR8,  8,  SC2RS)
@@ -1061,13 +1061,13 @@ GEN_K2(dec_sc2rl_u8,   FOR8,  8,  SC2RLS)
 GEN_K2(dec_sc2r_u16,   FOR16, 16, SC2RS)
 GEN_K2(dec_sc2rl_u16,  FOR16, 16, SC2RLS)
 
-/* ------- k4v: MZ's SIMD multi-cursor walk -- 8 chains in zmm lanes --------
- * The k4r arithmetic walk vectorized ACROSS chains: per-lane H/R/C/P in
+/* ------- c4v: MZ's SIMD multi-cursor walk -- 8 chains in zmm lanes --------
+ * The c4r arithmetic walk vectorized ACROSS chains: per-lane H/R/C/P in
  * 512-bit registers, per-lane variable shifts run all 8 walks at once.
  * x86 AVX-512 only (8 lanes; NEON's 2 lanes can't amortize).            */
 #if defined(__AVX512VBMI__) && defined(__AVX512VL__) && defined(__AVX512BW__)
-#define HAVE_K4V 1
-static void k4v_loadseg(const ENC *E, uint8_t *out, const uint8_t *A[4],
+#define HAVE_C4V 1
+static void c4v_loadseg(const ENC *E, uint8_t *out, const uint8_t *A[4],
                         uint8_t **o, uint8_t **lim, uint64_t *c, int *si, int *done) {
     if (*si < E->nseg) {
         for (int b = 0; b < 4; b++) A[b] = E->bk[*si][b];
@@ -1075,7 +1075,7 @@ static void k4v_loadseg(const ENC *E, uint8_t *out, const uint8_t *A[4],
         *lim = out + E->segoff[*si + 1] - MARGIN;
     } else *done = 1;
 }
-static void dec_k4v_u8(const ENC *E, uint8_t *out) {
+static void dec_c4v_u8(const ENC *E, uint8_t *out) {
     const uint8_t *A[8][4]; uint8_t *o[8], *lim[8]; int si[8], done[8];
     uint64_t cs[8] __attribute__((aligned(64)));
     uint64_t hs[8] __attribute__((aligned(64)));
@@ -1084,7 +1084,7 @@ static void dec_k4v_u8(const ENC *E, uint8_t *out) {
     uint64_t L[8][4];
     memset(L, 0, sizeof L);
     for (int k = 0; k < 8; k++) { si[k] = k; done[k] = 0; cs[k] = 0;
-        k4v_loadseg(E, out, A[k], &o[k], &lim[k], &cs[k], &si[k], &done[k]); }
+        c4v_loadseg(E, out, A[k], &o[k], &lim[k], &cs[k], &si[k], &done[k]); }
     const __m512i M255 = _mm512_set1_epi64(255), M3 = _mm512_set1_epi64(3);
     const __m512i ONE = _mm512_set1_epi64(1), R0 = _mm512_set1_epi64(0x18100800);
     for (;;) {
@@ -1093,7 +1093,7 @@ static void dec_k4v_u8(const ENC *E, uint8_t *out) {
             if (!done[k] && o[k] > lim[k]) {
                 uint8_t *e_ = out + E->segoff[si[k] + 1];
                 while (o[k] < e_) { uint8_t b_ = *A[k][cs[k]]++; *o[k]++ = b_; cs[k] = b_ >> 6; }
-                si[k] += 8; k4v_loadseg(E, out, A[k], &o[k], &lim[k], &cs[k], &si[k], &done[k]);
+                si[k] += 8; c4v_loadseg(E, out, A[k], &o[k], &lim[k], &cs[k], &si[k], &done[k]);
             }
             any |= !done[k];
         }
@@ -1114,9 +1114,9 @@ static void dec_k4v_u8(const ENC *E, uint8_t *out) {
         __m512i H = _mm512_load_si512((const void *)hs);
         __m512i C = _mm512_load_si512((const void *)cs);
         __m512i R = R0, P = _mm512_setzero_si512();
-        #define K4V_W(k) {             __m512i S3 = _mm512_slli_epi64(C, 3);             __m512i REF = _mm512_and_si512(_mm512_srlv_epi64(R, S3), M255);             P = _mm512_or_si512(P, _mm512_slli_epi64(REF, 8 * (k)));             C = _mm512_and_si512(_mm512_srlv_epi64(H, _mm512_add_epi64(REF, REF)), M3);             R = _mm512_add_epi64(R, _mm512_sllv_epi64(ONE, S3)); }
-        K4V_W(0) K4V_W(1) K4V_W(2) K4V_W(3) K4V_W(4) K4V_W(5) K4V_W(6) K4V_W(7)
-        #undef K4V_W
+        #define C4V_W(k) {             __m512i S3 = _mm512_slli_epi64(C, 3);             __m512i REF = _mm512_and_si512(_mm512_srlv_epi64(R, S3), M255);             P = _mm512_or_si512(P, _mm512_slli_epi64(REF, 8 * (k)));             C = _mm512_and_si512(_mm512_srlv_epi64(H, _mm512_add_epi64(REF, REF)), M3);             R = _mm512_add_epi64(R, _mm512_sllv_epi64(ONE, S3)); }
+        C4V_W(0) C4V_W(1) C4V_W(2) C4V_W(3) C4V_W(4) C4V_W(5) C4V_W(6) C4V_W(7)
+        #undef C4V_W
         _mm512_store_si512((void *)ps, P);
         _mm512_store_si512((void *)rs, R);
         _mm512_store_si512((void *)cs, C);
@@ -1134,7 +1134,7 @@ static void dec_k4v_u8(const ENC *E, uint8_t *out) {
         }
     }
 }
-static void dec_k4v_u16(const ENC *E, uint8_t *out) {
+static void dec_c4v_u16(const ENC *E, uint8_t *out) {
     const uint8_t *A[16][4]; uint8_t *o[16], *lim[16]; int si[16], done[16];
     uint64_t cs[16] __attribute__((aligned(64)));
     uint64_t hs[16] __attribute__((aligned(64)));
@@ -1143,7 +1143,7 @@ static void dec_k4v_u16(const ENC *E, uint8_t *out) {
     uint64_t L[16][4];
     memset(L, 0, sizeof L);
     for (int k = 0; k < 16; k++) { si[k] = k; done[k] = 0; cs[k] = 0;
-        k4v_loadseg(E, out, A[k], &o[k], &lim[k], &cs[k], &si[k], &done[k]); }
+        c4v_loadseg(E, out, A[k], &o[k], &lim[k], &cs[k], &si[k], &done[k]); }
     const __m512i M255 = _mm512_set1_epi64(255), M3 = _mm512_set1_epi64(3);
     const __m512i ONE = _mm512_set1_epi64(1), R0 = _mm512_set1_epi64(0x18100800);
     for (;;) {
@@ -1152,7 +1152,7 @@ static void dec_k4v_u16(const ENC *E, uint8_t *out) {
             if (!done[k] && o[k] > lim[k]) {
                 uint8_t *e_ = out + E->segoff[si[k] + 1];
                 while (o[k] < e_) { uint8_t b_ = *A[k][cs[k]]++; *o[k]++ = b_; cs[k] = b_ >> 6; }
-                si[k] += 16; k4v_loadseg(E, out, A[k], &o[k], &lim[k], &cs[k], &si[k], &done[k]);
+                si[k] += 16; c4v_loadseg(E, out, A[k], &o[k], &lim[k], &cs[k], &si[k], &done[k]);
             }
             any |= !done[k];
         }
@@ -1174,14 +1174,14 @@ static void dec_k4v_u16(const ENC *E, uint8_t *out) {
             __m512i H = _mm512_load_si512((const void *)(hs + 8 * g));
             __m512i C = _mm512_load_si512((const void *)(cs + 8 * g));
             __m512i R = R0, P = _mm512_setzero_si512();
-            #define K4V_W2(k) { \
+            #define C4V_W2(k) { \
                 __m512i S3 = _mm512_slli_epi64(C, 3); \
                 __m512i REF = _mm512_and_si512(_mm512_srlv_epi64(R, S3), M255); \
                 P = _mm512_or_si512(P, _mm512_slli_epi64(REF, 8 * (k))); \
                 C = _mm512_and_si512(_mm512_srlv_epi64(H, _mm512_add_epi64(REF, REF)), M3); \
                 R = _mm512_add_epi64(R, _mm512_sllv_epi64(ONE, S3)); }
-            K4V_W2(0) K4V_W2(1) K4V_W2(2) K4V_W2(3) K4V_W2(4) K4V_W2(5) K4V_W2(6) K4V_W2(7)
-            #undef K4V_W2
+            C4V_W2(0) C4V_W2(1) C4V_W2(2) C4V_W2(3) C4V_W2(4) C4V_W2(5) C4V_W2(6) C4V_W2(7)
+            #undef C4V_W2
             _mm512_store_si512((void *)(ps + 8 * g), P);
             _mm512_store_si512((void *)(rs + 8 * g), R);
             _mm512_store_si512((void *)(cs + 8 * g), C);
@@ -1200,7 +1200,7 @@ static void dec_k4v_u16(const ENC *E, uint8_t *out) {
         }
     }
 }
-static void dec_k4v_u24(const ENC *E, uint8_t *out) {
+static void dec_c4v_u24(const ENC *E, uint8_t *out) {
     const uint8_t *A[24][4]; uint8_t *o[24], *lim[24]; int si[24], done[24];
     uint64_t cs[24] __attribute__((aligned(64)));
     uint64_t hs[24] __attribute__((aligned(64)));
@@ -1209,7 +1209,7 @@ static void dec_k4v_u24(const ENC *E, uint8_t *out) {
     uint64_t L[24][4];
     memset(L, 0, sizeof L);
     for (int k = 0; k < 24; k++) { si[k] = k; done[k] = 0; cs[k] = 0;
-        k4v_loadseg(E, out, A[k], &o[k], &lim[k], &cs[k], &si[k], &done[k]); }
+        c4v_loadseg(E, out, A[k], &o[k], &lim[k], &cs[k], &si[k], &done[k]); }
     const __m512i M255 = _mm512_set1_epi64(255), M3 = _mm512_set1_epi64(3);
     const __m512i ONE = _mm512_set1_epi64(1), R0 = _mm512_set1_epi64(0x18100800);
     for (;;) {
@@ -1218,7 +1218,7 @@ static void dec_k4v_u24(const ENC *E, uint8_t *out) {
             if (!done[k] && o[k] > lim[k]) {
                 uint8_t *e_ = out + E->segoff[si[k] + 1];
                 while (o[k] < e_) { uint8_t b_ = *A[k][cs[k]]++; *o[k]++ = b_; cs[k] = b_ >> 6; }
-                si[k] += 24; k4v_loadseg(E, out, A[k], &o[k], &lim[k], &cs[k], &si[k], &done[k]);
+                si[k] += 24; c4v_loadseg(E, out, A[k], &o[k], &lim[k], &cs[k], &si[k], &done[k]);
             }
             any |= !done[k];
         }
@@ -1240,14 +1240,14 @@ static void dec_k4v_u24(const ENC *E, uint8_t *out) {
             __m512i H = _mm512_load_si512((const void *)(hs + 8 * g));
             __m512i C = _mm512_load_si512((const void *)(cs + 8 * g));
             __m512i R = R0, P = _mm512_setzero_si512();
-            #define K4V_W2(k) { \
+            #define C4V_W2(k) { \
                 __m512i S3 = _mm512_slli_epi64(C, 3); \
                 __m512i REF = _mm512_and_si512(_mm512_srlv_epi64(R, S3), M255); \
                 P = _mm512_or_si512(P, _mm512_slli_epi64(REF, 8 * (k))); \
                 C = _mm512_and_si512(_mm512_srlv_epi64(H, _mm512_add_epi64(REF, REF)), M3); \
                 R = _mm512_add_epi64(R, _mm512_sllv_epi64(ONE, S3)); }
-            K4V_W2(0) K4V_W2(1) K4V_W2(2) K4V_W2(3) K4V_W2(4) K4V_W2(5) K4V_W2(6) K4V_W2(7)
-            #undef K4V_W2
+            C4V_W2(0) C4V_W2(1) C4V_W2(2) C4V_W2(3) C4V_W2(4) C4V_W2(5) C4V_W2(6) C4V_W2(7)
+            #undef C4V_W2
             _mm512_store_si512((void *)(ps + 8 * g), P);
             _mm512_store_si512((void *)(rs + 8 * g), R);
             _mm512_store_si512((void *)(cs + 8 * g), C);
@@ -1266,8 +1266,8 @@ static void dec_k4v_u24(const ENC *E, uint8_t *out) {
         }
     }
 }
-/* k4w: k4v with VECTORIZED header build -- gathers + in-lane 2-bit extract */
-static void dec_k4w_u16(const ENC *E, uint8_t *out) {
+/* c4w: c4v with VECTORIZED header build -- gathers + in-lane 2-bit extract */
+static void dec_c4w_u16(const ENC *E, uint8_t *out) {
     uint64_t ap[16][4] __attribute__((aligned(64)));   /* cursor addresses */
     uint8_t *o[16], *lim[16]; int si[16], done[16];
     uint64_t cs[16] __attribute__((aligned(64)));
@@ -1277,7 +1277,7 @@ static void dec_k4w_u16(const ENC *E, uint8_t *out) {
     for (int k = 0; k < 16; k++) {
         si[k] = k; done[k] = 0; cs[k] = 0;
         const uint8_t *A4[4] = {0,0,0,0};
-        k4v_loadseg(E, out, A4, &o[k], &lim[k], &cs[k], &si[k], &done[k]);
+        c4v_loadseg(E, out, A4, &o[k], &lim[k], &cs[k], &si[k], &done[k]);
         for (int b = 0; b < 4; b++) ap[k][b] = (uint64_t)(uintptr_t)A4[b];
     }
     const __m512i M255 = _mm512_set1_epi64(255), M3 = _mm512_set1_epi64(3);
@@ -1299,7 +1299,7 @@ static void dec_k4w_u16(const ENC *E, uint8_t *out) {
                     (const uint8_t *)(uintptr_t)ap[k][3]};
                 while (o[k] < e_) { uint8_t b_ = *A4[cs[k]]++; *o[k]++ = b_; cs[k] = b_ >> 6; }
                 si[k] += 16;                          /* stride to next segment */
-                k4v_loadseg(E, out, A4, &o[k], &lim[k], &cs[k], &si[k], &done[k]);
+                c4v_loadseg(E, out, A4, &o[k], &lim[k], &cs[k], &si[k], &done[k]);
                 for (int b = 0; b < 4; b++) ap[k][b] = (uint64_t)(uintptr_t)A4[b];
             }
             any |= !done[k];
@@ -1326,14 +1326,14 @@ static void dec_k4w_u16(const ENC *E, uint8_t *out) {
             }
             __m512i C = _mm512_load_si512((const void *)(cs + 8 * g));
             __m512i R = R0, P = _mm512_setzero_si512();
-            #define K4W_W(k) { \
+            #define C4W_W(k) { \
                 __m512i S3 = _mm512_slli_epi64(C, 3); \
                 __m512i REF = _mm512_and_si512(_mm512_srlv_epi64(R, S3), M255); \
                 P = _mm512_or_si512(P, _mm512_slli_epi64(REF, 8 * (k))); \
                 C = _mm512_and_si512(_mm512_srlv_epi64(H, _mm512_add_epi64(REF, REF)), M3); \
                 R = _mm512_add_epi64(R, _mm512_sllv_epi64(ONE, S3)); }
-            K4W_W(0) K4W_W(1) K4W_W(2) K4W_W(3) K4W_W(4) K4W_W(5) K4W_W(6) K4W_W(7)
-            #undef K4W_W
+            C4W_W(0) C4W_W(1) C4W_W(2) C4W_W(3) C4W_W(4) C4W_W(5) C4W_W(6) C4W_W(7)
+            #undef C4W_W
             _mm512_store_si512((void *)(ps + 8 * g), P);
             _mm512_store_si512((void *)(rs + 8 * g), R);
             _mm512_store_si512((void *)(cs + 8 * g), C);
@@ -1355,7 +1355,7 @@ static void dec_k4w_u16(const ENC *E, uint8_t *out) {
     }
 }
 /* ===========================================================================
- * k4x -- register-arithmetic K=4 demux, SIMD across chains (x86 AVX-512).
+ * c4x -- register-arithmetic C=4 demux, SIMD across chains (x86 AVX-512).
  *
  * PROBLEM.  Re-interleave four per-class literal streams where the class of
  * the previous OUTPUT byte (top 2 bits, after remap) selects which stream the
@@ -1381,14 +1381,14 @@ static void dec_k4w_u16(const ENC *E, uint8_t *out) {
  *     B7 bit ref = bit 7 of SRC[ref]      B6 bit ref = bit 6 of SRC[ref]
  * Built with 2 movemasks per 16B bucket load (paddb x,x lifts bit6 to the
  * sign position) and plain shift/or concatenation -- no pdep.  Packing into
- * 2-bit fields instead (k4v did) needs pdep headers and, at 16-deep, 128 bits
+ * 2-bit fields instead (c4v did) needs pdep headers and, at 16-deep, 128 bits
  * per chain; the planes fit one u64 lane each and index directly by ref.
  *
  * WHY 16-DEEP / 16 PER ITERATION.  Stocks hold 16 headers per bucket and the
  * walk runs exactly 16 steps, so an iteration can never stall or overshoot
  * (per-bucket consumption <= 16 = stock depth): every iteration emits exactly
  * 16 bytes, unconditionally -- no data-dependent yield, no terminal case, no
- * fallback branch.  Doubling the radius from 8 (k4v) halves every fixed
+ * fallback branch.  Doubling the radius from 8 (c4v) halves every fixed
  * per-iteration cost (headers, emit, cursor updates, guards) per output byte.
  *
  * WALK STEP (12 ops, all lane-parallel; recurrence C -> S3 -> REF -> planes
@@ -1420,13 +1420,13 @@ static void dec_k4w_u16(const ENC *E, uint8_t *out) {
  * scalar drain/tick sees any chain's state naturally.
  *
  * HISTORY/PERF (x-ray/mozilla/dickens lit streams): scalar walk 0.67-0.90
- * ns/B -> k4v (8-deep, pdep headers, 2x vpermb-256) 0.51-0.70 -> k4x
+ * ns/B -> c4v (8-deep, pdep headers, 2x vpermb-256) 0.51-0.70 -> c4x
  * 0.50-0.61 -> +vpternlogq 0.485-0.488 (Zen5) / 0.582-0.587 (GNR); u24
  * lane-groups ~wash (chain hidden at u16); vpgatherqq header build -45-52%
  * (gathers lose ~2x to scalar loads + movemask).  M4/Graviton have no
  * 8-lane-64b ALU: the 6-walk scalar kernel keeps those platforms.
  * ======================================================================== */
-static void dec_k4x_u16(const ENC *E, uint8_t *out) {
+static void dec_c4x_u16(const ENC *E, uint8_t *out) {
     uint64_t ap[16][4] __attribute__((aligned(64)));   /* bucket read cursors */
     uint8_t *o[16], *lim[16]; int si[16], done[16];    /* per-chain segment st.*/
     uint64_t cs[16] __attribute__((aligned(64)));      /* current class/chain  */
@@ -1441,7 +1441,7 @@ static void dec_k4x_u16(const ENC *E, uint8_t *out) {
     for (int k = 0; k < 16; k++) {
         si[k] = k; done[k] = 0; cs[k] = 0;
         const uint8_t *A4[4] = {0,0,0,0};
-        k4v_loadseg(E, out, A4, &o[k], &lim[k], &cs[k], &si[k], &done[k]);
+        c4v_loadseg(E, out, A4, &o[k], &lim[k], &cs[k], &si[k], &done[k]);
         for (int b = 0; b < 4; b++) ap[k][b] = (uint64_t)(uintptr_t)A4[b];
     }
     const __m512i M255 = _mm512_set1_epi64(255);   /* isolate REF byte        */
@@ -1463,7 +1463,7 @@ static void dec_k4x_u16(const ENC *E, uint8_t *out) {
                     (const uint8_t *)(uintptr_t)ap[k][3]};
                 while (o[k] < e_) { uint8_t b_ = *A4[cs[k]]++; *o[k]++ = b_; cs[k] = b_ >> 6; }
                 si[k] += 16;                          /* stride to next segment */
-                k4v_loadseg(E, out, A4, &o[k], &lim[k], &cs[k], &si[k], &done[k]);
+                c4v_loadseg(E, out, A4, &o[k], &lim[k], &cs[k], &si[k], &done[k]);
                 for (int b = 0; b < 4; b++) ap[k][b] = (uint64_t)(uintptr_t)A4[b];
             }
             any |= !done[k];
@@ -1493,7 +1493,7 @@ static void dec_k4x_u16(const ENC *E, uint8_t *out) {
             __m512i B6 = _mm512_load_si512((const void *)(h6s + 8 * g));
             __m512i C = _mm512_load_si512((const void *)(cs + 8 * g));
             __m512i R = R0, P0 = _mm512_setzero_si512(), P1 = _mm512_setzero_si512();
-            #define K4X_W(k) { \
+            #define C4X_W(k) { \
                 /* S3 = 8*class: byte offset of current bucket's counter   */ \
                 __m512i S3 = _mm512_slli_epi64(C, 3); \
                 /* REF = R's byte for that bucket = 16*b + n; the &255 is  */ \
@@ -1514,9 +1514,9 @@ static void dec_k4x_u16(const ENC *E, uint8_t *out) {
                 C = _mm512_ternarylogic_epi64(A2, T6, TWOZ, 0xE4); \
                 /* consume: +1 to the current bucket's counter byte         */ \
                 R = _mm512_add_epi64(R, _mm512_sllv_epi64(ONEZ, S3)); }
-            K4X_W(0) K4X_W(1) K4X_W(2) K4X_W(3) K4X_W(4) K4X_W(5) K4X_W(6) K4X_W(7)
-            K4X_W(8) K4X_W(9) K4X_W(10) K4X_W(11) K4X_W(12) K4X_W(13) K4X_W(14) K4X_W(15)
-            #undef K4X_W
+            C4X_W(0) C4X_W(1) C4X_W(2) C4X_W(3) C4X_W(4) C4X_W(5) C4X_W(6) C4X_W(7)
+            C4X_W(8) C4X_W(9) C4X_W(10) C4X_W(11) C4X_W(12) C4X_W(13) C4X_W(14) C4X_W(15)
+            #undef C4X_W
             /* hand results back to the scalar side (emit + tick/drain)    */
             _mm512_store_si512((void *)(p0s + 8 * g), P0);
             _mm512_store_si512((void *)(p1s + 8 * g), P1);
@@ -1541,7 +1541,7 @@ static void dec_k4x_u16(const ENC *E, uint8_t *out) {
         }
     }
 }
-#endif /* HAVE_K4V */
+#endif /* HAVE_C4V */
 
 /* ---------------- harness ------------------------------------------------- */
 static double now(void) {
@@ -1593,49 +1593,49 @@ static void selftest(void) {
     uint8_t *chk[9]; int nc = 0;
     struct { decfn f; const ENC *e; const char *n; } T[] = {
         {dec_h4_u1, e4, "h4u1"}, {dec_h4_u4, e4, "h4u4"}, {dec_h4_u8, e4, "h4u8"},
-#ifdef HAVE_K4R
-        {dec_k4r_u8, e4, "k4r8"}, {dec_k4r_u4, e4, "k4r4"},
+#ifdef HAVE_C4R
+        {dec_c4r_u8, e4, "c4r8"}, {dec_c4r_u4, e4, "c4r4"},
 #endif
-#ifdef HAVE_K4V
-        {dec_k4v_u8, e4, "k4v"}, {dec_k4v_u16, e4, "k4v16"},
-        {dec_k4w_u16, e4, "k4w16"}, {dec_k4v_u24, e4, "k4v24"},
-        {dec_k4x_u16, e4, "k4x16"},
+#ifdef HAVE_C4V
+        {dec_c4v_u8, e4, "c4v"}, {dec_c4v_u16, e4, "c4v16"},
+        {dec_c4w_u16, e4, "c4w16"}, {dec_c4v_u24, e4, "c4v24"},
+        {dec_c4x_u16, e4, "c4x16"},
 #endif
         {dec_w3_u1, e4, "w3u1"}, {dec_w3_u4, e4, "w3u4"}, {dec_w3_u8, e4, "w3u8"},
-        {dec_k2nt_u8, e2, "k2nt"}, {dec_k2t_u8, e2, "k2t"},
-        {dec_k2t_u2, e2, "k2t2"}, {dec_k2t_u4, e2, "k2t4"},
-        {dec_k2t_u6, e2, "k2t6"}, {dec_k2t_u12, e2, "k2t12"},
-        {dec_k2t_u16, e2, "k2t16"},
-        {dec_k2nt_u2, e2, "k2nt2"}, {dec_k2nt_u4, e2, "k2nt4"},
-        {dec_k2nt_u6, e2, "k2nt6"}, {dec_k2nt_u12, e2, "k2nt12"},
-        {dec_k2nt_u16, e2, "k2nt16"},
+        {dec_c2nt_u8, e2, "c2nt"}, {dec_c2t_u8, e2, "c2t"},
+        {dec_c2t_u2, e2, "c2t2"}, {dec_c2t_u4, e2, "c2t4"},
+        {dec_c2t_u6, e2, "c2t6"}, {dec_c2t_u12, e2, "c2t12"},
+        {dec_c2t_u16, e2, "c2t16"},
+        {dec_c2nt_u2, e2, "c2nt2"}, {dec_c2nt_u4, e2, "c2nt4"},
+        {dec_c2nt_u6, e2, "c2nt6"}, {dec_c2nt_u12, e2, "c2nt12"},
+        {dec_c2nt_u16, e2, "c2nt16"},
 #if !defined(__aarch64__)
-        {dec_k2m_u2, e2, "k2m2"}, {dec_k2m_u4, e2, "k2m4"},
-        {dec_k2m_u6, e2, "k2m6"}, {dec_k2m_u12, e2, "k2m12"},
-        {dec_k2m_u16, e2, "k2m16"},
+        {dec_c2m_u2, e2, "c2m2"}, {dec_c2m_u4, e2, "c2m4"},
+        {dec_c2m_u6, e2, "c2m6"}, {dec_c2m_u12, e2, "c2m12"},
+        {dec_c2m_u16, e2, "c2m16"},
 #endif
-#ifdef HAVE_K2G
-        {dec_k2g_u2, e2, "k2g2"}, {dec_k2g_u4, e2, "k2g4"},
-        {dec_k2g_u6, e2, "k2g6"}, {dec_k2g_u8, e2, "k2g8"},
-        {dec_k2gc_u4, e2, "k2gc4"},
+#ifdef HAVE_C2G
+        {dec_c2g_u2, e2, "c2g2"}, {dec_c2g_u4, e2, "c2g4"},
+        {dec_c2g_u6, e2, "c2g6"}, {dec_c2g_u8, e2, "c2g8"},
+        {dec_c2gc_u4, e2, "c2gc4"},
 #endif
-        {dec_k2ntc_u4, e2, "k2ntc4"}, {dec_k2tc_u4, e2, "k2tc4"},
+        {dec_c2ntc_u4, e2, "c2ntc4"}, {dec_c2tc_u4, e2, "c2tc4"},
 #if !defined(__aarch64__)
-        {dec_k2mc_u4, e2, "k2mc4"},
+        {dec_c2mc_u4, e2, "c2mc4"},
 #endif
-#ifdef HAVE_K2Q
-        {dec_k2q_u4, e2, "k2q4"}, {dec_k2q_u6, e2, "k2q6"},
-        {dec_k2qc_u4, e2, "k2qc4"},
+#ifdef HAVE_C2Q
+        {dec_c2q_u4, e2, "c2q4"}, {dec_c2q_u6, e2, "c2q6"},
+        {dec_c2qc_u4, e2, "c2qc4"},
 #endif
-#ifdef HAVE_K2P
-        {dec_k2p_u4, e2, "k2p4"}, {dec_k2pc_u4, e2, "k2pc4"},
+#ifdef HAVE_C2P
+        {dec_c2p_u4, e2, "c2p4"}, {dec_c2pc_u4, e2, "c2pc4"},
 #endif
-#ifdef HAVE_K2S
-        {dec_k2sc_u4, e2, "k2sc4"}, {dec_k2sc_u2, e2, "k2sc2"},
-        {dec_k2sl_u4, e2, "k2sl4"}, {dec_k2sl_u2, e2, "k2sl2"}, {dec_k2sl_u3, e2, "k2sl3"},
-        {dec_k2sp_u4, e2, "k2sp4"}, {dec_k2sp_u3, e2, "k2sp3"},
+#ifdef HAVE_C2S
+        {dec_c2sc_u4, e2, "c2sc4"}, {dec_c2sc_u2, e2, "c2sc2"},
+        {dec_c2sl_u4, e2, "c2sl4"}, {dec_c2sl_u2, e2, "c2sl2"}, {dec_c2sl_u3, e2, "c2sl3"},
+        {dec_c2sp_u4, e2, "c2sp4"}, {dec_c2sp_u3, e2, "c2sp3"},
 #endif
-        {dec_k2d_u8, e2, "k2d"}, {dec_k2e_u8, e2, "k2e"}, {dec_k2f_u8, e2, "k2f"},
+        {dec_c2d_u8, e2, "c2d"}, {dec_c2e_u8, e2, "c2e"}, {dec_c2f_u8, e2, "c2f"},
         {dec_sc4a_u8, e4, "sc4a8"}, {dec_sc4a_u16, e4, "sc4a16"},
         {dec_sc4al_u16, e4, "sc4al16"}, {dec_sc4r_u8, e4, "sc4r8"},
         {dec_sc4r_u16, e4, "sc4r16"}, {dec_sc2r_u8, e2, "sc2r8"},
@@ -1653,8 +1653,8 @@ static void selftest(void) {
 }
 
 int main(int argc, char **argv) {
-    build_h4(); build_w3(); build_k2(); build_k2g(); build_k2p(); build_k2s();
-    build_k2d(); build_k2e(); build_k2f();
+    build_h4(); build_w3(); build_k2(); build_c2g(); build_c2p(); build_c2s();
+    build_c2d(); build_c2e(); build_c2f();
     for (int i = 0; i < 256; i++) { g_cls4[i] = (uint8_t)(i >> 6); g_cls2[i] = (uint8_t)(i >> 7); }
     /* gather constant identity-order check */
     { uint64_t w = 0x8000000000000080ULL;   /* byte0 and byte7 have top bit */
@@ -1702,7 +1702,7 @@ int main(int argc, char **argv) {
         ENC *e2 = encode(v2, N, 2, segb, 7);
         ENC *e8 = encode(v8, N, 8, segb, 5);
         ENC *e16 = encode(v16, N, 16, segb, 4);
-        /* scalar reference timing (K=4 encode, 8 seg) */
+        /* scalar reference timing (C=4 encode, 8 seg) */
         { memset(out, 0, N); dec_ref(e4, out, 6);
           if (memcmp(out, v, N)) { printf("  ref VERIFY FAIL\n"); }
           else { int R = 1 + (int)(2e8 / N); double best = 1e30;
@@ -1712,72 +1712,72 @@ int main(int argc, char **argv) {
         run("h4_u1", dec_h4_u1, e4, v, out);
         run("h4_u4", dec_h4_u4, e4, v, out);
         run("h4_u8", dec_h4_u8, e4, v, out);
-#ifdef HAVE_K4R
-        run("k4r_u4", dec_k4r_u4, e4, v, out);
-        run("k4r_u8", dec_k4r_u8, e4, v, out);
+#ifdef HAVE_C4R
+        run("c4r_u4", dec_c4r_u4, e4, v, out);
+        run("c4r_u8", dec_c4r_u8, e4, v, out);
 #endif
-#ifdef HAVE_K4V
-        run("k4v_u8", dec_k4v_u8, e4, v, out);
-        run("k4v_u16", dec_k4v_u16, e4, v, out);
-        run("k4w_u16", dec_k4w_u16, e4, v, out);
-        run("k4v_u24", dec_k4v_u24, e4, v, out);
-        run("k4x_u16", dec_k4x_u16, e4, v, out);
+#ifdef HAVE_C4V
+        run("c4v_u8", dec_c4v_u8, e4, v, out);
+        run("c4v_u16", dec_c4v_u16, e4, v, out);
+        run("c4w_u16", dec_c4w_u16, e4, v, out);
+        run("c4v_u24", dec_c4v_u24, e4, v, out);
+        run("c4x_u16", dec_c4x_u16, e4, v, out);
 #endif
         run("w3_u1", dec_w3_u1, e4, v, out);
         run("w3_u4", dec_w3_u4, e4, v, out);
         run("w3_u8", dec_w3_u8, e4, v, out);
-        run("k2nt_u2", dec_k2nt_u2, e2, v2, out);
-        run("k2nt_u4", dec_k2nt_u4, e2, v2, out);
-        run("k2nt_u6", dec_k2nt_u6, e2, v2, out);
-        run("k2nt_u8", dec_k2nt_u8, e2, v2, out);
-        run("k2nt_u12", dec_k2nt_u12, e2, v2, out);
-        run("k2nt_u16", dec_k2nt_u16, e2, v2, out);
-        run("k2t_u2", dec_k2t_u2, e2, v2, out);
-        run("k2t_u4", dec_k2t_u4, e2, v2, out);
-        run("k2t_u6", dec_k2t_u6, e2, v2, out);
-        run("k2t_u8", dec_k2t_u8, e2, v2, out);
-        run("k2t_u12", dec_k2t_u12, e2, v2, out);
-        run("k2t_u16", dec_k2t_u16, e2, v2, out);
-#ifdef HAVE_K2G
-        run("k2g_u2", dec_k2g_u2, e2, v2, out);
-        run("k2g_u4", dec_k2g_u4, e2, v2, out);
-        run("k2g_u6", dec_k2g_u6, e2, v2, out);
-        run("k2g_u8", dec_k2g_u8, e2, v2, out);
-        run("k2gc_u4", dec_k2gc_u4, e2, v2, out);
+        run("c2nt_u2", dec_c2nt_u2, e2, v2, out);
+        run("c2nt_u4", dec_c2nt_u4, e2, v2, out);
+        run("c2nt_u6", dec_c2nt_u6, e2, v2, out);
+        run("c2nt_u8", dec_c2nt_u8, e2, v2, out);
+        run("c2nt_u12", dec_c2nt_u12, e2, v2, out);
+        run("c2nt_u16", dec_c2nt_u16, e2, v2, out);
+        run("c2t_u2", dec_c2t_u2, e2, v2, out);
+        run("c2t_u4", dec_c2t_u4, e2, v2, out);
+        run("c2t_u6", dec_c2t_u6, e2, v2, out);
+        run("c2t_u8", dec_c2t_u8, e2, v2, out);
+        run("c2t_u12", dec_c2t_u12, e2, v2, out);
+        run("c2t_u16", dec_c2t_u16, e2, v2, out);
+#ifdef HAVE_C2G
+        run("c2g_u2", dec_c2g_u2, e2, v2, out);
+        run("c2g_u4", dec_c2g_u4, e2, v2, out);
+        run("c2g_u6", dec_c2g_u6, e2, v2, out);
+        run("c2g_u8", dec_c2g_u8, e2, v2, out);
+        run("c2gc_u4", dec_c2gc_u4, e2, v2, out);
 #endif
-        run("k2ntc_u4", dec_k2ntc_u4, e2, v2, out);
-        run("k2tc_u4", dec_k2tc_u4, e2, v2, out);
+        run("c2ntc_u4", dec_c2ntc_u4, e2, v2, out);
+        run("c2tc_u4", dec_c2tc_u4, e2, v2, out);
 #if !defined(__aarch64__)
-        run("k2mc_u4", dec_k2mc_u4, e2, v2, out);
+        run("c2mc_u4", dec_c2mc_u4, e2, v2, out);
 #endif
-#ifdef HAVE_K2Q
-        run("k2q_u4", dec_k2q_u4, e2, v2, out);
-        run("k2q_u6", dec_k2q_u6, e2, v2, out);
-        run("k2qc_u4", dec_k2qc_u4, e2, v2, out);
+#ifdef HAVE_C2Q
+        run("c2q_u4", dec_c2q_u4, e2, v2, out);
+        run("c2q_u6", dec_c2q_u6, e2, v2, out);
+        run("c2qc_u4", dec_c2qc_u4, e2, v2, out);
 #endif
-#ifdef HAVE_K2S
-        run("k2sc_u4", dec_k2sc_u4, e2, v2, out);
-        run("k2sc_u2", dec_k2sc_u2, e2, v2, out);
-        run("k2sl_u4", dec_k2sl_u4, e2, v2, out);
-        run("k2sl_u2", dec_k2sl_u2, e2, v2, out);
-        run("k2sl_u3", dec_k2sl_u3, e2, v2, out);
-        run("k2sp_u4", dec_k2sp_u4, e2, v2, out);
-        run("k2sp_u3", dec_k2sp_u3, e2, v2, out);
+#ifdef HAVE_C2S
+        run("c2sc_u4", dec_c2sc_u4, e2, v2, out);
+        run("c2sc_u2", dec_c2sc_u2, e2, v2, out);
+        run("c2sl_u4", dec_c2sl_u4, e2, v2, out);
+        run("c2sl_u2", dec_c2sl_u2, e2, v2, out);
+        run("c2sl_u3", dec_c2sl_u3, e2, v2, out);
+        run("c2sp_u4", dec_c2sp_u4, e2, v2, out);
+        run("c2sp_u3", dec_c2sp_u3, e2, v2, out);
 #endif
-#ifdef HAVE_K2P
-        run("k2p_u4", dec_k2p_u4, e2, v2, out);
-        run("k2pc_u4", dec_k2pc_u4, e2, v2, out);
+#ifdef HAVE_C2P
+        run("c2p_u4", dec_c2p_u4, e2, v2, out);
+        run("c2pc_u4", dec_c2pc_u4, e2, v2, out);
 #endif
-        run("k2d_u8", dec_k2d_u8, e2, v2, out);
-        run("k2e_u8", dec_k2e_u8, e2, v2, out);
-        run("k2f_u8", dec_k2f_u8, e2, v2, out);
+        run("c2d_u8", dec_c2d_u8, e2, v2, out);
+        run("c2e_u8", dec_c2e_u8, e2, v2, out);
+        run("c2f_u8", dec_c2f_u8, e2, v2, out);
 #if !defined(__aarch64__)
-        run("k2m_u2", dec_k2m_u2, e2, v2, out);
-        run("k2m_u4", dec_k2m_u4, e2, v2, out);
-        run("k2m_u6", dec_k2m_u6, e2, v2, out);
-        run("k2m_u8", dec_k2m_u8, e2, v2, out);
-        run("k2m_u12", dec_k2m_u12, e2, v2, out);
-        run("k2m_u16", dec_k2m_u16, e2, v2, out);
+        run("c2m_u2", dec_c2m_u2, e2, v2, out);
+        run("c2m_u4", dec_c2m_u4, e2, v2, out);
+        run("c2m_u6", dec_c2m_u6, e2, v2, out);
+        run("c2m_u8", dec_c2m_u8, e2, v2, out);
+        run("c2m_u12", dec_c2m_u12, e2, v2, out);
+        run("c2m_u16", dec_c2m_u16, e2, v2, out);
 #endif
         run("sc4a_u2", dec_sc4a_u2, e4, v, out);
         run("sc4a_u4", dec_sc4a_u4c, e4, v, out);

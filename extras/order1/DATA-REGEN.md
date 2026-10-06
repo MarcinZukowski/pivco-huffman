@@ -19,7 +19,7 @@ caveats first:
   `notes/2026-08-15-o1demux-k4/` (untracked); build lines below.  Their
   numbers (ledger §1.3, §4.3, §8.6, §9.1, §16.1–2, §23.1) stand on the
   archived result files there (`xfield_realfse_results.txt`,
-  `k8_crossfield_results.txt`) and on `sessionratio` re-run 2026-09-09.
+  `c8_crossfield_results.txt`) and on `sessionratio` re-run 2026-09-09.
 - **Scratchpads die.**  /tmp (and this session's scratchpad) gets purged
   by macOS; it already ate one worktree mid-session.  Nothing below
   depends on scratchpad state.
@@ -40,7 +40,7 @@ caveats first:
 | `PIVCO_LVL_STATS=1` | per-tree-level winner/savings census to stderr on compress |
 | `PIVCO_WIRE_STATS=1` | wire-category byte census (kr/marker/bitmap/pad/fse/framing), reconciles to container size |
 | `PIVCO_FSE_RATIO/THRESH/MINB` | override the static-FSE commit gates (defaults 0.95 / 0.625 / 32) |
-| `PIVCO_BLKTAB=K` | per-block table ring, K = 1..8 (flags bit 2 on the wire; decode self-describing) |
+| `PIVCO_BLKTAB=K` | per-block table ring, C = 1..8 (flags bit 2 on the wire; decode self-describing) |
 | `PIVCO_NODYN=1` | disable id 51 (dynamic nibble) |
 | `PIVCO_CTX=1`, `PIVCO_CTX_DICT=N`, `PIVCO_CTX_FREE=1`, `PIVCO_NOFUSE=1` | ctx coder on / dictionary cap / no dictionary (pre-cap coder) / quad fusion off |
 | `PIVCO_CTX_NOCACHE`, `PIVCO_CTX_DP`, `PIVCO_CTX_L=N` | no table reuse (streaming bound) / DP probability expansion / tableLog override (16-param modes use N−1) |
@@ -100,7 +100,7 @@ All need `/tmp/phd_<f>/{lit,ll,ml,of}` + `/tmp/o1maps/<f>.map{2,4}` from
 
 | tool | what | build / run |
 |---|---|---|
-| `sessionratio.c` | real-FSE ratio of order0 / K2serial / K4serial / k2g2 / k2g4 / k4g16, whole-stream tables, decode-verified (§9.1) | `cc -O3 -mcpu=native -I ext/fse/lib sessionratio.c build/libpivco_huffman.a -o sessionratio && ./sessionratio [files]` |
+| `sessionratio.c` | real-FSE ratio of order0 / C2serial / C4serial / c2g2 / c2g4 / c4g16, whole-stream tables, decode-verified (§9.1) | `cc -O3 -mcpu=native -I ext/fse/lib sessionratio.c build/libpivco_huffman.a -o sessionratio && ./sessionratio [files]` |
 | `sessionratio_blk.c` | same with per-block tables, env `BLK` (default 16384, 0 = whole stream) (§16.1) | as above; `BLK=16384 ./sessionratio_blk` |
 | `sessionratio_rep.c` | + NCount repeat-mode (`REPEAT=1`) and the per-block mode argmax columns (§16.1) | as above; `REPEAT=1 ./sessionratio_rep` |
 | `sessionspeed.c` | end-to-end decode (FSE `usingDTable` + production merges + NEON gather), byte-exact, ns/B (§8.6) | `cc -O3 -mcpu=native -I include -I src -I ext/fse/lib sessionspeed.c build/libpivco_huffman.a -o sessionspeed` |
@@ -110,12 +110,12 @@ All need `/tmp/phd_<f>/{lit,ll,ml,of}` + `/tmp/o1maps/<f>.map{2,4}` from
 | `coderbench.c` | nib / pair / byte / pos2 / repeat / tableLog-7 / straight-to-bytes coders on those regions (§1.3); env `TL256` for the pair table | `cc -O3 -mcpu=native -I include -I src -I ext/fse/lib coderbench.c build/libpivco_huffman.a -o coderbench && ./coderbench *.dump` |
 | `fsesum.c` | real FSE byte cost of every `*.bin` in a directory (charging rules in the header) | `cc -O3 -I ext/fse/lib fsesum.c build/libpivco_huffman.a -o /tmp/fsesum` |
 | `xfield_demux.py` | cross-field class-context demux of ll/ml/of into `/tmp/xf/`, then prices with `/tmp/fsesum` (§16.2) | `python3 xfield_demux.py` (writes `xfield_realfse_results.txt`) |
-| `k8_crossfield.py` | Shannon accounting for kKgK² at K = 2/4/8 + cross-field (§9.1, §16.2 Shannon column) | `python3 k8_crossfield.py > k8_crossfield_results.txt` |
+| `c8_crossfield.py` | Shannon accounting for kKgK² at C = 2/4/8 + cross-field (§9.1, §16.2 Shannon column) | `python3 c8_crossfield.py > c8_crossfield_results.txt` |
 | `extras/bench/bench_merge4way.c` | one-go vs 3-binary 4-way merge (§4.3) — committed | CMake target `pivco_bench_merge4way` |
 
 Sweeps behind the 2026-09-08/09 numbers:
 
-- **ctx vs k4g16** (§23.1): worktree of e1bdce0 + `ph-ctx-session.patch` (from 9d4409e),
+- **ctx vs c4g16** (§23.1): worktree of e1bdce0 + `ph-ctx-session.patch` (from 9d4409e),
   `PIVCO_CTX=1 ./build/pivcohuf c -a` per lit stream (dict-48 default) vs
   `sessionratio` on the same streams.
 - **tableLog re-check on the landing tree** (§1.2 “shipped”): two builds
@@ -135,7 +135,7 @@ Sweeps behind the 2026-09-08/09 numbers:
 - **Table ring** (ledger-pending; chat 2026-08-24): global vs
   `PIVCO_BLKTAB=1` vs `PIVCO_BLKTAB=8`, `PIVCO_NODYN=1`, on the
   fixed-capture L19 streams; roundtrip via `pivcohuf d` + `cmp`.
-  Inter-table delta analysis parses the K=8 containers directly
+  Inter-table delta analysis parses the C=8 containers directly
   (introductions carry their 128-B length nibbles in the wire).
 - **ctx config grid** (ledger §2.2): dANS arm plain `-a`; ctx arms add
   `PIVCO_CTX=1` × {`PIVCO_NOFUSE`} × {`PIVCO_CTX_FREE`}.

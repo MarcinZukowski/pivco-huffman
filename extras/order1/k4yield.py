@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-# Yield simulation for K=4 (top-2-bit buckets) demux kernel proposals vs the
-# built K=2 (6,6) window kernel.  Metric: bytes emitted per DEPENDENT table
+# Yield simulation for C=4 (top-2-bit buckets) demux kernel proposals vs the
+# built C=2 (6,6) window kernel.  Metric: bytes emitted per DEPENDENT table
 # lookup -- the serial currency all these kernels spend.
 #
 # Kernels simulated (all walks operate on residence classes r[j] = class(v[j-1])):
@@ -12,7 +12,7 @@
 #             lookup, which sees it in the shifted H regs).
 #  win4(d)  : asymmetric window variant: d elements of lookahead in the chain's
 #             STARTING bucket, 1 head for each other bucket.  Index = 2d+6+2 bits.
-#  k2_66    : the built kernel: 6 lookahead each side, K=2 top-bit classes.
+#  c2_66    : the built kernel: 6 lookahead each side, C=2 top-bit classes.
 #             Reported without terminal (matches built code, calibrates cost)
 #             and with terminal (+1/iter backport idea).
 import numpy as np, heapq, sys, os
@@ -75,7 +75,7 @@ def yield_k2(r, d, term):
     return em / lk
 
 def cluster_ctx(v, K, iters=16):
-    # k-means-style context clustering: partition prev-symbols into K classes
+    # k-means-style context clustering: partition prev-symbols into C classes
     # minimizing sum of per-context follower entropies (the remap objective).
     idx = v[:-1].astype(np.int64) * 256 + v[1:].astype(np.int64)
     M = np.bincount(idx, minlength=65536).reshape(256, 256).astype(np.float64)
@@ -105,17 +105,17 @@ def row(v, c2, c4, tag, f):
     r4l = r4.tolist(); r2l = r2.tolist()
     h4 = yield_heads4(r4l)
     w2 = yield_win4(r4l, 2); w3 = yield_win4(r4l, 3); w4 = yield_win4(r4l, 4)
-    k2 = yield_k2(r2l, 6, 0); k2t = yield_k2(r2l, 6, 1)
+    c2 = yield_k2(r2l, 6, 0); c2t = yield_k2(r2l, 6, 1)
     o0 = hufflen(np.bincount(v, minlength=256).tolist())
     s2 = 100 * (1 - o1_cost(v, c2, 2) / o0)
     s4 = 100 * (1 - o1_cost(v, c4, 4) / o0)
     p12 = np.bincount(c2, minlength=2).max() / len(v)
     p14 = np.bincount(c4, minlength=4).max() / len(v)
-    print(f"{f:9}{tag:5} {p12:6.3f} {p14:6.3f} | {h4:7.2f} {w2:7.2f} {w3:7.2f} {w4:7.2f} {k2:6.2f} {k2t:6.2f} | {s2:6.2f} {s4:6.2f}")
+    print(f"{f:9}{tag:5} {p12:6.3f} {p14:6.3f} | {h4:7.2f} {w2:7.2f} {w3:7.2f} {w4:7.2f} {c2:6.2f} {c2t:6.2f} | {s2:6.2f} {s4:6.2f}")
 
 def main():
     files = sys.argv[1:] or ["dickens", "mozilla", "x-ray", "webster", "samba", "xml"]
-    hdr = f"{'file':9}{'cls':5} {'p1K2':6} {'p1K4':6} | {'heads4':7} {'win4d2':7} {'win4d3':7} {'win4d4':7} {'k2_66':6} {'+term':6} | {'o1K2%':6} {'o1K4%':6}"
+    hdr = f"{'file':9}{'cls':5} {'p1K2':6} {'p1K4':6} | {'heads4':7} {'win4d2':7} {'win4d3':7} {'win4d4':7} {'c2_66':6} {'+term':6} | {'o1K2%':6} {'o1K4%':6}"
     print(hdr); print("-" * len(hdr))
     for f in files:
         v = np.fromfile(f"/tmp/phd_{f}/lit", dtype=np.uint8)[:SAMPLE]
