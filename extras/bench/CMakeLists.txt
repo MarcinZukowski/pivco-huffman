@@ -247,7 +247,7 @@ if(PIVCO_FSE)
     target_link_libraries(pivco_bench_fse_table_use pivco_huffman m)
 
     # Per-chunk compressed-size comparison over arbitrary input files:
-    # pivco / pivco+static-ANS / pivco+nibANS / fse.
+    # pivco / pivco+sFSE / pivco+nibFSE / fse.
     add_executable(pivco_bench_chunk_sizes bench_chunk_sizes.c)
     target_link_libraries(pivco_bench_chunk_sizes pivco_huffman m)
     target_include_directories(pivco_bench_chunk_sizes PRIVATE

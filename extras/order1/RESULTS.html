@@ -136,7 +136,7 @@ streams ── entropy layer ──▶  container    zstd: order-0 FSE/Huffman �
     <b>phaz</b><span>zstd's parser + copy engine with PH as the entropy layer.</span>
     <b>ctx</b><span>The carry-context coder (§2).</span>
     <b>o6</b><span>The cross-field context-switched tANS (§13).</span>
-    <b>dANS / nibANS</b><span>PR #30's dynamic nibble-FSE (§1); landed 2026-09-09 as the <i>nibble table</i> (id 51, bench column nibANS).</span>
+    <b>dANS / nibFSE</b><span>PR #30's dynamic nibble-FSE (§1); landed 2026-09-09 as the <i>nibble table</i> (id 51, bench column nibFSE).</span>
     <b>cN gM</b><span>Plane-on-wire literal coding: N context classes, M residue contexts (§9.1).</span>
     <b>o2…o6 *.c</b><span>Standalone probe coders in extras/order1.</span>
     <b>silesia</b><span>The standard 12-file test corpus.</span>
@@ -403,10 +403,10 @@ perf stat -x, -e cycles:u,instructions:u env ONLY=zzzz ./o2demux</pre>
   <div class="tablewrap"><table>
     <caption>29 inputs (44.2 MB) · one Huffman table per 128 KiB segment · size vs PH / decode MB/s · stock → wide</caption>
     <tr><th>menu</th><th>M4 (16 KiB blocks)</th><th>Graviton 4</th><th>Granite Rapids</th><th>Zen 5</th></tr>
-    <tr><td>sANS+nib</td><td>−2.14 → −2.09% · 4792 → <span class="w">6519</span></td><td>−1.92 → −1.89% · 2723 → 3272</td><td>4003 → 5561</td><td>6139 → 7613</td></tr>
-    <tr><td>sANS+nib+k1</td><td>5714 → 6764</td><td>3049 → 3363</td><td>4741 → 5678</td><td>6815 → 7632</td></tr>
-    <tr><td>sANS+nib+k1+k2</td><td>5902 → 6265</td><td>3041 → 3120</td><td>4780 → 4960</td><td>6219 → 6347</td></tr>
-    <tr><td class="dim">4 cursors, M4, sANS+nib</td><td class="dim">−2.12% · 5964</td><td colspan="3" class="dim">half the initial-state cost (0.02 vs 0.05 points), two thirds of the gain</td></tr>
+    <tr><td>sFSE+nib</td><td>−2.14 → −2.09% · 4792 → <span class="w">6519</span></td><td>−1.92 → −1.89% · 2723 → 3272</td><td>4003 → 5561</td><td>6139 → 7613</td></tr>
+    <tr><td>sFSE+nib+k1</td><td>5714 → 6764</td><td>3049 → 3363</td><td>4741 → 5678</td><td>6815 → 7632</td></tr>
+    <tr><td>sFSE+nib+k1+k2</td><td>5902 → 6265</td><td>3041 → 3120</td><td>4780 → 4960</td><td>6219 → 6347</td></tr>
+    <tr><td class="dim">4 cursors, M4, sFSE+nib</td><td class="dim">−2.12% · 5964</td><td colspan="3" class="dim">half the initial-state cost (0.02 vs 0.05 points), two thirds of the gain</td></tr>
   </table></div>
   <ul class="lessons">
     <li><b>Per region the wide decoder is 2.3–2.8× the stock one at every size</b>: three factors of about
@@ -416,7 +416,7 @@ perf stat -x, -e cycles:u,instructions:u env ONLY=zzzz ./o2demux</pre>
     small regions that dominate by count; the static path sidesteps it with the stock layout under 64
     bytes.</li>
     <li><b>nib's place once k2 exists</b>: in the full menu nib wins 183 regions (0.13 MB) for 0.02 points
-    while costing 60% of the encode speed. Opt-in stays; the recommended menus are sANS+k1+k2 or sANS+k2.</li>
+    while costing 60% of the encode speed. Opt-in stays; the recommended menus are sFSE+k1+k2 or sFSE+k2.</li>
     <li><b>nib8</b>: a 256-symbol table derived on both sides from the transmitted 16 counts (product
     model, 1024 states, absent bytes get no slot, one-sweep largest-remainder normalization), coded with
     the k2 loop — half the steps, no static tables, ~3 µs per-region build (the floor for a 1024-state
@@ -693,28 +693,28 @@ perf stat -x, -e cycles:u,instructions:u env ONLY=zzzz ./o2demux</pre>
   <div class="tablewrap"><table>
     <caption>29 inputs · 128 KiB segments · size vs PH / decode MB/s · M4 16 KiB blocks, servers 32 KiB</caption>
     <tr><th>menu</th><th>M4</th><th>Graviton 4</th><th>Granite Rapids</th><th>Zen 5</th></tr>
-    <tr><td>sANS</td><td>−1.14 / 8195</td><td>−0.90 / 3922</td><td>−0.90 / 7224</td><td>−0.90 / 10416</td></tr>
-    <tr><td>sANS+k1</td><td>−1.97 / 7302</td><td>−1.72 / 3615</td><td>−1.72 / 6217</td><td>−1.72 / 8397</td></tr>
-    <tr><td>sANS+nib+k1 (the menu before k2; nib on stock FSE)</td><td>−2.35 / 5714</td><td>−2.11 / 3059</td><td>−2.11 / 4747</td><td>−2.11 / 6868</td></tr>
+    <tr><td>sFSE</td><td>−1.14 / 8195</td><td>−0.90 / 3922</td><td>−0.90 / 7224</td><td>−0.90 / 10416</td></tr>
+    <tr><td>sFSE+k1</td><td>−1.97 / 7302</td><td>−1.72 / 3615</td><td>−1.72 / 6217</td><td>−1.72 / 8397</td></tr>
+    <tr><td>sFSE+nib+k1 (the menu before k2; nib on stock FSE)</td><td>−2.35 / 5714</td><td>−2.11 / 3059</td><td>−2.11 / 4747</td><td>−2.11 / 6868</td></tr>
     <tr><td class="a">k2 alone</td><td class="w">−3.28 / 6622</td><td>−3.14 / 3249</td><td>−3.14 / 5265</td><td>−3.14 / 6590</td></tr>
-    <tr><td class="a">sANS+k2</td><td class="w">−3.45 / 6310</td><td>−3.26 / 3145</td><td>−3.26 / 5015</td><td>−3.26 / 6398</td></tr>
-    <tr><td>sANS+k1+k2</td><td>−3.48 / 6297</td><td>−3.28 / 3148</td><td>−3.28 / 4955</td><td>−3.28 / 6403</td></tr>
+    <tr><td class="a">sFSE+k2</td><td class="w">−3.45 / 6310</td><td>−3.26 / 3145</td><td>−3.26 / 5015</td><td>−3.26 / 6398</td></tr>
+    <tr><td>sFSE+k1+k2</td><td>−3.48 / 6297</td><td>−3.28 / 3148</td><td>−3.28 / 4955</td><td>−3.28 / 6403</td></tr>
   </table></div>
   <ul class="lessons">
     <li><b>The aggregate is mostly one stream</b>: x-ray/lit (15% of the compressed corpus) goes 1.23× →
     1.32× and carries ~1.0 of the 1.1 points; the mozilla code streams gain ~1 point each, text nothing.
-    k1 adds 0.02 points on top of k2, sANS 0.12–0.17; compress is 3× the nibble menus'.</li>
+    k1 adds 0.02 points on top of k2, sFSE 0.12–0.17; compress is 3× the nibble menus'.</li>
     <li><b>Coder vs coverage, measured both ways.</b> On the regions the static gate picks, k2 saves 12%
     more than the static tables at the same decode speed (k1 is even a touch faster: 4 KB tables). On
     k2's own 20% regions the static tables cannot shrink 48% of the bytes at all and k1 19%; of what each
-    can code, k2 saves 36%, k1 28%, sANS 23%. The rest of k2's gain is coverage, and every extra byte
+    can code, k2 saves 36%, k1 28%, sFSE 23%. The rest of k2's gain is coverage, and every extra byte
     through a tANS loop costs ~12 raw bytes of decode time whichever coder runs it: the gate is the dial
     (10%: −4.19% at 5186 MB/s; 20%: −3.45 at 6185; 30%: −2.43 at 7116; 50%: −1.87 at 7513; loosening
-    sANS to "any saving" gives −1.31 at 6793). The static gate is depth-aware and k2's is not; a k2 gate
+    sFSE to "any saving" gives −1.31 at 6793). The static gate is depth-aware and k2's is not; a k2 gate
     of that form is untried.</li>
-    <li><b>Where k2 loses</b>: it cannot code 0.02–0.04% of the bytes sANS or k1 code; on pure-skew
+    <li><b>Where k2 loses</b>: it cannot code 0.02–0.04% of the bytes sFSE or k1 code; on pure-skew
     regions (dickens/ll, x-ray/ml) the static table with its exact skew and L=12 is ~3% smaller, 15 KB
-    over the corpus, which sANS in the menu recovers. k1 adds nothing k2 lacks.</li>
+    over the corpus, which sFSE in the menu recovers. k1 adds nothing k2 lacks.</li>
     <li><b>Catalog halving by complement symmetry.</b> The grid is closed under p → 1−p, so
     P<sub>r</sub>(byte | carry) = P<sub>r′</sub>(~byte | ~carry) for the mirror recipe. Layout 1 (mirror
     tables for two of the four carries, XOR per decoded byte) costs 1–4% decode on the servers: same
@@ -734,7 +734,7 @@ perf stat -x, -e cycles:u,instructions:u env ONLY=zzzz ./o2demux</pre>
     first-touch only). Open.</li>
   </ul>
   <div class="verdict"><b>Verdict</b>
-  k2 is the coder in the menu; sANS stays for the pure-skew regions and is now switchable
+  k2 is the coder in the menu; sFSE stays for the pure-skew regions and is now switchable
   (<code>fse_static_enabled</code>); k1 is redundant given k2; the gate, not the loop, sets the
   size/speed point. Open: a depth-aware k2 gate, prebuilt vectors, k1's halving.</div>
 </section>
@@ -868,7 +868,7 @@ perf stat -x, -e cycles:u,instructions:u env ONLY=zzzz ./o2demux</pre>
   file. That, not the coder, was the size gap on the literal streams. One table per 128 KiB segment, sent
   with the segment's first block only when it saves its own 128 bytes (code-length bit model; the period
   is encoder policy, nothing on the wire but a flag): PH −1.68% / −5% compress / −2% decompress at 128K
-  (64K −1.95% / −12% / −12%; 256K −1.37%; 512K −1.13%), sANS −1.10%. Joint optimization unaffected. The
+  (64K −1.95% / −12% / −12%; 256K −1.37%; 512K −1.13%), sFSE −1.10%. Joint optimization unaffected. The
   shelved 16 KiB ring with its reuse forms is superseded: at 128 KiB a raw table is 0.1–0.8% of a block
   and depth-1 reuse already catches the two streams where that bites. Wire v0.10 (main@ad33427):
   24-bit ENCODED_LEN plus a BLOCK_FLAGS byte.</p>

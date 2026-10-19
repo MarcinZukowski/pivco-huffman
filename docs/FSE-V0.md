@@ -798,7 +798,7 @@ over arbitrary files:
 ./build/extras/bench/pivco_bench_chunk_sizes [--chunk BYTES] FILE [FILE ...]
 ```
 
-Four columns — pivco (FSE off), pivco+static-ANS, pivco+nibANS,
+Four columns — pivco (FSE off), pivco+static-ANS, pivco+nibFSE,
 and stock `FSE_compress` over the chunk bytes.  The pivco columns are
 charged 128 bytes per chunk for the nibble-packed code lengths, every
 codec gets a 1-byte block tag and the RAW / RLE escapes, and every
@@ -810,7 +810,7 @@ At 32 KiB chunks over `extras/datasets/`, static ANS is inert on most
 text (`+0.00%` vs plain pivco) while the nibble table carries
 essentially the whole FSE win — calgary_pic −38.0%, csv_numeric
 −6.4%, source_c −1.6%, README.md −1.8%.  Aggregate over the 13
-dataset files: pivco 58.96% of raw, +static 58.19%, +nibANS 57.70%,
+dataset files: pivco 58.96% of raw, +static 58.19%, +nibFSE 57.70%,
 fse 57.73%.
 
 Obvious follow-ups, none done yet:
@@ -893,7 +893,7 @@ differ, and our absolute ratios are the better of the two on both files
 (e.g. xml 1.527 here vs 1.514 there) — so only the pivco-vs-fse margin
 within each system is meaningful.
 
-Broader sweep, `extras/datasets/` plus the literal corpus: nibANS now beats
+Broader sweep, `extras/datasets/` plus the literal corpus: nibFSE now beats
 fse on calgary_pic (−14.4% relative), mr.serial (−11.9%), csv_numeric
 (−7.3%), json_api (−1.9%), source_c (−1.5%), mozilla, ooffice, osdb,
 flux, precip, README; it still trails on the prose-like streams
@@ -912,14 +912,14 @@ exactly what the per-node and per-flat-region tables are for.
 
 Where the design lands against that floor:
 
-| file | entropy O0 | pivco | +sANS | +nibANS | fse |
+| file | entropy O0 | pivco | +sFSE | +nibFSE | fse |
 |---|---:|---:|---:|---:|---:|
 | nci.serial   | 467494 | +1.63% | +1.63% | **-0.32%** | +0.52% |
 | xml.serial   | 234799 | +1.52% | +1.52% | +0.79% | +0.64% |
 | calgary_pic  |  73210 | +43.70% | -1.79% | **-11.49%** | +3.45% |
 | all 31 files | 54942499 | +1.26% | +1.17% | **-1.50%** | +0.92% |
 
-So nibANS is under the order-0 floor in aggregate and plain FSE is not,
+So nibFSE is under the order-0 floor in aggregate and plain FSE is not,
 which is the whole point of the design.  xml.serial is the case where it
 still is not: +0.79% vs FSE's +0.64%.
 
@@ -1082,7 +1082,7 @@ nibble table.
 Size vs pure PH and whole-file decode MB/s, all candidates at the 20%
 gate:
 
-| stream            | sANS   | +nibble|   +k1  | +both  | PH    | sANS | +nib | +k1  | +both|
+| stream            | sFSE   | +nibble|   +k1  | +both  | PH    | sFSE | +nib | +k1  | +both|
 |-------------------|-------:|-------:|-------:|-------:|------:|-----:|-----:|-----:|-----:|
 | x-ray lit         |  −0.48 |  −5.36 |  −2.40 |  −5.78 |  7968 | 7047 | 1694 | 5036 | 1932 |
 | mozilla lit       |  −0.92 |  −1.06 |  −1.05 |  −1.10 |  8114 | 6756 | 5478 | 6478 | 5699 |

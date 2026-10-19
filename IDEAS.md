@@ -538,8 +538,8 @@ four probabilities on a symmetric 4-value grid, one recipe byte; only
 the 136 canonical recipes carry tables (complement symmetry: a region
 under a non-canonical recipe is coded as its complement under the
 mirror recipe and complemented back after the decode loop), 4.25 MB.
-29 inputs at 128 KiB segments, size vs PH / decode on M4: sANS -1.14%
-/ 8195 MB/s, today's sANS+nib+k1 -2.34 / 6785, sANS+k2 -3.45 / 6310,
+29 inputs at 128 KiB segments, size vs PH / decode on M4: sFSE -1.14%
+/ 8195 MB/s, today's sFSE+nib+k1 -2.34 / 6785, sFSE+k2 -3.45 / 6310,
 k2 alone -3.28 / 6622, compress 3x the nibble menus'.  The gain is
 mostly x-ray/lit (1.23x → 1.32x); on the regions all coders can code,
 k2 saves 12% more than the static tables at the same speed, the rest

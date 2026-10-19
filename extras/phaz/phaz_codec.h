@@ -53,7 +53,7 @@ size_t phaz_decompress(const void *src, size_t n, void *dst, size_t cap,
  * fills these with the pivoted ll/ml/of/lit streams + per-block metadata. */
 /* The PH/PHA stream coder's configuration (pivco_cfg_t: the FSE candidate
  * menu) and the Huffman table period in blocks (0 = one table per stream).
- * Defaults: sANS only, one table per PIVCOHUF_SEGMENT_BYTES_DEFAULT. */
+ * Defaults: sFSE only, one table per PIVCOHUF_SEGMENT_BYTES_DEFAULT. */
 extern pivco_cfg_t g_phaz_cfg;
 extern size_t g_phaz_seg_blocks;
 extern size_t g_phaz_blk;   /* codec block size for the pivoted streams */

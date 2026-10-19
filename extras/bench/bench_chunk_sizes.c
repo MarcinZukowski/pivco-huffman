@@ -4,13 +4,13 @@
  * compresses each chunk independently with:
  *
  *   pivco        PivCo-Huffman, per-node FSE off -- raw partition bitmaps
- *   pivco+sANS   ... + static ANS: the pre-built PIVCO_FSE_NUM_TABLES
+ *   pivco+sFSE   ... + static FSE: the pre-built PIVCO_FSE_NUM_TABLES
  *                byte-alphabet FSE tables, selected per node from the
  *                partition skew (no per-node table header)
- *   pivco+nibANS ... + nibble ANS: the static schedule *and* the per-bitmap
+ *   pivco+nibFSE ... + nibble FSE: the static schedule *and* the per-bitmap
  *                nibble table (PIVCO_FSE_NIBBLE_ID), smaller payload wins
- *   pivco+k1ANS  ... + the k=1 bit-context table (PIVCO_FSE_K1_ID) instead
- *   pivco+allANS ... + both transmitted-table candidates
+ *   pivco+k1FSE  ... + the k=1 bit-context table (PIVCO_FSE_K1_ID) instead
+ *   pivco+allFSE ... + both transmitted-table candidates
  *   fse          Yann's TANS straight over the chunk's bytes
  *                (FSE_compress -- order-0, self-describing)
  *
@@ -75,11 +75,11 @@
 /* Per-chunk block-type tag (CODED / RAW / RLE). */
 #define BLOCK_TAG_BYTES 1
 
-enum { C_PIVCO = 0, C_PIVCO_SANS, C_PIVCO_NIBANS, C_PIVCO_K1ANS, C_PIVCO_ALLANS,
+enum { C_PIVCO = 0, C_PIVCO_SFSE, C_PIVCO_NIBFSE, C_PIVCO_K1FSE, C_PIVCO_ALLFSE,
        C_FSE, N_CODECS };
 
 static const char *codec_name[N_CODECS] = {
-    "pivco", "pivco+sANS", "pivco+nibANS", "pivco+k1ANS", "pivco+allANS", "fse",
+    "pivco", "pivco+sFSE", "pivco+nibFSE", "pivco+k1FSE", "pivco+allFSE", "fse",
 };
 #define N_PIVCO 5   /* the pivco variants, in codec order */
 
@@ -396,11 +396,11 @@ static int run_one(const char *path, size_t chunk, codec_totals_t grand[N_CODECS
     printf("%zu bytes, %zu chunk%s of %zu (last %zu), %zu constant (RLE)\n",
            len, nchunks, nchunks == 1 ? "" : "s", chunk, last_chunk, nrle);
     print_table((uint64_t)len, entropy_bits / 8.0, tot);
-    printf("regions committed: nibANS %llu nibble; k1ANS %llu k1; allANS %llu nibble + %llu k1\n\n",
-           (unsigned long long)tot[C_PIVCO_NIBANS].dyn_commits,
-           (unsigned long long)tot[C_PIVCO_K1ANS].k1_commits,
-           (unsigned long long)tot[C_PIVCO_ALLANS].dyn_commits,
-           (unsigned long long)tot[C_PIVCO_ALLANS].k1_commits);
+    printf("regions committed: nibFSE %llu nibble; k1FSE %llu k1; allFSE %llu nibble + %llu k1\n\n",
+           (unsigned long long)tot[C_PIVCO_NIBFSE].dyn_commits,
+           (unsigned long long)tot[C_PIVCO_K1FSE].k1_commits,
+           (unsigned long long)tot[C_PIVCO_ALLFSE].dyn_commits,
+           (unsigned long long)tot[C_PIVCO_ALLFSE].k1_commits);
 
     for (int c = 0; c < N_CODECS; c++) {
         grand[c].bytes       += tot[c].bytes;
@@ -445,7 +445,7 @@ int main(int argc, char **argv)
         } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
             printf("Usage: %s [--chunk BYTES] [--flat LAYOUT] [--table POLICY] FILE [...]\n"
                    "  Compresses each file in independent chunks (default 32768 B)\n"
-                   "  with pivco / pivco+static-ANS / pivco+nibANS / fse and\n"
+                   "  with pivco / pivco+sFSE / pivco+nibFSE / fse and\n"
                    "  reports header-inclusive sizes.\n"
                    "  --flat  natural|vertical|vertical128 (default vertical)\n"
                    "  --table per-file|per-chunk           (default per-file)\n",

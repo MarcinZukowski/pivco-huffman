@@ -94,7 +94,7 @@ static int cmd_d(const char *in, const char *out){
 }
 
 /* A menu spec is a string of letters: r = PH raw (no FSE), s = static
- * tables, n = nibble table, 1 = k1, 2 = k2 (e.g. "s2" = sANS+k2). */
+ * tables, n = nibble table, 1 = k1, 2 = k2 (e.g. "s2" = sFSE+k2). */
 static void menu_cfg(const char *m, pivco_cfg_t *c){
     *c = g_phaz_cfg;
     c->fse_enabled = strchr(m,'r') == NULL;
