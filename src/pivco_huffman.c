@@ -129,6 +129,7 @@ const pivco_cfg_t pivco_cfg_default = {
     .fse_k1_enabled = 0,
     .fse_k2_enabled = 0,
     .flat_layout = PIVCO_FLAT_VERTICAL,
+    .krt = 0,
 };
 
 #include "pivco_huffman_common.h"

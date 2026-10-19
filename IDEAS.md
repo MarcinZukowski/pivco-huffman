@@ -780,6 +780,32 @@ alternative: byte planes (one low byte per node, a presence bitmap,
 sparse high bytes), unpacked with a memcpy, keeping ~40% of the
 K_right bytes without a variable-width fetch.  Ledger §28.2.
 
+Follow-up 2026-10-10: K_right by size.  A node with n < KrT drops its
+header and goes popcount-first; larger nodes keep the 2-byte field.
+n is known at node entry on both sides, so KrT alone sets the layout.
+KrT rides in 5 spare bits of the marker prefix's first byte, coded
+KrT = c ? 2^(c-1) : 0: c = 0 keeps K_right everywhere, c = 17
+(KrT = 65536 > any u16 block_N) drops it everywhere.  Measured
+at 16K blocks on M4 with KrT as a compile-time constant, over 219 MB
+(silesia, datasets, lits streams): a block carries only 10–20 headers
+(2.6 on dna_fasta), ~30 bytes of ~10 KB of output, because flat
+subtrees and leaf-only nodes absorb the deep, small-n part of the
+tree; about 20% of the headers sit below n = 256.  Size: KrT = 256
+-0.06% PH / -0.07% PHA, KrT = ∞ -0.29% / -0.31%; only tiny streams
+gain much (290 B lits streams -3..-5%).  Decode (fair_bench dec_pb,
+geometric mean over 20 distributions with internal nodes): KrT = 256
+-1.1% PH / -1.7% PHA, no larger than the drift on the 10 unaffected
+distributions; KrT = ∞ -8.6% / -8.4%, about -5..6% net of that drift.
+Not worth turning on at 16K blocks.  It pays where blocks are tiny
+next to a 2-byte header: nested PH on bitmaps (#29), where KrT = 256
+recovers 90–100% of the KrT = ∞ gain.
+
+Landed 2026-10-19 as that runtime field, encoder default KrT = 0
+(`pivco_cfg_t.krt` sets it), so the default layout is unchanged.  The
+decoder reads KrT from every block.  At KrT = 0 it is free: PH output
+byte-identical, decode geomean vs the prior code -0.36% PH /
++0.32% PHA (best) and +0.07% / +0.19% (median), inside noise.
+
 **NEON**
 
 ### Root fusion (init + root encode), 2026-05-11

@@ -20,6 +20,32 @@
 /* Backend lifecycle.  Scalar has no runtime tables to lazy-init. */
 static inline void codec_init_scalar(void) { /* no-op */ }
 
+/* ---------- Decode primitives (bottom-up) ---------- */
+
+/* popcount_K_right_scalar — count "1" bits in the first K bits of bm.
+ * 64-bit words, then the masked partial word.  The codec calls it
+ * (through prim_popcount_K_right) for nodes below KrT, which carry no
+ * K_right header.  `nbytes` is derivable from K. */
+static inline int popcount_K_right_scalar(const uint8_t *bm, int nbytes, int K)
+{
+    (void)nbytes;
+    int cnt = 0;
+    int full = K >> 6;
+    for (int i = 0; i < full; i++) {
+        uint64_t w;
+        memcpy(&w, bm + 8 * i, 8);
+        cnt += __builtin_popcountll(w);
+    }
+    int rest = K & 63;
+    if (rest) {
+        uint64_t w = 0;
+        memcpy(&w, bm + 8 * full, (size_t)((rest + 7) >> 3));
+        w &= (1ULL << rest) - 1;
+        cnt += __builtin_popcountll(w);
+    }
+    return cnt;
+}
+
 /* ---------- Encode primitives: rank-based encoding (8-bit in-order ranks) ---------- *
  * Partition compares a per-node threshold (split_rank) to the leaf rank, so
  * the values are 8-bit and partition routing is byte-identical to the code_la
@@ -204,6 +230,9 @@ PIVCO_PRIM_ALWAYS_INLINE void prim_merge_flat(uint8_t *out, int n,
     if (r > nv) merge_flat_scalar(out + n5 + nv, r - nv,
                                 bm1 + (((size_t)nv * D) >> 3), D, c2s);
 }
+
+PIVCO_PRIM_ALWAYS_INLINE int prim_popcount_K_right(const uint8_t *bm, int K)
+{ return popcount_K_right_scalar(bm, bitmap_bytes(K), K); }
 
 PIVCO_PRIM_ALWAYS_INLINE void prim_merge_cst_cst(const uint8_t *bm, int K,
                                                       uint8_t left_sym,

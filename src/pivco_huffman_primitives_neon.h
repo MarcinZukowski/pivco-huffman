@@ -48,8 +48,9 @@ static inline void codec_init_neon(void)
 /* popcount_K_right_neon — count "1" bits in the first K bits of bm.
  * Vectorised: 64-byte main path with 4-wide ILP, then 16-byte mop-up,
  * scalar tail for the trailing 0..15 full bytes + the optional partial
- * byte (K & 7).  `nbytes` is derivable from K; kept for signature
- * stability with the BU x86 backend. */
+ * byte (K & 7).  The codec calls it (through prim_popcount_K_right) for
+ * nodes below KrT, which carry no K_right header.  `nbytes` is derivable
+ * from K; kept for signature stability with the BU x86 backend. */
 static inline int popcount_K_right_neon(const uint8_t *bm, int nbytes, int K)
 {
     (void)nbytes;
@@ -1750,6 +1751,9 @@ PIVCO_PRIM_ALWAYS_INLINE void prim_merge_flat(uint8_t *out, int n,
     if (r > nv) merge_flat_neon(out + n5 + nv, r - nv,
                                 bm1 + (((size_t)nv * D) >> 3), D, c2s);
 }
+
+PIVCO_PRIM_ALWAYS_INLINE int prim_popcount_K_right(const uint8_t *bm, int K)
+{ return popcount_K_right_neon(bm, bitmap_bytes(K), K); }
 
 PIVCO_PRIM_ALWAYS_INLINE void prim_merge_cst_cst(const uint8_t *bm, int K,
                                                       uint8_t left_sym,

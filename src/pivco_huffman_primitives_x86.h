@@ -61,10 +61,10 @@ static inline void codec_init_x86(void)
 /* ---------- Decode primitives (bottom-up) ---------- */
 
 /* popcount_K_right_x86 — count "1" bits in the first K bits of bm.
- * Scalar 64-bit POPCNT, 4-way unrolled.  No codec.c caller (codec uses
- * wire_read_kr_header for the value at read time); kept for signature
- * stability with the NEON BU backend.  `nbytes` is derivable from K.
- * VPOPCNTQ fast path lives in primitives_avx512.h. */
+ * Scalar 64-bit POPCNT, 4-way unrolled.  The codec calls it (through
+ * prim_popcount_K_right) for nodes below KrT, which carry no K_right
+ * header.  `nbytes` is derivable from K.  VPOPCNTQ fast path lives in
+ * primitives_avx512.h. */
 static inline int popcount_K_right_x86(const uint8_t *bm, int nbytes, int K)
 {
     (void)nbytes;
@@ -1366,6 +1366,9 @@ PIVCO_PRIM_ALWAYS_INLINE void prim_merge_flat(uint8_t *out, int n,
     if (r > nv) merge_flat_x86(out + n5 + nv, r - nv,
                                 bm1 + (((size_t)nv * D) >> 3), D, c2s);
 }
+
+PIVCO_PRIM_ALWAYS_INLINE int prim_popcount_K_right(const uint8_t *bm, int K)
+{ return popcount_K_right_x86(bm, bitmap_bytes(K), K); }
 
 PIVCO_PRIM_ALWAYS_INLINE void prim_merge_cst_cst(const uint8_t *bm, int K,
                                                       uint8_t left_sym,

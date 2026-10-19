@@ -406,6 +406,16 @@ static void build_single_symbol_table(int sym, pivco_table_t *table)
     fill_marker_order(table);
 }
 
+/* The marker prefix's 5-bit code for a K_right threshold:
+ * KrT = c ? 2^(c-1) : 0.  -1 when krt is not 0 or a power of two up to
+ * 65536. */
+static int code_from_krt(int krt)
+{
+    if (krt == 0) return 0;
+    if (krt < 0 || krt > 65536 || (krt & (krt - 1)) != 0) return -1;
+    return __builtin_ctz((unsigned)krt) + 1;
+}
+
 int pivco_build_table(const pivco_cfg_t *cfg,
                               const uint64_t freq[PIVCO_MAX_SYMBOLS],
                               pivco_table_t *table)
@@ -413,6 +423,8 @@ int pivco_build_table(const pivco_cfg_t *cfg,
     if (!freq || !table) return PIVCO_ERR_NULL;
     if (!cfg) cfg = &pivco_cfg_default;
     if ((unsigned)cfg->flat_layout > PIVCO_FLAT_VERTICAL_128)
+        return PIVCO_ERR_BAD_CFG;
+    if (code_from_krt(cfg->krt) < 0)
         return PIVCO_ERR_BAD_CFG;
 
     memset(table, 0, sizeof(*table));
@@ -444,6 +456,7 @@ int pivco_build_table(const pivco_cfg_t *cfg,
         table->fse_k1_enabled = (uint8_t)(cfg->fse_k1_enabled ? 1 : 0);
         table->fse_k2_enabled = (uint8_t)(cfg->fse_k2_enabled ? 1 : 0);
         table->flat_layout = (uint8_t)cfg->flat_layout;
+        table->krt_code = (uint8_t)code_from_krt(cfg->krt);
         return PIVCO_OK;
     }
 
@@ -555,6 +568,7 @@ static int build_table_finish(const uint8_t lengths[PIVCO_MAX_SYMBOLS],
     table->fse_k1_enabled = (uint8_t)(cfg->fse_k1_enabled ? 1 : 0);
     table->fse_k2_enabled = (uint8_t)(cfg->fse_k2_enabled ? 1 : 0);
     table->flat_layout = (uint8_t)cfg->flat_layout;
+    table->krt_code = (uint8_t)code_from_krt(cfg->krt);
     /* Copy lengths to table */
     for (int i = 0; i < PIVCO_MAX_SYMBOLS; i++) {
         table->code_len[i] = lengths[i];
@@ -1203,6 +1217,8 @@ int pivco_build_table_from_code_lens(
     if (!cfg) cfg = &pivco_cfg_default;
     if ((unsigned)cfg->flat_layout > PIVCO_FLAT_VERTICAL_128)
         return PIVCO_ERR_BAD_CFG;
+    if (code_from_krt(cfg->krt) < 0)
+        return PIVCO_ERR_BAD_CFG;
     /* Clear everything except the 4 KB decode_sym/decode_len pair: those are
      * filled independently by pivco_build_traditional_table() and are
      * never read by the bulk decoder, so zeroing them here is wasted work. */
@@ -1227,6 +1243,7 @@ int pivco_build_table_from_code_lens(
         table->fse_k1_enabled = (uint8_t)(cfg->fse_k1_enabled ? 1 : 0);
         table->fse_k2_enabled = (uint8_t)(cfg->fse_k2_enabled ? 1 : 0);
         table->flat_layout = (uint8_t)cfg->flat_layout;
+        table->krt_code = (uint8_t)code_from_krt(cfg->krt);
         return PIVCO_OK;
     }
     return build_table_finish(code_lens, table, cfg);
@@ -1242,6 +1259,8 @@ int pivco_build_codec_table(const pivco_cfg_t *cfg,
         cfg = &pivco_cfg_default;
     if ((unsigned)cfg->flat_layout > PIVCO_FLAT_VERTICAL_128)
         return PIVCO_ERR_BAD_CFG;
+    if (code_from_krt(cfg->krt) < 0)
+        return PIVCO_ERR_BAD_CFG;
     /* The research tree modes shape the tree differently. */
     if (cfg->tree_mode != PIVCO_TREE_MODE_OPTIMIZED)
         return pivco_build_table_from_code_lens(cfg, code_lens, table);
@@ -1255,6 +1274,7 @@ int pivco_build_codec_table(const pivco_cfg_t *cfg,
     table->fse_k1_enabled = (uint8_t)(cfg->fse_k1_enabled ? 1 : 0);
     table->fse_k2_enabled = (uint8_t)(cfg->fse_k2_enabled ? 1 : 0);
     table->flat_layout = (uint8_t)cfg->flat_layout;
+    table->krt_code = (uint8_t)code_from_krt(cfg->krt);
     memcpy(table->code_len, code_lens, PIVCO_MAX_SYMBOLS);
     /* The encoder's symbol -> rank gather: the inverse of rank_to_sym,
      * walked downward so the single-symbol table's two ranks leave

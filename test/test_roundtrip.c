@@ -609,6 +609,114 @@ static int test_flat_layouts(void)
 }
 
 
+/* ---------- Test: K_right threshold (cfg.krt) ---------- */
+
+/* For each KrT x distribution x PH/PHA: encode with the KrT baked into
+ * the table, decode with a table rebuilt under the default cfg (KrT 0),
+ * since every block carries its own KrT.  A KrT that drops headers must
+ * shrink the block; out-of-range KrT values must be refused. */
+static int test_krt(void)
+{
+    printf("[test_krt] ");
+
+    typedef void (*make_fn)(uint64_t[PIVCO_MAX_SYMBOLS]);
+    static const struct { const char *name; make_fn make; } dists[] = {
+        {"english",   make_english},
+        {"zipfian",   make_zipfian},
+        {"geometric", make_geometric},
+        {"odd_sigma", make_odd_sigma},
+    };
+    static const int krts[] = { 0, 1, 256, 65536 };
+    static const int bad_krts[] = { -1, 3, 384, 131072 };
+
+    for (size_t b = 0; b < sizeof(bad_krts) / sizeof(bad_krts[0]); b++) {
+        uint64_t freq[PIVCO_MAX_SYMBOLS];
+        make_english(freq);
+        pivco_cfg_t cfg = pivco_cfg_default;
+        cfg.krt = bad_krts[b];
+        pivco_table_t table;
+        int rc = pivco_build_table(&cfg, freq, &table);
+        if (rc != PIVCO_ERR_BAD_CFG)
+            FAIL("krt %d: build_table returned %d, want BAD_CFG",
+                 bad_krts[b], rc);
+    }
+
+    uint64_t seed = 0x6B5254AB6B5254ABULL;
+    for (size_t d = 0; d < sizeof(dists) / sizeof(dists[0]); d++) {
+        uint64_t freq[PIVCO_MAX_SYMBOLS];
+        dists[d].make(freq);
+        uint64_t total = 0;
+        for (int i = 0; i < PIVCO_MAX_SYMBOLS; i++) total += freq[i];
+
+        uint8_t symbols[PIVCO_BLOCK_SIZE];
+        uint64_t rng = seed++;
+        for (int i = 0; i < PIVCO_BLOCK_SIZE; i++) {
+            uint64_t r = xorshift64(&rng) % total;
+            uint64_t cum = 0;
+            int sym;
+            for (sym = 0; sym < PIVCO_MAX_SYMBOLS; sym++) {
+                cum += freq[sym];
+                if (r < cum) break;
+            }
+            symbols[i] = (uint8_t)sym;
+        }
+
+        for (int fse = 0; fse <= 1; fse++) {
+            size_t len_krt0 = 0;
+            for (size_t k = 0; k < sizeof(krts) / sizeof(krts[0]); k++) {
+                pivco_cfg_t cfg = pivco_cfg_default;
+                cfg.fse_enabled = fse;
+                cfg.krt = krts[k];
+                pivco_table_t table;
+                int rc = pivco_build_table(&cfg, freq, &table);
+                if (rc != PIVCO_OK)
+                    FAIL("%s fse %d krt %d: build_table returned %d",
+                         dists[d].name, fse, krts[k], rc);
+
+                pivco_cfg_t dcfg = pivco_cfg_default;
+                dcfg.fse_enabled = fse;
+                pivco_table_t dtable;
+                rc = pivco_build_table_from_code_lens(&dcfg, table.code_len,
+                                                      &dtable);
+                if (rc != PIVCO_OK)
+                    FAIL("%s fse %d krt %d: from_code_lens returned %d",
+                         dists[d].name, fse, krts[k], rc);
+
+                uint8_t encoded[PIVCO_MAX_ENCODED_SIZE];
+                uint8_t decoded[PIVCO_BLOCK_SIZE];
+                size_t enc_len, consumed;
+                rc = pivco_encode(g_tenc, &table, symbols, PIVCO_BLOCK_SIZE,
+                                  encoded, &enc_len);
+                if (rc != PIVCO_OK)
+                    FAIL("%s fse %d krt %d: encode returned %d",
+                         dists[d].name, fse, krts[k], rc);
+                rc = pivco_decode(g_tdec, &dtable, encoded, enc_len,
+                                  decoded, &consumed);
+                if (rc != PIVCO_OK)
+                    FAIL("%s fse %d krt %d: decode returned %d",
+                         dists[d].name, fse, krts[k], rc);
+                if (consumed != enc_len)
+                    FAIL("%s fse %d krt %d: consumed %zu of %zu bytes",
+                         dists[d].name, fse, krts[k], consumed, enc_len);
+                for (int i = 0; i < PIVCO_BLOCK_SIZE; i++)
+                    if (symbols[i] != decoded[i])
+                        FAIL("%s fse %d krt %d: mismatch at %d",
+                             dists[d].name, fse, krts[k], i);
+
+                if (krts[k] == 0)
+                    len_krt0 = enc_len;
+                if (krts[k] == 65536 && enc_len >= len_krt0)
+                    FAIL("%s fse %d: krt 65536 gave %zu bytes, krt 0 %zu",
+                         dists[d].name, fse, enc_len, len_krt0);
+            }
+        }
+    }
+
+    printf("PASS\n");
+    return 0;
+}
+
+
 /* ---- histogram primitive: dispatched vs naive, edges + alignment ---- */
 static int test_histogram(void)
 {
@@ -668,6 +776,7 @@ int test_roundtrip_all(void)
     failures += test_single_symbol();
     failures += test_joint_lengths();
     failures += test_flat_layouts();
+    failures += test_krt();
     failures += test_histogram();
 
     uint64_t freq[PIVCO_MAX_SYMBOLS];

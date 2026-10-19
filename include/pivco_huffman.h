@@ -219,6 +219,7 @@ typedef struct {
     uint8_t  fse_k1_enabled;     /* baked from pivco_cfg_t at build */
     uint8_t  fse_k2_enabled;     /* baked from pivco_cfg_t at build */
     uint8_t  flat_layout;        /* baked from pivco_cfg_t at build */
+    uint8_t  krt_code;           /* baked from pivco_cfg_t.krt at build */
 
     /* Flat-subtree fast path: per-node, if flat_depth[i] >= 2 then node i
        is the root of a MAXIMAL flat subtree of depth D = flat_depth[i]
@@ -383,6 +384,14 @@ typedef struct {
      * default: 0.  Ignored when fse_enabled is 0. */
     int                 fse_k2_enabled;
     pivco_flat_layout_t flat_layout;  /* default PIVCO_FLAT_VERTICAL */
+    /* K_right threshold KrT: a node with n < krt carries no 2-byte
+     * K_right header; its bitmap goes ahead of its children instead and
+     * the decoder popcounts it.  0 or a power of two up to 65536
+     * (anything else is PIVCO_ERR_BAD_CFG); 0 keeps K_right everywhere,
+     * 65536 drops it everywhere.  Encoder-side only -- every block
+     * carries its KrT, so the decoder needs no matching setting.
+     * default: 0. */
+    int                 krt;
 } pivco_cfg_t;
 
 extern const pivco_cfg_t pivco_cfg_default;

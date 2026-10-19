@@ -18,22 +18,31 @@
  *        symbol count N for this block; read before the walk (N up to 65535).
  *   [marker prefix]
  *        the FSE markers for all M non-flat internal nodes, hoisted out of the
- *        per-node records.  Empty when M == 0.  Otherwise an (M+1)-bit presence
- *        bitmap: bit 0 is the "any node FSE-coded" flag, bit i+1 set = node i
- *        is FSE-coded; when any is set, one marker value byte per set node bit
- *        follows.  When no node is FSE the whole prefix is that single byte
- *        (bit 0 == 0) -- all of #PH, and any #PHA block FSE never fired on.
- *        i indexes the nodes in the table's ascending pre-order
- *        (marker_positions); M and the order derive from the tree on both
- *        sides, so nothing else on the wire names them.
+ *        per-node records.  Empty when M == 0.  Otherwise an (M+6)-bit
+ *        presence bitmap, LSB-first:
+ *          bit 0       "any node FSE-coded" flag
+ *          bits 1..5   KrT code c: K_right threshold KrT = c ? 2^(c-1) : 0.
+ *                      A node with n < KrT carries no K_right header (see
+ *                      below).  c = 0 keeps K_right everywhere; c = 17
+ *                      (KrT = 65536, above any block_N) drops it everywhere.
+ *          bit i+6     node i is FSE-coded; i indexes the nodes in the
+ *                      table's ascending pre-order (marker_positions).  M
+ *                      and the order derive from the tree on both sides,
+ *                      so nothing else on the wire names them.
+ *        then, when bit 0 is set, one marker value byte per set node bit.
+ *        When no node is FSE the whole prefix is that single byte (bit 0 ==
+ *        0) -- all of #PH, and any #PHA block FSE never fired on.
  *
  * Per non-flat internal node (marker-less: the marker is in the prefix above):
  *   [optional K_right: uint16 LE, 2 bytes]
- *        if kr_header_needed(); at node entry.
+ *        if kr_header_needed() and n >= KrT; at node entry.  When n < KrT the
+ *        bitmap body moves here instead, and the decoder takes K_right as
+ *        the popcount of its n bits.
  *   [larger-K child region][smaller child region]
  *        recursively, same layout; larger first (strict >, ties left-first),
- *        keyed on the K_right header -- no extra bits.
+ *        keyed on K_right -- no extra bits.
  *   [bitmap body]
+ *        here when n >= KrT (always for a node without a K_right header).
  *        marker == 0 (raw): n-bit bitmap, ceil(n/8) bytes.  marker != 0 (FSE):
  *        2-byte LE fse_len + fse_len bytes of FSE-compressed bytes.  The marker
  *        is looked up from the prefix by schedule record.
@@ -67,15 +76,16 @@
  * information in prefix position anyway — but it consumes a node's
  * bitmap only at merge time, after both children are decoded.  So the
  * stream is read strictly forward, each byte touched once, and the
- * decoder's L1 working set is a moving window.
+ * decoder's L1 working set is a moving window.  A node below KrT trades
+ * that for its 2 header bytes: its bitmap is read at entry for the
+ * popcount and again at the merge, after its children's regions.
  *
  * The larger-K child goes first so the decoder meets each node's
  * dominant half while the smaller sibling's buffer is still empty —
  * the decoder can overlap the larger child's working scratch with
  * that hole, which is what lets the scratch arena stay near N (see
  * the decode tree walk in pivco_huffman_codec.c).  Both sides key the
- * order on the K_right header already on the wire, so it costs no
- * bits.
+ * order on K_right, already known to both, so it costs no bits.
  *
  * The K_right header occupies one slot per recursion site into a
  * non-leaf child (kr_header_needed()): leaf-only nodes (BOTH_LEAVES,

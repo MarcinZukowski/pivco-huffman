@@ -77,10 +77,9 @@ static inline void codec_init_avx512(void)
 /* ---------- Decode primitives (bottom-up) ---------- */
 
 /* popcount_K_right_avx512 — count "1" bits in the first K bits of bm.
- * 64-byte main loop with VPOPCNTQ; 1c throughput.  No codec.c caller
- * (codec uses wire_read_kr_header for the value at read time); kept
- * for symmetry with primitives_x86.h + primitives_neon.h.  `nbytes`
- * is derivable from K. */
+ * 64-byte main loop with VPOPCNTQ; 1c throughput.  The codec calls it
+ * (through prim_popcount_K_right) for nodes below KrT, which carry no
+ * K_right header.  `nbytes` is derivable from K. */
 static inline int popcount_K_right_avx512(const uint8_t *bm,
                                             int nbytes, int K)
 {
@@ -774,6 +773,9 @@ PIVCO_PRIM_ALWAYS_INLINE void prim_merge_flat(uint8_t *out, int n,
     if (r > nv) merge_flat_avx512(out + n5 + nv, r - nv,
                                 bm1 + (((size_t)nv * D) >> 3), D, c2s);
 }
+
+PIVCO_PRIM_ALWAYS_INLINE int prim_popcount_K_right(const uint8_t *bm, int K)
+{ return popcount_K_right_avx512(bm, bitmap_bytes(K), K); }
 
 PIVCO_PRIM_ALWAYS_INLINE void prim_merge_cst_cst(const uint8_t *bm, int K,
                                                       uint8_t left_sym,
