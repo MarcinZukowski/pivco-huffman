@@ -22,6 +22,7 @@
 - [FastLanes-style transposed bitpacking](#fastlanes-style-transposed-bitpacking-2026-04-27)
 - [LSB-first canonical codes](#lsb-first-canonical-codes-2026-05-12)
 - [Skew-specialized merge: per-word easy paths](#skew-specialized-merge-per-word-easy-paths-all-zero--all-ones-2026-07-01-parked)
+- [Pooled partial-byte tails](#pooled-partial-byte-tails-2026-10-11)
 
 **PHAZ**
 - [Context menu per code stream, chosen under a decode-cost class](#context-menu-per-code-stream-chosen-under-a-decode-cost-class-2026-10-04)
@@ -301,6 +302,30 @@ Prototyped on `merge_cst_vec` (NEON), a few flavors tested:
 It also addresses a pathological "cursor stuck at a page boundary" case from #8.
 
 Probably not worth pursuing due to marginal applicability.
+
+### Pooled partial-byte tails, 2026-10-11
+Every raw bitmap or flat region ends on a byte boundary, which wastes
+about 3.5 bits per region on average.  Instead, keep each region's whole
+bytes in place and pack only the n mod 8 tail bits of all regions into
+one pool per block.  Decode consumes regions in post-order, so a single
+sequential bit cursor over the pool serves every tail.  No lookup is needed.
+- **Size, estimated:**
+  - Top level: about 20–30 regions per 16K block, so ~10 B, ~0.1%,
+    the scale of K_right at KrT = 256.
+  - Nested PH (#29): a 2 KB nphD region's inner block has ~19 non-flat
+    bitmaps plus a few flat regions, so ~8–10 B.  That is ~0.05 points on
+    the partition-bitmap menu, ~0.15 at ≥ 2 KB.
+  - FSE-coded regions don't gain; their payloads are byte streams already.
+- **Decode cost:** bitmaps are read in place from const input, so the
+  partial last byte has to be supplied separately.  Either the kernels'
+  tail paths take it as an argument, or the last ≤ 16 B chunk is copied
+  to scratch with the tail appended.  A few cycles per node, so roughly
+  +0.3–1% at the top level (walk-layer price ~0.1% per cycle/node).
+- **Wire hook:** one more flag bit in the marker prefix, after KrT's
+  bits 1–5 (node bits shift up by one).  An all-raw block still spends a
+  single byte, so it is a per-block choice like KrT, free when off.
+- **Verdict:** same trade as K_right — not worth it at the top level.
+  Worth revisiting for inner blocks only if nested PH goes on the wire.
 
 **PHAZ**
 
