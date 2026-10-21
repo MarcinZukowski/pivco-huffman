@@ -455,6 +455,7 @@ int pivco_build_table(const pivco_cfg_t *cfg,
         table->fse_nibble_enabled = (uint8_t)(cfg->fse_nibble_enabled ? 1 : 0);
         table->fse_k1_enabled = (uint8_t)(cfg->fse_k1_enabled ? 1 : 0);
         table->fse_k2_enabled = (uint8_t)(cfg->fse_k2_enabled ? 1 : 0);
+        table->fse_dhuf0_enabled = (uint8_t)(cfg->fse_dhuf0_enabled ? 1 : 0);
         table->flat_layout = (uint8_t)cfg->flat_layout;
         table->krt_code = (uint8_t)code_from_krt(cfg->krt);
         return PIVCO_OK;
@@ -567,6 +568,7 @@ static int build_table_finish(const uint8_t lengths[PIVCO_MAX_SYMBOLS],
     table->fse_nibble_enabled = (uint8_t)(cfg->fse_nibble_enabled ? 1 : 0);
     table->fse_k1_enabled = (uint8_t)(cfg->fse_k1_enabled ? 1 : 0);
     table->fse_k2_enabled = (uint8_t)(cfg->fse_k2_enabled ? 1 : 0);
+    table->fse_dhuf0_enabled = (uint8_t)(cfg->fse_dhuf0_enabled ? 1 : 0);
     table->flat_layout = (uint8_t)cfg->flat_layout;
     table->krt_code = (uint8_t)code_from_krt(cfg->krt);
     /* Copy lengths to table */
@@ -1242,6 +1244,7 @@ int pivco_build_table_from_code_lens(
         table->fse_nibble_enabled = (uint8_t)(cfg->fse_nibble_enabled ? 1 : 0);
         table->fse_k1_enabled = (uint8_t)(cfg->fse_k1_enabled ? 1 : 0);
         table->fse_k2_enabled = (uint8_t)(cfg->fse_k2_enabled ? 1 : 0);
+        table->fse_dhuf0_enabled = (uint8_t)(cfg->fse_dhuf0_enabled ? 1 : 0);
         table->flat_layout = (uint8_t)cfg->flat_layout;
         table->krt_code = (uint8_t)code_from_krt(cfg->krt);
         return PIVCO_OK;
@@ -1273,6 +1276,7 @@ int pivco_build_codec_table(const pivco_cfg_t *cfg,
     table->fse_nibble_enabled = (uint8_t)(cfg->fse_nibble_enabled ? 1 : 0);
     table->fse_k1_enabled = (uint8_t)(cfg->fse_k1_enabled ? 1 : 0);
     table->fse_k2_enabled = (uint8_t)(cfg->fse_k2_enabled ? 1 : 0);
+    table->fse_dhuf0_enabled = (uint8_t)(cfg->fse_dhuf0_enabled ? 1 : 0);
     table->flat_layout = (uint8_t)cfg->flat_layout;
     table->krt_code = (uint8_t)code_from_krt(cfg->krt);
     memcpy(table->code_len, code_lens, PIVCO_MAX_SYMBOLS);

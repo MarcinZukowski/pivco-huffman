@@ -133,6 +133,11 @@ typedef enum {
 #define PIVCO_K2_PREFETCH 1
 #endif
 
+/* Table id for dHuf0 (see pivco_dhuf0.c): the region's bytes coded with
+ * huf0 under a table fitted to this region's byte histogram, in huf0's
+ * own 4-stream format with its weight header in front. */
+#define PIVCO_FSE_DHUF0_ID 54
+
 
 /* Idempotent.  Safe to call multiple times; first call builds the
  * CTables + DTables; subsequent calls are no-ops. */
@@ -229,6 +234,22 @@ pivco_fse_status_t pivco_k2_decompress(const void *src, size_t src_len,
                                         size_t *out_len);
 
 int pivco_k2_prebuild(void);
+
+/* ---- dHuf0 path (pivco_dhuf0.c) ----
+ *
+ * Payload: huf0's 4-stream output (weight header, jump table, four
+ * bitstreams); the decoder needs only the expected byte count.  Returns
+ * PIVCO_FSE_FALLBACK when the result would not be smaller than src_len,
+ * when huf0 finds the region incompressible or single-symbol, or when
+ * src_len exceeds huf0's 128 KB block limit. */
+pivco_fse_status_t pivco_dhuf0_compress(const void *src, size_t src_len,
+                                         void *dst, size_t dst_cap,
+                                         size_t *out_len);
+
+pivco_fse_status_t pivco_dhuf0_decompress(const void *src, size_t src_len,
+                                           void *dst, size_t dst_cap,
+                                           size_t dst_expected,
+                                           size_t *out_len);
 
 /* Helper: byte-wise XOR-flip a buffer (all 1s become 0s and vice
  * versa).  Used when the right side is the majority -- we flip the

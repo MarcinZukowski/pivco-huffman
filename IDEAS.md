@@ -23,6 +23,7 @@
 - [LSB-first canonical codes](#lsb-first-canonical-codes-2026-05-12)
 - [Skew-specialized merge: per-word easy paths](#skew-specialized-merge-per-word-easy-paths-all-zero--all-ones-2026-07-01-parked)
 - [Pooled partial-byte tails](#pooled-partial-byte-tails-2026-10-11)
+- [Faster dHuf0: zstd's huf0 and a cheaper table setup](#faster-dhuf0-zstds-huf0-and-a-cheaper-table-setup-2026-10-20)
 
 **PHAZ**
 - [Context menu per code stream, chosen under a decode-cost class](#context-menu-per-code-stream-chosen-under-a-decode-cost-class-2026-10-04)
@@ -326,6 +327,31 @@ sequential bit cursor over the pool serves every tail.  No lookup is needed.
   single byte, so it is a per-block choice like KrT, free when off.
 - **Verdict:** same trade as K_right — not worth it at the top level.
   Worth revisiting for inner blocks only if nested PH goes on the wire.
+
+### Faster dHuf0: zstd's huf0 and a cheaper table setup, 2026-10-20
+dHuf0 (wire id 54) uses ext/fse's huf0.  zstd's huf0 decodes the same
+format.  Measured standalone on M4, outside the codec: the 25.5K
+Silesia regions dHuf0 commits at the 64 B / 20% gate, encoded once with
+ext/fse, decoded with each library.  Per region, best of 15:
+
+| region size | regions | weight read | + table fill | full decode, ext/fse | full decode, zstd | ns/B ext/fse → zstd |
+|---|---|---|---|---|---|---|
+| 64–511 B    | 10354 | ~870 ns | ~1340 ns | 1720 ns | 1590 ns | 6.97 → 6.48 |
+| 512–2047 B  | 10183 | ~870 ns | ~1400–1580 ns | 2470 ns | 2020 ns | 2.53 → 2.08 |
+| 2048–8191 B |  5020 | ~860 ns | ~1390–1450 ns | 3130 ns | 2550 ns | 1.51 → 1.23 |
+
+- **Decode loop:** zstd's is ~1.6× faster (≥ 2 KB: ~0.84 → ~0.53 ns/B
+  after setup).  So zstd's huf0 makes dHuf0 ~19% faster at the 2 KB gate.
+- **Table setup:** the same in both, ~1.4 µs per region whatever its
+  size.  ~0.86 µs of it is reading the FSE-coded weights, the rest is the
+  DTable fill.  At 2 KB that is ~0.7 ns/B, as much as the decode itself.
+- **Weight read looks slow:** ~3800 cycles for at most 255 weights under
+  a log-6 FSE table.  Not profiled yet.  A faster read (or a cheaper
+  weight format: dHuf0 is not bound to huf0's header) would lower the
+  setup cost and with it the region-size gate.
+- **Integration:** ext/fse and zstd both define `HUF_*`, so taking zstd's
+  huf0 means replacing ext/fse's copy, or building zstd's under renamed
+  symbols.
 
 **PHAZ**
 

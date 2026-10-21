@@ -128,6 +128,7 @@ const pivco_cfg_t pivco_cfg_default = {
     .fse_nibble_enabled = 0,
     .fse_k1_enabled = 0,
     .fse_k2_enabled = 0,
+    .fse_dhuf0_enabled = 0,
     .flat_layout = PIVCO_FLAT_VERTICAL,
     .krt = 0,
 };

@@ -66,6 +66,10 @@
  * table_id == PIVCO_FSE_K2_ID
  *   the k=2 bit-context table: the same form with P(bit | previous two
  *   bits), four 2-bit grid indices in the recipe byte.
+ * table_id == PIVCO_FSE_DHUF0_ID
+ *   dHuf0: the region's bytes coded with huf0 under a table fitted to
+ *   this region, in huf0's 4-stream format (FSE-coded weight header,
+ *   6-byte jump table, four bitstreams); xor_flag is always 0.
  *
  * All forms are decoded by pivco_fse_decompress(), which dispatches on
  * table_id.
@@ -103,7 +107,7 @@
  *                                     fse_len payload bytes
  *
  * Only the transmitted-table candidates are used there (the nibble
- * table, k=1, k=2): a flat region has no partition skew for the static
+ * table, k=1, k=2, dHuf0): a flat region has no partition skew for the static
  * schedule to key on.  Coding it matters because a depth-D flat
  * subtree gives all 2^D of its symbols the same code length by
  * construction — Huffman models their real frequencies not at all, and

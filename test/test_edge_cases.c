@@ -596,9 +596,82 @@ static int test_fse_k2(void)
     return 0;
 }
 
-/* k=1 on the wire, through the file API: the codec's static -> nibble ->
- * k1 chain, codec_fse_commit with id 52, and the decoder's dispatch of
- * marker 52 on both region kinds.  With one table for the whole input
+/* dHuf0 directly: round trip through the direct call and the dispatch
+ * on bitmaps of skewed bytes, refusals on inputs huf0 cannot code
+ * (single symbol, uniform bytes), damaged payloads stay in bounds. */
+static int test_fse_dhuf0(void)
+{
+    printf("[fse_dhuf0] ");
+    uint64_t rng = 0x5eedd1ff0f0dd15cULL;
+    /* P(bit set) per bit: from heavily skewed to balanced. */
+    const double dens[] = { 0.02, 0.05, 0.10, 0.20, 0.35, 0.50 };
+    const size_t big[] = { 1000, 1023, 1024, 1025, 2048, 4096, 16384, 32768 };
+    static uint8_t src[32768], enc[2 * 32768 + 64], enc2[2 * 32768 + 64], dec[32768 + 16];
+    int tested = 0, fell_back = 0;
+    for (size_t di = 0; di < sizeof(dens) / sizeof(dens[0]); di++) {
+        for (size_t li = 0; li < 400 + sizeof(big) / sizeof(big[0]); li++) {
+            size_t n = li < 400 ? 64 + li : big[li - 400];
+            for (size_t i = 0; i < n; i++) {
+                uint8_t b = 0;
+                for (int j = 0; j < 8; j++) {
+                    double u = (double)(xorshift64(&rng) >> 11) / 9007199254740992.0;
+                    b |= (uint8_t)((u < dens[di]) << j);
+                }
+                src[i] = b;
+            }
+            size_t clen = 0;
+            pivco_fse_status_t rc = pivco_dhuf0_compress(src, n, enc, sizeof(enc), &clen);
+            if (rc == PIVCO_FSE_FALLBACK) { fell_back++; continue; }
+            if (rc != PIVCO_FSE_OK) FAIL("compress n=%zu rc=%d", n, rc);
+            if (clen >= n) FAIL("dhuf0 committed a payload >= raw (n=%zu clen=%zu)", n, clen);
+
+            size_t olen = 0;
+            memset(dec, 0xCB, sizeof(dec));
+            rc = pivco_fse_decompress(PIVCO_FSE_DHUF0_ID, enc, clen, dec, sizeof(dec), n, &olen);
+            if (rc != PIVCO_FSE_OK) FAIL("decompress n=%zu rc=%d", n, rc);
+            if (olen != n) FAIL("olen %zu != n %zu", olen, n);
+            if (memcmp(src, dec, n) != 0) {
+                size_t i; for (i = 0; i < n && src[i] == dec[i]; i++) ;
+                FAIL("mismatch n=%zu density=%zu at byte %zu", n, di, i);
+            }
+            size_t clen2 = 0;
+            rc = pivco_fse_compress(PIVCO_FSE_DHUF0_ID, src, n, enc2, sizeof(enc2), &clen2);
+            if (rc != PIVCO_FSE_OK || clen2 != clen || memcmp(enc, enc2, clen) != 0)
+                FAIL("compress dispatch differs from direct call (n=%zu)", n);
+            if (li % 37 == 0) {
+                const size_t cuts[] = { 1, 2, clen / 2, clen - 1 };
+                for (size_t c = 0; c < sizeof(cuts) / sizeof(cuts[0]); c++) {
+                    if (cuts[c] >= clen) continue;
+                    olen = 0;
+                    rc = pivco_fse_decompress(PIVCO_FSE_DHUF0_ID, enc, cuts[c], dec, sizeof(dec), n, &olen);
+                    if (rc == PIVCO_FSE_OK && olen != n) FAIL("truncated payload: OK with olen %zu != n %zu", olen, n);
+                }
+                memcpy(enc2, enc, clen);
+                for (size_t i = 0; i < clen; i++) enc2[i] ^= (uint8_t)(xorshift64(&rng) >> 56);
+                olen = 0;
+                rc = pivco_fse_decompress(PIVCO_FSE_DHUF0_ID, enc2, clen, dec, sizeof(dec), n, &olen);
+                if (rc == PIVCO_FSE_OK && olen != n) FAIL("garbage payload: OK with olen %zu != n %zu", olen, n);
+            }
+            tested++;
+        }
+    }
+    if (tested == 0) FAIL("dhuf0 path never committed -- test is vacuous");
+
+    size_t clen = 0;
+    memset(src, 0x5A, 4096);
+    if (pivco_dhuf0_compress(src, 4096, enc, sizeof(enc), &clen) != PIVCO_FSE_FALLBACK)
+        FAIL("single-symbol region did not fall back");
+    for (size_t i = 0; i < 4096; i++) src[i] = (uint8_t)i;
+    if (pivco_dhuf0_compress(src, 4096, enc, sizeof(enc), &clen) != PIVCO_FSE_FALLBACK)
+        FAIL("uniform region did not fall back");
+    printf("PASS (%d lengths, %d fallbacks)\n", tested, fell_back);
+    return 0;
+}
+
+/* A transmitted-table coder on the wire, through the file API: k=1
+ * (k 1), k=2 (k 2) or dHuf0 (k 0).  Covers the codec's candidate chain,
+ * codec_fse_commit with the coder's id, and the decoder's dispatch of
+ * that marker on both region kinds.  With one table for the whole input
  * (seg_blocks 0), a locally skewed block under a globally balanced
  * histogram gives regions the bit-pair model wins and the static
  * schedule cannot touch (its skew gate needs a lopsided bitmap):
@@ -610,8 +683,10 @@ static int test_fse_k2(void)
  *            past its stack budget onto the heap. */
 static int test_fse_kn_wire(int k)
 {
-    const int id = k == 1 ? PIVCO_FSE_K1_ID : PIVCO_FSE_K2_ID;
-    printf("[fse_k%d_wire] ", k);
+    const int id = k == 1 ? PIVCO_FSE_K1_ID : k == 2 ? PIVCO_FSE_K2_ID
+                          : PIVCO_FSE_DHUF0_ID;
+    const char *name = k == 1 ? "k1" : k == 2 ? "k2" : "dhuf0";
+    printf("[fse_%s_wire] ", name);
     uint64_t rng = 0xC0FFEE0DDBA11ULL;
     uint64_t commit[PIVCO_FSE_STATS_SLOTS], attempt[PIVCO_FSE_STATS_SLOTS];
     uint64_t bin[PIVCO_FSE_STATS_SLOTS], bout[PIVCO_FSE_STATS_SLOTS];
@@ -620,6 +695,7 @@ static int test_fse_kn_wire(int k)
     cfg.fse_nibble_enabled = 0;
     cfg.fse_k1_enabled = k == 1;
     cfg.fse_k2_enabled = k == 2;
+    cfg.fse_dhuf0_enabled = k == 0;
 
     for (int part = 0; part < 2; part++) {
         const size_t B = part == 0 ? (size_t)PIVCO_BLOCK_SIZE : 32768;
@@ -653,8 +729,8 @@ static int test_fse_kn_wire(int k)
         pivco_fse_stats_get(commit, attempt, bin, bout);
         if (commit[id] == 0) {
             free(in); free(enc); free(dec);
-            FAIL("part %d: k%d never committed (attempts %llu) -- test is vacuous",
-                 part, k, (unsigned long long)attempt[id]);
+            FAIL("part %d: %s never committed (attempts %llu) -- test is vacuous",
+                 part, name, (unsigned long long)attempt[id]);
         }
         size_t dec_len = N;
         rc = pivcohuf_decompress(enc, enc_len, dec, &dec_len);
@@ -662,8 +738,8 @@ static int test_fse_kn_wire(int k)
             free(in); free(enc); free(dec);
             FAIL("part %d: roundtrip failed (rc=%d len=%zu)", part, rc, dec_len);
         }
-        printf("%s%llu k%d regions", part ? ", flat: " : "nodes: ",
-               (unsigned long long)commit[id], k);
+        printf("%s%llu %s regions", part ? ", flat: " : "nodes: ",
+               (unsigned long long)commit[id], name);
         free(in); free(enc); free(dec);
     }
     printf(" PASS\n");
@@ -911,6 +987,8 @@ int test_edge_cases_all(void)
     fails += test_fse_k2();
     fails += test_fse_kn_wire(1);
     fails += test_fse_kn_wire(2);
+    fails += test_fse_dhuf0();
+    fails += test_fse_kn_wire(0);
 #endif
     return fails;
 }

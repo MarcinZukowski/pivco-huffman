@@ -147,6 +147,15 @@ static uint8_t *encode_scratch_ensure(pivco_scratch_t *sc, size_t need)
 #ifndef PIVCO_FSE_K2_MIN_GAIN
 #define PIVCO_FSE_K2_MIN_GAIN 0.20
 #endif
+/* dHuf0 sends its whole byte table in the payload, and the decoder
+ * rebuilds that table per region, so it needs regions big enough to pay
+ * for both. */
+#ifndef PIVCO_FSE_DHUF0_MIN_BYTES
+#define PIVCO_FSE_DHUF0_MIN_BYTES 2048
+#endif
+#ifndef PIVCO_FSE_DHUF0_MIN_GAIN
+#define PIVCO_FSE_DHUF0_MIN_GAIN 0.25
+#endif
 
 /* FSE per-table-id stats live in src/pivco_huffman.c (backend-neutral
  * TU) so the symbols resolve regardless of backend.  codec.c writes
@@ -236,7 +245,7 @@ static inline size_t codec_table_len_bound(int nbytes, double min_gain)
  * node's bitmap, or a flat subtree's packed n*D bits.  Returns 1 on
  * commit.
  *
- * Up to three candidates are tried, each behind its own gate, and the
+ * Up to five candidates are tried, each behind its own gate, and the
  * smallest payload wins:
  *
  *   static  — one of the PIVCO_FSE_NUM_TABLES pre-built byte-alphabet
@@ -256,6 +265,11 @@ static inline size_t codec_table_len_bound(int nbytes, double min_gain)
  *             P(bit | previous bit) model, one recipe byte on the wire,
  *             tables from the catalog (pivco_k1.c).  Gated on
  *             PIVCO_FSE_K1_MIN_GAIN.
+ *   k=2     — PIVCO_FSE_K2_ID: as k=1 with P(bit | previous two bits)
+ *             (pivco_k2.c).  Gated on PIVCO_FSE_K2_MIN_GAIN.
+ *   dHuf0   — PIVCO_FSE_DHUF0_ID: the region's bytes coded with huf0
+ *             under a table fitted to this region, the table in the
+ *             payload (pivco_dhuf0.c).  Gated on PIVCO_FSE_DHUF0_MIN_GAIN.
  *
  * Flat regions are where FSE matters most on literal streams: a
  * depth-D flat subtree gives all 2^D of its symbols the same code
@@ -282,6 +296,8 @@ static inline size_t codec_table_len_bound(int nbytes, double min_gain)
  *   k1_on        — table->fse_k1_enabled; 0 skips the k=1 candidate
  *                  (decode is unaffected either way — it dispatches on
  *                  the wire marker and always knows every form)
+ *   k2_on        — table->fse_k2_enabled; likewise for k=2
+ *   dhuf0_on     — table->fse_dhuf0_enabled; likewise for dHuf0
  *   marker_slot  — points at the 1-byte FSE marker (currently 0 = raw)
  *   body         — the nbytes-byte raw region, already in the stream
  *   n / n_left / n_right — partition counts (static skew test)
@@ -298,7 +314,7 @@ static inline size_t codec_table_len_bound(int nbytes, double min_gain)
  * written by the caller, so the wire layout does not depend on it. */
 
 static inline int codec_fse_try(int static_on, int nibble_on, int k1_on,
-                                int k2_on, uint8_t *marker_slot,
+                                int k2_on, int dhuf0_on, uint8_t *marker_slot,
                                 uint8_t *body, int nbytes,
                                 int n, int n_left, int n_right,
                                 int depth, uint8_t **out_ptr)
@@ -433,6 +449,23 @@ static inline int codec_fse_try(int static_on, int nibble_on, int k1_on,
         }
     }
 
+    /* ---- candidate 5: dHuf0 ----
+     * Byte Huffman with the region's own table.  Same gain gate as the
+     * other transmitted-table candidates. */
+    if (dhuf0_on && nbytes >= PIVCO_FSE_DHUF0_MIN_BYTES) {
+        size_t lim = codec_table_len_bound(nbytes, PIVCO_FSE_DHUF0_MIN_GAIN);
+        if (best_id >= 1 && best_len < lim) lim = best_len;
+        pivco_fse_status_t rc = pivco_dhuf0_compress(body, (size_t)nbytes,
+                                                     try_out, cap, &try_len);
+        g_pivco_fse_attempt[PIVCO_FSE_DHUF0_ID]++;
+        if (rc == PIVCO_FSE_OK && try_len < lim) {
+            best_id  = PIVCO_FSE_DHUF0_ID;
+            best_xor = 0;
+            best_len = try_len;
+            uint8_t *t = best_out; best_out = try_out; try_out = t;
+        }
+    }
+
     int committed = 0;
     if (best_id < 1) {
         g_pivco_fse_commit[0]++;     /* slot 0 = attempted, rejected */
@@ -444,7 +477,7 @@ static inline int codec_fse_try(int static_on, int nibble_on, int k1_on,
     if (buf != stack_stage) free(buf);
     return committed;
 #else
-    (void)static_on; (void)nibble_on; (void)k1_on; (void)k2_on; (void)marker_slot; (void)body;
+    (void)static_on; (void)nibble_on; (void)k1_on; (void)k2_on; (void)dhuf0_on; (void)marker_slot; (void)body;
     (void)nbytes; (void)n; (void)n_left; (void)n_right; (void)depth; (void)out_ptr;
     return 0;
 #endif
@@ -460,7 +493,8 @@ static inline int codec_flat_fse_eligible(const pivco_table_t *table, int nbytes
     return table->fse_enabled &&
            ((table->fse_nibble_enabled && nbytes >= PIVCO_FSE_NIBBLE_MIN_BYTES) ||
             (table->fse_k1_enabled && nbytes >= PIVCO_FSE_K1_MIN_BYTES) ||
-            (table->fse_k2_enabled && nbytes >= PIVCO_FSE_K2_MIN_BYTES));
+            (table->fse_k2_enabled && nbytes >= PIVCO_FSE_K2_MIN_BYTES) ||
+            (table->fse_dhuf0_enabled && nbytes >= PIVCO_FSE_DHUF0_MIN_BYTES));
 #else
     (void)table; (void)nbytes;
     return 0;
@@ -483,6 +517,7 @@ static void codec_emit_bitmap(const pivco_table_t *table, int rec_idx,
     if (table->fse_enabled)
         codec_fse_try(table->fse_static_enabled, table->fse_nibble_enabled,
                       table->fse_k1_enabled, table->fse_k2_enabled,
+                      table->fse_dhuf0_enabled,
                       &node_markers[rec_idx], bm, nbytes,
                       n, n_left, n_right, depth, out_ptr);
 }
@@ -531,6 +566,7 @@ static void codec_encode_node(const pivco_table_t *table,
         if (try_fse) {
             if (codec_fse_try(0, table->fse_nibble_enabled,
                               table->fse_k1_enabled, table->fse_k2_enabled,
+                              table->fse_dhuf0_enabled,
                               marker_slot, body, total_bytes,
                               0, 0, 0, 0, out_ptr))
                 return;                     /* committed, natural-packed */

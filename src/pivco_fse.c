@@ -50,6 +50,10 @@ _Static_assert(PIVCO_FSE_STATS_SLOTS >= PIVCO_FSE_K2_ID + 1,
                "PIVCO_FSE_STATS_SLOTS must cover the k=2 table id");
 _Static_assert(PIVCO_FSE_K2_ID == PIVCO_FSE_K1_ID + 1 && PIVCO_FSE_K2_ID <= 0x7F,
                "PIVCO_FSE_K2_ID must follow the k=1 id and fit the 7-bit marker field");
+_Static_assert(PIVCO_FSE_STATS_SLOTS >= PIVCO_FSE_DHUF0_ID + 1,
+               "PIVCO_FSE_STATS_SLOTS must cover the dHuf0 table id");
+_Static_assert(PIVCO_FSE_DHUF0_ID == PIVCO_FSE_K2_ID + 1 && PIVCO_FSE_DHUF0_ID <= 0x7F,
+               "PIVCO_FSE_DHUF0_ID must follow the k=2 id and fit the 7-bit marker field");
 
 /* One CTable + one DTable per pre-built distribution.  Slot 0 is
  * reserved (matches marker 0 = "no FSE").  Allocated by
@@ -302,6 +306,8 @@ pivco_fse_status_t pivco_fse_compress(int table_id,
         return pivco_k1_compress(src, src_len, dst, dst_cap, 0, out_len);
     if (table_id == PIVCO_FSE_K2_ID)
         return pivco_k2_compress(src, src_len, dst, dst_cap, 0, out_len);
+    if (table_id == PIVCO_FSE_DHUF0_ID)
+        return pivco_dhuf0_compress(src, src_len, dst, dst_cap, out_len);
 
     pivco_fse_init();
     if (!g_init_ok) return PIVCO_FSE_ERR_INTERNAL;
@@ -343,6 +349,9 @@ pivco_fse_status_t pivco_fse_decompress(int table_id,
     if (table_id == PIVCO_FSE_K2_ID)
         return pivco_k2_decompress(src, src_len, dst, dst_cap,
                                    dst_expected, out_len);
+    if (table_id == PIVCO_FSE_DHUF0_ID)
+        return pivco_dhuf0_decompress(src, src_len, dst, dst_cap,
+                                      dst_expected, out_len);
 
     pivco_fse_init();
     if (!g_init_ok) return PIVCO_FSE_ERR_INTERNAL;

@@ -108,8 +108,11 @@ if(PIVCO_FSE)
         src/pivco_fse.c
         src/pivco_k1.c
         src/pivco_k2.c
+        src/pivco_dhuf0.c
         ext/fse/lib/fse_compress.c
         ext/fse/lib/fse_decompress.c
+        ext/fse/lib/huf_compress.c
+        ext/fse/lib/huf_decompress.c
         ext/fse/lib/entropy_common.c
         ext/fse/lib/hist.c
         ext/fse/lib/debug.c
