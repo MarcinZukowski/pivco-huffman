@@ -18,6 +18,7 @@
 #include "pivcohuf_file.h"
 #ifdef PIVCO_HAS_FSE
 #include "pivco_fse.h"
+#include "pivco_nph.h"
 #endif
 #include <stdint.h>
 #include <stdio.h>
@@ -681,11 +682,68 @@ static int test_fse_dhuf0(void)
  *            block dominated by one of them: 16 KB bodies of one
  *            repeated code, which also drives codec_fse_try's staging
  *            past its stack budget onto the heap. */
+/* dnPH's code-length record: both forms round-trip the lengths of real
+ * tables, the writer picks the smaller form, and the reader refuses
+ * truncated records, unknown modes and out-of-range lengths. */
+static int test_nph_lens(void)
+{
+    printf("[nph_lens] ");
+    uint64_t rng = 0x5EEDF00DULL;
+    const int counts[] = { 2, 3, 17, 100, 191, 192, 193, 194, 255, 256 };
+    int forms[2] = { 0, 0 };
+    for (size_t ci = 0; ci < sizeof(counts) / sizeof(counts[0]); ci++) {
+        for (int rep = 0; rep < 8; rep++) {
+            uint64_t freq[PIVCO_MAX_SYMBOLS] = {0};
+            int placed = 0;
+            while (placed < counts[ci]) {
+                int s = (int)(xorshift64(&rng) & 255);
+                if (freq[s]) continue;
+                freq[s] = 1 + (xorshift64(&rng) % (rep < 4 ? 4 : 100000));
+                placed++;
+            }
+            pivco_table_t t;
+            if (pivco_build_table(NULL, freq, &t) != PIVCO_OK)
+                FAIL("build k=%d", counts[ci]);
+            uint8_t rec[PIVCO_NPH_LENS_MAX_BYTES];
+            size_t len = pivco_nph_write_lens(t.code_len, rec);
+            size_t want = counts[ci] > 192 ? PIVCO_NPH_LENS_MAX_BYTES
+                                           : 1 + 32 + (size_t)(counts[ci] + 1) / 2;
+            if (len != want) FAIL("k=%d: record %zu B, want %zu", counts[ci], len, want);
+            forms[rec[0]]++;
+            uint8_t back[PIVCO_MAX_SYMBOLS];
+            if (pivco_nph_read_lens(rec, len, back) != len)
+                FAIL("k=%d: read failed", counts[ci]);
+            if (memcmp(back, t.code_len, PIVCO_MAX_SYMBOLS) != 0)
+                FAIL("k=%d: lengths differ", counts[ci]);
+            if (pivco_nph_read_lens(rec, len - 1, back) != 0)
+                FAIL("k=%d: truncated record accepted", counts[ci]);
+            uint8_t bad[PIVCO_NPH_LENS_MAX_BYTES];
+            memcpy(bad, rec, len);
+            bad[0] = 2;
+            if (pivco_nph_read_lens(bad, len, back) != 0)
+                FAIL("k=%d: unknown mode accepted", counts[ci]);
+            /* An out-of-range length in the first coded nibble. */
+            memcpy(bad, rec, len);
+            if (rec[0] == PIVCO_NPH_LENS_FULL) {
+                bad[1] = (uint8_t)((bad[1] & 0xF0) | (PIVCO_MAX_CODE_LEN + 1));
+            } else {
+                bad[33] = (uint8_t)(bad[33] & 0xF0);   /* a present symbol of length 0 */
+            }
+            if (pivco_nph_read_lens(bad, len, back) != 0)
+                FAIL("k=%d: bad length accepted", counts[ci]);
+        }
+    }
+    if (!forms[0] || !forms[1]) FAIL("a record form was never written");
+    printf("full %d, presence %d PASS\n", forms[PIVCO_NPH_LENS_FULL],
+           forms[PIVCO_NPH_LENS_PRESENCE]);
+    return 0;
+}
+
 static int test_fse_kn_wire(int k)
 {
     const int id = k == 1 ? PIVCO_FSE_K1_ID : k == 2 ? PIVCO_FSE_K2_ID
-                          : PIVCO_FSE_DHUF0_ID;
-    const char *name = k == 1 ? "k1" : k == 2 ? "k2" : "dhuf0";
+                 : k == 3 ? PIVCO_FSE_DNPH_ID : PIVCO_FSE_DHUF0_ID;
+    const char *name = k == 1 ? "k1" : k == 2 ? "k2" : k == 3 ? "dnph" : "dhuf0";
     printf("[fse_%s_wire] ", name);
     uint64_t rng = 0xC0FFEE0DDBA11ULL;
     uint64_t commit[PIVCO_FSE_STATS_SLOTS], attempt[PIVCO_FSE_STATS_SLOTS];
@@ -696,8 +754,11 @@ static int test_fse_kn_wire(int k)
     cfg.fse_k1_enabled = k == 1;
     cfg.fse_k2_enabled = k == 2;
     cfg.fse_dhuf0_enabled = k == 0;
+    cfg.fse_dnph_enabled = k == 3;
 
-    for (int part = 0; part < 2; part++) {
+    /* Part 1 is all flat regions, which dnPH does not code. */
+    const int parts = k == 3 ? 1 : 2;
+    for (int part = 0; part < parts; part++) {
         const size_t B = part == 0 ? (size_t)PIVCO_BLOCK_SIZE : 32768;
         const size_t N = part == 0 ? 200000 : 16 * 32768;
         uint8_t *in = malloc(N);
@@ -989,6 +1050,8 @@ int test_edge_cases_all(void)
     fails += test_fse_kn_wire(2);
     fails += test_fse_dhuf0();
     fails += test_fse_kn_wire(0);
+    fails += test_nph_lens();
+    fails += test_fse_kn_wire(3);
 #endif
     return fails;
 }

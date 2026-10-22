@@ -25,6 +25,7 @@
 #include "pivco_prof.h"
 #ifdef PIVCO_HAS_FSE
 #include "pivco_fse.h"
+#include "pivco_nph.h"
 #endif
 
 #include <stdlib.h>
@@ -156,6 +157,14 @@ static uint8_t *encode_scratch_ensure(pivco_scratch_t *sc, size_t need)
 #ifndef PIVCO_FSE_DHUF0_MIN_GAIN
 #define PIVCO_FSE_DHUF0_MIN_GAIN 0.25
 #endif
+/* dnPH sends its code lengths (33..129 B) and decodes an inner block
+ * with a table built per region. */
+#ifndef PIVCO_FSE_DNPH_MIN_BYTES
+#define PIVCO_FSE_DNPH_MIN_BYTES 1024
+#endif
+#ifndef PIVCO_FSE_DNPH_MIN_GAIN
+#define PIVCO_FSE_DNPH_MIN_GAIN 0.10
+#endif
 
 /* FSE per-table-id stats live in src/pivco_huffman.c (backend-neutral
  * TU) so the symbols resolve regardless of backend.  codec.c writes
@@ -233,6 +242,44 @@ static inline size_t codec_table_len_bound(int nbytes, double min_gain)
     size_t keep = (size_t)nbytes - (size_t)((double)nbytes * min_gain);
     return keep > 2 ? keep - 2 : 0;
 }
+
+/* dnPH payload for an nbytes-byte bitmap: [code-length record][inner PH
+ * block] (see pivco_nph.h), the inner table fitted to the bitmap's byte
+ * histogram.  The inner block is encoded with the context's child
+ * encoder, since the outer walk is using this one's arenas.  Falls back
+ * when the bitmap has a single byte value or the payload would not fit
+ * dst_cap. */
+static pivco_fse_status_t codec_dnph_compress(pivco_encoder_t *enc_ctx,
+                                              const pivco_table_t *table,
+                                              const uint8_t *body, int nbytes,
+                                              uint8_t *dst, size_t dst_cap,
+                                              size_t *out_len)
+{
+    if (nbytes > PIVCO_NPH_MAX_N) return PIVCO_FSE_FALLBACK;
+    pivco_nested_t *ns = pivco_nested_for_encoder((pivco_scratch_t *)enc_ctx->internal);
+    if (!ns) return PIVCO_FSE_FALLBACK;
+    uint64_t freq[PIVCO_MAX_SYMBOLS] = {0};
+    pivco_histogram(ns->enc, body, (size_t)nbytes, freq);
+    int distinct = 0;
+    for (int s = 0; s < PIVCO_MAX_SYMBOLS; s++)
+        distinct += freq[s] != 0;
+    if (distinct < 2) return PIVCO_FSE_FALLBACK;
+
+    pivco_cfg_t cfg;
+    pivco_nph_inner_cfg(&cfg, table->flat_layout);
+    if (pivco_build_table(&cfg, freq, &ns->table) != PIVCO_OK)
+        return PIVCO_FSE_FALLBACK;
+    size_t rec_len = pivco_nph_write_lens(ns->table.code_len, ns->out);
+    size_t inner_len = 0;
+    if (CODEC_ENCODE_ENTRY(ns->enc, &ns->table, body, (size_t)nbytes,
+                           ns->out + rec_len, &inner_len) != PIVCO_OK)
+        return PIVCO_FSE_FALLBACK;
+    size_t len = rec_len + inner_len;
+    if (len > dst_cap) return PIVCO_FSE_FALLBACK;
+    memcpy(dst, ns->out, len);
+    *out_len = len;
+    return PIVCO_FSE_OK;
+}
 #endif
 
 /* Largest staging kept on the stack: two halves of 2*nbytes + 64 (`cap` in
@@ -245,7 +292,7 @@ static inline size_t codec_table_len_bound(int nbytes, double min_gain)
  * node's bitmap, or a flat subtree's packed n*D bits.  Returns 1 on
  * commit.
  *
- * Up to five candidates are tried, each behind its own gate, and the
+ * Up to six candidates are tried, each behind its own gate, and the
  * smallest payload wins:
  *
  *   static  — one of the PIVCO_FSE_NUM_TABLES pre-built byte-alphabet
@@ -270,6 +317,10 @@ static inline size_t codec_table_len_bound(int nbytes, double min_gain)
  *   dHuf0   — PIVCO_FSE_DHUF0_ID: the region's bytes coded with huf0
  *             under a table fitted to this region, the table in the
  *             payload (pivco_dhuf0.c).  Gated on PIVCO_FSE_DHUF0_MIN_GAIN.
+ *   dnPH    — PIVCO_FSE_DNPH_ID: the region's bytes coded as an inner PH
+ *             block under a table fitted to them, the code lengths in
+ *             the payload (pivco_nph.h).  Internal nodes only.  Gated on
+ *             PIVCO_FSE_DNPH_MIN_GAIN.
  *
  * Flat regions are where FSE matters most on literal streams: a
  * depth-D flat subtree gives all 2^D of its symbols the same code
@@ -290,14 +341,14 @@ static inline size_t codec_table_len_bound(int nbytes, double min_gain)
  * keeps the configured layout and its decode speed.
  *
  * Inputs:
- *   static_on    — try the static schedule (internal nodes); 0 for flat
- *                  regions
- *   nibble_on    — table->fse_nibble_enabled; 0 skips the nibble candidate
- *   k1_on        — table->fse_k1_enabled; 0 skips the k=1 candidate
- *                  (decode is unaffected either way — it dispatches on
- *                  the wire marker and always knows every form)
- *   k2_on        — table->fse_k2_enabled; likewise for k=2
- *   dhuf0_on     — table->fse_dhuf0_enabled; likewise for dHuf0
+ *   internal     — 1 for an internal node's bitmap, 0 for a flat
+ *                  region; sFSE and dnPH are tried on bitmaps only
+ *   enc_ctx      — the encoder context, whose child context codes dnPH's
+ *                  inner block
+ *   table        — the candidates' enable flags (fse_*_enabled; decode
+ *                  is unaffected by them — it dispatches on the wire
+ *                  marker and always knows every form), and the flat
+ *                  layout dnPH's inner block takes
  *   marker_slot  — points at the 1-byte FSE marker (currently 0 = raw)
  *   body         — the nbytes-byte raw region, already in the stream
  *   n / n_left / n_right — partition counts (static skew test)
@@ -313,8 +364,10 @@ static inline size_t codec_table_len_bound(int nbytes, double min_gain)
  * No-op when PIVCO_HAS_FSE is not defined -- the marker byte is still
  * written by the caller, so the wire layout does not depend on it. */
 
-static inline int codec_fse_try(int static_on, int nibble_on, int k1_on,
-                                int k2_on, int dhuf0_on, uint8_t *marker_slot,
+static inline int codec_fse_try(int internal,
+                                pivco_encoder_t *enc_ctx,
+                                const pivco_table_t *table,
+                                uint8_t *marker_slot,
                                 uint8_t *body, int nbytes,
                                 int n, int n_left, int n_right,
                                 int depth, uint8_t **out_ptr)
@@ -340,7 +393,7 @@ static inline int codec_fse_try(int static_on, int nibble_on, int k1_on,
      * pivco_fse_freq[1] and modelling a near-50/50 bitmap with it costs
      * more than it saves.  Also size-gated: below MIN_BITMAP_BYTES the
      * attempt is not worth the encoder time. */
-    int static_id = (static_on &&
+    int static_id = (internal && table->fse_static_enabled &&
                      nbytes >= PIVCO_FSE_MIN_BITMAP_BYTES &&
                      n > 0 &&
                      (double)((n_left >= n_right) ? n_left : n_right) /
@@ -393,7 +446,7 @@ static inline int codec_fse_try(int static_on, int nibble_on, int k1_on,
      * here was why this codec lost to plain FSE on literal streams: it
      * declines most deep nodes, where the ratio tends to 1 with depth no
      * matter how many bytes the coding actually saves. */
-    if (nibble_on && nbytes >= PIVCO_FSE_NIBBLE_MIN_BYTES) {
+    if (table->fse_nibble_enabled && nbytes >= PIVCO_FSE_NIBBLE_MIN_BYTES) {
         size_t lim = codec_table_len_bound(nbytes, PIVCO_FSE_NIBBLE_MIN_GAIN);
         if (best_id >= 1 && best_len < lim) lim = best_len;
         pivco_fse_status_t rc = pivco_fse_compress_nibble(body, (size_t)nbytes,
@@ -411,7 +464,7 @@ static inline int codec_fse_try(int static_on, int nibble_on, int k1_on,
     /* ---- candidate 3: k=1 bit-context table ----
      * A recipe byte names two grid probabilities; the tables come from
      * the catalog.  Same gain gate as the nibble table. */
-    if (k1_on && nbytes >= PIVCO_FSE_K1_MIN_BYTES) {
+    if (table->fse_k1_enabled && nbytes >= PIVCO_FSE_K1_MIN_BYTES) {
         size_t lim = codec_table_len_bound(nbytes, PIVCO_FSE_K1_MIN_GAIN);
         if (best_id >= 1 && best_len < lim) lim = best_len;
         /* lim == 0: no payload can commit, and max_len 0 would mean "no
@@ -432,7 +485,7 @@ static inline int codec_fse_try(int static_on, int nibble_on, int k1_on,
 
     /* ---- candidate 4: k=2 bit-context table ----
      * As k=1 with one more bit of context. */
-    if (k2_on && nbytes >= PIVCO_FSE_K2_MIN_BYTES) {
+    if (table->fse_k2_enabled && nbytes >= PIVCO_FSE_K2_MIN_BYTES) {
         size_t lim = codec_table_len_bound(nbytes, PIVCO_FSE_K2_MIN_GAIN);
         if (best_id >= 1 && best_len < lim) lim = best_len;
         if (lim > 0) {
@@ -452,7 +505,7 @@ static inline int codec_fse_try(int static_on, int nibble_on, int k1_on,
     /* ---- candidate 5: dHuf0 ----
      * Byte Huffman with the region's own table.  Same gain gate as the
      * other transmitted-table candidates. */
-    if (dhuf0_on && nbytes >= PIVCO_FSE_DHUF0_MIN_BYTES) {
+    if (table->fse_dhuf0_enabled && nbytes >= PIVCO_FSE_DHUF0_MIN_BYTES) {
         size_t lim = codec_table_len_bound(nbytes, PIVCO_FSE_DHUF0_MIN_GAIN);
         if (best_id >= 1 && best_len < lim) lim = best_len;
         pivco_fse_status_t rc = pivco_dhuf0_compress(body, (size_t)nbytes,
@@ -460,6 +513,23 @@ static inline int codec_fse_try(int static_on, int nibble_on, int k1_on,
         g_pivco_fse_attempt[PIVCO_FSE_DHUF0_ID]++;
         if (rc == PIVCO_FSE_OK && try_len < lim) {
             best_id  = PIVCO_FSE_DHUF0_ID;
+            best_xor = 0;
+            best_len = try_len;
+            uint8_t *t = best_out; best_out = try_out; try_out = t;
+        }
+    }
+
+    /* ---- candidate 6: dnPH ----
+     * The region as an inner PH block with its own table.  Same gain
+     * gate as the other transmitted-table candidates. */
+    if (internal && table->fse_dnph_enabled && nbytes >= PIVCO_FSE_DNPH_MIN_BYTES) {
+        size_t lim = codec_table_len_bound(nbytes, PIVCO_FSE_DNPH_MIN_GAIN);
+        if (best_id >= 1 && best_len < lim) lim = best_len;
+        pivco_fse_status_t rc = codec_dnph_compress(enc_ctx, table, body, nbytes,
+                                                    try_out, cap, &try_len);
+        g_pivco_fse_attempt[PIVCO_FSE_DNPH_ID]++;
+        if (rc == PIVCO_FSE_OK && try_len < lim) {
+            best_id  = PIVCO_FSE_DNPH_ID;
             best_xor = 0;
             best_len = try_len;
             uint8_t *t = best_out; best_out = try_out; try_out = t;
@@ -477,7 +547,8 @@ static inline int codec_fse_try(int static_on, int nibble_on, int k1_on,
     if (buf != stack_stage) free(buf);
     return committed;
 #else
-    (void)static_on; (void)nibble_on; (void)k1_on; (void)k2_on; (void)dhuf0_on; (void)marker_slot; (void)body;
+    (void)internal;
+    (void)enc_ctx; (void)table; (void)marker_slot; (void)body;
     (void)nbytes; (void)n; (void)n_left; (void)n_right; (void)depth; (void)out_ptr;
     return 0;
 #endif
@@ -504,7 +575,8 @@ static inline int codec_flat_fse_eligible(const pivco_table_t *table, int nbytes
 /* Emit a node's bitmap (marker-less: the marker goes to the block
  * prefix via node_markers[rec_idx]).  The FSE attempt may rewrite the
  * bitmap in place with [fse_len][payload] and set the marker slot. */
-static void codec_emit_bitmap(const pivco_table_t *table, int rec_idx,
+static void codec_emit_bitmap(pivco_encoder_t *enc_ctx,
+                              const pivco_table_t *table, int rec_idx,
                               const uint8_t *bm_stage, int n,
                               int n_left, int n_right, int depth,
                               uint8_t **out_ptr, uint8_t *node_markers)
@@ -515,14 +587,13 @@ static void codec_emit_bitmap(const pivco_table_t *table, int rec_idx,
     memcpy(bm, bm_stage, (size_t)nbytes);
     *out_ptr += nbytes;
     if (table->fse_enabled)
-        codec_fse_try(table->fse_static_enabled, table->fse_nibble_enabled,
-                      table->fse_k1_enabled, table->fse_k2_enabled,
-                      table->fse_dhuf0_enabled,
+        codec_fse_try(1, enc_ctx, table,
                       &node_markers[rec_idx], bm, nbytes,
                       n, n_left, n_right, depth, out_ptr);
 }
 
-static void codec_encode_node(const pivco_table_t *table,
+static void codec_encode_node(pivco_encoder_t *enc_ctx,
+                               const pivco_table_t *table,
                                int rec_idx,
                                uint8_t *ranks, int n,
                                int depth,
@@ -564,9 +635,7 @@ static void codec_encode_node(const pivco_table_t *table,
         PROF_TOC(PROF_ENC_FLAT, n);
 
         if (try_fse) {
-            if (codec_fse_try(0, table->fse_nibble_enabled,
-                              table->fse_k1_enabled, table->fse_k2_enabled,
-                              table->fse_dhuf0_enabled,
+            if (codec_fse_try(0, enc_ctx, table,
                               marker_slot, body, total_bytes,
                               0, 0, 0, 0, out_ptr))
                 return;                     /* committed, natural-packed */
@@ -615,7 +684,7 @@ static void codec_encode_node(const pivco_table_t *table,
      * arrive.  Below the threshold the bitmap itself goes there. */
     int bm_first = KRT_BITMAP_GOES_FIRST(n, krt_from_code(table->krt_code));
     if (bm_first)
-        codec_emit_bitmap(table, rec_idx, bm_stage, n, n_left, n_right,
+        codec_emit_bitmap(enc_ctx, table, rec_idx, bm_stage, n, n_left, n_right,
                           depth, out_ptr, node_markers);
     else
         wire_write_kr_header(table, (int16_t)rec_idx, out_ptr, n_right);
@@ -629,26 +698,26 @@ static void codec_encode_node(const pivco_table_t *table,
      * only changes the stream at FULL nodes — exactly where the
      * decoder reorders. */
     if (kind == PIVCO_SCHED_LEAF_LEFT) {
-        codec_encode_node(table, rec_idx + 1, tmp, n_right, depth + 1,
+        codec_encode_node(enc_ctx, table, rec_idx + 1, tmp, n_right, depth + 1,
                            out_ptr, tmp + n_right, node_markers);
     } else if (kind == PIVCO_SCHED_FULL) {
         int left = rec_idx + 1;
         int right = rec_idx + rec->right;
         if (n_right > n_left) {
-            codec_encode_node(table, right, tmp,   n_right, depth + 1,
+            codec_encode_node(enc_ctx, table, right, tmp,   n_right, depth + 1,
                                out_ptr, tmp + n_right, node_markers);
-            codec_encode_node(table, left,  ranks, n_left,  depth + 1,
+            codec_encode_node(enc_ctx, table, left,  ranks, n_left,  depth + 1,
                                out_ptr, tmp + n_right, node_markers);
         } else {
-            codec_encode_node(table, left,  ranks, n_left,  depth + 1,
+            codec_encode_node(enc_ctx, table, left,  ranks, n_left,  depth + 1,
                                out_ptr, tmp + n_right, node_markers);
-            codec_encode_node(table, right, tmp,   n_right, depth + 1,
+            codec_encode_node(enc_ctx, table, right, tmp,   n_right, depth + 1,
                                out_ptr, tmp + n_right, node_markers);
         }
     }
 
     if (!bm_first)
-        codec_emit_bitmap(table, rec_idx, bm_stage, n, n_left, n_right,
+        codec_emit_bitmap(enc_ctx, table, rec_idx, bm_stage, n, n_left, n_right,
                           depth, out_ptr, node_markers);
 }
 
@@ -742,7 +811,7 @@ int CODEC_ENCODE_ENTRY(pivco_encoder_t *enc_ctx, const pivco_table_t *table, con
     uint8_t node_markers[PIVCO_MAX_SYMBOLS];
     memset(node_markers, 0, (size_t)table->dec.sched_len);
     uint8_t *rptr = region_buf;
-    codec_encode_node(table, 0, ranks, N, 0, &rptr, tmp, node_markers);
+    codec_encode_node(enc_ctx, table, 0, ranks, N, 0, &rptr, tmp, node_markers);
     size_t region_len = (size_t)(rptr - region_buf);
 
     /* [block_N][marker prefix][marker-less regions]. */
@@ -798,7 +867,75 @@ int CODEC_ENCODE_ENTRY(pivco_encoder_t *enc_ctx, const pivco_table_t *table, con
  *   FULL         — both children internal: larger child in place,
  *                  smaller via the ping-pong partner, merge_vec_vec */
 
-static void codec_decode_subtree(const pivco_table_t *table,
+#ifdef PIVCO_HAS_FSE
+/* Decode a dnPH payload src[0..len) into the nbytes-byte bitmap dst:
+ * rebuild the inner table from the code-length record (with the outer
+ * table's flat layout), then decode the inner block with the context's
+ * child decoder.  Returns 0 on a corrupt payload; a child context
+ * refuses nested regions, so a payload nests at most one level. */
+static int codec_dnph_decompress(pivco_decoder_t *dec_ctx,
+                                 const pivco_table_t *table,
+                                 const uint8_t *src, size_t len,
+                                 uint8_t *dst, int nbytes)
+{
+    pivco_nested_t *ns = pivco_nested_for_decoder((pivco_scratch_t *)dec_ctx->internal);
+    if (!ns) return 0;
+    uint8_t lens[PIVCO_MAX_SYMBOLS];
+    size_t rec_len = pivco_nph_read_lens(src, len, lens);
+    if (rec_len == 0 || len - rec_len < PIVCO_BLOCK_N_BYTES) return 0;
+    pivco_cfg_t cfg;
+    pivco_nph_inner_cfg(&cfg, table->flat_layout);
+    if (pivco_build_codec_table(&cfg, lens, &ns->table) != PIVCO_OK) return 0;
+    const uint8_t *inner = src + rec_len;
+    const uint8_t *p = inner;
+    if (wire_read_block_n(&p) != nbytes) return 0;
+    size_t consumed = 0;
+    if (CODEC_DECODE_ENTRY(ns->dec, &ns->table, inner, len - rec_len,
+                           dst, &consumed) != PIVCO_OK)
+        return 0;
+    return consumed == len - rec_len;
+}
+
+/* prim_merge_cst_vec for code outside the per-backend codec build
+ * (pivco_nph.c's code-length reader).  May be called before any
+ * encode or decode, so it initialises the backend's tables. */
+void PIVCO_BACKEND_FN(pivco_merge_cst_vec)(const uint8_t *bm, int K,
+                                           uint8_t left_sym,
+                                           const uint8_t *right_buf,
+                                           uint8_t *out)
+{
+    prim_codec_init();
+    prim_merge_cst_vec(bm, K, left_sym, right_buf, out);
+}
+#endif
+
+/* wire_read_bitmap, plus the forms that need the decoder context:
+ * dnPH's inner block. */
+static inline const uint8_t *codec_read_bitmap(pivco_decoder_t *dec_ctx,
+                                               const pivco_table_t *table,
+                                               const uint8_t **in_ptr,
+                                               int n, uint8_t *scratch,
+                                               uint8_t marker)
+{
+#ifdef PIVCO_HAS_FSE
+    if (marker == PIVCO_FSE_DNPH_ID) {
+        int nbytes = bitmap_bytes(n);
+        uint16_t len;
+        memcpy(&len, *in_ptr, 2);
+        *in_ptr += 2;
+        if (!codec_dnph_decompress(dec_ctx, table, *in_ptr, len, scratch, nbytes))
+            memset(scratch, 0, (size_t)nbytes);
+        *in_ptr += len;
+        return scratch;
+    }
+#else
+    (void)dec_ctx; (void)table;
+#endif
+    return wire_read_bitmap(in_ptr, n, scratch, marker);
+}
+
+static void codec_decode_subtree(pivco_decoder_t *dec_ctx,
+                                   const pivco_table_t *table,
                                    int rec_idx, int K,
                                    uint8_t *out, uint8_t *tmp,
                                    const uint8_t **in_ptr,
@@ -832,7 +969,7 @@ static void codec_decode_subtree(const pivco_table_t *table,
     case PIVCO_SCHED_BOTH_LEAVES: {
         /* No K_right header (kr_header_needed returns false). */
         uint8_t bm_scratch[(size_t)bitmap_bytes(K) + 16];
-        const uint8_t *bm = wire_read_bitmap(in_ptr, K, bm_scratch, node_markers[rec_idx]);
+        const uint8_t *bm = codec_read_bitmap(dec_ctx, table, in_ptr, K, bm_scratch, node_markers[rec_idx]);
         prim_merge_cst_cst(bm, K, r2s[rec->param], r2s[rec->param + 1], out);
         return;
     }
@@ -846,18 +983,18 @@ static void codec_decode_subtree(const pivco_table_t *table,
         const uint8_t *bm = NULL;
         int K_right;
         if (KRT_BITMAP_GOES_FIRST(K, krt)) {
-            bm = wire_read_bitmap(in_ptr, K, bm_first_scratch, node_markers[rec_idx]);
+            bm = codec_read_bitmap(dec_ctx, table, in_ptr, K, bm_first_scratch, node_markers[rec_idx]);
             K_right = prim_popcount_K_right(bm, K);
         } else {
             K_right = wire_read_kr_header(table, (int16_t)rec_idx, in_ptr);
         }
         uint8_t *right_buf = out + (K - K_right);
-        codec_decode_subtree(table, rec_idx + 1, K_right,
+        codec_decode_subtree(dec_ctx, table, rec_idx + 1, K_right,
                               right_buf, tmp, in_ptr, node_markers, krt);
 
         uint8_t bm_scratch[(size_t)(KRT_BITMAP_GOES_FIRST(K, krt) ? 0 : bitmap_bytes(K)) + 16];
         if (!KRT_BITMAP_GOES_FIRST(K, krt))
-            bm = wire_read_bitmap(in_ptr, K, bm_scratch, node_markers[rec_idx]);
+            bm = codec_read_bitmap(dec_ctx, table, in_ptr, K, bm_scratch, node_markers[rec_idx]);
         prim_merge_cst_vec(bm, K, r2s[rec->param], right_buf, out);
         return;
     }
@@ -871,7 +1008,7 @@ static void codec_decode_subtree(const pivco_table_t *table,
         const uint8_t *bm = NULL;
         int K_right;
         if (KRT_BITMAP_GOES_FIRST(K, krt)) {
-            bm = wire_read_bitmap(in_ptr, K, bm_first_scratch, node_markers[rec_idx]);
+            bm = codec_read_bitmap(dec_ctx, table, in_ptr, K, bm_first_scratch, node_markers[rec_idx]);
             K_right = prim_popcount_K_right(bm, K);
         } else {
             K_right = wire_read_kr_header(table, (int16_t)rec_idx, in_ptr);
@@ -883,22 +1020,22 @@ static void codec_decode_subtree(const pivco_table_t *table,
         if (K_right > K_left) {
             right_buf = out + K_left;            /* larger, in place    */
             left_buf  = tmp;                     /* smaller, ping-pong  */
-            codec_decode_subtree(table, right, K_right,
+            codec_decode_subtree(dec_ctx, table, right, K_right,
                                   right_buf, tmp, in_ptr, node_markers, krt);
-            codec_decode_subtree(table, left,  K_left,
+            codec_decode_subtree(dec_ctx, table, left,  K_left,
                                   left_buf,  out, in_ptr, node_markers, krt);
         } else {
             left_buf  = out + K_right;           /* larger, in place    */
             right_buf = tmp;                     /* smaller, ping-pong  */
-            codec_decode_subtree(table, left,  K_left,
+            codec_decode_subtree(dec_ctx, table, left,  K_left,
                                   left_buf,  tmp, in_ptr, node_markers, krt);
-            codec_decode_subtree(table, right, K_right,
+            codec_decode_subtree(dec_ctx, table, right, K_right,
                                   right_buf, out, in_ptr, node_markers, krt);
         }
 
         uint8_t bm_scratch[(size_t)(KRT_BITMAP_GOES_FIRST(K, krt) ? 0 : bitmap_bytes(K)) + 16];
         if (!KRT_BITMAP_GOES_FIRST(K, krt))
-            bm = wire_read_bitmap(in_ptr, K, bm_scratch, node_markers[rec_idx]);
+            bm = codec_read_bitmap(dec_ctx, table, in_ptr, K, bm_scratch, node_markers[rec_idx]);
         prim_merge_vec_vec(bm, K, left_buf, right_buf, out);
         return;
     }
@@ -935,7 +1072,7 @@ int CODEC_DECODE_ENTRY(pivco_decoder_t *dec_ctx, const pivco_table_t *table, con
      * optimization. */
     if (root_kind == PIVCO_SCHED_BOTH_LEAVES) {
         uint8_t bm_scratch[(size_t)bitmap_bytes(N) + 16];
-        const uint8_t *bm = wire_read_bitmap(&ptr, N, bm_scratch, node_markers[0]);
+        const uint8_t *bm = codec_read_bitmap(dec_ctx, table, &ptr, N, bm_scratch, node_markers[0]);
         prim_merge_cst_cst(bm, N, r2s[root->param], r2s[root->param + 1],
                            symbols);
         *consumed = (size_t)(ptr - in);
@@ -987,19 +1124,19 @@ int CODEC_DECODE_ENTRY(pivco_decoder_t *dec_ctx, const pivco_table_t *table, con
         const uint8_t *bm = NULL;
         int K_right;
         if (KRT_BITMAP_GOES_FIRST(N, krt)) {
-            bm = wire_read_bitmap(&ptr, N, bm_first_scratch, node_markers[0]);
+            bm = codec_read_bitmap(dec_ctx, table, &ptr, N, bm_first_scratch, node_markers[0]);
             K_right = prim_popcount_K_right(bm, N);
         } else {
             K_right = wire_read_kr_header(table, 0, &ptr);
         }
         uint8_t *scratch = decode_scratch_ensure((pivco_scratch_t *)dec_ctx->internal, need);
         if (!scratch) return PIVCO_ERR_NULL;
-        codec_decode_subtree(table, 1, K_right,
+        codec_decode_subtree(dec_ctx, table, 1, K_right,
                               scratch, scratch + K_right, &ptr, node_markers, krt);
 
         uint8_t bm_scratch[(size_t)(KRT_BITMAP_GOES_FIRST(N, krt) ? 0 : bitmap_bytes(N)) + 16];
         if (!KRT_BITMAP_GOES_FIRST(N, krt))
-            bm = wire_read_bitmap(&ptr, N, bm_scratch, node_markers[0]);
+            bm = codec_read_bitmap(dec_ctx, table, &ptr, N, bm_scratch, node_markers[0]);
         prim_merge_cst_vec(bm, N, r2s[root->param], scratch, symbols);
         *consumed = (size_t)(ptr - in);
         return PIVCO_OK;
@@ -1017,7 +1154,7 @@ int CODEC_DECODE_ENTRY(pivco_decoder_t *dec_ctx, const pivco_table_t *table, con
     const uint8_t *bm = NULL;
     int K_right;
     if (KRT_BITMAP_GOES_FIRST(N, krt)) {
-        bm = wire_read_bitmap(&ptr, N, bm_first_scratch, node_markers[0]);
+        bm = codec_read_bitmap(dec_ctx, table, &ptr, N, bm_first_scratch, node_markers[0]);
         K_right = prim_popcount_K_right(bm, N);
     } else {
         K_right = wire_read_kr_header(table, 0, &ptr);
@@ -1032,22 +1169,22 @@ int CODEC_DECODE_ENTRY(pivco_decoder_t *dec_ctx, const pivco_table_t *table, con
     if (K_right > K_left) {                  /* right larger -> first on the wire */
         buf_right = scratch;
         buf_left  = scratch + K_right;
-        codec_decode_subtree(table, right, K_right,
+        codec_decode_subtree(dec_ctx, table, right, K_right,
                               buf_right, /*tmp=*/buf_left, &ptr, node_markers, krt);
-        codec_decode_subtree(table, left,  K_left,
+        codec_decode_subtree(dec_ctx, table, left,  K_left,
                               buf_left,  /*tmp=*/scratch + N, &ptr, node_markers, krt);
     } else {
         buf_left  = scratch;
         buf_right = scratch + K_left;
-        codec_decode_subtree(table, left,  K_left,
+        codec_decode_subtree(dec_ctx, table, left,  K_left,
                               buf_left,  /*tmp=*/buf_right, &ptr, node_markers, krt);
-        codec_decode_subtree(table, right, K_right,
+        codec_decode_subtree(dec_ctx, table, right, K_right,
                               buf_right, /*tmp=*/scratch + N, &ptr, node_markers, krt);
     }
 
     uint8_t bm_scratch[(size_t)(KRT_BITMAP_GOES_FIRST(N, krt) ? 0 : bitmap_bytes(N)) + 16];
     if (!KRT_BITMAP_GOES_FIRST(N, krt))
-        bm = wire_read_bitmap(&ptr, N, bm_scratch, node_markers[0]);
+        bm = codec_read_bitmap(dec_ctx, table, &ptr, N, bm_scratch, node_markers[0]);
     prim_merge_vec_vec(bm, N, buf_left, buf_right, symbols);
 
     *consumed = (size_t)(ptr - in);

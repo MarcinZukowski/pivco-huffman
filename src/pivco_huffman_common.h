@@ -119,10 +119,13 @@ static inline int kr_header_needed(const pivco_table_t *table,
 
 /* Context-owned scratch (the former per-thread arenas).  Lives behind
  * the public contexts' `internal` pointer; grown by the codec's ensure
- * helpers, preallocated for PIVCO_WIRE_MAX_N at context create. */
+ * helpers, preallocated at context create: for PIVCO_WIRE_MAX_N, or for
+ * PIVCO_NPH_MAX_N in a child context (see pivco_nph.h). */
 typedef struct {
     uint8_t *enc; size_t enc_cap;      /* encode ranks + recursion tmp */
     uint8_t *dec; size_t dec_cap;      /* decode ping-pong arena       */
+    struct pivco_nested *nested;       /* created on first nested region (pivco_nph.h) */
+    int is_child;                      /* a nested context: no nesting below */
 } pivco_scratch_t;
 
 #define PIVCO_ENC_SCRATCH_BYTES(N) \
@@ -143,5 +146,30 @@ typedef struct {
  * carry this much extra headroom (see decode_scratch_ensure). */
 #define DECODE_SCRATCH_ALIGN ((uintptr_t)16384)   /* Apple page size */
 #define DECODE_SCRATCH_SHIFT (64 * 39)
+
+/* Per-backend function names: PIVCO_BACKEND_FN(f) is f_<backend>.  In
+ * the per-backend codec build the backend is its PIVCO_BACKEND_*; in
+ * every other file it is the one pivco_encode / pivco_decode dispatch
+ * to. */
+#if defined(PIVCO_BACKEND_SCALAR)
+#  define PIVCO_BACKEND_SUFFIX scalar
+#elif defined(PIVCO_BACKEND_NEON)
+#  define PIVCO_BACKEND_SUFFIX neon
+#elif defined(PIVCO_BACKEND_X86)
+#  define PIVCO_BACKEND_SUFFIX x86
+#elif defined(PIVCO_BACKEND_AVX512)
+#  define PIVCO_BACKEND_SUFFIX avx512
+#elif defined(PIVCO_HAS_AVX512)
+#  define PIVCO_BACKEND_SUFFIX avx512
+#elif defined(PIVCO_HAS_NEON)
+#  define PIVCO_BACKEND_SUFFIX neon
+#elif defined(PIVCO_HAS_SSE4)
+#  define PIVCO_BACKEND_SUFFIX x86
+#else
+#  define PIVCO_BACKEND_SUFFIX scalar
+#endif
+#define PIVCO_BACKEND_CAT_(f, b) f##_##b
+#define PIVCO_BACKEND_CAT(f, b)  PIVCO_BACKEND_CAT_(f, b)
+#define PIVCO_BACKEND_FN(f)      PIVCO_BACKEND_CAT(f, PIVCO_BACKEND_SUFFIX)
 
 #endif /* PIVCO_HUFFMAN_COMMON_H */

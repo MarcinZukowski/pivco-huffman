@@ -219,6 +219,7 @@ typedef struct {
     uint8_t  fse_k1_enabled;     /* baked from pivco_cfg_t at build */
     uint8_t  fse_k2_enabled;     /* baked from pivco_cfg_t at build */
     uint8_t  fse_dhuf0_enabled;  /* baked from pivco_cfg_t at build */
+    uint8_t  fse_dnph_enabled;   /* baked from pivco_cfg_t at build */
     uint8_t  flat_layout;        /* baked from pivco_cfg_t at build */
     uint8_t  krt_code;           /* baked from pivco_cfg_t.krt at build */
 
@@ -390,6 +391,12 @@ typedef struct {
      * Encoder-side only.
      * default: 0.  Ignored when fse_enabled is 0. */
     int                 fse_dhuf0_enabled;
+    /* Let a per-node FSE attempt on a partition bitmap additionally try
+     * dnPH (PIVCO_FSE_DNPH_ID): the bitmap's bytes coded as an inner PH
+     * block under a table fitted to them, the code lengths travelling in
+     * the payload.  Encoder-side only.
+     * default: 0.  Ignored when fse_enabled is 0. */
+    int                 fse_dnph_enabled;
     pivco_flat_layout_t flat_layout;  /* default PIVCO_FLAT_VERTICAL */
     /* K_right threshold KrT: a node with n < krt carries no 2-byte
      * K_right header; its bitmap goes ahead of its children instead and
@@ -461,10 +468,11 @@ int pivco_joint_optimize_lengths(const uint64_t freq[PIVCO_MAX_SYMBOLS],
  * FSE-coded bitmap is committed.  Slot 0 = "FSE attempted but did not
  * commit"; slots 1..PIVCO_FSE_NUM_TABLES = pivco_fse_freq[] table picked;
  * slot PIVCO_FSE_NIBBLE_ID = the nibble table; PIVCO_FSE_K1_ID = the
- * k=1 bit-context table; PIVCO_FSE_K2_ID = k=2; PIVCO_FSE_DHUF0_ID = dHuf0.
- * MUST be >= PIVCO_FSE_DHUF0_ID + 1 (static-asserted in pivco_fse.c).
+ * k=1 bit-context table; PIVCO_FSE_K2_ID = k=2; PIVCO_FSE_DHUF0_ID = dHuf0;
+ * PIVCO_FSE_DNPH_ID = dnPH.
+ * MUST be >= PIVCO_FSE_DNPH_ID + 1 (static-asserted in pivco_fse.c).
  * Not thread-safe; intended for single-threaded analysis runs. */
-#define PIVCO_FSE_STATS_SLOTS 55
+#define PIVCO_FSE_STATS_SLOTS 56
 void pivco_fse_stats_reset(void);
 void pivco_fse_stats_get(uint64_t commit_count[PIVCO_FSE_STATS_SLOTS],
                                  uint64_t attempt_count[PIVCO_FSE_STATS_SLOTS],

@@ -138,6 +138,13 @@ typedef enum {
  * own 4-stream format with its weight header in front. */
 #define PIVCO_FSE_DHUF0_ID 54
 
+/* Table id for dnPH, nested PH with a dynamic table: a partition
+ * bitmap's bytes coded as an inner PH block, under a table fitted to
+ * them, its code lengths in front (see pivco_nph.h).  Coded by the codec
+ * itself, not by pivco_fse_compress / pivco_fse_decompress: the inner
+ * block needs the codec's walk. */
+#define PIVCO_FSE_DNPH_ID 55
+
 
 /* Idempotent.  Safe to call multiple times; first call builds the
  * CTables + DTables; subsequent calls are no-ops. */

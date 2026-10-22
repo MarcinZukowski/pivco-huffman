@@ -109,6 +109,7 @@ if(PIVCO_FSE)
         src/pivco_k1.c
         src/pivco_k2.c
         src/pivco_dhuf0.c
+        src/pivco_nph.c
         ext/fse/lib/fse_compress.c
         ext/fse/lib/fse_decompress.c
         ext/fse/lib/huf_compress.c

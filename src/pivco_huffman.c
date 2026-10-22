@@ -129,19 +129,21 @@ const pivco_cfg_t pivco_cfg_default = {
     .fse_k1_enabled = 0,
     .fse_k2_enabled = 0,
     .fse_dhuf0_enabled = 0,
+    .fse_dnph_enabled = 0,
     .flat_layout = PIVCO_FLAT_VERTICAL,
     .krt = 0,
 };
 
 #include "pivco_huffman_common.h"
 #include "pivco_huffman_primitives.h"   /* arch-selected; prim_histogram_chunk */
+#include "pivco_nph.h"
 
-static pivco_scratch_t *scratch_create(void)
+static pivco_scratch_t *scratch_create(int max_n)
 {
     pivco_scratch_t *sc = (pivco_scratch_t *)calloc(1, sizeof(*sc));
     if (!sc) return NULL;
-    sc->enc_cap = PIVCO_ENC_SCRATCH_BYTES(PIVCO_WIRE_MAX_N);
-    sc->dec_cap = PIVCO_DEC_SCRATCH_BYTES(PIVCO_WIRE_MAX_N)
+    sc->enc_cap = PIVCO_ENC_SCRATCH_BYTES(max_n);
+    sc->dec_cap = PIVCO_DEC_SCRATCH_BYTES(max_n)
                 + DECODE_SCRATCH_ALIGN + DECODE_SCRATCH_SHIFT;
     /* PH_CTX_ALLOC=1 placement A/B probe: start from a deliberately
      * small 256 KiB cap instead of the full preallocation, mimicking
@@ -169,27 +171,83 @@ static pivco_scratch_t *scratch_create(void)
 static void scratch_free(pivco_scratch_t *sc)
 {
     if (!sc) return;
+    if (sc->nested) {
+        pivco_encoder_free(sc->nested->enc);
+        pivco_decoder_free(sc->nested->dec);
+        free(sc->nested->out);
+        free(sc->nested);
+    }
     free(sc->enc); free(sc->dec); free(sc);
 }
 
-pivco_encoder_t *pivco_encoder_create(void)
+static pivco_encoder_t *encoder_create(int max_n)
 {
     pivco_encoder_t *e = (pivco_encoder_t *)calloc(1, sizeof(*e));
     if (!e) return NULL;
-    e->internal = scratch_create();
+    e->internal = scratch_create(max_n);
     if (!e->internal) { free(e); return NULL; }
     prim_codec_init();
     return e;
 }
 
-pivco_decoder_t *pivco_decoder_create(void)
+static pivco_decoder_t *decoder_create(int max_n)
 {
     pivco_decoder_t *d = (pivco_decoder_t *)calloc(1, sizeof(*d));
     if (!d) return NULL;
-    d->internal = scratch_create();
+    d->internal = scratch_create(max_n);
     if (!d->internal) { free(d); return NULL; }
     prim_codec_init();
     return d;
+}
+
+pivco_encoder_t *pivco_encoder_create(void)
+{
+    return encoder_create(PIVCO_WIRE_MAX_N);
+}
+
+pivco_decoder_t *pivco_decoder_create(void)
+{
+    return decoder_create(PIVCO_WIRE_MAX_N);
+}
+
+/* Staging for one inner block: what the encoder writes for an N-byte
+ * region (PIVCO_MAX_ENCODED_SIZE's 2 bytes per symbol), plus room for
+ * the code-length record in front. */
+#define PIVCO_NPH_OUT_BYTES ((size_t)PIVCO_NPH_MAX_N * 2 + 4096)
+
+pivco_nested_t *pivco_nested_for_encoder(pivco_scratch_t *sc)
+{
+    if (sc->nested) return sc->nested;
+    if (sc->is_child) return NULL;
+    pivco_nested_t *ns = (pivco_nested_t *)calloc(1, sizeof(*ns));
+    if (!ns) return NULL;
+    ns->enc = encoder_create(PIVCO_NPH_MAX_N);
+    ns->out = (uint8_t *)malloc(PIVCO_NPH_OUT_BYTES);
+    if (!ns->enc || !ns->out) {
+        pivco_encoder_free(ns->enc);
+        free(ns->out);
+        free(ns);
+        return NULL;
+    }
+    ((pivco_scratch_t *)ns->enc->internal)->is_child = 1;
+    sc->nested = ns;
+    return ns;
+}
+
+pivco_nested_t *pivco_nested_for_decoder(pivco_scratch_t *sc)
+{
+    if (sc->nested) return sc->nested;
+    if (sc->is_child) return NULL;
+    pivco_nested_t *ns = (pivco_nested_t *)calloc(1, sizeof(*ns));
+    if (!ns) return NULL;
+    ns->dec = decoder_create(PIVCO_NPH_MAX_N);
+    if (!ns->dec) {
+        free(ns);
+        return NULL;
+    }
+    ((pivco_scratch_t *)ns->dec->internal)->is_child = 1;
+    sc->nested = ns;
+    return ns;
 }
 
 void pivco_encoder_free(pivco_encoder_t *e)

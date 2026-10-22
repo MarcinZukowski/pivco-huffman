@@ -54,6 +54,10 @@ _Static_assert(PIVCO_FSE_STATS_SLOTS >= PIVCO_FSE_DHUF0_ID + 1,
                "PIVCO_FSE_STATS_SLOTS must cover the dHuf0 table id");
 _Static_assert(PIVCO_FSE_DHUF0_ID == PIVCO_FSE_K2_ID + 1 && PIVCO_FSE_DHUF0_ID <= 0x7F,
                "PIVCO_FSE_DHUF0_ID must follow the k=2 id and fit the 7-bit marker field");
+_Static_assert(PIVCO_FSE_STATS_SLOTS >= PIVCO_FSE_DNPH_ID + 1,
+               "PIVCO_FSE_STATS_SLOTS must cover the dnPH table id");
+_Static_assert(PIVCO_FSE_DNPH_ID == PIVCO_FSE_DHUF0_ID + 1 && PIVCO_FSE_DNPH_ID <= 0x7F,
+               "PIVCO_FSE_DNPH_ID must follow the dHuf0 id and fit the 7-bit marker field");
 
 /* One CTable + one DTable per pre-built distribution.  Slot 0 is
  * reserved (matches marker 0 = "no FSE").  Allocated by

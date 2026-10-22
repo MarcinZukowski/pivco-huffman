@@ -70,9 +70,15 @@
  *   dHuf0: the region's bytes coded with huf0 under a table fitted to
  *   this region, in huf0's 4-stream format (FSE-coded weight header,
  *   6-byte jump table, four bitstreams); xor_flag is always 0.
+ * table_id == PIVCO_FSE_DNPH_ID
+ *   dnPH, internal nodes only: the bitmap's bytes coded as an inner PH
+ *   block under a table fitted to them, its code lengths in front (see
+ *   pivco_nph.h).  The inner block cannot nest again; xor_flag is
+ *   always 0.
  *
- * All forms are decoded by pivco_fse_decompress(), which dispatches on
- * table_id.
+ * All forms but dnPH are decoded by pivco_fse_decompress(), which
+ * dispatches on table_id; dnPH needs the decoder context and is decoded
+ * by the codec (codec_read_bitmap).
  *
  * The order above is exactly the order the BU decoder consumes bytes.
  * It needs both child counts up front to size the children's buffers
