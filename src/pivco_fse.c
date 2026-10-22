@@ -28,36 +28,24 @@
 #include <string.h>
 
 #include "pivco_huffman.h"   /* PIVCO_FSE_STATS_SLOTS */
-/* The FSE stats arrays are indexed by t_id in [0, PIVCO_FSE_NIBBLE_ID]
- * (0 = reject, 1..N = pivco_fse_select_table(), N+1 = the nibble
- * table).  Guard against the slot count drifting behind the table count
- * (it did once: 26 slots vs 50 tables). */
-_Static_assert(PIVCO_FSE_STATS_SLOTS >= PIVCO_FSE_NIBBLE_ID + 1,
-               "PIVCO_FSE_STATS_SLOTS must cover every FSE table id (>= NIBBLE_ID + 1)");
-/* The nibble id sits immediately past the static schedule, and the wire
- * marker byte only has 7 bits for it (bit 7 is the xor flag). */
-_Static_assert(PIVCO_FSE_NIBBLE_ID == PIVCO_FSE_NUM_TABLES + 1,
-               "PIVCO_FSE_NIBBLE_ID must follow the last static table id");
-_Static_assert(PIVCO_FSE_NIBBLE_ID <= 0x7F,
-               "PIVCO_FSE_NIBBLE_ID must fit the wire marker's 7-bit table field");
+#include "pivco_nph.h"       /* PIVCO_SNPH_NUM_TABLES */
+
+/* Wire ids: the static tables 1..PIVCO_FSE_NUM_TABLES, then one id per
+ * other form, consecutive, within the marker's 7-bit field (bit 7 is
+ * the xor flag); the stats arrays have one slot per id. */
+_Static_assert(PIVCO_FSE_NIBBLE_ID == PIVCO_FSE_NUM_TABLES + 1 &&
+               PIVCO_FSE_K1_ID     == PIVCO_FSE_NIBBLE_ID + 1 &&
+               PIVCO_FSE_K2_ID     == PIVCO_FSE_K1_ID + 1 &&
+               PIVCO_FSE_DHUF0_ID  == PIVCO_FSE_K2_ID + 1 &&
+               PIVCO_FSE_DNPH_ID   == PIVCO_FSE_DHUF0_ID + 1 &&
+               PIVCO_FSE_SNPH_ID   == PIVCO_FSE_DNPH_ID + 1,
+               "wire ids must follow the static tables, consecutively");
+_Static_assert(PIVCO_FSE_SNPH_ID <= 0x7F, "wire ids must fit the marker's 7-bit field");
+_Static_assert(PIVCO_FSE_STATS_SLOTS == PIVCO_FSE_SNPH_ID + 1, "one stats slot per wire id");
 _Static_assert(PIVCO_FSE_NIB_TABLELOG <= PIVCO_FSE_NIB_TABLELOG_MAX,
                "nibble encoder tableLog must not exceed what the decoder accepts");
-_Static_assert(PIVCO_FSE_STATS_SLOTS >= PIVCO_FSE_K1_ID + 1,
-               "PIVCO_FSE_STATS_SLOTS must cover the k=1 table id");
-_Static_assert(PIVCO_FSE_K1_ID == PIVCO_FSE_NIBBLE_ID + 1 && PIVCO_FSE_K1_ID <= 0x7F,
-               "PIVCO_FSE_K1_ID must follow the nibble id and fit the 7-bit marker field");
-_Static_assert(PIVCO_FSE_STATS_SLOTS >= PIVCO_FSE_K2_ID + 1,
-               "PIVCO_FSE_STATS_SLOTS must cover the k=2 table id");
-_Static_assert(PIVCO_FSE_K2_ID == PIVCO_FSE_K1_ID + 1 && PIVCO_FSE_K2_ID <= 0x7F,
-               "PIVCO_FSE_K2_ID must follow the k=1 id and fit the 7-bit marker field");
-_Static_assert(PIVCO_FSE_STATS_SLOTS >= PIVCO_FSE_DHUF0_ID + 1,
-               "PIVCO_FSE_STATS_SLOTS must cover the dHuf0 table id");
-_Static_assert(PIVCO_FSE_DHUF0_ID == PIVCO_FSE_K2_ID + 1 && PIVCO_FSE_DHUF0_ID <= 0x7F,
-               "PIVCO_FSE_DHUF0_ID must follow the k=2 id and fit the 7-bit marker field");
-_Static_assert(PIVCO_FSE_STATS_SLOTS >= PIVCO_FSE_DNPH_ID + 1,
-               "PIVCO_FSE_STATS_SLOTS must cover the dnPH table id");
-_Static_assert(PIVCO_FSE_DNPH_ID == PIVCO_FSE_DHUF0_ID + 1 && PIVCO_FSE_DNPH_ID <= 0x7F,
-               "PIVCO_FSE_DNPH_ID must follow the dHuf0 id and fit the 7-bit marker field");
+_Static_assert(PIVCO_SNPH_NUM_TABLES == PIVCO_FSE_NUM_TABLES,
+               "snPH has one table per sFSE table");
 
 /* One CTable + one DTable per pre-built distribution.  Slot 0 is
  * reserved (matches marker 0 = "no FSE").  Allocated by

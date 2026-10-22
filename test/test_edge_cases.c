@@ -19,6 +19,7 @@
 #ifdef PIVCO_HAS_FSE
 #include "pivco_fse.h"
 #include "pivco_nph.h"
+#include "pivco_snph_tables.h"
 #endif
 #include <stdint.h>
 #include <stdio.h>
@@ -739,11 +740,32 @@ static int test_nph_lens(void)
     return 0;
 }
 
+/* snPH's generated tables: every symbol coded, within
+ * PIVCO_MAX_CODE_LEN, and a code the codec table build accepts. */
+static int test_snph_tables(void)
+{
+    printf("[snph_tables] ");
+    static pivco_table_t t;
+    pivco_cfg_t cfg;
+    pivco_nph_inner_cfg(&cfg, PIVCO_FLAT_VERTICAL);
+    for (int i = 1; i <= PIVCO_SNPH_NUM_TABLES; i++) {
+        for (int s = 0; s < PIVCO_MAX_SYMBOLS; s++)
+            if (pivco_snph_lens[i][s] < 1 || pivco_snph_lens[i][s] > PIVCO_MAX_CODE_LEN)
+                FAIL("table %d: symbol %d has length %d", i, s, pivco_snph_lens[i][s]);
+        if (pivco_build_codec_table(&cfg, pivco_snph_lens[i], &t) != PIVCO_OK)
+            FAIL("table %d: build failed", i);
+    }
+    printf("%d tables PASS\n", PIVCO_SNPH_NUM_TABLES);
+    return 0;
+}
+
 static int test_fse_kn_wire(int k)
 {
     const int id = k == 1 ? PIVCO_FSE_K1_ID : k == 2 ? PIVCO_FSE_K2_ID
-                 : k == 3 ? PIVCO_FSE_DNPH_ID : PIVCO_FSE_DHUF0_ID;
-    const char *name = k == 1 ? "k1" : k == 2 ? "k2" : k == 3 ? "dnph" : "dhuf0";
+                 : k == 3 ? PIVCO_FSE_DNPH_ID : k == 4 ? PIVCO_FSE_SNPH_ID
+                 : PIVCO_FSE_DHUF0_ID;
+    const char *name = k == 1 ? "k1" : k == 2 ? "k2" : k == 3 ? "dnph"
+                     : k == 4 ? "snph" : "dhuf0";
     printf("[fse_%s_wire] ", name);
     uint64_t rng = 0xC0FFEE0DDBA11ULL;
     uint64_t commit[PIVCO_FSE_STATS_SLOTS], attempt[PIVCO_FSE_STATS_SLOTS];
@@ -755,9 +777,11 @@ static int test_fse_kn_wire(int k)
     cfg.fse_k2_enabled = k == 2;
     cfg.fse_dhuf0_enabled = k == 0;
     cfg.fse_dnph_enabled = k == 3;
+    cfg.fse_snph_enabled = k == 4;
+    cfg.fse_static_enabled = k != 4;
 
-    /* Part 1 is all flat regions, which dnPH does not code. */
-    const int parts = k == 3 ? 1 : 2;
+    /* Part 1 is all flat regions, which dnPH and snPH do not code. */
+    const int parts = k >= 3 ? 1 : 2;
     for (int part = 0; part < parts; part++) {
         const size_t B = part == 0 ? (size_t)PIVCO_BLOCK_SIZE : 32768;
         const size_t N = part == 0 ? 200000 : 16 * 32768;
@@ -1052,6 +1076,8 @@ int test_edge_cases_all(void)
     fails += test_fse_kn_wire(0);
     fails += test_nph_lens();
     fails += test_fse_kn_wire(3);
+    fails += test_snph_tables();
+    fails += test_fse_kn_wire(4);
 #endif
     return fails;
 }

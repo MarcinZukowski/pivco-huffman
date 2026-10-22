@@ -48,6 +48,9 @@
  *        is looked up from the prefix by schedule record.
  *
  * The marker byte is [xor_flag:1][table_id:7].
+ * TODO: give sFSE a single table_id, with its table index in a 1-byte
+ * payload header as snPH has, instead of spending ids
+ * 1..PIVCO_FSE_NUM_TABLES on it.
  * table_id == 1..PIVCO_FSE_NUM_TABLES
  *   selects a pre-built static table (xor_flag says
  *   whether the encoder bit-inverted the bitmap first, so those tables
@@ -75,10 +78,15 @@
  *   block under a table fitted to them, its code lengths in front (see
  *   pivco_nph.h).  The inner block cannot nest again; xor_flag is
  *   always 0.
+ * table_id == PIVCO_FSE_SNPH_ID
+ *   snPH, internal nodes only: the bitmap's bytes coded as an inner PH
+ *   block under a static table, named by an index byte in front (see
+ *   pivco_nph.h).  xor_flag says whether the encoder bit-inverted the
+ *   bitmap first, as for the static tables.
  *
- * All forms but dnPH are decoded by pivco_fse_decompress(), which
- * dispatches on table_id; dnPH needs the decoder context and is decoded
- * by the codec (codec_read_bitmap).
+ * All forms but dnPH and snPH are decoded by pivco_fse_decompress(),
+ * which dispatches on table_id; dnPH and snPH need the decoder context
+ * and are decoded by the codec (codec_read_bitmap).
  *
  * The order above is exactly the order the BU decoder consumes bytes.
  * It needs both child counts up front to size the children's buffers

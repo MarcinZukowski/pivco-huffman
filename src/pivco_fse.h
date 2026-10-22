@@ -145,6 +145,12 @@ typedef enum {
  * block needs the codec's walk. */
 #define PIVCO_FSE_DNPH_ID 55
 
+/* Table id for snPH, nested PH with a static table: a partition
+ * bitmap's bytes coded as an inner PH block under one of a fixed set
+ * of tables, named by an index byte (see pivco_nph.h).  Coded by the
+ * codec itself, like dnPH. */
+#define PIVCO_FSE_SNPH_ID 56
+
 
 /* Idempotent.  Safe to call multiple times; first call builds the
  * CTables + DTables; subsequent calls are no-ops. */

@@ -19,6 +19,19 @@
  *                            order, low nibble first: 32 + ceil(k/2) B.
  * The writer picks the smaller form.  Lengths are 1..PIVCO_MAX_CODE_LEN.
  *
+ * Static nPH (snPH, PIVCO_FSE_SNPH_ID) takes the inner block's table
+ * from a fixed set instead, so its payload starts with the table's
+ * index:
+ *
+ *   [table index:u8][inner PH block]
+ *
+ * Table t (1..PIVCO_SNPH_NUM_TABLES) models i.i.d. bits with sFSE's
+ * table t probability for the frequent bit (pivco_fse_freq[t]): its code
+ * lengths are a length-limited Huffman code for that byte distribution,
+ * generated into pivco_snph_tables.h by extras/gen_fse_tables.py.  The
+ * tables are tuned for "0 is the frequent bit"; the marker's xor_flag
+ * says whether the encoder inverted the bitmap first.
+ *
  * The inner table takes everything the decoder needs from the code
  * lengths and the outer table (its flat layout); the rest of its
  * configuration is the encoder's choice (pivco_nph_inner_cfg). */
@@ -35,15 +48,27 @@
 /* Largest inner block: the bitmap of the largest outer block. */
 #define PIVCO_NPH_MAX_N (PIVCO_WIRE_MAX_N / 8 + 1)
 
-/* What a context needs to code nested regions: a child context for the
- * inner block's encode or decode (the parent's arenas are in use by the
- * outer walk), the inner block's table, rebuilt per region, and on the
- * encoder side a staging buffer for the inner block. */
+/* snPH's tables, one per sFSE table (static-asserted against
+ * PIVCO_FSE_NUM_TABLES in pivco_fse.c). */
+#define PIVCO_SNPH_NUM_TABLES 50
+
+/* What a context needs to code nested regions. */
 typedef struct pivco_nested {
+    /* Child context for the inner block's encode (encoder side) or
+     * decode (decoder side); the parent's arenas are in use by the
+     * outer walk. */
     pivco_encoder_t *enc;
     pivco_decoder_t *dec;
+    /* dnPH's inner table, rebuilt per region. */
     pivco_table_t    table;
+    /* snPH's tables by index, built on first use (NULL until then), and
+     * the flat layout each was built for. */
+    pivco_table_t   *snph[PIVCO_SNPH_NUM_TABLES + 1];
+    uint8_t          snph_layout[PIVCO_SNPH_NUM_TABLES + 1];
+    /* Encoder side: staging for the inner block, and for the bitmap
+     * inverted when snPH codes it with the xor flag. */
     uint8_t         *out;
+    uint8_t         *flipped_bitmap;
 } pivco_nested_t;
 
 /* The context's nested-region state, created on first use with a child
@@ -79,5 +104,11 @@ size_t pivco_nph_read_lens(const uint8_t *in, size_t avail,
 /* The configuration of an inner block's table: no FSE inside, KrT
  * PIVCO_NPH_KRT, and the outer table's flat layout. */
 void pivco_nph_inner_cfg(pivco_cfg_t *cfg, int flat_layout);
+
+/* snPH's table t for the given flat layout, built into nested on first
+ * use (and rebuilt when the layout changes).  NULL when t is outside
+ * 1..PIVCO_SNPH_NUM_TABLES or on allocation failure. */
+const pivco_table_t *pivco_snph_table(pivco_nested_t *nested, int t,
+                                      int flat_layout);
 
 #endif  /* PIVCO_NPH_H */

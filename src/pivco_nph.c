@@ -2,7 +2,9 @@
  * (see pivco_nph.h).  The inner block itself is coded by the codec. */
 
 #include "pivco_nph.h"
+#include "pivco_snph_tables.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 /* prim_merge_cst_vec of the backend pivco_decode dispatches to (see
@@ -91,4 +93,26 @@ void pivco_nph_inner_cfg(pivco_cfg_t *cfg, int flat_layout)
     cfg->fse_enabled = 0;
     cfg->krt = PIVCO_NPH_KRT;
     cfg->flat_layout = (pivco_flat_layout_t)flat_layout;
+}
+
+const pivco_table_t *pivco_snph_table(pivco_nested_t *nested, int t,
+                                      int flat_layout)
+{
+    if (t < 1 || t > PIVCO_SNPH_NUM_TABLES) return NULL;
+    if (nested->snph[t] && nested->snph_layout[t] == flat_layout) return nested->snph[t];
+    if (!nested->snph[t]) {
+        nested->snph[t] = (pivco_table_t *)calloc(1, sizeof(pivco_table_t));
+        if (!nested->snph[t]) return NULL;
+    }
+    pivco_cfg_t cfg;
+    pivco_nph_inner_cfg(&cfg, flat_layout);
+    /* The generated lengths are a complete code; a failure here is a
+     * bad table file, and the caller falls back or reports corruption. */
+    if (pivco_build_codec_table(&cfg, pivco_snph_lens[t], nested->snph[t]) != PIVCO_OK) {
+        free(nested->snph[t]);
+        nested->snph[t] = NULL;
+        return NULL;
+    }
+    nested->snph_layout[t] = (uint8_t)flat_layout;
+    return nested->snph[t];
 }

@@ -213,14 +213,18 @@ typedef struct {
     uint8_t  max_len;
     uint8_t  min_len;
     uint16_t num_symbols;
-    uint8_t  fse_enabled;        /* baked from pivco_cfg_t at build */
-    uint8_t  fse_static_enabled; /* baked from pivco_cfg_t at build */
-    uint8_t  fse_nibble_enabled; /* baked from pivco_cfg_t at build */
-    uint8_t  fse_k1_enabled;     /* baked from pivco_cfg_t at build */
-    uint8_t  fse_k2_enabled;     /* baked from pivco_cfg_t at build */
-    uint8_t  fse_dhuf0_enabled;  /* baked from pivco_cfg_t at build */
-    uint8_t  fse_dnph_enabled;   /* baked from pivco_cfg_t at build */
-    uint8_t  flat_layout;        /* baked from pivco_cfg_t at build */
+
+    /* Baked from pivco_cfg_t at build. */
+    uint8_t  fse_enabled;
+    uint8_t  fse_static_enabled;
+    uint8_t  fse_nibble_enabled;
+    uint8_t  fse_k1_enabled;
+    uint8_t  fse_k2_enabled;
+    uint8_t  fse_dhuf0_enabled;
+    uint8_t  fse_dnph_enabled;
+    uint8_t  fse_snph_enabled;
+    uint8_t  flat_layout;
+
     uint8_t  krt_code;           /* baked from pivco_cfg_t.krt at build */
 
     /* Flat-subtree fast path: per-node, if flat_depth[i] >= 2 then node i
@@ -397,6 +401,13 @@ typedef struct {
      * the payload.  Encoder-side only.
      * default: 0.  Ignored when fse_enabled is 0. */
     int                 fse_dnph_enabled;
+    /* Let a per-node FSE attempt on a partition bitmap additionally try
+     * snPH (PIVCO_FSE_SNPH_ID): the bitmap's bytes coded as an inner PH
+     * block under a static table picked by the bitmap's skew, as sFSE
+     * picks its table; one index byte travels in the payload.
+     * Encoder-side only.
+     * default: 0.  Ignored when fse_enabled is 0. */
+    int                 fse_snph_enabled;
     pivco_flat_layout_t flat_layout;  /* default PIVCO_FLAT_VERTICAL */
     /* K_right threshold KrT: a node with n < krt carries no 2-byte
      * K_right header; its bitmap goes ahead of its children instead and
@@ -464,15 +475,18 @@ int pivco_joint_optimize_lengths(const uint64_t freq[PIVCO_MAX_SYMBOLS],
 
 /* ---------- FSE table-usage stats (debug instrumentation) ----------
  *
- * Per-table-id counters incremented inside the encoder every time an
- * FSE-coded bitmap is committed.  Slot 0 = "FSE attempted but did not
- * commit"; slots 1..PIVCO_FSE_NUM_TABLES = pivco_fse_freq[] table picked;
- * slot PIVCO_FSE_NIBBLE_ID = the nibble table; PIVCO_FSE_K1_ID = the
- * k=1 bit-context table; PIVCO_FSE_K2_ID = k=2; PIVCO_FSE_DHUF0_ID = dHuf0;
- * PIVCO_FSE_DNPH_ID = dnPH.
- * MUST be >= PIVCO_FSE_DNPH_ID + 1 (static-asserted in pivco_fse.c).
+ * Per-table-id counters, bumped by the encoder each time a region is
+ * coded.  One slot per wire id (static-asserted in pivco_fse.c):
+ *   0                        attempted, nothing committed
+ *   1..PIVCO_FSE_NUM_TABLES  sFSE, the pivco_fse_freq[] table picked
+ *   PIVCO_FSE_NIBBLE_ID      nibble table
+ *   PIVCO_FSE_K1_ID          k=1 bit-context table
+ *   PIVCO_FSE_K2_ID          k=2 bit-context table
+ *   PIVCO_FSE_DHUF0_ID       dHuf0
+ *   PIVCO_FSE_DNPH_ID        dnPH
+ *   PIVCO_FSE_SNPH_ID        snPH
  * Not thread-safe; intended for single-threaded analysis runs. */
-#define PIVCO_FSE_STATS_SLOTS 56
+#define PIVCO_FSE_STATS_SLOTS 57
 void pivco_fse_stats_reset(void);
 void pivco_fse_stats_get(uint64_t commit_count[PIVCO_FSE_STATS_SLOTS],
                                  uint64_t attempt_count[PIVCO_FSE_STATS_SLOTS],

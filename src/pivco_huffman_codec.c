@@ -165,6 +165,14 @@ static uint8_t *encode_scratch_ensure(pivco_scratch_t *sc, size_t need)
 #ifndef PIVCO_FSE_DNPH_MIN_GAIN
 #define PIVCO_FSE_DNPH_MIN_GAIN 0.10
 #endif
+/* snPH sends one index byte and decodes an inner block with a table
+ * built once per context. */
+#ifndef PIVCO_FSE_SNPH_MIN_BYTES
+#define PIVCO_FSE_SNPH_MIN_BYTES 256
+#endif
+#ifndef PIVCO_FSE_SNPH_MIN_GAIN
+#define PIVCO_FSE_SNPH_MIN_GAIN 0.10
+#endif
 
 /* FSE per-table-id stats live in src/pivco_huffman.c (backend-neutral
  * TU) so the symbols resolve regardless of backend.  codec.c writes
@@ -255,11 +263,11 @@ static pivco_fse_status_t codec_dnph_compress(pivco_encoder_t *enc_ctx,
                                               uint8_t *dst, size_t dst_cap,
                                               size_t *out_len)
 {
-    if (nbytes > PIVCO_NPH_MAX_N) return PIVCO_FSE_FALLBACK;
-    pivco_nested_t *ns = pivco_nested_for_encoder((pivco_scratch_t *)enc_ctx->internal);
-    if (!ns) return PIVCO_FSE_FALLBACK;
+    PIVCO_CHECK(nbytes <= PIVCO_NPH_MAX_N);  /* a bitmap of at most PIVCO_WIRE_MAX_N symbols */
+    pivco_nested_t *nested = pivco_nested_for_encoder((pivco_scratch_t *)enc_ctx->internal);
+    if (!nested) return PIVCO_FSE_FALLBACK;
     uint64_t freq[PIVCO_MAX_SYMBOLS] = {0};
-    pivco_histogram(ns->enc, body, (size_t)nbytes, freq);
+    pivco_histogram(nested->enc, body, (size_t)nbytes, freq);
     int distinct = 0;
     for (int s = 0; s < PIVCO_MAX_SYMBOLS; s++)
         distinct += freq[s] != 0;
@@ -267,16 +275,50 @@ static pivco_fse_status_t codec_dnph_compress(pivco_encoder_t *enc_ctx,
 
     pivco_cfg_t cfg;
     pivco_nph_inner_cfg(&cfg, table->flat_layout);
-    if (pivco_build_table(&cfg, freq, &ns->table) != PIVCO_OK)
+    if (pivco_build_table(&cfg, freq, &nested->table) != PIVCO_OK)
         return PIVCO_FSE_FALLBACK;
-    size_t rec_len = pivco_nph_write_lens(ns->table.code_len, ns->out);
+    size_t rec_len = pivco_nph_write_lens(nested->table.code_len, nested->out);
     size_t inner_len = 0;
-    if (CODEC_ENCODE_ENTRY(ns->enc, &ns->table, body, (size_t)nbytes,
-                           ns->out + rec_len, &inner_len) != PIVCO_OK)
+    if (CODEC_ENCODE_ENTRY(nested->enc, &nested->table, body, (size_t)nbytes,
+                           nested->out + rec_len, &inner_len) != PIVCO_OK)
         return PIVCO_FSE_FALLBACK;
     size_t len = rec_len + inner_len;
     if (len > dst_cap) return PIVCO_FSE_FALLBACK;
-    memcpy(dst, ns->out, len);
+    memcpy(dst, nested->out, len);
+    *out_len = len;
+    return PIVCO_FSE_OK;
+}
+
+/* snPH payload for an nbytes-byte bitmap: [table index][inner PH block]
+ * (see pivco_nph.h), under static table t, the bitmap inverted first
+ * when xor_flag is set.  Encoded with the context's child encoder, as
+ * for dnPH. */
+static pivco_fse_status_t codec_snph_compress(pivco_encoder_t *enc_ctx,
+                                              const pivco_table_t *table,
+                                              const uint8_t *body, int nbytes,
+                                              int t, int xor_flag,
+                                              uint8_t *dst, size_t dst_cap,
+                                              size_t *out_len)
+{
+    PIVCO_CHECK(nbytes <= PIVCO_NPH_MAX_N);  /* a bitmap of at most PIVCO_WIRE_MAX_N symbols */
+    pivco_nested_t *nested = pivco_nested_for_encoder((pivco_scratch_t *)enc_ctx->internal);
+    if (!nested) return PIVCO_FSE_FALLBACK;
+    const pivco_table_t *inner = pivco_snph_table(nested, t, table->flat_layout);
+    if (!inner) return PIVCO_FSE_FALLBACK;
+    const uint8_t *src = body;
+    if (xor_flag) {
+        for (int i = 0; i < nbytes; i++)
+            nested->flipped_bitmap[i] = (uint8_t)~body[i];
+        src = nested->flipped_bitmap;
+    }
+    nested->out[0] = (uint8_t)t;
+    size_t inner_len = 0;
+    if (CODEC_ENCODE_ENTRY(nested->enc, inner, src, (size_t)nbytes,
+                           nested->out + 1, &inner_len) != PIVCO_OK)
+        return PIVCO_FSE_FALLBACK;
+    size_t len = 1 + inner_len;
+    if (len > dst_cap) return PIVCO_FSE_FALLBACK;
+    memcpy(dst, nested->out, len);
     *out_len = len;
     return PIVCO_FSE_OK;
 }
@@ -292,7 +334,7 @@ static pivco_fse_status_t codec_dnph_compress(pivco_encoder_t *enc_ctx,
  * node's bitmap, or a flat subtree's packed n*D bits.  Returns 1 on
  * commit.
  *
- * Up to six candidates are tried, each behind its own gate, and the
+ * The following candidates are tried, each behind its own gate, and the
  * smallest payload wins:
  *
  *   static  — one of the PIVCO_FSE_NUM_TABLES pre-built byte-alphabet
@@ -321,6 +363,11 @@ static pivco_fse_status_t codec_dnph_compress(pivco_encoder_t *enc_ctx,
  *             block under a table fitted to them, the code lengths in
  *             the payload (pivco_nph.h).  Internal nodes only.  Gated on
  *             PIVCO_FSE_DNPH_MIN_GAIN.
+ *   snPH    — PIVCO_FSE_SNPH_ID: the region's bytes coded as an inner PH
+ *             block under the static table for the bitmap's skew (the
+ *             static schedule's pick and xor flip), its index in the
+ *             payload (pivco_nph.h).  Internal nodes only.  Gated on
+ *             PIVCO_FSE_SNPH_MIN_GAIN, not the static path's speed gate.
  *
  * Flat regions are where FSE matters most on literal streams: a
  * depth-D flat subtree gives all 2^D of its symbols the same code
@@ -533,6 +580,30 @@ static inline int codec_fse_try(int internal,
             best_xor = 0;
             best_len = try_len;
             uint8_t *t = best_out; best_out = try_out; try_out = t;
+        }
+    }
+
+    /* ---- candidate 7: snPH ----
+     * The region as an inner PH block under the static table for its
+     * skew: sFSE's table pick and xor flip, no speed gate. */
+    if (internal && table->fse_snph_enabled && nbytes >= PIVCO_FSE_SNPH_MIN_BYTES &&
+        n > 0) {
+        double p_major = (double)((n_left >= n_right) ? n_left : n_right) / (double)n;
+        int t = p_major >= PIVCO_FSE_MIN_THRESHOLD ? pivco_fse_select_table(p_major) : 0;
+        if (t >= 1) {
+            size_t lim = codec_table_len_bound(nbytes, PIVCO_FSE_SNPH_MIN_GAIN);
+            if (best_id >= 1 && best_len < lim) lim = best_len;
+            int xor_flag = (n_right > n_left);
+            pivco_fse_status_t rc = codec_snph_compress(enc_ctx, table, body, nbytes,
+                                                        t, xor_flag,
+                                                        try_out, cap, &try_len);
+            g_pivco_fse_attempt[PIVCO_FSE_SNPH_ID]++;
+            if (rc == PIVCO_FSE_OK && try_len < lim) {
+                best_id  = PIVCO_FSE_SNPH_ID;
+                best_xor = xor_flag;
+                best_len = try_len;
+                uint8_t *tmp = best_out; best_out = try_out; try_out = tmp;
+            }
         }
     }
 
@@ -868,32 +939,59 @@ int CODEC_ENCODE_ENTRY(pivco_encoder_t *enc_ctx, const pivco_table_t *table, con
  *                  smaller via the ping-pong partner, merge_vec_vec */
 
 #ifdef PIVCO_HAS_FSE
+/* Decode the inner block in[0..len) under inner_table into the
+ * nbytes-byte bitmap dst with the context's child decoder.  Returns 0
+ * unless the block is exactly nbytes symbols and exactly len bytes; a
+ * child context refuses nested regions, so a payload nests at most one
+ * level. */
+static int codec_nph_decode_inner(pivco_nested_t *nested,
+                                  const pivco_table_t *inner_table,
+                                  const uint8_t *in, size_t len,
+                                  uint8_t *dst, int nbytes)
+{
+    if (len < PIVCO_BLOCK_N_BYTES) return 0;
+    const uint8_t *p = in;
+    if (wire_read_block_n(&p) != nbytes) return 0;
+    size_t consumed = 0;
+    if (CODEC_DECODE_ENTRY(nested->dec, inner_table, in, len, dst, &consumed) != PIVCO_OK)
+        return 0;
+    return consumed == len;
+}
+
 /* Decode a dnPH payload src[0..len) into the nbytes-byte bitmap dst:
  * rebuild the inner table from the code-length record (with the outer
- * table's flat layout), then decode the inner block with the context's
- * child decoder.  Returns 0 on a corrupt payload; a child context
- * refuses nested regions, so a payload nests at most one level. */
+ * table's flat layout), then decode the inner block.  Returns 0 on a
+ * corrupt payload. */
 static int codec_dnph_decompress(pivco_decoder_t *dec_ctx,
                                  const pivco_table_t *table,
                                  const uint8_t *src, size_t len,
                                  uint8_t *dst, int nbytes)
 {
-    pivco_nested_t *ns = pivco_nested_for_decoder((pivco_scratch_t *)dec_ctx->internal);
-    if (!ns) return 0;
+    pivco_nested_t *nested = pivco_nested_for_decoder((pivco_scratch_t *)dec_ctx->internal);
+    if (!nested) return 0;
     uint8_t lens[PIVCO_MAX_SYMBOLS];
     size_t rec_len = pivco_nph_read_lens(src, len, lens);
-    if (rec_len == 0 || len - rec_len < PIVCO_BLOCK_N_BYTES) return 0;
+    if (rec_len == 0) return 0;
     pivco_cfg_t cfg;
     pivco_nph_inner_cfg(&cfg, table->flat_layout);
-    if (pivco_build_codec_table(&cfg, lens, &ns->table) != PIVCO_OK) return 0;
-    const uint8_t *inner = src + rec_len;
-    const uint8_t *p = inner;
-    if (wire_read_block_n(&p) != nbytes) return 0;
-    size_t consumed = 0;
-    if (CODEC_DECODE_ENTRY(ns->dec, &ns->table, inner, len - rec_len,
-                           dst, &consumed) != PIVCO_OK)
-        return 0;
-    return consumed == len - rec_len;
+    if (pivco_build_codec_table(&cfg, lens, &nested->table) != PIVCO_OK) return 0;
+    return codec_nph_decode_inner(nested, &nested->table, src + rec_len, len - rec_len,
+                                  dst, nbytes);
+}
+
+/* Decode an snPH payload src[0..len) into the nbytes-byte bitmap dst:
+ * the static table its index byte names (for the outer table's flat
+ * layout), then the inner block.  Returns 0 on a corrupt payload. */
+static int codec_snph_decompress(pivco_decoder_t *dec_ctx,
+                                 const pivco_table_t *table,
+                                 const uint8_t *src, size_t len,
+                                 uint8_t *dst, int nbytes)
+{
+    pivco_nested_t *nested = pivco_nested_for_decoder((pivco_scratch_t *)dec_ctx->internal);
+    if (!nested || len < 1) return 0;
+    const pivco_table_t *inner = pivco_snph_table(nested, src[0], table->flat_layout);
+    if (!inner) return 0;
+    return codec_nph_decode_inner(nested, inner, src + 1, len - 1, dst, nbytes);
 }
 
 /* prim_merge_cst_vec for code outside the per-backend codec build
@@ -910,7 +1008,7 @@ void PIVCO_BACKEND_FN(pivco_merge_cst_vec)(const uint8_t *bm, int K,
 #endif
 
 /* wire_read_bitmap, plus the forms that need the decoder context:
- * dnPH's inner block. */
+ * dnPH's and snPH's inner blocks. */
 static inline const uint8_t *codec_read_bitmap(pivco_decoder_t *dec_ctx,
                                                const pivco_table_t *table,
                                                const uint8_t **in_ptr,
@@ -918,13 +1016,19 @@ static inline const uint8_t *codec_read_bitmap(pivco_decoder_t *dec_ctx,
                                                uint8_t marker)
 {
 #ifdef PIVCO_HAS_FSE
-    if (marker == PIVCO_FSE_DNPH_ID) {
+    int t_id = marker & 0x7F;
+    if (t_id == PIVCO_FSE_DNPH_ID || t_id == PIVCO_FSE_SNPH_ID) {
         int nbytes = bitmap_bytes(n);
         uint16_t len;
         memcpy(&len, *in_ptr, 2);
         *in_ptr += 2;
-        if (!codec_dnph_decompress(dec_ctx, table, *in_ptr, len, scratch, nbytes))
+        int ok = t_id == PIVCO_FSE_DNPH_ID
+                     ? codec_dnph_decompress(dec_ctx, table, *in_ptr, len, scratch, nbytes)
+                     : codec_snph_decompress(dec_ctx, table, *in_ptr, len, scratch, nbytes);
+        if (!ok)
             memset(scratch, 0, (size_t)nbytes);
+        else if (marker & 0x80)
+            pivco_fse_flip_bits(scratch, (size_t)nbytes);
         *in_ptr += len;
         return scratch;
     }

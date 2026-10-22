@@ -201,6 +201,8 @@ static void usage(FILE *out) {
         "                        per-region table (id 54); smaller payload wins\n"
         "  --ans-dnph            with -a: also try dnPH, bitmaps as nested PH\n"
         "                        blocks with their own table (id 55)\n"
+        "  --ans-snph            with -a: also try snPH, bitmaps as nested PH\n"
+        "                        blocks with a static table (id 56)\n"
         "  --ans-no-static       with -a: do not try the static-schedule tables\n"
         "  -b, --block-size N    symbols per block (1..65535; default per-arch).\n"
         "                        recorded in the stream; decompress reads it back.\n"
@@ -233,12 +235,13 @@ int main(int argc, char **argv)
         .fse_static_enabled = 1,
         /* the transmitted-table candidates need fse_enabled and their
          * own flag: --ans-nibble / --ans-k1 / --ans-k2 / --ans-dhuf0 /
-         * --ans-dnph */
+         * --ans-dnph / --ans-snph */
         .fse_nibble_enabled = 0,
         .fse_k1_enabled = 0,
         .fse_k2_enabled = 0,
         .fse_dhuf0_enabled = 0,
         .fse_dnph_enabled = 0,
+        .fse_snph_enabled = 0,
         .flat_layout = PIVCO_FLAT_VERTICAL,
     };
     int force = 0;
@@ -266,6 +269,8 @@ int main(int argc, char **argv)
             cli_cfg.fse_dhuf0_enabled = 1;
         } else if (strcmp(argv[i], "--ans-dnph") == 0) {
             cli_cfg.fse_dnph_enabled = 1;
+        } else if (strcmp(argv[i], "--ans-snph") == 0) {
+            cli_cfg.fse_snph_enabled = 1;
         } else if (strcmp(argv[i], "--ans-no-static") == 0) {
             cli_cfg.fse_static_enabled = 0;
         } else if (strcmp(argv[i], "--table-kb") == 0 && i + 1 < argc) {

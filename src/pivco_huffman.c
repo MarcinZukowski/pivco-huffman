@@ -130,6 +130,7 @@ const pivco_cfg_t pivco_cfg_default = {
     .fse_k2_enabled = 0,
     .fse_dhuf0_enabled = 0,
     .fse_dnph_enabled = 0,
+    .fse_snph_enabled = 0,
     .flat_layout = PIVCO_FLAT_VERTICAL,
     .krt = 0,
 };
@@ -174,7 +175,10 @@ static void scratch_free(pivco_scratch_t *sc)
     if (sc->nested) {
         pivco_encoder_free(sc->nested->enc);
         pivco_decoder_free(sc->nested->dec);
+        for (int t = 0; t <= PIVCO_SNPH_NUM_TABLES; t++)
+            free(sc->nested->snph[t]);
         free(sc->nested->out);
+        free(sc->nested->flipped_bitmap);
         free(sc->nested);
     }
     free(sc->enc); free(sc->dec); free(sc);
@@ -219,35 +223,37 @@ pivco_nested_t *pivco_nested_for_encoder(pivco_scratch_t *sc)
 {
     if (sc->nested) return sc->nested;
     if (sc->is_child) return NULL;
-    pivco_nested_t *ns = (pivco_nested_t *)calloc(1, sizeof(*ns));
-    if (!ns) return NULL;
-    ns->enc = encoder_create(PIVCO_NPH_MAX_N);
-    ns->out = (uint8_t *)malloc(PIVCO_NPH_OUT_BYTES);
-    if (!ns->enc || !ns->out) {
-        pivco_encoder_free(ns->enc);
-        free(ns->out);
-        free(ns);
+    pivco_nested_t *nested = (pivco_nested_t *)calloc(1, sizeof(*nested));
+    if (!nested) return NULL;
+    nested->enc = encoder_create(PIVCO_NPH_MAX_N);
+    nested->out = (uint8_t *)malloc(PIVCO_NPH_OUT_BYTES);
+    nested->flipped_bitmap = (uint8_t *)malloc(PIVCO_NPH_MAX_N);
+    if (!nested->enc || !nested->out || !nested->flipped_bitmap) {
+        pivco_encoder_free(nested->enc);
+        free(nested->out);
+        free(nested->flipped_bitmap);
+        free(nested);
         return NULL;
     }
-    ((pivco_scratch_t *)ns->enc->internal)->is_child = 1;
-    sc->nested = ns;
-    return ns;
+    ((pivco_scratch_t *)nested->enc->internal)->is_child = 1;
+    sc->nested = nested;
+    return nested;
 }
 
 pivco_nested_t *pivco_nested_for_decoder(pivco_scratch_t *sc)
 {
     if (sc->nested) return sc->nested;
     if (sc->is_child) return NULL;
-    pivco_nested_t *ns = (pivco_nested_t *)calloc(1, sizeof(*ns));
-    if (!ns) return NULL;
-    ns->dec = decoder_create(PIVCO_NPH_MAX_N);
-    if (!ns->dec) {
-        free(ns);
+    pivco_nested_t *nested = (pivco_nested_t *)calloc(1, sizeof(*nested));
+    if (!nested) return NULL;
+    nested->dec = decoder_create(PIVCO_NPH_MAX_N);
+    if (!nested->dec) {
+        free(nested);
         return NULL;
     }
-    ((pivco_scratch_t *)ns->dec->internal)->is_child = 1;
-    sc->nested = ns;
-    return ns;
+    ((pivco_scratch_t *)nested->dec->internal)->is_child = 1;
+    sc->nested = nested;
+    return nested;
 }
 
 void pivco_encoder_free(pivco_encoder_t *e)
