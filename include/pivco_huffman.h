@@ -417,6 +417,13 @@ typedef struct {
      * carries its KrT, so the decoder needs no matching setting.
      * default: 0. */
     int                 krt;
+    /* Shaking: climb steps pivco_shake_lengths spends per call searching
+     * code lengths for a smaller encoded size under this cfg; the
+     * pivcohuf file codec calls it once per table segment.  Each step is
+     * a trial encode, so encode slows down roughly in proportion.
+     * Encoder-side only.
+     * default: 0 (off). */
+    int                 shake_steps;
 } pivco_cfg_t;
 
 extern const pivco_cfg_t pivco_cfg_default;
@@ -472,6 +479,18 @@ int pivco_histogram(pivco_encoder_t *enc, const uint8_t *in, size_t n,
 int pivco_joint_optimize_lengths(const uint64_t freq[PIVCO_MAX_SYMBOLS],
                                  uint8_t lengths[PIVCO_MAX_SYMBOLS],
                                  const pivco_cfg_t *cfg);
+
+/* Shaking (src/shake_lengths.c): rewrites lengths[] -- a complete code
+ * for in[0..n) -- in place with the lengths found that encode in[0..n),
+ * cut into block_size blocks, smallest under cfg.  Spends
+ * cfg->shake_steps trial encodes (none when 0); the result is never
+ * larger than the input lengths' and is deterministic.  It optimises
+ * size only, so it can undo effort's decompress-speed shaping.  The
+ * encoder's stats are left as they were; the FSE debug counters are
+ * not.  Returns PIVCO_OK, or PIVCO_ERR_* (lengths untouched). */
+int pivco_shake_lengths(pivco_encoder_t *enc, const pivco_cfg_t *cfg,
+                        const uint8_t *in, size_t n, size_t block_size,
+                        uint8_t lengths[PIVCO_MAX_SYMBOLS]);
 
 /* ---------- FSE table-usage stats (debug instrumentation) ----------
  *

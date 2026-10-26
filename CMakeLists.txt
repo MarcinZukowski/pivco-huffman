@@ -94,6 +94,7 @@ set(PIVCO_SOURCES
     src/pivco_instrumentation.c
     src/pivco_prof.c
     src/pivcohuf_file.c
+    src/shake_lengths.c
     src/traditional_huffman.c
 )
 

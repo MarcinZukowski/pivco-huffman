@@ -133,6 +133,7 @@ const pivco_cfg_t pivco_cfg_default = {
     .fse_snph_enabled = 0,
     .flat_layout = PIVCO_FLAT_VERTICAL,
     .krt = 0,
+    .shake_steps = 0,
 };
 
 #include "pivco_huffman_common.h"

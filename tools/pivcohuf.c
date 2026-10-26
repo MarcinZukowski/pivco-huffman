@@ -209,6 +209,8 @@ static void usage(FILE *out) {
         "  --table-kb N          rebuild the Huffman table every N KiB of input\n"
         "                        (rounded to whole blocks; default 128; 0 = one\n"
         "                        table per file).  recorded in the stream.\n"
+        "  --shake N             spend N trial encodes per table searching code\n"
+        "                        lengths for a smaller output (default 0 = off)\n"
         "  -e, --effort N        compress-time shaping effort (0..4, default 1):\n"
         "                        0 simplest, 1 balanced, 2 faster-decompress,\n"
         "                        3 fastest-decompress, 4 fastest-compress\n"
@@ -273,6 +275,9 @@ int main(int argc, char **argv)
             cli_cfg.fse_snph_enabled = 1;
         } else if (strcmp(argv[i], "--ans-no-static") == 0) {
             cli_cfg.fse_static_enabled = 0;
+        } else if (strcmp(argv[i], "--shake") == 0 && i + 1 < argc) {
+            cli_cfg.shake_steps = atoi(argv[i + 1]);
+            i++;
         } else if (strcmp(argv[i], "--table-kb") == 0 && i + 1 < argc) {
             table_kb = (size_t)strtoul(argv[i + 1], NULL, 0);
             i++;

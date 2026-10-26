@@ -1044,6 +1044,78 @@ static int test_table_segments(void)
     return 0;
 }
 
+/* Shaking: off is byte-identical to the default cfg, on round-trips,
+ * is deterministic and is no larger (here strictly smaller) than off. */
+static int test_shake(void)
+{
+    printf("[shake] ");
+    const size_t N = 3 * PIVCOHUF_SEGMENT_BYTES_DEFAULT;
+    uint8_t *in = malloc(N);
+    if (!in) FAIL("oom in");
+    /* Order-1 source over 24 symbols: the next symbol stays near the
+     * previous one, so the tree's grouping shapes the bitmap contexts. */
+    uint64_t rng = 0x5A4B3C2D1E0FULL;
+    int prev = 0;
+    for (size_t i = 0; i < N; i++) {
+        uint64_t x = xorshift64(&rng);
+        int step = (int)(x % 7) - 3;
+        if ((x >> 8) % 5 == 0)
+            step = 0;
+        prev = (prev + step + 24) % 24;
+        in[i] = (uint8_t)prev;
+    }
+    pivco_cfg_t off = pivco_cfg_default;
+    off.fse_enabled = 1;
+    off.fse_k2_enabled = 1;
+    pivco_cfg_t on = off;
+    on.shake_steps = 200;
+    size_t cap = pivcohuf_compress_bound(N);
+    uint8_t *e0 = malloc(cap);
+    uint8_t *e1 = malloc(cap);
+    uint8_t *e2 = malloc(cap);
+    uint8_t *e3 = malloc(cap);
+    uint8_t *dec = malloc(N);
+    if (!e0 || !e1 || !e2 || !e3 || !dec) {
+        free(in); free(e0); free(e1); free(e2); free(e3); free(dec);
+        FAIL("oom bufs");
+    }
+    pivco_cfg_t off_zero = off;
+    off_zero.shake_steps = 0;
+    size_t l0 = cap;
+    size_t lz = cap;
+    size_t l1 = cap;
+    size_t l2 = cap;
+    int rc = pivcohuf_compress_cfg(in, N, e0, &l0, &off, PIVCO_BLOCK_SIZE, NULL);
+    rc |= pivcohuf_compress_cfg(in, N, e3, &lz, &off_zero, PIVCO_BLOCK_SIZE, NULL);
+    rc |= pivcohuf_compress_cfg(in, N, e1, &l1, &on, PIVCO_BLOCK_SIZE, NULL);
+    rc |= pivcohuf_compress_cfg(in, N, e2, &l2, &on, PIVCO_BLOCK_SIZE, NULL);
+    int fail = 0;
+    if (rc != PIVCOHUF_OK) {
+        printf("  FAIL: compress rc=%d\n", rc);
+        fail = 1;
+    } else if (lz != l0 || memcmp(e0, e3, l0) != 0) {
+        printf("  FAIL: shake_steps=0 not byte-identical (%zu vs %zu)\n", lz, l0);
+        fail = 1;
+    } else if (l1 != l2 || memcmp(e1, e2, l1) != 0) {
+        printf("  FAIL: shaking not deterministic (%zu vs %zu)\n", l1, l2);
+        fail = 1;
+    } else if (l1 >= l0) {
+        printf("  FAIL: shaken %zu B not smaller than unshaken %zu B\n", l1, l0);
+        fail = 1;
+    } else {
+        size_t dl = N;
+        rc = pivcohuf_decompress(e1, l1, dec, &dl);
+        if (rc != PIVCOHUF_OK || dl != N || memcmp(in, dec, N) != 0) {
+            printf("  FAIL: shaken roundtrip (rc=%d len=%zu)\n", rc, dl);
+            fail = 1;
+        }
+    }
+    if (!fail)
+        printf("PASS (%zu -> %zu B)\n", l0, l1);
+    free(in); free(e0); free(e1); free(e2); free(e3); free(dec);
+    return fail;
+}
+
 int test_edge_cases_all(void)
 {
     int fails = 0;
@@ -1078,6 +1150,7 @@ int test_edge_cases_all(void)
     fails += test_fse_kn_wire(3);
     fails += test_snph_tables();
     fails += test_fse_kn_wire(4);
+    fails += test_shake();
 #endif
     return fails;
 }

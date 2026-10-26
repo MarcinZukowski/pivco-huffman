@@ -238,6 +238,14 @@ static int pivcohuf_compress_impl(pivco_encoder_t *enc_ctx,
                 table_pending = 1;
             }
 
+            /* Shake the new table's lengths toward a smaller encode of
+             * this segment (no-op when cfg->shake_steps is 0). */
+            if (cfg->shake_steps > 0 && seg_end > off) {
+                if (pivco_shake_lengths(enc_ctx, cfg, in + off, seg_end - off, B,
+                                        real_table.code_len) != PIVCO_OK) {
+                    free(block_buf); return PIVCOHUF_ERR_INTERNAL; }
+            }
+
             /* Rebuild the table from its code lengths, so encode uses the
              * exact table the decoder reconstructs from the wire (the tree
              * is fully determined by the lengths; within-tier order is

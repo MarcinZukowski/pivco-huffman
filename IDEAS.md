@@ -24,6 +24,7 @@
 - [Skew-specialized merge: per-word easy paths](#skew-specialized-merge-per-word-easy-paths-all-zero--all-ones-2026-07-01-parked)
 - [Pooled partial-byte tails](#pooled-partial-byte-tails-2026-10-11)
 - [Faster dHuf0: zstd's huf0 and a cheaper table setup](#faster-dhuf0-zstds-huf0-and-a-cheaper-table-setup-2026-10-20)
+- [Within-tier symbol order for shaking (wire change)](#within-tier-symbol-order-for-shaking-wire-change-2026-10-26)
 
 **PHAZ**
 - [Context menu per code stream, chosen under a decode-cost class](#context-menu-per-code-stream-chosen-under-a-decode-cost-class-2026-10-04)
@@ -352,6 +353,47 @@ ext/fse, decoded with each library.  Per region, best of 15:
 - **Integration:** ext/fse and zstd both define `HUF_*`, so taking zstd's
   huf0 means replacing ext/fse's copy, or building zstd's under renamed
   symbols.
+
+### Within-tier symbol order for shaking (wire change), 2026-10-26
+Shaking (`pivco_shake_lengths`, `cfg.shake_steps`) searches code
+lengths for a smaller encode under the per-node coders.  It only
+reaches a thin slice of tree shapes.
+
+- The wire carries lengths only, and the tree is canonical: sorted by
+  length, then symbol value within a tier.
+- Given the lengths, the canonical order fixes which symbols are
+  siblings.  4 symbols at one length have 3 pairings (ab|cd, ac|bd,
+  ad|bc); canonical always gives ab|cd.  8 symbols at one length have
+  315 balanced trees; canonical allows 1.
+- A rotation that keeps a subtree intact is usually not
+  representable.  Example: y=1 b=2 a=3 z=3 is (y,(b,(a,z))).  Rotating
+  at the root to ((y,b),(a,z)) makes all lengths 2, and canonical
+  rebuilds ((a,b),(y,z)): a and z are no longer siblings.
+- Order-0 coding does not care: by the chain rule every grouping costs
+  the same.  k1/k2 and the other context coders do: grouping symbols
+  that behave alike changes how predictable each node's bitmap is.
+
+Idea: carry a within-tier symbol order on the wire, and let shaking
+search it too.
+
+- Decode: free.  The decoder already maps rank to symbol through
+  `rank_to_sym`; another order only fills it differently.
+- Header: log2(k!) bits per tier of k symbols.  20 symbols is ~61
+  bits.  A full order of 256 symbols is at most ~210 B, against the
+  128 B lengths table, once per 128 KiB segment.  Cheaper forms: a few
+  transpositions on top of canonical order, or an order only for the
+  tiers that differ.
+- Break-even: a k2-coded segment is ~30-60 KB, so 1% is 300-600 B.  A
+  full order pays when it buys more than ~0.5-1%.
+- Search: a within-tier swap is a natural new move.  It changes
+  groupings only, never the order-0 cost.  The space is far larger
+  than the lengths space.
+- This is what v0.3's `rank_within_tier` wire field carried, for
+  another reason (see "Drop within-tier freq sort").
+
+Shaking today, for scale (lengths only, M4, whole files,
+`pivcohuf c -e 0 -a --ans-k2 --shake N`): xml 0.98% at 50 steps,
+3.95% at 5000; x-ray 1.01% / 5.35%.
 
 **PHAZ**
 
