@@ -2147,6 +2147,111 @@ static void prim_merge_flat_avx2ymm(const ctx_t *c) {
 }
 #endif /* __AVX2__ && !__AVX512VBMI2__ */
 
+/* ============================================================================
+ * merge_vec_vec / merge_cst_vec : bidir — both ends of the node at once
+ *   The production prim_* on P-element pieces, alternating one piece from
+ *   the front (cursors from 0) and one from the back (cursors from the child
+ *   sizes, which the decoder knows before the merge; cached here so they are
+ *   not timed).  fwd-P runs the same pieces front-only, to separate the
+ *   piece-call cost from the second front.  Pieces start 64-aligned: a tail
+ *   past the last multiple of 64 is merged first, from the back cursors.
+ * ========================================================================== */
+#if defined(HAVE_SIMD)
+#if defined(__AVX512VBMI2__) && defined(__AVX512VBMI__)
+#  define PV_ISA_BUILD PV_ISA_AVX512
+#elif defined(USE_NEON_KERNELS)
+#  define PV_ISA_BUILD PV_ISA_NEON
+#else
+#  define PV_ISA_BUILD PV_ISA_SSE4
+#endif
+
+/* Set bits of bm in [0, n), cached per (bm, n). */
+static int pv_bidir_nright(const uint8_t *bm, int n) {
+    static const uint8_t *cbm;
+    static int cn = -1;
+    static int cnr;
+    if (bm != cbm || n != cn) {
+        cbm = bm;
+        cn = n;
+        cnr = prim_popcount_K_right(bm, n);
+    }
+    return cnr;
+}
+
+/* Set bits of bm in [j, j + len), j a multiple of 8. */
+static inline int pv_bidir_pop(const uint8_t *bm, int j, int len) {
+    int s = 0;
+    int k = 0;
+    for (; k + 64 <= len; k += 64) {
+        uint64_t w;
+        memcpy(&w, bm + ((j + k) >> 3), 8);
+        s += __builtin_popcountll(w);
+    }
+    for (; k < len; k++)
+        s += (bm[(j + k) >> 3] >> ((j + k) & 7)) & 1;
+    return s;
+}
+
+#define PV_MERGE_VV(bmo, K, lo, ro, oo) \
+    prim_merge_vec_vec(bm + ((bmo) >> 3), (K), L + (lo), R + (ro), o + (oo))
+#define PV_MERGE_CV(bmo, K, lo, ro, oo) \
+    prim_merge_cst_vec(bm + ((bmo) >> 3), (K), MERGE_LEFT_SYM, R + (ro), o + (oo))
+
+#define PV_BIDIR_FN(NAME, MERGE, P, BACK)                                     \
+static void NAME(const ctx_t *c) {                                           \
+    const uint8_t *bm = c->bm;                                               \
+    const int n = c->n;                                                      \
+    const uint8_t *L = c->merge_left;                                        \
+    const uint8_t *R = c->merge_right;                                       \
+    uint8_t *o = c->out;                                                     \
+    (void)L;                                                                 \
+    int f = 0;                                                               \
+    int lf = 0;                                                              \
+    int rf = 0;                                                              \
+    int b = n;                                                               \
+    if (BACK) {                                                              \
+        int rb = pv_bidir_nright(bm, n);                                     \
+        int lb = n - rb;                                                     \
+        int b64 = n & ~63;                                                   \
+        int nt = pv_bidir_pop(bm, b64, n - b64);                             \
+        rb -= nt;                                                            \
+        lb -= (n - b64) - nt;                                                \
+        if (n > b64)                                                         \
+            MERGE(b64, n - b64, lb, rb, b64);                                \
+        b = b64;                                                             \
+        while (b - f >= 2 * (P)) {                                           \
+            int nf = pv_bidir_pop(bm, f, (P));                               \
+            MERGE(f, (P), lf, rf, f);                                        \
+            rf += nf;                                                        \
+            lf += (P) - nf;                                                  \
+            f += (P);                                                        \
+            b -= (P);                                                        \
+            int nb = pv_bidir_pop(bm, b, (P));                               \
+            rb -= nb;                                                        \
+            lb -= (P) - nb;                                                  \
+            MERGE(b, (P), lb, rb, b);                                        \
+        }                                                                    \
+        (void)lb;                                                            \
+    } else {                                                                 \
+        while (b - f >= (P)) {                                               \
+            int nf = pv_bidir_pop(bm, f, (P));                               \
+            MERGE(f, (P), lf, rf, f);                                        \
+            rf += nf;                                                        \
+            lf += (P) - nf;                                                  \
+            f += (P);                                                        \
+        }                                                                    \
+    }                                                                        \
+    if (b > f)                                                               \
+        MERGE(f, b - f, lf, rf, f);                                          \
+    (void)lf;                                                                \
+}
+
+PV_BIDIR_FN(prim_merge_vv_fwd64,    PV_MERGE_VV, 64,   0)
+PV_BIDIR_FN(prim_merge_vv_bidir64,  PV_MERGE_VV, 64,   1)
+PV_BIDIR_FN(prim_merge_cv_fwd64,    PV_MERGE_CV, 64,   0)
+PV_BIDIR_FN(prim_merge_cv_bidir64,  PV_MERGE_CV, 64,   1)
+#endif /* HAVE_SIMD */
+
 static void pv_register_merge(void) {
 #if defined(USE_NEON_KERNELS)
     pv_build_cc_tables();
@@ -2260,6 +2365,17 @@ static void pv_register_merge(void) {
     PV_VARIANT(ST_MERGE_VEC_VEC, "unroll16",       PV_ISA_SSE4, "asof-d24c0eb (prior production)",
                "2x-unrolled stride-16 expand_tab merge; production before the two-table merge", 0,
                PV_FN_SSE(prim_merge_vv_unroll16));
+#if defined(HAVE_SIMD)
+    /* bidir — production prim_* on pieces, front and back at once */
+    PV_VARIANT(ST_MERGE_VEC_VEC, "fwd64",    PV_ISA_BUILD, "bidirectional-merge study (2026-10)",
+               "production on 64-element pieces, front only", 0, prim_merge_vv_fwd64);
+    PV_VARIANT(ST_MERGE_VEC_VEC, "bidir64",  PV_ISA_BUILD, "bidirectional-merge study (2026-10)",
+               "64-element pieces, front and back alternating", 0, prim_merge_vv_bidir64);
+    PV_VARIANT(ST_MERGE_CST_VEC, "fwd64",    PV_ISA_BUILD, "bidirectional-merge study (2026-10)",
+               "production on 64-element pieces, front only", 0, prim_merge_cv_fwd64);
+    PV_VARIANT(ST_MERGE_CST_VEC, "bidir64",  PV_ISA_BUILD, "bidirectional-merge study (2026-10)",
+               "64-element pieces, front and back alternating", 0, prim_merge_cv_bidir64);
+#endif
 }
 
 #endif /* PIVCO_PRIM_VARIANTS_MERGE_H */
