@@ -21,6 +21,7 @@
 #include "pivco_huffman.h"
 #include "pivco_huffman_common.h"
 #include "pivco_huffman_wire.h"
+#include "node_memo.h"
 #include "pivco_huffman_primitives.h"
 #include "pivco_prof.h"
 #ifdef PIVCO_HAS_FSE
@@ -643,6 +644,13 @@ static inline int codec_flat_fse_eligible(const pivco_table_t *table, int nbytes
 #endif
 }
 
+/* The memo shaking attached to this encoder (see node_memo.h); NULL
+ * otherwise. */
+static inline pivco_node_memo_t *get_codec_memo(const pivco_encoder_t *enc_ctx)
+{
+    return ((const pivco_scratch_t *)enc_ctx->internal)->memo;
+}
+
 /* Emit a node's bitmap (marker-less: the marker goes to the block
  * prefix via node_markers[rec_idx]).  The FSE attempt may rewrite the
  * bitmap in place with [fse_len][payload] and set the marker slot. */
@@ -654,6 +662,11 @@ static void codec_emit_bitmap(pivco_encoder_t *enc_ctx,
 {
     int nbytes = bitmap_bytes(n);
     node_markers[rec_idx] = 0;
+    pivco_node_memo_t *memo = get_codec_memo(enc_ctx);
+    if (memo && memo->known[rec_idx]) {
+        node_markers[rec_idx] = (uint8_t)((memo->coded[rec_idx] >> memo->block) & 1u);
+        return;
+    }
     uint8_t *bm = *out_ptr;
     memcpy(bm, bm_stage, (size_t)nbytes);
     *out_ptr += nbytes;
@@ -661,6 +674,10 @@ static void codec_emit_bitmap(pivco_encoder_t *enc_ctx,
         codec_fse_try(1, enc_ctx, table,
                       &node_markers[rec_idx], bm, nbytes,
                       n, n_left, n_right, depth, out_ptr);
+    if (memo) {
+        memo->bytes[rec_idx] += (uint32_t)(*out_ptr - bm);
+        memo->coded[rec_idx] |= (uint64_t)(node_markers[rec_idx] != 0) << memo->block;
+    }
 }
 
 static void codec_encode_node(pivco_encoder_t *enc_ctx,
@@ -691,6 +708,9 @@ static void codec_encode_node(pivco_encoder_t *enc_ctx,
         *marker_slot = 0;
         *out_ptr += 1;
         uint8_t *body = *out_ptr;
+        pivco_node_memo_t *memo = get_codec_memo(enc_ctx);
+        if (memo && memo->known[rec_idx])
+            return;
         *out_ptr += total_bytes;
 
         /* Pack naturally first when an FSE attempt is on the table: the
@@ -706,16 +726,18 @@ static void codec_encode_node(pivco_encoder_t *enc_ctx,
         PROF_TOC(PROF_ENC_FLAT, n);
 
         if (try_fse) {
-            if (codec_fse_try(0, enc_ctx, table,
-                              marker_slot, body, total_bytes,
-                              0, 0, 0, 0, out_ptr))
-                return;                     /* committed, natural-packed */
-            if (table->flat_layout != PIVCO_FLAT_NATURAL) {
+            int committed = codec_fse_try(0, enc_ctx, table,
+                                          marker_slot, body, total_bytes,
+                                          0, 0, 0, 0, out_ptr);
+            /* committed: natural-packed; otherwise re-pack */
+            if (!committed && table->flat_layout != PIVCO_FLAT_NATURAL) {
                 PROF_TIC();
                 prim_enc_pack_dN(ranks, n, D, base, body, table->flat_layout);
                 PROF_TOC(PROF_ENC_FLAT, n);
             }
         }
+        if (memo)
+            memo->bytes[rec_idx] += (uint32_t)(*out_ptr - body);
         return;
     }
 

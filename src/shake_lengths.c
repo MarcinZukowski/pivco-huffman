@@ -22,9 +22,15 @@
  * A step is first priced on SHAKE_SCREEN spread blocks and only priced
  * in full when those do not get worse.  Lengths already priced are
  * skipped.  The result is never larger than the input lengths', and the
- * search is deterministic (fixed seed). */
+ * search is deterministic (fixed seed).
+ *
+ * Pricing runs with a node memo (node_memo.h) attached to the encoder:
+ * a node whose symbol sets and depth were priced before adds its known
+ * record bytes, summed over the blocks, instead of being coded again. */
 
 #include "pivco_huffman.h"
+#include "pivco_huffman_common.h"
+#include "node_memo.h"
 
 #include <stdint.h>
 #include <stdlib.h>
@@ -36,10 +42,37 @@
 #define SHAKE_FREEZE_SHARE 0.25
 #define SHAKE_SEED 0x9E3779B97F4A7C15ull
 
+/* Node memo size, in entries of 24 bytes.
+ *
+ * Each step adds one entry per node of the candidate's tree that no
+ * earlier tree had.  On silesia that is 0.9 to 8.2 new entries per
+ * step, fewer as the search goes on.
+ *
+ * The memo stops recording at half full.  SHAKE_MEMO_SLOTS_PER_STEP
+ * keeps the worst measured case about a quarter full.  The size is a
+ * power of two, from SHAKE_MEMO_MIN_SLOTS (96 KiB) to
+ * SHAKE_MEMO_MAX_SLOTS (24 MiB).  When a long search fills the memo,
+ * new nodes are no longer recorded and are coded each time they come
+ * back. */
+#define SHAKE_MEMO_SLOTS_PER_STEP 32u
+#define SHAKE_MEMO_MIN_SLOTS (1u << 12)
+#define SHAKE_MEMO_MAX_SLOTS (1u << 20)
+#define SHAKE_MEMO_UNSET UINT32_MAX
+
+/* A node's record bytes summed over the screen blocks and over all
+ * blocks (SHAKE_MEMO_UNSET until priced), and the blocks where it is
+ * FSE-coded. */
+typedef struct {
+    uint64_t key;                 /* 0: empty */
+    uint64_t coded;
+    uint32_t screen_bytes;
+    uint32_t all_bytes;
+} memo_ent_t;
+
 typedef struct {
     uint8_t lens[PIVCO_MAX_SYMBOLS];
     size_t cost;
-    size_t *blk;
+    size_t screen_cost;           /* the screen blocks' share of cost */
     int alive;
 } shake_cand_t;
 
@@ -54,12 +87,17 @@ typedef struct {
     uint8_t *screen;
     uint8_t *out;
     size_t out_cap;
-    size_t *cand_blk;
     int used[PIVCO_MAX_SYMBOLS];
     int nu;
     uint64_t rng;
     uint64_t *seen;
     uint32_t seen_mask;
+    pivco_node_memo_t *memo;      /* NULL: price without one */
+    memo_ent_t *ment;
+    uint32_t ment_mask;
+    uint32_t ment_count;
+    uint64_t key[PIVCO_MAX_SYMBOLS - 1];      /* per sched record */
+    memo_ent_t *ent[PIVCO_MAX_SYMBOLS - 1];   /* per sched record */
 } shake_t;
 
 static uint32_t shake_rnd(shake_t *s, uint32_t n)
@@ -204,25 +242,154 @@ static int draw_moves(shake_t *s, uint8_t *lens, int nmoves)
     return ok;
 }
 
-/* Encoded bytes of the blocks selected by sel (all blocks when NULL)
- * under lens, per block into blk; SIZE_MAX when the table does not build
- * or a block does not encode. */
-static size_t price(shake_t *s, const uint8_t *lens, const uint8_t *sel, size_t *blk)
+static uint64_t key_mix(uint64_t h, uint64_t v)
+{
+    h ^= v;
+    h *= 0x100000001B3ull;
+    h ^= h >> 29;
+    h *= 0xBF58476D1CE4E5B9ull;
+    h ^= h >> 32;
+    return h;
+}
+
+/* h extended by the set of symbols at ranks [lo, hi) of t. */
+static uint64_t set_key(uint64_t h, const pivco_table_t *t, int lo, int hi)
+{
+    uint64_t w[4] = { 0 };
+    for (int r = lo; r < hi; r++) {
+        int sym = t->dec.rank_to_sym[r];
+        w[sym >> 6] |= 1ull << (sym & 63);
+    }
+    for (int k = 0; k < 4; k++)
+        h = key_mix(h, w[k]);
+    return h;
+}
+
+/* Keys sched record rec, covering ranks [lo, hi) at depth, and the
+ * records below it: a flat region on its set and D, an internal node on
+ * its left set, right set and depth (the static table's commit gate
+ * reads the depth). */
+static void memo_keys(uint64_t *key, const pivco_table_t *t,
+                      int rec, int lo, int hi, int depth)
+{
+    const pivco_sched_rec_t *r = &t->dec.sched[rec];
+    pivco_sched_kind_t kind = pivco_sched_kind(r);
+    if (kind == PIVCO_SCHED_FLAT) {
+        uint64_t h = key_mix(1, (uint64_t)pivco_sched_flat_depth(r));
+        key[rec] = set_key(h, t, lo, hi) | 1;
+        return;
+    }
+    int mid = r->param + 1;
+    uint64_t h = key_mix(2, (uint64_t)depth);
+    h = set_key(h, t, lo, mid);
+    h = key_mix(h, 3);
+    key[rec] = set_key(h, t, mid, hi) | 1;
+    if (kind == PIVCO_SCHED_FULL) {
+        memo_keys(key, t, rec + 1, lo, mid, depth + 1);
+        memo_keys(key, t, rec + r->right, mid, hi, depth + 1);
+    } else if (kind == PIVCO_SCHED_LEAF_LEFT) {
+        memo_keys(key, t, rec + 1, mid, hi, depth + 1);
+    }
+}
+
+/* key's memo entry, a new unpriced one when key is not there yet; NULL
+ * when it is not there and the memo is half full. */
+static memo_ent_t *memo_entry(shake_t *s, uint64_t key)
+{
+    uint32_t i = (uint32_t)(key >> 32) & s->ment_mask;
+    while (s->ment[i].key) {
+        if (s->ment[i].key == key)
+            return &s->ment[i];
+        i = (i + 1) & s->ment_mask;
+    }
+    if (s->ment_count >= (s->ment_mask + 1) / 2)
+        return NULL;
+    memo_ent_t *e = &s->ment[i];
+    e->key = key;
+    e->coded = 0;
+    e->screen_bytes = SHAKE_MEMO_UNSET;
+    e->all_bytes = SHAKE_MEMO_UNSET;
+    s->ment_count++;
+    return e;
+}
+
+/* Encodes block i under s->tab; its length (without the records the
+ * memo knows), or SIZE_MAX when it does not encode. */
+static size_t price_block(shake_t *s, int i)
+{
+    if (s->memo)
+        s->memo->block = i;
+    size_t off = (size_t)i * s->block_size;
+    size_t bn = s->n - off < s->block_size ? s->n - off : s->block_size;
+    size_t ol = s->out_cap;
+    if (pivco_encode(s->enc, s->tab, s->in + off, bn, s->out, &ol) != PIVCO_OK)
+        return SIZE_MAX;
+    return ol;
+}
+
+/* Encoded bytes of the segment under lens: of all blocks when full,
+ * else of the screen blocks only.  *screen_cost (when not NULL) gets
+ * the screen blocks' share.  SIZE_MAX when the table does not build or
+ * a block does not encode.
+ *
+ * The screen blocks are encoded first, so the memo can take each new
+ * node's screen sum before the other blocks add to it. */
+static size_t price(shake_t *s, const uint8_t *lens, int full, size_t *screen_cost)
 {
     if (pivco_build_codec_table(s->cfg, lens, s->tab) != PIVCO_OK)
         return SIZE_MAX;
+    pivco_node_memo_t *m = s->memo;
+    int nrec = s->tab->dec.sched_len;
     size_t total = 0;
-    for (int i = 0; i < s->nblk; i++) {
-        if (sel && !sel[i])
-            continue;
-        size_t off = (size_t)i * s->block_size;
-        size_t bn = s->n - off < s->block_size ? s->n - off : s->block_size;
-        size_t ol = s->out_cap;
-        if (pivco_encode(s->enc, s->tab, s->in + off, bn, s->out, &ol) != PIVCO_OK)
-            return SIZE_MAX;
-        blk[i] = ol;
-        total += ol;
+    size_t scr = 0;
+    if (m) {
+        memo_keys(s->key, s->tab, 0, 0, s->tab->dec.num_ranks, 0);
+        for (int r = 0; r < nrec; r++) {
+            memo_ent_t *e = memo_entry(s, s->key[r]);
+            uint32_t have = !e ? SHAKE_MEMO_UNSET : full ? e->all_bytes : e->screen_bytes;
+            s->ent[r] = e;
+            m->known[r] = have != SHAKE_MEMO_UNSET;
+            m->bytes[r] = 0;
+            m->coded[r] = m->known[r] ? e->coded : 0;
+            if (m->known[r]) {
+                total += have;
+                scr += e->screen_bytes;
+            }
+        }
     }
+    for (int i = 0; i < s->nblk; i++) {
+        if (!s->screen || !s->screen[i])
+            continue;
+        size_t ol = price_block(s, i);
+        if (ol == SIZE_MAX)
+            return SIZE_MAX;
+        total += ol;
+        scr += ol;
+    }
+    if (m)
+        for (int r = 0; r < nrec; r++)
+            if (s->ent[r] && !m->known[r]) {
+                s->ent[r]->screen_bytes = m->bytes[r];
+                s->ent[r]->coded |= m->coded[r];
+            }
+    if (full) {
+        for (int i = 0; i < s->nblk; i++) {
+            if (s->screen && s->screen[i])
+                continue;
+            size_t ol = price_block(s, i);
+            if (ol == SIZE_MAX)
+                return SIZE_MAX;
+            total += ol;
+        }
+        if (m)
+            for (int r = 0; r < nrec; r++)
+                if (s->ent[r] && !m->known[r]) {
+                    s->ent[r]->all_bytes = m->bytes[r];
+                    s->ent[r]->coded |= m->coded[r];
+                }
+    }
+    if (screen_cost)
+        *screen_cost = scr;
     return total;
 }
 
@@ -236,20 +403,17 @@ static void climb_step(shake_t *s, shake_cand_t *c)
     if (seen_insert(s, lens_hash(cand)))
         return;
     if (s->screen) {
-        size_t sc = price(s, cand, s->screen, s->cand_blk);
-        size_t sb = 0;
-        for (int i = 0; i < s->nblk; i++)
-            if (s->screen[i])
-                sb += c->blk[i];
-        if (sc == SIZE_MAX || sc > sb)
+        size_t sc = price(s, cand, 0, NULL);
+        if (sc == SIZE_MAX || sc > c->screen_cost)
             return;
     }
-    size_t cost = price(s, cand, NULL, s->cand_blk);
+    size_t screen_cost;
+    size_t cost = price(s, cand, 1, &screen_cost);
     if (cost >= c->cost)
         return;
     c->cost = cost;
+    c->screen_cost = screen_cost;
     memcpy(c->lens, cand, sizeof(cand));
-    memcpy(c->blk, s->cand_blk, (size_t)s->nblk * sizeof(size_t));
 }
 
 static void race(shake_t *s, shake_cand_t *c, int steps)
@@ -261,7 +425,7 @@ static void race(shake_t *s, shake_cand_t *c, int steps)
                 continue;
             if (seen_insert(s, lens_hash(c[i].lens)))
                 continue;
-            c[i].cost = price(s, c[i].lens, NULL, c[i].blk);
+            c[i].cost = price(s, c[i].lens, 1, &c[i].screen_cost);
             if (c[i].cost != SIZE_MAX)
                 c[i].alive = 1;
         }
@@ -333,14 +497,24 @@ int pivco_shake_lengths(pivco_encoder_t *enc, const pivco_cfg_t *cfg,
     memset(c, 0, sizeof(c));
     s.tab = (pivco_table_t *)calloc(1, sizeof(pivco_table_t));
     s.out = (uint8_t *)malloc(s.out_cap);
-    s.cand_blk = (size_t *)malloc((size_t)s.nblk * sizeof(size_t));
     s.seen = (uint64_t *)calloc(seen_cap, sizeof(uint64_t));
-    int ok = s.tab && s.out && s.cand_blk && s.seen;
-    for (int i = 0; i < SHAKE_STARTS; i++) {
-        c[i].blk = (size_t *)malloc((size_t)s.nblk * sizeof(size_t));
-        c[i].cost = SIZE_MAX;
-        ok = ok && c[i].blk;
+    int ok = s.tab && s.out && s.seen;
+    /* coded[] has a bit per block: more blocks than that price without
+     * a memo. */
+    if (s.nblk <= PIVCO_MEMO_MAX_BLOCKS) {
+        /* The steps plus the starting points' first pricing. */
+        uint64_t memo_want = (uint64_t)SHAKE_MEMO_SLOTS_PER_STEP *
+                             (uint64_t)(cfg->shake_steps + SHAKE_STARTS);
+        uint32_t memo_cap = SHAKE_MEMO_MIN_SLOTS;
+        while (memo_cap < memo_want && memo_cap < SHAKE_MEMO_MAX_SLOTS)
+            memo_cap <<= 1;
+        s.memo = (pivco_node_memo_t *)calloc(1, sizeof(pivco_node_memo_t));
+        s.ment = (memo_ent_t *)calloc(memo_cap, sizeof(memo_ent_t));
+        s.ment_mask = memo_cap - 1;
+        ok = ok && s.memo && s.ment;
     }
+    for (int i = 0; i < SHAKE_STARTS; i++)
+        c[i].cost = SIZE_MAX;
     if (!ok)
         goto done;
     if (SHAKE_SCREEN < s.nblk) {
@@ -353,16 +527,20 @@ int pivco_shake_lengths(pivco_encoder_t *enc, const pivco_cfg_t *cfg,
 
     /* Pricing runs real encodes; keep them out of the caller's stats. */
     pivco_ctx_stats_t saved = enc->stats;
+    pivco_scratch_t *sc = (pivco_scratch_t *)enc->internal;
+    sc->memo = s.memo;
     memcpy(c[0].lens, lengths, sizeof(c[0].lens));
     seen_insert(&s, lens_hash(c[0].lens));
-    c[0].cost = price(&s, c[0].lens, NULL, c[0].blk);
+    c[0].cost = price(&s, c[0].lens, 1, &c[0].screen_cost);
     if (c[0].cost == SIZE_MAX) {
+        sc->memo = NULL;
         enc->stats = saved;
         rc = PIVCO_ERR_CORRUPT;
         goto done;
     }
     c[0].alive = 1;
     race(&s, c, cfg->shake_steps);
+    sc->memo = NULL;
     enc->stats = saved;
 
     int b = 0;
@@ -373,11 +551,10 @@ int pivco_shake_lengths(pivco_encoder_t *enc, const pivco_cfg_t *cfg,
     rc = PIVCO_OK;
 
 done:
-    for (int i = 0; i < SHAKE_STARTS; i++)
-        free(c[i].blk);
+    free(s.ment);
+    free(s.memo);
     free(s.screen);
     free(s.seen);
-    free(s.cand_blk);
     free(s.out);
     free(s.tab);
     return rc;

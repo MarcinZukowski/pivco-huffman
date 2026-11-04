@@ -125,6 +125,7 @@ typedef struct {
     uint8_t *enc; size_t enc_cap;      /* encode ranks + recursion tmp */
     uint8_t *dec; size_t dec_cap;      /* decode ping-pong arena       */
     struct pivco_nested *nested;       /* created on first nested region (pivco_nph.h) */
+    struct pivco_node_memo *memo;      /* attached while shaking prices (node_memo.h) */
     int is_child;                      /* a nested context: no nesting below */
 } pivco_scratch_t;
 
