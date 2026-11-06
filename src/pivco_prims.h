@@ -47,6 +47,11 @@ typedef struct {
                             uint8_t *scratch);
 } pivco_prims_t;
 
+/* The widest merge overread (PIVCO_PRIM_MERGE_OVERREAD) of any backend.
+ * The prims codec can run any table's merges, so its buffers need this
+ * much slack; each table's backend is checked against it. */
+#define PIVCO_PRIMS_MERGE_OVERREAD 16
+
 extern const pivco_prims_t pivco_prims_scalar;
 extern const pivco_prims_t pivco_prims_neon;
 extern const pivco_prims_t pivco_prims_x86;

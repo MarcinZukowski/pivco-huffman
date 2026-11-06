@@ -6,6 +6,9 @@
 #include "pivco_huffman_primitives.h"
 #include "pivco_prims.h"
 
+_Static_assert(PIVCO_PRIM_MERGE_OVERREAD <= PIVCO_PRIMS_MERGE_OVERREAD,
+               "the prims codec's buffers must cover this table's merges");
+
 #define PIVCO_PRIMS_STR_(x) #x
 #define PIVCO_PRIMS_STR(x)  PIVCO_PRIMS_STR_(x)
 

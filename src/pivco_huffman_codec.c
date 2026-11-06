@@ -38,6 +38,9 @@
 #define prim_merge_vec_vec       g_pivco_prims->merge_vec_vec
 #define prim_merge_flat          g_pivco_prims->merge_flat
 #define prim_merge_flat_natural  g_pivco_prims->merge_flat_natural
+/* Compiled as the scalar backend, but runs any table's merges. */
+#undef PIVCO_PRIM_MERGE_OVERREAD
+#define PIVCO_PRIM_MERGE_OVERREAD PIVCO_PRIMS_MERGE_OVERREAD
 #endif
 #include "pivco_prof.h"
 #ifdef PIVCO_HAS_FSE
