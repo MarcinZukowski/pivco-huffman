@@ -524,3 +524,18 @@ endif()
 # were not wired into the top CMake; they're left as orphan sources for
 # manual compilation.  (Add add_executable() blocks here if they get
 # resurrected.)
+
+# Dispatch builds compile at the SSE4.1 floor but still define
+# PIVCO_HAS_AVX512; these benches call the AVX-512 primitives directly,
+# so they get that tier's flags and run only on AVX-512 CPUs.
+if(PIVCO_CODEC_DISPATCH AND PIVCO_TIER_AVX512)
+    foreach(t pivco_partition_micro
+              pivco_micro_avx512_cnt
+              pivco_fusion_v3_avx512_cnt
+              pivco_fusion_v4_avx512_cnt
+              pivco_bench_bitslice)
+        if(TARGET ${t})
+            target_compile_options(${t} PRIVATE ${PIVCO_AVX512_FLAGS})
+        endif()
+    endforeach()
+endif()

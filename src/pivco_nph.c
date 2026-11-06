@@ -14,6 +14,9 @@ void PIVCO_BACKEND_FN(pivco_merge_cst_vec)(const uint8_t *bm, int K,
                                            uint8_t left_sym,
                                            const uint8_t *right_buf,
                                            uint8_t *out);
+#if defined(PIVCO_CODEC_DISPATCH)
+#include "pivco_prims.h"   /* dispatch builds use the table chosen at startup */
+#endif
 
 size_t pivco_nph_write_lens(const uint8_t lens[PIVCO_MAX_SYMBOLS], uint8_t *out)
 {
@@ -83,7 +86,12 @@ size_t pivco_nph_read_lens(const uint8_t *in, size_t avail,
     }
     for (int j = 0; j < k; j++)
         bad |= (unsigned)(vals[j] - 1) >= (unsigned)PIVCO_MAX_CODE_LEN;
+#if defined(PIVCO_CODEC_DISPATCH)
+    g_pivco_prims->codec_init();
+    g_pivco_prims->merge_cst_vec(presence, PIVCO_MAX_SYMBOLS, 0, vals, lens);
+#else
     PIVCO_BACKEND_FN(pivco_merge_cst_vec)(presence, PIVCO_MAX_SYMBOLS, 0, vals, lens);
+#endif
     return bad ? 0 : len;
 }
 

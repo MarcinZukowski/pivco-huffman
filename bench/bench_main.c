@@ -392,7 +392,11 @@ int main(int argc, char **argv)
         BENCH(p_dec_bu, {
             for (int b = 0; b < NBLOCKS; b++) {
                 size_t consumed;
-#if defined(PIVCO_HAS_NEON)
+#if defined(PIVCO_CODEC_DISPATCH)
+                /* The codec chosen at startup: a direct AVX-512 call would
+                 * fault on a CPU without it. */
+                pivco_decode(bench_dec_ctx(), table, neon_enc_buf + neon_enc_off[b], neon_enc_off[b+1] - neon_enc_off[b], dec_buf + (size_t)b * BLK, &consumed);
+#elif defined(PIVCO_HAS_NEON)
                 pivco_decode_bu_neon(bench_dec_ctx(), table, neon_enc_buf + neon_enc_off[b], neon_enc_off[b+1] - neon_enc_off[b], dec_buf + (size_t)b * BLK, &consumed);
 #elif defined(PIVCO_HAS_AVX512)
                 /* AVX-512 hosts: codec_avx512 (Phase 5 backend, 2026-05-14).

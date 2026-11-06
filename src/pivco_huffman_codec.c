@@ -23,6 +23,22 @@
 #include "pivco_huffman_wire.h"
 #include "node_memo.h"
 #include "pivco_huffman_primitives.h"
+#ifdef PIVCO_PRIMS_INDIRECT
+#include "pivco_prims.h"
+#define prim_codec_init          g_pivco_prims->codec_init
+#define prim_enc_init            g_pivco_prims->enc_init
+#define prim_enc_partition_full  g_pivco_prims->enc_partition_full
+#define prim_enc_partition_right g_pivco_prims->enc_partition_right
+#define prim_enc_partition_none  g_pivco_prims->enc_partition_none
+#define prim_enc_pack_dN         g_pivco_prims->enc_pack_dN
+#define prim_enc_pack_dN_natural g_pivco_prims->enc_pack_dN_natural
+#define prim_popcount_K_right    g_pivco_prims->popcount_K_right
+#define prim_merge_cst_cst       g_pivco_prims->merge_cst_cst
+#define prim_merge_cst_vec       g_pivco_prims->merge_cst_vec
+#define prim_merge_vec_vec       g_pivco_prims->merge_vec_vec
+#define prim_merge_flat          g_pivco_prims->merge_flat
+#define prim_merge_flat_natural  g_pivco_prims->merge_flat_natural
+#endif
 #include "pivco_prof.h"
 #ifdef PIVCO_HAS_FSE
 #include "pivco_fse.h"
@@ -185,7 +201,10 @@ extern uint64_t g_pivco_fse_bytes_out[PIVCO_FSE_STATS_SLOTS];
 
 /* ---------- Backend → entry-point name ---------- */
 
-#if defined(PIVCO_BACKEND_SCALAR)
+#if defined(PIVCO_CODEC_VARIANT)
+#  define CODEC_ENCODE_ENTRY PIVCO_BACKEND_FN(pivco_encode)
+#  define CODEC_DECODE_ENTRY PIVCO_BACKEND_FN(pivco_decode_bu)
+#elif defined(PIVCO_BACKEND_SCALAR)
 #  define CODEC_ENCODE_ENTRY pivco_encode_scalar
 #  define CODEC_DECODE_ENTRY pivco_decode_scalar
 #elif defined(PIVCO_BACKEND_NEON)
@@ -199,6 +218,14 @@ extern uint64_t g_pivco_fse_bytes_out[PIVCO_FSE_STATS_SLOTS];
 #  define CODEC_DECODE_ENTRY pivco_decode_bu_avx512
 #else
 #  error "pivco_huffman_codec.c needs PIVCO_BACKEND_{SCALAR,NEON,X86,AVX512}"
+#endif
+#if defined(PIVCO_CODEC_VARIANT)
+int CODEC_ENCODE_ENTRY(pivco_encoder_t *enc_ctx, const pivco_table_t *table,
+                       const uint8_t *symbols, size_t n,
+                       uint8_t *out, size_t *out_len);
+int CODEC_DECODE_ENTRY(pivco_decoder_t *dec_ctx, const pivco_table_t *table,
+                       const uint8_t *in, size_t in_len,
+                       uint8_t *symbols, size_t *consumed);
 #endif
 
 /* ---------- Encode tree walk ---------- *

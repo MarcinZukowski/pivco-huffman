@@ -71,6 +71,196 @@ void pivco_fse_root_get(int idx, pivco_fse_root_event_t *out)
     *out = g_pivco_fse_root_log[idx];
 }
 
+#ifdef PIVCO_CODEC_DISPATCH
+#include "pivco_cpu.h"
+#include "pivco_prims.h"
+
+/* SIMD tiers, each a superset of the one below.  A codec or primitive
+ * table runs only on a CPU at or above its tier. */
+enum { PIVCO_TIER_BASE, PIVCO_TIER_SSE4, PIVCO_TIER_AVX2, PIVCO_TIER_AVX512, PIVCO_TIER_COUNT };
+static const char *const pivco_tier_names[] = { "base", "sse4.1", "avx2", "avx512-vbmi2" };
+_Static_assert(sizeof pivco_tier_names / sizeof pivco_tier_names[0] == PIVCO_TIER_COUNT,
+               "one name per tier");
+
+static int pivco_cpu_tier(void)
+{
+#if defined(__x86_64__)
+    __builtin_cpu_init();
+    if (__builtin_cpu_supports("avx512f") && __builtin_cpu_supports("avx512bw")
+        && __builtin_cpu_supports("avx512vl") && __builtin_cpu_supports("avx512vbmi")
+        && __builtin_cpu_supports("avx512vbmi2") && __builtin_cpu_supports("avx512vpopcntdq")
+        && __builtin_cpu_supports("gfni") && __builtin_cpu_supports("avx512bitalg"))
+        return PIVCO_TIER_AVX512;
+    if (__builtin_cpu_supports("avx2") && __builtin_cpu_supports("bmi2")
+        && __builtin_cpu_supports("popcnt"))
+        return PIVCO_TIER_AVX2;
+    if (__builtin_cpu_supports("sse4.1") && __builtin_cpu_supports("popcnt"))
+        return PIVCO_TIER_SSE4;
+#endif
+    return PIVCO_TIER_BASE;
+}
+
+#if defined(PIVCO_BUILT_AVX2)
+extern const pivco_prims_t pivco_prims_x86_avx2;
+extern const pivco_prims_t pivco_prims_x86_avx2_intel;
+#endif
+static const struct {
+    const char *name;
+    int tier;
+    const pivco_prims_t *prims;
+} pivco_prims_tables[] = {
+    { "scalar", PIVCO_TIER_BASE, &pivco_prims_scalar },
+#if defined(PIVCO_HAS_NEON)
+    { "neon", PIVCO_TIER_BASE, &pivco_prims_neon },
+#endif
+#if defined(PIVCO_HAS_SSE4)
+    { "x86", PIVCO_TIER_SSE4, &pivco_prims_x86 },
+#endif
+#if defined(PIVCO_BUILT_AVX2)
+    { "x86_avx2", PIVCO_TIER_AVX2, &pivco_prims_x86_avx2 },
+    { "x86_avx2_intel", PIVCO_TIER_AVX2, &pivco_prims_x86_avx2_intel },
+#endif
+#if defined(PIVCO_HAS_AVX512)
+    { "avx512", PIVCO_TIER_AVX512, &pivco_prims_avx512 },
+#endif
+};
+#define PIVCO_N_PRIMS_TABLES (int)(sizeof pivco_prims_tables / sizeof pivco_prims_tables[0])
+const pivco_prims_t *g_pivco_prims;
+
+typedef int (*pivco_encode_fn)(pivco_encoder_t *, const pivco_table_t *,
+                               const uint8_t *, size_t, uint8_t *, size_t *);
+typedef int (*pivco_decode_fn)(pivco_decoder_t *, const pivco_table_t *,
+                               const uint8_t *, size_t, uint8_t *, size_t *);
+
+/* A codec: its entry points and the SIMD tier it needs. */
+typedef struct {
+    const char *name;
+    int tier;
+    pivco_encode_fn enc;
+    pivco_decode_fn dec;
+} pivco_codec_t;
+
+#define PIVCO_DECLARE_CODEC(s)                                              \
+    int pivco_encode_##s(pivco_encoder_t *, const pivco_table_t *,          \
+                         const uint8_t *, size_t, uint8_t *, size_t *);     \
+    int pivco_decode_bu_##s(pivco_decoder_t *, const pivco_table_t *,       \
+                            const uint8_t *, size_t, uint8_t *, size_t *);
+PIVCO_DECLARE_CODEC(prims)
+#if defined(PIVCO_BUILT_AVX2)
+PIVCO_DECLARE_CODEC(x86_avx2)
+PIVCO_DECLARE_CODEC(x86_avx2_intel)
+#endif
+static const pivco_codec_t pivco_codecs[] = {
+    { "scalar", PIVCO_TIER_BASE, pivco_encode_scalar, pivco_decode_scalar },
+#if defined(PIVCO_HAS_NEON)
+    { "neon", PIVCO_TIER_BASE, pivco_encode_neon, pivco_decode_bu_neon },
+#endif
+#if defined(PIVCO_HAS_SSE4)
+    { "x86", PIVCO_TIER_SSE4, pivco_encode_x86, pivco_decode_bu_x86 },
+#endif
+#if defined(PIVCO_BUILT_AVX2)
+    { "x86_avx2", PIVCO_TIER_AVX2, pivco_encode_x86_avx2, pivco_decode_bu_x86_avx2 },
+    { "x86_avx2_intel", PIVCO_TIER_AVX2, pivco_encode_x86_avx2_intel, pivco_decode_bu_x86_avx2_intel },
+#endif
+#if defined(PIVCO_HAS_AVX512)
+    { "avx512", PIVCO_TIER_AVX512, pivco_encode_avx512, pivco_decode_bu_avx512 },
+#endif
+    { "prims", PIVCO_TIER_BASE, pivco_encode_prims, pivco_decode_bu_prims },
+};
+#define PIVCO_N_CODECS (int)(sizeof pivco_codecs / sizeof pivco_codecs[0])
+static int pivco_codec_idx;
+
+const char *pivco_codec_name(void)
+{
+    PIVCO_CHECK(pivco_codec_idx >= 0 && pivco_codec_idx < PIVCO_N_CODECS);
+    return pivco_codecs[pivco_codec_idx].name;
+}
+
+const char *pivco_prims_name(void)
+{
+    PIVCO_CHECK(g_pivco_prims != NULL);
+    return g_pivco_prims->name;
+}
+
+/* Index of `name` among the primitive tables, or -1. */
+static int pivco_find_prims(const char *name)
+{
+    for (int i = 0; i < PIVCO_N_PRIMS_TABLES; i++)
+        if (!strcmp(pivco_prims_tables[i].name, name))
+            return i;
+    return -1;
+}
+
+/* Index of `name` among the codecs, or -1. */
+static int pivco_find_codec(const char *name)
+{
+    for (int i = 0; i < PIVCO_N_CODECS; i++)
+        if (!strcmp(pivco_codecs[i].name, name))
+            return i;
+    return -1;
+}
+
+/* The best table this CPU runs: its highest built tier, refined by
+ * vendor.  Codec and table names match, so it names the codec too. */
+static const char *pivco_default_name(int cpu_tier)
+{
+    int intel = pivco_cpu()->vendor == PIVCO_VENDOR_INTEL;
+    const char *order[] = {
+        "avx512",
+        intel ? "x86_avx2_intel" : "x86_avx2",
+        "x86",
+        "neon",
+        "scalar",
+    };
+    for (int i = 0; i < (int)(sizeof order / sizeof order[0]); i++) {
+        int t = pivco_find_prims(order[i]);
+        if (t >= 0 && pivco_prims_tables[t].tier <= cpu_tier)
+            return order[i];
+    }
+    return "scalar";
+}
+
+/* PIVCO_CODEC=<name> picks the codec, PIVCO_PRIMS=<name> the table the
+ * prims codec calls through; both default to pivco_default_name().  A
+ * name the CPU can't run aborts. */
+__attribute__((constructor)) static void pivco_codec_select(void)
+{
+    int cpu_tier = pivco_cpu_tier();
+    PIVCO_CHECK(cpu_tier >= 0 && cpu_tier < PIVCO_TIER_COUNT);
+    const char *want = getenv("PIVCO_CODEC");
+    if (!want)
+        want = pivco_default_name(cpu_tier);
+    int c = pivco_find_codec(want);
+    if (c < 0) {
+        fprintf(stderr, "PIVCO_CODEC=%s: unknown or not built\n", want);
+        abort();
+    }
+    if (pivco_codecs[c].tier > cpu_tier) {
+        PIVCO_CHECK(pivco_codecs[c].tier < PIVCO_TIER_COUNT);
+        fprintf(stderr, "PIVCO_CODEC=%s needs %s; this CPU has %s\n", want,
+                pivco_tier_names[pivco_codecs[c].tier], pivco_tier_names[cpu_tier]);
+        abort();
+    }
+    pivco_codec_idx = c;
+    const char *tab = getenv("PIVCO_PRIMS");
+    if (!tab)
+        tab = pivco_default_name(cpu_tier);
+    int t = pivco_find_prims(tab);
+    if (t < 0) {
+        fprintf(stderr, "PIVCO_PRIMS=%s: unknown or not built\n", tab);
+        abort();
+    }
+    if (pivco_prims_tables[t].tier > cpu_tier) {
+        PIVCO_CHECK(pivco_prims_tables[t].tier < PIVCO_TIER_COUNT);
+        fprintf(stderr, "PIVCO_PRIMS=%s needs %s; this CPU has %s\n", tab,
+                pivco_tier_names[pivco_prims_tables[t].tier], pivco_tier_names[cpu_tier]);
+        abort();
+    }
+    g_pivco_prims = pivco_prims_tables[t].prims;
+    PIVCO_CHECK(g_pivco_prims != NULL);
+}
+#endif  /* PIVCO_CODEC_DISPATCH*/
+
 /* Compile-time backend choice for the dispatched entries: the build
  * enables exactly one SIMD tier (or none), so there is nothing to
  * select at runtime. */
@@ -79,7 +269,9 @@ int pivco_encode(pivco_encoder_t *enc, const pivco_table_t *table,
                  uint8_t *out, size_t *out_len)
 {
     int rc;
-#ifdef PIVCO_HAS_AVX512
+#if defined(PIVCO_CODEC_DISPATCH)
+    rc = pivco_codecs[pivco_codec_idx].enc(enc, table, symbols, n, out, out_len);
+#elif defined(PIVCO_HAS_AVX512)
     rc = pivco_encode_avx512(enc, table, symbols, n, out, out_len);
 #elif defined(PIVCO_HAS_NEON)
     rc = pivco_encode_neon(enc, table, symbols, n, out, out_len);
@@ -101,7 +293,9 @@ int pivco_decode(pivco_decoder_t *dec, const pivco_table_t *table,
                  uint8_t *symbols, size_t *consumed)
 {
     int rc;
-#ifdef PIVCO_HAS_AVX512
+#if defined(PIVCO_CODEC_DISPATCH)
+    rc = pivco_codecs[pivco_codec_idx].dec(dec, table, in, in_len, symbols, consumed);
+#elif defined(PIVCO_HAS_AVX512)
     rc = pivco_decode_bu_avx512(dec, table, in, in_len, symbols, consumed);
 #elif defined(PIVCO_HAS_NEON)
     rc = pivco_decode_bu_neon(dec, table, in, in_len, symbols, consumed);
@@ -286,7 +480,11 @@ int pivco_histogram(pivco_encoder_t *enc, const uint8_t *in, size_t n,
         size_t len = n - off;
         if (len > PIVCO_PRIM_HIST_CHUNK) len = PIVCO_PRIM_HIST_CHUNK;
         uint32_t h32[256] = {0};
+#if defined(PIVCO_CODEC_DISPATCH)
+        g_pivco_prims->histogram_chunk(in + off, len, h32, scratch);
+#else
         prim_histogram_chunk(in + off, len, h32, scratch);
+#endif
         for (int sym = 0; sym < 256; sym++) freq[sym] += h32[sym];
         off += len;
     }
