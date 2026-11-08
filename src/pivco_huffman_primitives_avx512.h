@@ -700,104 +700,8 @@ static inline void pack_dN_avx512(uint8_t *out, const uint8_t *ranks,
     if (bits_in_buf > 0) out[byte_idx] = (uint8_t)(buf & ((1u << bits_in_buf) - 1));
 }
 
-/* ---------- Aliases consumed by codec.c ---------- */
-
-#define PIVCO_PRIM_ALWAYS_INLINE __attribute__((always_inline)) static inline
-
-/* Widest load a merge kernel issues at a child-buffer cursor (8B expandloadu tail window);
- * the cursor can rest AT `size` on the exhausted side, so buffers a
- * merge reads need this much trailing slack.  Consumed by the decode
- * placement logic (scratch_carve / place_tail). */
-#define PIVCO_PRIM_MERGE_OVERREAD 8
-
-PIVCO_PRIM_ALWAYS_INLINE void prim_codec_init(void)
-{ codec_init_avx512(); }
-
-PIVCO_PRIM_ALWAYS_INLINE void prim_enc_init(uint8_t *ranks, int n,
-                                              const uint8_t *symbols,
-                                              const uint8_t *sym_to_rank,
-                                              const pivco_enc_init_aux_t *aux)
-{ (void)aux; init_avx512(ranks, n, symbols, sym_to_rank); }
-
-PIVCO_PRIM_ALWAYS_INLINE int prim_enc_partition_full(uint8_t *ranks,
-                                                      int n, uint8_t thr,
-                                                      uint8_t *bm,
-                                                      uint8_t *right_out)
-{ return part_full_avx512(ranks, n, thr, bm, right_out); }
-
-PIVCO_PRIM_ALWAYS_INLINE int prim_enc_partition_right(uint8_t *ranks,
-                                                      int n, uint8_t thr,
-                                                      uint8_t *bm,
-                                                      uint8_t *right_out)
-{ return part_right_avx512(ranks, n, thr, bm, right_out); }
-
-PIVCO_PRIM_ALWAYS_INLINE int prim_enc_partition_none(uint8_t *ranks,
-                                                     int n, uint8_t thr,
-                                                     uint8_t *bm)
-{ return part_none_avx512(ranks, n, thr, bm); }
-
-/* Natural-layout kernels exposed for bench_prim's ST_PACK/ST_MERGE_FLAT
- * rows (the prim_ entries below produce the layout `vertical` selects:
- * the hybrid vertical wire, or natural when 0). */
-PIVCO_PRIM_ALWAYS_INLINE void prim_enc_pack_dN_natural(const uint8_t *ranks,
-                                             int n, int D, uint8_t base, uint8_t *out_packed)
-{ pack_dN_avx512(out_packed, ranks, n, D, base); }
-PIVCO_PRIM_ALWAYS_INLINE void prim_merge_flat_natural(uint8_t *out, int n,
-                                                          const uint8_t *bm, int D,
-                                                          const uint8_t *c2s)
-{ merge_flat_avx512(out, n, bm, D, c2s); }
-PIVCO_PRIM_ALWAYS_INLINE void prim_enc_pack_dN(const uint8_t *ranks,
-                                             int n, int D, uint8_t base, uint8_t *out_packed,
-                                             int vertical)
-{
-    int n5 = vertical == PIVCO_FLAT_VERTICAL ? pivco_vert_n512(n, D) : 0;
-    if (n5) vert512_pack_x86_best(out_packed, ranks, n5, D, base);
-    int r = n - n5, nv = vertical ? pivco_vert_n(r, D) : 0;
-    uint8_t *o1 = out_packed + (((size_t)n5 * D) >> 3);
-    if (nv) vert_pack_x86_best(o1, ranks + n5, nv, D, base);
-    if (r > nv) pack_dN_avx512(o1 + (((size_t)nv * D) >> 3),
-                             ranks + n5 + nv, r - nv, D, base);
-}
-
-
-PIVCO_PRIM_ALWAYS_INLINE void prim_merge_flat(uint8_t *out, int n,
-                                                          const uint8_t *bm, int D,
-                                                          const uint8_t *c2s,
-                                                          int vertical)
-{
-    int n5 = vertical == PIVCO_FLAT_VERTICAL ? pivco_vert_n512(n, D) : 0;
-    if (n5) vert512_merge_x86_best(out, n5, bm, D, c2s);
-    int r = n - n5, nv = vertical ? pivco_vert_n(r, D) : 0;
-    const uint8_t *bm1 = bm + (((size_t)n5 * D) >> 3);
-    if (nv) vert_merge_x86_best(out + n5, nv, bm1, D, c2s);
-    if (r > nv) merge_flat_avx512(out + n5 + nv, r - nv,
-                                bm1 + (((size_t)nv * D) >> 3), D, c2s);
-}
-
-PIVCO_PRIM_ALWAYS_INLINE int prim_popcount_K_right(const uint8_t *bm, int K)
-{ return popcount_K_right_avx512(bm, bitmap_bytes(K), K); }
-
-PIVCO_PRIM_ALWAYS_INLINE void prim_merge_cst_cst(const uint8_t *bm, int K,
-                                                      uint8_t left_sym,
-                                                      uint8_t right_sym,
-                                                      uint8_t *out)
-{ merge_cst_cst_avx512(bm, K, left_sym, right_sym, out); }
-
-PIVCO_PRIM_ALWAYS_INLINE void prim_merge_cst_vec(const uint8_t *bm, int K,
-                                                          uint8_t left_sym,
-                                                          const uint8_t *right_buf,
-                                                          uint8_t *out)
-{ merge_cst_vec_avx512(bm, K, left_sym, right_buf, out); }
-
-PIVCO_PRIM_ALWAYS_INLINE void prim_merge_vec_vec(const uint8_t *bm, int K,
-                                               const uint8_t *left_buf,
-                                               const uint8_t *right_buf,
-                                               uint8_t *out)
-{ merge_vec_vec_avx512(bm, K, left_buf, right_buf, out); }
-
-
 /* ---------------------------------------------------------------------------
- * prim_histogram_chunk — positional (bit-plane) byte histogram.
+ * histogram_chunk_avx512 — positional (bit-plane) byte histogram.
  *
  * Port of Harold Aptroot's AVX-512 histogram, used under the MIT
  * License (Copyright (c) 2026 Harold Aptroot):
@@ -814,7 +718,7 @@ PIVCO_PRIM_ALWAYS_INLINE void prim_merge_vec_vec(const uint8_t *bm, int K,
  * Zen 5 with clang; gcc trails ~10-35%% on the FA chains).
  *
  * Needs GFNI + BITALG + VBMI2 on top of the backend baseline; without
- * the compile flags the shared scalar core is used instead.
+ * the compile flags the table uses the shared scalar core instead.
  * ------------------------------------------------------------------------- */
 #include "pivco_huffman_hist_scalar.h"
 
@@ -980,16 +884,6 @@ static inline void histogram_chunk_avx512(const uint8_t *in, size_t n,
 
     while (N) hist[ptr[--N]] += 1;
 }
-PIVCO_PRIM_ALWAYS_INLINE void prim_histogram_chunk(const uint8_t *in, size_t n,
-                                                   uint32_t hist[256],
-                                                   uint8_t *scratch)
-{ histogram_chunk_avx512(in, n, hist, scratch); }
-
-#else  /* no GFNI/BITALG compile support: fall back to the scalar core */
-PIVCO_PRIM_ALWAYS_INLINE void prim_histogram_chunk(const uint8_t *in, size_t n,
-                                                   uint32_t hist[256],
-                                                   uint8_t *scratch)
-{ histogram_chunk_scalar(in, n, hist, scratch); }
 #endif /* __GFNI__ && __AVX512BITALG__ */
 
 #endif  /* PIVCO_HUFFMAN_PRIMITIVES_AVX512_H */

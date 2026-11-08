@@ -101,13 +101,13 @@ static int pivco_cpu_tier(void)
 }
 
 #if defined(PIVCO_BUILT_AVX2)
-extern const pivco_prims_t pivco_prims_x86_avx2;
-extern const pivco_prims_t pivco_prims_x86_avx2_intel;
+extern const pivco_prims_t *const pivco_prims_x86_avx2;
+extern const pivco_prims_t *const pivco_prims_x86_avx2_intel;
 #endif
 static const struct {
     const char *name;
     int tier;
-    const pivco_prims_t *prims;
+    const pivco_prims_t *const *prims;
 } pivco_prims_tables[] = {
     { "scalar", PIVCO_TIER_BASE, &pivco_prims_scalar },
 #if defined(PIVCO_HAS_NEON)
@@ -256,7 +256,7 @@ __attribute__((constructor)) static void pivco_codec_select(void)
                 pivco_tier_names[pivco_prims_tables[t].tier], pivco_tier_names[cpu_tier]);
         abort();
     }
-    g_pivco_prims = pivco_prims_tables[t].prims;
+    g_pivco_prims = *pivco_prims_tables[t].prims;
     PIVCO_CHECK(g_pivco_prims != NULL);
 }
 #endif  /* PIVCO_CODEC_DISPATCH*/

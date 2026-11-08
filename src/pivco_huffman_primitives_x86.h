@@ -1200,36 +1200,14 @@ PIVCO_PACK_SSE_DN(pack_d6_sse_x86, 6, 0,1,2,  3,4,5,   8,9,10,   11,12,13, -1,-1
 PIVCO_PACK_SSE_DN(pack_d7_sse_x86, 7, 0,1,2,  3,4,5,   6,8,9,    10,11,12, 13,14)
 #undef PIVCO_PACK_SSE_DN
 
-/* Dispatcher: native SIMD per-D path (mirrors pack_dN_x86) + scalar tail. */
-static inline void pack_dN_x86(uint8_t *out, const uint8_t *ranks,
-                                  int n, int D, uint8_t base)
+/* Scalar tail of the natural pack: codes i..n-1, after a SIMD body
+ * packed codes 0..i-1. */
+static inline __attribute__((always_inline))
+void pack_tail_x86(uint8_t *out, const uint8_t *ranks, int i, int n,
+                   int D, uint8_t base)
 {
-    int total_bytes = (n * D + 7) >> 3;
-    if (total_bytes > 0) out[total_bytes - 1] = 0;
-
-    int i = 0;
-    switch (D) {
-    case 4: i = pack_d4_sse_x86(out, ranks, n, base); break;
-    case 8: i = pack_d8_sse_x86(out, ranks, n, base); break;
-#ifdef PIVCO_HAS_AVX2
-    case 2: i = pack_d2_avx2_x86(out, ranks, n, base); break;
-    case 3: i = pack_d3_avx2_x86(out, ranks, n, base); break;
-    case 5: i = pack_d5_avx2_x86(out, ranks, n, base); break;
-    case 6: i = pack_d6_avx2_x86(out, ranks, n, base); break;
-    case 7: i = pack_d7_avx2_x86(out, ranks, n, base); break;
-#else
-    case 2: i = pack_d2_sse_x86(out, ranks, n, base); break;
-    case 3: i = pack_d3_sse_x86(out, ranks, n, base); break;
-    case 5: i = pack_d5_sse_x86(out, ranks, n, base); break;
-    case 6: i = pack_d6_sse_x86(out, ranks, n, base); break;
-    case 7: i = pack_d7_sse_x86(out, ranks, n, base); break;
-#endif
-    default: break;
-    }
-
     if (i >= n) return;
 
-    /* Scalar tail. */
     int bit_pos = i * D;
     int byte_idx = bit_pos >> 3;
     int bits_in_buf = bit_pos & 7;
@@ -1249,28 +1227,51 @@ static inline void pack_dN_x86(uint8_t *out, const uint8_t *ranks,
     if (bits_in_buf > 0) out[byte_idx] = (uint8_t)(buf & ((1u << bits_in_buf) - 1));
 }
 
-/* ---------- Aliases consumed by codec.c ---------- */
+/* Natural pack, SSE4.1: native SIMD per-D path + scalar tail. */
+static inline void pack_dN_x86(uint8_t *out, const uint8_t *ranks,
+                                  int n, int D, uint8_t base)
+{
+    int total_bytes = (n * D + 7) >> 3;
+    if (total_bytes > 0) out[total_bytes - 1] = 0;
 
-#define PIVCO_PRIM_ALWAYS_INLINE __attribute__((always_inline)) static inline
+    int i = 0;
+    switch (D) {
+    case 2: i = pack_d2_sse_x86(out, ranks, n, base); break;
+    case 3: i = pack_d3_sse_x86(out, ranks, n, base); break;
+    case 4: i = pack_d4_sse_x86(out, ranks, n, base); break;
+    case 5: i = pack_d5_sse_x86(out, ranks, n, base); break;
+    case 6: i = pack_d6_sse_x86(out, ranks, n, base); break;
+    case 7: i = pack_d7_sse_x86(out, ranks, n, base); break;
+    case 8: i = pack_d8_sse_x86(out, ranks, n, base); break;
+    default: break;
+    }
+    pack_tail_x86(out, ranks, i, n, D, base);
+}
 
-#include "pivco_huffman_hist_scalar.h"
+#ifdef PIVCO_HAS_AVX2
+/* Natural pack, AVX2: the ryg ymm packs for D = 2, 3, 5, 6, 7. */
+static inline void pack_dN_avx2_x86(uint8_t *out, const uint8_t *ranks,
+                                       int n, int D, uint8_t base)
+{
+    int total_bytes = (n * D + 7) >> 3;
+    if (total_bytes > 0) out[total_bytes - 1] = 0;
 
-/* SSE4.1/AVX2 has no histogram win over the shared scalar core (measured);
- * alias it explicitly. */
-PIVCO_PRIM_ALWAYS_INLINE void prim_histogram_chunk(const uint8_t *in, size_t n,
-                                                   uint32_t hist[256],
-                                                   uint8_t *scratch)
-{ histogram_chunk_scalar(in, n, hist, scratch); }
+    int i = 0;
+    switch (D) {
+    case 2: i = pack_d2_avx2_x86(out, ranks, n, base); break;
+    case 3: i = pack_d3_avx2_x86(out, ranks, n, base); break;
+    case 4: i = pack_d4_sse_x86(out, ranks, n, base); break;
+    case 5: i = pack_d5_avx2_x86(out, ranks, n, base); break;
+    case 6: i = pack_d6_avx2_x86(out, ranks, n, base); break;
+    case 7: i = pack_d7_avx2_x86(out, ranks, n, base); break;
+    case 8: i = pack_d8_sse_x86(out, ranks, n, base); break;
+    default: break;
+    }
+    pack_tail_x86(out, ranks, i, n, D, base);
+}
+#endif
 
-
-/* Widest load a merge kernel issues at a child-buffer cursor (16B loadu at child cursors);
- * the cursor can rest AT `size` on the exhausted side, so buffers a
- * merge reads need this much trailing slack.  Consumed by the decode
- * placement logic (scratch_carve / place_tail). */
-#define PIVCO_PRIM_MERGE_OVERREAD 16
-
-PIVCO_PRIM_ALWAYS_INLINE void prim_codec_init(void)
-{ codec_init_x86(); }
+#include "pivco_huffman_hist_scalar.h"   /* histogram_chunk_scalar */
 
 /* enc_init 2tab no-OR gather: read 16 input symbols as 2x u64 (frees the load
  * ports for the dependent table loads) and merge each rank pair as
@@ -1281,10 +1282,11 @@ PIVCO_PRIM_ALWAYS_INLINE void prim_codec_init(void)
  * only variant with no pathological host (4tab regresses on Skylake, bc2 on all
  * Intel).  x86-only: on AArch64 the shift folds into orr, so NEON keeps its SIMD
  * gather.  See IDEAS.md ("enc_init 4tab / bc2") for the A/B/C that chose 2tab. */
-PIVCO_PRIM_ALWAYS_INLINE void prim_enc_init(uint8_t *restrict ranks, int n,
-                                              const uint8_t *restrict symbols,
-                                              const uint8_t *sym_to_rank,
-                                              const pivco_enc_init_aux_t *aux)
+static inline __attribute__((always_inline))
+void enc_init_2tab_x86(uint8_t *restrict ranks, int n,
+                       const uint8_t *restrict symbols,
+                       const uint8_t *sym_to_rank,
+                       const pivco_enc_init_aux_t *aux)
 {
     PIVCO_CHECK(aux && aux->s2r_hi);
     const uint16_t *restrict hi = aux->s2r_hi;
@@ -1312,80 +1314,5 @@ PIVCO_PRIM_ALWAYS_INLINE void prim_enc_init(uint8_t *restrict ranks, int n,
 #undef PIVCO_LO
 #undef PIVCO_HI
 }
-
-PIVCO_PRIM_ALWAYS_INLINE int prim_enc_partition_full(uint8_t *ranks,
-                                                      int n, uint8_t thr,
-                                                      uint8_t *bm,
-                                                      uint8_t *right_out)
-{ return part_full_x86(ranks, n, thr, bm, right_out); }
-
-PIVCO_PRIM_ALWAYS_INLINE int prim_enc_partition_right(uint8_t *ranks,
-                                                      int n, uint8_t thr,
-                                                      uint8_t *bm,
-                                                      uint8_t *right_out)
-{ return part_core_x86(ranks, n, thr, bm, right_out, 1); }
-
-PIVCO_PRIM_ALWAYS_INLINE int prim_enc_partition_none(uint8_t *ranks,
-                                                     int n, uint8_t thr,
-                                                     uint8_t *bm)
-{ return part_core_x86(ranks, n, thr, bm, NULL, 0); }
-
-/* Natural-layout kernels exposed for bench_prim's ST_PACK/ST_MERGE_FLAT
- * rows (the prim_ entries below produce the layout `vertical` selects:
- * the hybrid vertical wire, or natural when 0). */
-PIVCO_PRIM_ALWAYS_INLINE void prim_enc_pack_dN_natural(const uint8_t *ranks,
-                                             int n, int D, uint8_t base, uint8_t *out_packed)
-{ pack_dN_x86(out_packed, ranks, n, D, base); }
-PIVCO_PRIM_ALWAYS_INLINE void prim_merge_flat_natural(uint8_t *out, int n,
-                                                          const uint8_t *bm, int D,
-                                                          const uint8_t *c2s)
-{ merge_flat_x86(out, n, bm, D, c2s); }
-PIVCO_PRIM_ALWAYS_INLINE void prim_enc_pack_dN(const uint8_t *ranks,
-                                             int n, int D, uint8_t base, uint8_t *out_packed,
-                                             int vertical)
-{
-    int n5 = vertical == PIVCO_FLAT_VERTICAL ? pivco_vert_n512(n, D) : 0;
-    if (n5) vert512_pack_x86_best(out_packed, ranks, n5, D, base);
-    int r = n - n5, nv = vertical ? pivco_vert_n(r, D) : 0;
-    uint8_t *o1 = out_packed + (((size_t)n5 * D) >> 3);
-    if (nv) vert_pack_x86_best(o1, ranks + n5, nv, D, base);
-    if (r > nv) pack_dN_x86(o1 + (((size_t)nv * D) >> 3),
-                             ranks + n5 + nv, r - nv, D, base);
-}
-
-PIVCO_PRIM_ALWAYS_INLINE void prim_merge_flat(uint8_t *out, int n,
-                                                          const uint8_t *bm, int D,
-                                                          const uint8_t *c2s,
-                                                          int vertical)
-{
-    int n5 = vertical == PIVCO_FLAT_VERTICAL ? pivco_vert_n512(n, D) : 0;
-    if (n5) vert512_merge_x86_best(out, n5, bm, D, c2s);
-    int r = n - n5, nv = vertical ? pivco_vert_n(r, D) : 0;
-    const uint8_t *bm1 = bm + (((size_t)n5 * D) >> 3);
-    if (nv) vert_merge_x86_best(out + n5, nv, bm1, D, c2s);
-    if (r > nv) merge_flat_x86(out + n5 + nv, r - nv,
-                                bm1 + (((size_t)nv * D) >> 3), D, c2s);
-}
-
-PIVCO_PRIM_ALWAYS_INLINE int prim_popcount_K_right(const uint8_t *bm, int K)
-{ return popcount_K_right_x86(bm, bitmap_bytes(K), K); }
-
-PIVCO_PRIM_ALWAYS_INLINE void prim_merge_cst_cst(const uint8_t *bm, int K,
-                                                      uint8_t left_sym,
-                                                      uint8_t right_sym,
-                                                      uint8_t *out)
-{ merge_cst_cst_x86(bm, K, left_sym, right_sym, out); }
-
-PIVCO_PRIM_ALWAYS_INLINE void prim_merge_cst_vec(const uint8_t *bm, int K,
-                                                          uint8_t left_sym,
-                                                          const uint8_t *right_buf,
-                                                          uint8_t *out)
-{ merge_cst_vec_x86(bm, K, left_sym, right_buf, out); }
-
-PIVCO_PRIM_ALWAYS_INLINE void prim_merge_vec_vec(const uint8_t *bm, int K,
-                                               const uint8_t *left_buf,
-                                               const uint8_t *right_buf,
-                                               uint8_t *out)
-{ merge_vec_vec_x86(bm, K, left_buf, right_buf, out); }
 
 #endif  /* PIVCO_HUFFMAN_PRIMITIVES_X86_H */

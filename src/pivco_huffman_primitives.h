@@ -238,4 +238,10 @@
 #  define PIVCO_PRIM_BACKEND_NAME "avx512"
 #endif
 
+/* The table binding each primitive slot to a kernel, and the prim_*
+ * entries built from it.  The prims codec calls through the table chosen
+ * at startup instead. */
+#include "prims/tables.h"
+#include "prims/entries.h"
+
 #endif  /* PIVCO_HUFFMAN_PRIMITIVES_H */

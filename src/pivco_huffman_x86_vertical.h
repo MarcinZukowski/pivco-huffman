@@ -221,27 +221,6 @@ static inline void vert512_pack_x86v(uint8_t *out, const uint8_t *ranks,
 }
 
 
-/* Best-available dispatcher for the vertical prefix.  All x86 tiers
- * run the shared xmm 16-lane cores here: the wide 128-block forms (ymm
- * two-block, zmm srlv/multishift) were removed 2026-08 -- they only
- * covered the 128..511 mid-band (<= 4% of elements at 32K blocks, ~0.2%
- * E2E) at ~12 KB of text per TU.  Resurrect from git @ 87da7ed if that
- * band ever matters (see IDEAS.md). */
-static inline void vert_merge_x86_best(uint8_t *out, int n_v, const uint8_t *bm,
-                                       int D, const uint8_t *c2s)
-{
-    vert_merge_x86v(out, n_v, bm, D, c2s);
-}
-
-
-/* Best-available vertical pack (xmm cores on all tiers, as above). */
-static inline void vert_pack_x86_best(uint8_t *out, const uint8_t *ranks,
-                                      int n_v, int D, uint8_t base)
-{
-    vert_pack_x86v(out, ranks, n_v, D, base);
-}
-
-
 /* ==== 512-value / 64-lane blocks (see pivco_huffman_vertical.h) ====
  * With 64 lanes, one step fills a whole zmm row: extraction is a uniform
  * immediate shift + byte masks -- no srlv, no multishift, no reorder, no
@@ -1449,6 +1428,8 @@ static void vert512_pack_ymm_d7(uint8_t *out, const uint8_t *ranks,
     }
 }
 
+/* D=7 takes the 16-lane quarter walk: Zen 3 splits 256-bit ops in two,
+ * and the quarter walk wins there (1.12 vs 0.89 on c6a). */
 static inline void vert512_pack_ymm(uint8_t *out, const uint8_t *ranks, int n_v, int D, uint8_t base)
 {
     switch (D) {
@@ -1457,43 +1438,23 @@ static inline void vert512_pack_ymm(uint8_t *out, const uint8_t *ranks, int n_v,
     case 4: vert512_pack_ymm_d4(out, ranks, n_v, base); break;
     case 5: vert512_pack_ymm_d5(out, ranks, n_v, base); break;
     case 6: vert512_pack_ymm_d6(out, ranks, n_v, base); break;
-#if defined(PIVCO_X86_INTEL)
-    default: vert512_pack_ymm_d7(out, ranks, n_v, base); break;
-#else
-    /* Zen 3 splits 256-bit ops in two; the 16-lane quarter walk wins
-     * there (1.12 vs 0.89 on c6a) while Intel AVX2 prefers ymm (1.54
-     * vs 1.22 on c5). */
     default: vert512_pack_x86_d7(out, ranks, n_v, base); break;
-#endif
+    }
+}
+
+/* D=7 in ymm rows too: Intel AVX2 prefers ymm (1.54 vs 1.22 on c5). */
+static inline void vert512_pack_ymm_intel(uint8_t *out, const uint8_t *ranks, int n_v, int D, uint8_t base)
+{
+    switch (D) {
+    case 2: vert512_pack_ymm_d2(out, ranks, n_v, base); break;
+    case 3: vert512_pack_ymm_d3(out, ranks, n_v, base); break;
+    case 4: vert512_pack_ymm_d4(out, ranks, n_v, base); break;
+    case 5: vert512_pack_ymm_d5(out, ranks, n_v, base); break;
+    case 6: vert512_pack_ymm_d6(out, ranks, n_v, base); break;
+    default: vert512_pack_ymm_d7(out, ranks, n_v, base); break;
     }
 }
 
 #endif /* __AVX2__ */
-
-
-/* Best-available 512-block kernels. */
-static inline void vert512_merge_x86_best(uint8_t *out, int n_v, const uint8_t *bm,
-                                          int D, const uint8_t *c2s)
-{
-#if defined(__AVX512BW__) && defined(__AVX512VBMI__) && defined(__AVX512VL__)
-    vert512_merge_zmm(out, n_v, bm, D, c2s);
-#elif defined(__AVX2__)
-    vert512_merge_ymm(out, n_v, bm, D, c2s);
-#else
-    vert512_merge_x86v(out, n_v, bm, D, c2s);
-#endif
-}
-
-static inline void vert512_pack_x86_best(uint8_t *out, const uint8_t *ranks,
-                                         int n_v, int D, uint8_t base)
-{
-#if defined(__AVX512BW__) && defined(__AVX512VBMI__) && defined(__AVX512VL__)
-    vert512_pack_zmm(out, ranks, n_v, D, base);
-#elif defined(__AVX2__)
-    vert512_pack_ymm(out, ranks, n_v, D, base);
-#else
-    vert512_pack_x86v(out, ranks, n_v, D, base);
-#endif
-}
 
 #endif /* PIVCO_HUFFMAN_X86_VERTICAL_H */

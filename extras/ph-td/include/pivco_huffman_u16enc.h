@@ -11,11 +11,14 @@
  * Per-ISA #if dispatch (ph-td uses PIVCO_HAS_*, bench uses the router's
  * PIVCO_BACKEND_* — so gate on the architecture macro common to both).  Relies
  * on the shared primitives header providing compress_tab (neon/x86 tables), the
- * *_pack.h per-D helpers, bitmap_bytes(), the intrinsics, and
- * PIVCO_PRIM_ALWAYS_INLINE.  Moved verbatim from src/ (the src/ diff shows the
- * u16 -> u8 promotion). */
+ * *_pack.h per-D helpers, bitmap_bytes() and the intrinsics.  Moved verbatim
+ * from src/ (the src/ diff shows the u16 -> u8 promotion). */
 #ifndef PIVCO_HUFFMAN_U16ENC_H
 #define PIVCO_HUFFMAN_U16ENC_H
+
+#ifndef PIVCO_PRIM_ALWAYS_INLINE   /* ph-td includes a backend header directly */
+#define PIVCO_PRIM_ALWAYS_INLINE __attribute__((always_inline)) static inline
+#endif
 
 #if defined(__aarch64__)
 

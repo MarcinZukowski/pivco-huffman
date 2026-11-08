@@ -23,25 +23,6 @@
 #include "pivco_huffman_wire.h"
 #include "node_memo.h"
 #include "pivco_huffman_primitives.h"
-#ifdef PIVCO_PRIMS_INDIRECT
-#include "pivco_prims.h"
-#define prim_codec_init          g_pivco_prims->codec_init
-#define prim_enc_init            g_pivco_prims->enc_init
-#define prim_enc_partition_full  g_pivco_prims->enc_partition_full
-#define prim_enc_partition_right g_pivco_prims->enc_partition_right
-#define prim_enc_partition_none  g_pivco_prims->enc_partition_none
-#define prim_enc_pack_dN         g_pivco_prims->enc_pack_dN
-#define prim_enc_pack_dN_natural g_pivco_prims->enc_pack_dN_natural
-#define prim_popcount_K_right    g_pivco_prims->popcount_K_right
-#define prim_merge_cst_cst       g_pivco_prims->merge_cst_cst
-#define prim_merge_cst_vec       g_pivco_prims->merge_cst_vec
-#define prim_merge_vec_vec       g_pivco_prims->merge_vec_vec
-#define prim_merge_flat          g_pivco_prims->merge_flat
-#define prim_merge_flat_natural  g_pivco_prims->merge_flat_natural
-/* Compiled as the scalar backend, but runs any table's merges. */
-#undef PIVCO_PRIM_MERGE_OVERREAD
-#define PIVCO_PRIM_MERGE_OVERREAD PIVCO_PRIMS_MERGE_OVERREAD
-#endif
 #include "pivco_prof.h"
 #ifdef PIVCO_HAS_FSE
 #include "pivco_fse.h"
