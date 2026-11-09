@@ -1,6 +1,5 @@
 /* prims/entries.h — the prim_* entry points the codec calls, built from
- * a primitive table (prims/tables.h): this compile's prims_tab, or
- * g_pivco_prims in the prims codec.
+ * this compile's primitive table, prims_tab (prims/tables.h).
  *
  * Each prim_* calls its slot.  The flat-region entries (prim_merge_flat,
  * prim_enc_pack_dN) are built from the three span slots: the 512-lane
@@ -16,89 +15,83 @@
 
 #define PIVCO_PRIM_ALWAYS_INLINE __attribute__((always_inline)) static inline
 
-#if defined(PIVCO_PRIMS_INDIRECT)
-#define PIVCO_PRIMS_TAB g_pivco_prims
-#else
-#define PIVCO_PRIMS_TAB (&prims_tab)
-#endif
-
 PIVCO_PRIM_ALWAYS_INLINE void prim_codec_init(void)
-{ PIVCO_PRIMS_TAB->codec_init(); }
+{ prims_tab.codec_init(); }
 
 PIVCO_PRIM_ALWAYS_INLINE void prim_histogram_chunk(const uint8_t *in, size_t n,
                                                    uint32_t hist[256],
                                                    uint8_t *scratch)
-{ PIVCO_PRIMS_TAB->histogram_chunk(in, n, hist, scratch); }
+{ prims_tab.histogram_chunk(in, n, hist, scratch); }
 
 PIVCO_PRIM_ALWAYS_INLINE void prim_enc_init(uint8_t *ranks, int n,
                                             const uint8_t *symbols,
                                             const uint8_t *sym_to_rank,
                                             const pivco_enc_init_aux_t *aux)
-{ PIVCO_PRIMS_TAB->enc_init(ranks, n, symbols, sym_to_rank, aux); }
+{ prims_tab.enc_init(ranks, n, symbols, sym_to_rank, aux); }
 
 PIVCO_PRIM_ALWAYS_INLINE int prim_enc_partition_full(uint8_t *ranks, int n,
                                                      uint8_t thr, uint8_t *bm,
                                                      uint8_t *right_out)
-{ return PIVCO_PRIMS_TAB->enc_partition_full(ranks, n, thr, bm, right_out); }
+{ return prims_tab.enc_partition_full(ranks, n, thr, bm, right_out); }
 
 PIVCO_PRIM_ALWAYS_INLINE int prim_enc_partition_right(uint8_t *ranks, int n,
                                                       uint8_t thr, uint8_t *bm,
                                                       uint8_t *right_out)
-{ return PIVCO_PRIMS_TAB->enc_partition_right(ranks, n, thr, bm, right_out); }
+{ return prims_tab.enc_partition_right(ranks, n, thr, bm, right_out); }
 
 PIVCO_PRIM_ALWAYS_INLINE int prim_enc_partition_none(uint8_t *ranks, int n,
                                                      uint8_t thr, uint8_t *bm)
-{ return PIVCO_PRIMS_TAB->enc_partition_none(ranks, n, thr, bm); }
+{ return prims_tab.enc_partition_none(ranks, n, thr, bm); }
 
 PIVCO_PRIM_ALWAYS_INLINE int prim_popcount_K_right(const uint8_t *bm, int K)
-{ return PIVCO_PRIMS_TAB->popcount_K_right(bm, K); }
+{ return prims_tab.popcount_K_right(bm, K); }
 
 PIVCO_PRIM_ALWAYS_INLINE void prim_merge_cst_cst(const uint8_t *bm, int K,
                                                  uint8_t left_sym,
                                                  uint8_t right_sym,
                                                  uint8_t *out)
-{ PIVCO_PRIMS_TAB->merge_cst_cst(bm, K, left_sym, right_sym, out); }
+{ prims_tab.merge_cst_cst(bm, K, left_sym, right_sym, out); }
 
 PIVCO_PRIM_ALWAYS_INLINE void prim_merge_cst_vec(const uint8_t *bm, int K,
                                                  uint8_t left_sym,
                                                  const uint8_t *right_buf,
                                                  uint8_t *out)
-{ PIVCO_PRIMS_TAB->merge_cst_vec(bm, K, left_sym, right_buf, out); }
+{ prims_tab.merge_cst_vec(bm, K, left_sym, right_buf, out); }
 
 PIVCO_PRIM_ALWAYS_INLINE void prim_merge_vec_vec(const uint8_t *bm, int K,
                                                  const uint8_t *left_buf,
                                                  const uint8_t *right_buf,
                                                  uint8_t *out)
-{ PIVCO_PRIMS_TAB->merge_vec_vec(bm, K, left_buf, right_buf, out); }
+{ prims_tab.merge_vec_vec(bm, K, left_buf, right_buf, out); }
 
 /* ---------- Flat regions: the three span slots ---------- */
 
 PIVCO_PRIM_ALWAYS_INLINE void prim_merge_v512(uint8_t *out, int n,
                                               const uint8_t *bm, int D,
                                               const uint8_t *c2s)
-{ PIVCO_PRIMS_TAB->merge_v512(out, n, bm, D, c2s); }
+{ prims_tab.merge_v512(out, n, bm, D, c2s); }
 
 PIVCO_PRIM_ALWAYS_INLINE void prim_merge_v128(uint8_t *out, int n,
                                               const uint8_t *bm, int D,
                                               const uint8_t *c2s)
-{ PIVCO_PRIMS_TAB->merge_v128(out, n, bm, D, c2s); }
+{ prims_tab.merge_v128(out, n, bm, D, c2s); }
 
 PIVCO_PRIM_ALWAYS_INLINE void prim_merge_nat(uint8_t *out, int n,
                                              const uint8_t *bm, int D,
                                              const uint8_t *c2s)
-{ PIVCO_PRIMS_TAB->merge_nat(out, n, bm, D, c2s); }
+{ prims_tab.merge_nat(out, n, bm, D, c2s); }
 
 PIVCO_PRIM_ALWAYS_INLINE void prim_pack_v512(uint8_t *out, const uint8_t *ranks,
                                              int n, int D, uint8_t base)
-{ PIVCO_PRIMS_TAB->pack_v512(out, ranks, n, D, base); }
+{ prims_tab.pack_v512(out, ranks, n, D, base); }
 
 PIVCO_PRIM_ALWAYS_INLINE void prim_pack_v128(uint8_t *out, const uint8_t *ranks,
                                              int n, int D, uint8_t base)
-{ PIVCO_PRIMS_TAB->pack_v128(out, ranks, n, D, base); }
+{ prims_tab.pack_v128(out, ranks, n, D, base); }
 
 PIVCO_PRIM_ALWAYS_INLINE void prim_pack_nat(uint8_t *out, const uint8_t *ranks,
                                             int n, int D, uint8_t base)
-{ PIVCO_PRIMS_TAB->pack_nat(out, ranks, n, D, base); }
+{ prims_tab.pack_nat(out, ranks, n, D, base); }
 
 /* Natural-layout entries for bench_prim's ST_PACK/ST_MERGE_FLAT rows
  * (the entries below produce the layout `vertical` selects: the hybrid

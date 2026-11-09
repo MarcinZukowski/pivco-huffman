@@ -6,8 +6,8 @@
  * select, as the static const prims_tab.  The codec TU calls through it
  * (prims/entries.h), and the compiler resolves and inlines every call;
  * pivco_prims_table.c exports it for the prims codec.  The prims codec
- * itself (PIVCO_PRIMS_INDIRECT) defines no table: it calls through
- * g_pivco_prims.
+ * itself (PIVCO_PRIMS_INDIRECT) defines a table of trampolines: each slot
+ * calls the same slot of g_pivco_prims, the table picked at runtime.
  *
  * A backend can define more tables with the same flags, for one
  * microarchitecture each (prims_tab_<name>).  Only the prims codec runs
@@ -34,6 +34,121 @@
 
 /* Any table's merges can run here: the widest overread of them all. */
 #define PIVCO_PRIM_MERGE_OVERREAD PIVCO_PRIMS_MERGE_OVERREAD
+
+/* Trampolines: slot_<slot>_prims calls <slot> of g_pivco_prims, the
+ * table pivco_codec_select() picked for this CPU (or PIVCO_PRIMS).
+ *
+ * Why: they exist only so a specialized codec can still be built,
+ * without the dispatch machinery.  The codec always calls prims_tab.
+ * A specialized build binds it to one backend's kernels, which the
+ * compiler inlines; the prims codec binds it to these trampolines.
+ * Without specialized builds, the codec could call g_pivco_prims
+ * directly.
+ *
+ * The compiler folds prims_tab and inlines the trampolines, so each
+ * prim_* call is one indirect call through g_pivco_prims, with no
+ * trampoline frame. */
+static inline __attribute__((always_inline))
+void slot_codec_init_prims(void)
+{ g_pivco_prims->codec_init(); }
+
+static inline __attribute__((always_inline))
+void slot_histogram_chunk_prims(const uint8_t *in, size_t n,
+                                uint32_t hist[256], uint8_t *scratch)
+{ g_pivco_prims->histogram_chunk(in, n, hist, scratch); }
+
+static inline __attribute__((always_inline))
+void slot_enc_init_prims(uint8_t *ranks, int n, const uint8_t *symbols,
+                         const uint8_t *sym_to_rank,
+                         const pivco_enc_init_aux_t *aux)
+{ g_pivco_prims->enc_init(ranks, n, symbols, sym_to_rank, aux); }
+
+static inline __attribute__((always_inline))
+int slot_enc_partition_full_prims(uint8_t *ranks, int n, uint8_t thr,
+                                  uint8_t *bm, uint8_t *right_out)
+{ return g_pivco_prims->enc_partition_full(ranks, n, thr, bm, right_out); }
+
+static inline __attribute__((always_inline))
+int slot_enc_partition_right_prims(uint8_t *ranks, int n, uint8_t thr,
+                                   uint8_t *bm, uint8_t *right_out)
+{ return g_pivco_prims->enc_partition_right(ranks, n, thr, bm, right_out); }
+
+static inline __attribute__((always_inline))
+int slot_enc_partition_none_prims(uint8_t *ranks, int n, uint8_t thr,
+                                  uint8_t *bm)
+{ return g_pivco_prims->enc_partition_none(ranks, n, thr, bm); }
+
+static inline __attribute__((always_inline))
+int slot_popcount_K_right_prims(const uint8_t *bm, int K)
+{ return g_pivco_prims->popcount_K_right(bm, K); }
+
+static inline __attribute__((always_inline))
+void slot_merge_cst_cst_prims(const uint8_t *bm, int K, uint8_t left_sym,
+                              uint8_t right_sym, uint8_t *out)
+{ g_pivco_prims->merge_cst_cst(bm, K, left_sym, right_sym, out); }
+
+static inline __attribute__((always_inline))
+void slot_merge_cst_vec_prims(const uint8_t *bm, int K, uint8_t left_sym,
+                              const uint8_t *right_buf, uint8_t *out)
+{ g_pivco_prims->merge_cst_vec(bm, K, left_sym, right_buf, out); }
+
+static inline __attribute__((always_inline))
+void slot_merge_vec_vec_prims(const uint8_t *bm, int K,
+                              const uint8_t *left_buf,
+                              const uint8_t *right_buf, uint8_t *out)
+{ g_pivco_prims->merge_vec_vec(bm, K, left_buf, right_buf, out); }
+
+static inline __attribute__((always_inline))
+void slot_merge_v512_prims(uint8_t *out, int n, const uint8_t *bm, int D,
+                           const uint8_t *c2s)
+{ g_pivco_prims->merge_v512(out, n, bm, D, c2s); }
+
+static inline __attribute__((always_inline))
+void slot_merge_v128_prims(uint8_t *out, int n, const uint8_t *bm, int D,
+                           const uint8_t *c2s)
+{ g_pivco_prims->merge_v128(out, n, bm, D, c2s); }
+
+static inline __attribute__((always_inline))
+void slot_merge_nat_prims(uint8_t *out, int n, const uint8_t *bm, int D,
+                          const uint8_t *c2s)
+{ g_pivco_prims->merge_nat(out, n, bm, D, c2s); }
+
+static inline __attribute__((always_inline))
+void slot_pack_v512_prims(uint8_t *out, const uint8_t *ranks, int n, int D,
+                          uint8_t base)
+{ g_pivco_prims->pack_v512(out, ranks, n, D, base); }
+
+static inline __attribute__((always_inline))
+void slot_pack_v128_prims(uint8_t *out, const uint8_t *ranks, int n, int D,
+                          uint8_t base)
+{ g_pivco_prims->pack_v128(out, ranks, n, D, base); }
+
+static inline __attribute__((always_inline))
+void slot_pack_nat_prims(uint8_t *out, const uint8_t *ranks, int n, int D,
+                         uint8_t base)
+{ g_pivco_prims->pack_nat(out, ranks, n, D, base); }
+
+/* The prims codec's table: every slot a trampoline, so the prims codec
+ * runs whichever table g_pivco_prims points to. */
+static const pivco_prims_t prims_tab = {
+    .name                = "prims",
+    .codec_init          = slot_codec_init_prims,
+    .histogram_chunk     = slot_histogram_chunk_prims,
+    .enc_init            = slot_enc_init_prims,
+    .enc_partition_full  = slot_enc_partition_full_prims,
+    .enc_partition_right = slot_enc_partition_right_prims,
+    .enc_partition_none  = slot_enc_partition_none_prims,
+    .popcount_K_right    = slot_popcount_K_right_prims,
+    .merge_cst_cst       = slot_merge_cst_cst_prims,
+    .merge_cst_vec       = slot_merge_cst_vec_prims,
+    .merge_vec_vec       = slot_merge_vec_vec_prims,
+    .merge_v512          = slot_merge_v512_prims,
+    .merge_v128          = slot_merge_v128_prims,
+    .merge_nat           = slot_merge_nat_prims,
+    .pack_v512           = slot_pack_v512_prims,
+    .pack_v128           = slot_pack_v128_prims,
+    .pack_nat            = slot_pack_nat_prims,
+};
 
 #elif defined(PIVCO_BACKEND_SCALAR)
 
