@@ -119,7 +119,7 @@ add_executable(pivco_huffman_bench_encode
 )
 target_link_libraries(pivco_huffman_bench_encode pivco_huffman huf0 m)
 target_include_directories(pivco_huffman_bench_encode PRIVATE
-    ${CMAKE_SOURCE_DIR}/ext/fse/lib)
+    ${CMAKE_SOURCE_DIR}/ext/fse/lib ${CMAKE_SOURCE_DIR}/src)
 
 # Tree-shape ablation: OPTIMIZED / NAIVE / FUSED / CANONICAL_FLAT, with
 # huf0 (stock) and oo-huff baselines measured in the same session for
@@ -525,10 +525,10 @@ endif()
 # manual compilation.  (Add add_executable() blocks here if they get
 # resurrected.)
 
-# Dispatch builds compile at the SSE4.1 floor but still define
+# The build compiles at the SSE4.1 floor but still defines
 # PIVCO_HAS_AVX512; these benches call the AVX-512 primitives directly,
 # so they get that tier's flags and run only on AVX-512 CPUs.
-if(PIVCO_CODEC_DISPATCH AND PIVCO_TIER_AVX512)
+if(PIVCO_TIER_AVX512)
     foreach(t pivco_partition_micro
               pivco_micro_avx512_cnt
               pivco_fusion_v3_avx512_cnt

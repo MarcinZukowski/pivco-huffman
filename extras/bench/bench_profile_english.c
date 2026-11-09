@@ -157,17 +157,7 @@ int main(int argc, char **argv)
                 size_t consumed;
                 if (r == 0 && b < 5) printf("  block %d: off=%zu len=%zu\n", b, enc_off[b], enc_off[b+1]-enc_off[b]);
                 int rc;
-                if (use_bu) {
-#if defined(PIVCO_HAS_NEON)
-                    rc = pivco_decode_bu_neon(bench_dec_ctx(), &table, enc_buf + enc_off[b], enc_off[b + 1] - enc_off[b], out + b * N, &consumed);
-#elif defined(PIVCO_HAS_SSE4)
-                    rc = pivco_decode_bu_x86(bench_dec_ctx(), &table, enc_buf + enc_off[b], enc_off[b + 1] - enc_off[b], out + b * N, &consumed);
-#else
-                    rc = pivco_decode(bench_dec_ctx(), &table, enc_buf + enc_off[b], enc_off[b + 1] - enc_off[b], out + b * N, &consumed);
-#endif
-                } else {
-                    rc = pivco_decode(bench_dec_ctx(), &table, enc_buf + enc_off[b], enc_off[b + 1] - enc_off[b], out + b * N, &consumed);
-                }
+                rc = pivco_decode(bench_dec_ctx(), &table, enc_buf + enc_off[b], enc_off[b + 1] - enc_off[b], out + b * N, &consumed);
                 if (r == 0 && b < 5) printf("    rc=%d consumed=%zu\n", rc, consumed);
                 if (consumed != enc_off[b + 1] - enc_off[b]) {
                     printf("MISMATCH block %d: encoded=%zu consumed=%zu rc=%d\n",

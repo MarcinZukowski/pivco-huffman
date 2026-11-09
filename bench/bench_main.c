@@ -1,4 +1,5 @@
 #include "pivco_huffman.h"
+#include "pivco_prims.h"   /* pivco_prims_select: the scalar reference rows */
 #include "bench_ctx.h"
 #include "mem.h"
 #define HUF_STATIC_LINKING_ONLY
@@ -7,6 +8,16 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+
+/* Switches the codec's primitive table (NULL: the startup one); the
+ * scalar table is the reference for the pivco_s rows and checksums. */
+static void bench_select_prims(const char *name)
+{
+    if (pivco_prims_select(name) != 0) {
+        fprintf(stderr, "no primitive table %s\n", name ? name : "(startup)");
+        exit(1);
+    }
+}
 
 /* From bench_distributions.c */
 extern void         bench_init(void);
@@ -224,11 +235,13 @@ int main(int argc, char **argv)
         uint8_t *pivco_enc_buf = (uint8_t *)malloc((size_t)NBLOCKS * PIVCO_MAX_ENCODED_SIZE);
         size_t  *pivco_enc_off = (size_t *)malloc((size_t)(NBLOCKS + 1) * sizeof(size_t));
         pivco_enc_off[0] = 0;
+        bench_select_prims("scalar");
         for (int b = 0; b < NBLOCKS; b++) {
             size_t len;
-            pivco_encode_scalar(bench_enc_ctx(), table, symbols + (size_t)b * BLK, BLK, pivco_enc_buf + pivco_enc_off[b], &len);
+            pivco_encode(bench_enc_ctx(), table, symbols + (size_t)b * BLK, BLK, pivco_enc_buf + pivco_enc_off[b], &len);
             pivco_enc_off[b + 1] = pivco_enc_off[b] + len;
         }
+        bench_select_prims(NULL);
 
 #if defined(PIVCO_HAS_NEON) || defined(PIVCO_HAS_SSE4) || defined(PIVCO_HAS_AVX512) || defined(PIVCO_HAS_SVE)
         uint8_t *neon_enc_buf = (uint8_t *)malloc((size_t)NBLOCKS * PIVCO_MAX_ENCODED_SIZE);
@@ -307,7 +320,9 @@ int main(int argc, char **argv)
             size_t consumed;
 
             /* PIVCO scalar — first block */
-            rc = pivco_decode_scalar(bench_dec_ctx(), table, pivco_enc_buf, pivco_enc_off[1], dec, &consumed);
+            bench_select_prims("scalar");
+            rc = pivco_decode(bench_dec_ctx(), table, pivco_enc_buf, pivco_enc_off[1], dec, &consumed);
+            bench_select_prims(NULL);
             if (rc != PIVCO_OK || memcmp(symbols, dec, BLK) != 0) {
                 printf("%-13s ERROR: pivco roundtrip failed\n", name);
                 free(dec); goto cleanup;
@@ -373,10 +388,12 @@ int main(int argc, char **argv)
          * bug in pivco_n only flagged its peers as "wrong" — and we
          * had been ignoring those errors as harness flakiness.  See
          * commit 1399cee for the regression that motivated this. */
+        bench_select_prims("scalar");
         for (int b = 0; b < NBLOCKS; b++) {
             size_t consumed;
-            pivco_decode_scalar(bench_dec_ctx(), table, pivco_enc_buf + pivco_enc_off[b], pivco_enc_off[b+1] - pivco_enc_off[b], dec_buf + (size_t)b * BLK, &consumed);
+            pivco_decode(bench_dec_ctx(), table, pivco_enc_buf + pivco_enc_off[b], pivco_enc_off[b+1] - pivco_enc_off[b], dec_buf + (size_t)b * BLK, &consumed);
         }
+        bench_select_prims(NULL);
         uint64_t expected_cksum = fnv1a(dec_buf, TOTAL_SYMBOLS);
 
 #if defined(PIVCO_HAS_NEON) || defined(PIVCO_HAS_SSE4) || defined(PIVCO_HAS_AVX512) || defined(PIVCO_HAS_SVE)
@@ -392,21 +409,7 @@ int main(int argc, char **argv)
         BENCH(p_dec_bu, {
             for (int b = 0; b < NBLOCKS; b++) {
                 size_t consumed;
-#if defined(PIVCO_CODEC_DISPATCH)
-                /* The codec chosen at startup: a direct AVX-512 call would
-                 * fault on a CPU without it. */
                 pivco_decode(bench_dec_ctx(), table, neon_enc_buf + neon_enc_off[b], neon_enc_off[b+1] - neon_enc_off[b], dec_buf + (size_t)b * BLK, &consumed);
-#elif defined(PIVCO_HAS_NEON)
-                pivco_decode_bu_neon(bench_dec_ctx(), table, neon_enc_buf + neon_enc_off[b], neon_enc_off[b+1] - neon_enc_off[b], dec_buf + (size_t)b * BLK, &consumed);
-#elif defined(PIVCO_HAS_AVX512)
-                /* AVX-512 hosts: codec_avx512 (Phase 5 backend, 2026-05-14).
-                 * Distinct symbol from pivco_decode_bu_x86 (= codec_x86,
-                 * SSE/AVX2 only); the runtime dispatcher in pivco_huffman.c
-                 * picks this entry on AVX-512 hosts too. */
-                pivco_decode_bu_avx512(bench_dec_ctx(), table, neon_enc_buf + neon_enc_off[b], neon_enc_off[b+1] - neon_enc_off[b], dec_buf + (size_t)b * BLK, &consumed);
-#elif defined(PIVCO_HAS_SSE4)
-                pivco_decode_bu_x86(bench_dec_ctx(), table, neon_enc_buf + neon_enc_off[b], neon_enc_off[b+1] - neon_enc_off[b], dec_buf + (size_t)b * BLK, &consumed);
-#endif
             }
         }, "pivco_bu");
 
@@ -439,12 +442,14 @@ int main(int argc, char **argv)
 
       if (!quick && !tdbu_only) {
         /* PIVCO scalar: decode NBLOCKS blocks */
+        bench_select_prims("scalar");
         BENCH(p_dec_s, {
             for (int b = 0; b < NBLOCKS; b++) {
                 size_t consumed;
-                pivco_decode_scalar(bench_dec_ctx(), table, pivco_enc_buf + pivco_enc_off[b], pivco_enc_off[b+1] - pivco_enc_off[b], dec_buf + (size_t)b * BLK, &consumed);
+                pivco_decode(bench_dec_ctx(), table, pivco_enc_buf + pivco_enc_off[b], pivco_enc_off[b+1] - pivco_enc_off[b], dec_buf + (size_t)b * BLK, &consumed);
             }
         }, "pivco_s");
+        bench_select_prims(NULL);
 
         /* Trad 1-stream: decode blocks (ALL-only) */
         if (run_all) {

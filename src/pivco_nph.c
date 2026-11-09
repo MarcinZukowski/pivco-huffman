@@ -7,16 +7,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* prim_merge_cst_vec of the backend pivco_decode dispatches to (see
- * PIVCO_BACKEND_FN), defined in pivco_huffman_codec.c.  right_buf is
- * read up to 16 B past the values the merge consumes. */
-void PIVCO_BACKEND_FN(pivco_merge_cst_vec)(const uint8_t *bm, int K,
-                                           uint8_t left_sym,
-                                           const uint8_t *right_buf,
-                                           uint8_t *out);
-#if defined(PIVCO_CODEC_DISPATCH)
-#include "pivco_prims.h"   /* dispatch builds use the table chosen at startup */
-#endif
+#define PIVCO_PRIMS_INDIRECT 1   /* prim_* through the table picked at runtime */
+#include "pivco_huffman_primitives.h"
 
 size_t pivco_nph_write_lens(const uint8_t lens[PIVCO_MAX_SYMBOLS], uint8_t *out)
 {
@@ -86,12 +78,8 @@ size_t pivco_nph_read_lens(const uint8_t *in, size_t avail,
     }
     for (int j = 0; j < k; j++)
         bad |= (unsigned)(vals[j] - 1) >= (unsigned)PIVCO_MAX_CODE_LEN;
-#if defined(PIVCO_CODEC_DISPATCH)
-    g_pivco_prims->codec_init();
-    g_pivco_prims->merge_cst_vec(presence, PIVCO_MAX_SYMBOLS, 0, vals, lens);
-#else
-    PIVCO_BACKEND_FN(pivco_merge_cst_vec)(presence, PIVCO_MAX_SYMBOLS, 0, vals, lens);
-#endif
+    prim_codec_init();
+    prim_merge_cst_vec(presence, PIVCO_MAX_SYMBOLS, 0, vals, lens);
     return bad ? 0 : len;
 }
 

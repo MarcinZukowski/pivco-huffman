@@ -1,9 +1,8 @@
 /* pivco_prims.h — the codec's primitives as a struct of function
  * pointers, one const instance per table (prims/tables.h).
  *
- * The prims codec (the codec built with PIVCO_PRIMS_INDIRECT) calls
- * every prim_* through g_pivco_prims instead of inlining a backend's
- * header. The signatures and contracts are the ones documented in
+ * The codec (built with PIVCO_PRIMS_INDIRECT) calls every prim_*
+ * through g_pivco_prims instead of inlining a backend's header. The signatures and contracts are the ones documented in
  * pivco_huffman_primitives.h.
  *
  * Internal header.  Not part of the public API. */
@@ -63,13 +62,21 @@ extern const pivco_prims_t *const pivco_prims_neon;
 extern const pivco_prims_t *const pivco_prims_x86;
 extern const pivco_prims_t *const pivco_prims_avx512;
 
-/* The table the prims codec calls through.  Defaults to the build's
- * tier refined by CPU vendor; PIVCO_PRIMS=<name> in the environment
- * overrides it (developers only). */
+/* The table the codec calls through.  Defaults to the best one for this
+ * CPU's tier, vendor and microarchitecture; PIVCO_PRIMS=<name> in the
+ * environment overrides it (developers only). */
 extern const pivco_prims_t *g_pivco_prims;
 
-/* Names of the codec and the table chosen at startup (dispatch builds). */
-const char *pivco_codec_name(void);
+/* The current table's name. */
 const char *pivco_prims_name(void);
+
+/* For tests and benches: the number of built tables, the i-th one's
+ * name (0 <= i < count), and switching tables by name (NULL: back to the
+ * startup choice).  pivco_prims_select returns 0, or -1 if the table is
+ * unknown or this CPU can't run it.  Not thread-safe: no encode or
+ * decode may run meanwhile. */
+int pivco_prims_table_count(void);
+const char *pivco_prims_table_name(int i);
+int pivco_prims_select(const char *name);
 
 #endif /* PIVCO_PRIMS_H */

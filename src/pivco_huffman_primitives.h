@@ -1,8 +1,7 @@
 /* pivco_huffman_primitives.h — backend-primitive interface (router header).
  *
- * pivco_huffman_codec.c is compiled once per backend tier; this header
- * pulls in the right primitive implementation header based on the
- * PIVCO_BACKEND_* macro that CMake passes to that translation unit.
+ * Pulls in the right primitive implementation header based on the
+ * PIVCO_BACKEND_* macro (see Backend selection below).
  *
  * Every backend primitive header MUST provide static-inline
  * implementations under specialized names (e.g. `part_core_scalar`,
@@ -206,11 +205,16 @@
 #ifndef PIVCO_HUFFMAN_PRIMITIVES_H
 #define PIVCO_HUFFMAN_PRIMITIVES_H
 
-/* Backend selection.  The per-backend codec TUs pass an explicit
- * PIVCO_BACKEND_* define (CMake) and keep full control.  Any OTHER TU
- * may simply include this header: with no explicit define, the build
- * architecture picks the backend (the same tier CMake's codec dispatch
- * prefers for the build), so callers of prim_* never name a backend. */
+/* Backend selection.  The per-backend table compiles
+ * (pivco_prims_table.c) pass an explicit PIVCO_BACKEND_* define (CMake)
+ * and keep full control.  A TU that sets
+ * PIVCO_PRIMS_INDIRECT instead calls every prim_* through the table
+ * picked at runtime, as the prims codec does (prims/tables.h).  Any
+ * other TU gets the backend its compile flags allow, for benches that
+ * call one backend's primitives directly. */
+#if defined(PIVCO_PRIMS_INDIRECT) && !defined(PIVCO_BACKEND_SCALAR)
+#  define PIVCO_BACKEND_SCALAR 1   /* shared scalar helpers only */
+#endif
 #if !defined(PIVCO_BACKEND_SCALAR) && !defined(PIVCO_BACKEND_NEON) \
  && !defined(PIVCO_BACKEND_X86)    && !defined(PIVCO_BACKEND_AVX512)
 #  if defined(__aarch64__) || defined(__ARM_NEON)

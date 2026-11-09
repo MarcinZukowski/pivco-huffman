@@ -1,10 +1,9 @@
 /* pivco_huffman_codec.c — unified encode + bottom-up decode.
  *
- * One source file, compiled once per backend tier (CMake passes
- * -DPIVCO_BACKEND_{SCALAR,NEON,X86,AVX512}).  The tree walk + dispatch
- * + wire format are identical across backends; the per-node SIMD work
- * lives in pivco_huffman_primitives_<backend>.h, selected via the
- * router pivco_huffman_primitives.h.
+ * Compiled once, with PIVCO_PRIMS_INDIRECT: every prim_* goes through
+ * the primitive table picked at runtime (prims/tables.h).  The per-node
+ * SIMD work lives in the tables' kernels, in
+ * pivco_huffman_primitives_<backend>.h.
  *
  * Two responsibilities only:
  *
@@ -183,34 +182,16 @@ extern uint64_t g_pivco_fse_attempt [PIVCO_FSE_STATS_SLOTS];
 extern uint64_t g_pivco_fse_bytes_in [PIVCO_FSE_STATS_SLOTS];
 extern uint64_t g_pivco_fse_bytes_out[PIVCO_FSE_STATS_SLOTS];
 
-/* ---------- Backend → entry-point name ---------- */
+/* ---------- Entry-point names ---------- */
 
-#if defined(PIVCO_CODEC_VARIANT)
-#  define CODEC_ENCODE_ENTRY PIVCO_BACKEND_FN(pivco_encode)
-#  define CODEC_DECODE_ENTRY PIVCO_BACKEND_FN(pivco_decode_bu)
-#elif defined(PIVCO_BACKEND_SCALAR)
-#  define CODEC_ENCODE_ENTRY pivco_encode_scalar
-#  define CODEC_DECODE_ENTRY pivco_decode_scalar
-#elif defined(PIVCO_BACKEND_NEON)
-#  define CODEC_ENCODE_ENTRY pivco_encode_neon
-#  define CODEC_DECODE_ENTRY pivco_decode_bu_neon
-#elif defined(PIVCO_BACKEND_X86)
-#  define CODEC_ENCODE_ENTRY pivco_encode_x86
-#  define CODEC_DECODE_ENTRY pivco_decode_bu_x86
-#elif defined(PIVCO_BACKEND_AVX512)
-#  define CODEC_ENCODE_ENTRY pivco_encode_avx512
-#  define CODEC_DECODE_ENTRY pivco_decode_bu_avx512
-#else
-#  error "pivco_huffman_codec.c needs PIVCO_BACKEND_{SCALAR,NEON,X86,AVX512}"
-#endif
-#if defined(PIVCO_CODEC_VARIANT)
+#define CODEC_ENCODE_ENTRY PIVCO_BACKEND_FN(pivco_encode)
+#define CODEC_DECODE_ENTRY PIVCO_BACKEND_FN(pivco_decode_bu)
 int CODEC_ENCODE_ENTRY(pivco_encoder_t *enc_ctx, const pivco_table_t *table,
                        const uint8_t *symbols, size_t n,
                        uint8_t *out, size_t *out_len);
 int CODEC_DECODE_ENTRY(pivco_decoder_t *dec_ctx, const pivco_table_t *table,
                        const uint8_t *in, size_t in_len,
                        uint8_t *symbols, size_t *consumed);
-#endif
 
 /* ---------- Encode tree walk ---------- *
  *
@@ -1025,18 +1006,6 @@ static int codec_snph_decompress(pivco_decoder_t *dec_ctx,
     const pivco_table_t *inner = pivco_snph_table(nested, src[0], table->flat_layout);
     if (!inner) return 0;
     return codec_nph_decode_inner(nested, inner, src + 1, len - 1, dst, nbytes);
-}
-
-/* prim_merge_cst_vec for code outside the per-backend codec build
- * (pivco_nph.c's code-length reader).  May be called before any
- * encode or decode, so it initialises the backend's tables. */
-void PIVCO_BACKEND_FN(pivco_merge_cst_vec)(const uint8_t *bm, int K,
-                                           uint8_t left_sym,
-                                           const uint8_t *right_buf,
-                                           uint8_t *out)
-{
-    prim_codec_init();
-    prim_merge_cst_vec(bm, K, left_sym, right_buf, out);
 }
 #endif
 

@@ -593,9 +593,8 @@ void pivco_build_traditional_table(pivco_table_t *table);
  *     N comes from the wire — no `n` parameter — and `symbols` must
  *     have room for the worst case, typically PIVCO_BLOCK_SIZE.
  *
- * Both compile-time-dispatch to the best backend built into this
- * binary (the workers below) and accumulate ctx->stats on success;
- * that is their only difference from the workers. */
+ * Both run the primitive table picked at startup for this CPU and
+ * accumulate ctx->stats on success. */
 
 int pivco_encode(pivco_encoder_t *enc, const pivco_table_t *table,
                  const uint8_t *symbols, size_t n,
@@ -603,41 +602,6 @@ int pivco_encode(pivco_encoder_t *enc, const pivco_table_t *table,
 int pivco_decode(pivco_decoder_t *dec, const pivco_table_t *table,
                  const uint8_t *in, size_t in_len,
                  uint8_t *symbols, size_t *consumed);
-
-/* Per-backend workers: same contract as pivco_encode/_decode
- * minus the stats accounting.  Exposed for benches and tests; normal
- * callers use the dispatching pair above. */
-
-int pivco_encode_scalar(pivco_encoder_t *enc, const pivco_table_t *table,
-                        const uint8_t *symbols, size_t n,
-                        uint8_t *out, size_t *out_len);
-
-
-int pivco_decode_scalar(pivco_decoder_t *dec, const pivco_table_t *table,
-                        const uint8_t *in, size_t in_len,
-                        uint8_t *symbols, size_t *consumed);
-
-#ifdef PIVCO_HAS_NEON
-int pivco_encode_neon(pivco_encoder_t *enc, const pivco_table_t *table,
-                      const uint8_t *symbols, size_t n,
-                      uint8_t *out, size_t *out_len);
-
-/* Bottom-up merge decode (NEON). */
-int pivco_decode_bu_neon(pivco_decoder_t *dec, const pivco_table_t *table,
-                         const uint8_t *in, size_t in_len,
-                         uint8_t *symbols, size_t *consumed);
-#endif
-
-#ifdef PIVCO_HAS_SSE4
-int pivco_encode_x86(pivco_encoder_t *enc, const pivco_table_t *table,
-                     const uint8_t *symbols, size_t n,
-                     uint8_t *out, size_t *out_len);
-
-/* Bottom-up merge decode (x86 SSE4.1 / AVX-512 VBMI2). */
-int pivco_decode_bu_x86(pivco_decoder_t *dec, const pivco_table_t *table,
-                        const uint8_t *in, size_t in_len,
-                        uint8_t *symbols, size_t *consumed);
-#endif
 
 /* Prior experimental NEON variants (neon2, neon2b, neon_fused_1leaf)
  * are preserved under extras/ as negative results. See extras/README_*
@@ -648,17 +612,6 @@ int pivco_decode_bu_x86(pivco_decoder_t *dec, const pivco_table_t *table,
  * BU on the standard 2-way wire format beats it on all 29 distributions
  * across all 7 EC2 test hosts; no production caller remained.  See
  * docs/PREFIX_RADIX.md for the historical design record. */
-
-#ifdef PIVCO_HAS_AVX512
-int pivco_encode_avx512(pivco_encoder_t *enc, const pivco_table_t *table,
-                        const uint8_t *symbols, size_t n,
-                        uint8_t *out, size_t *out_len);
-
-/* Bottom-up merge decode (AVX-512 VBMI2). */
-int pivco_decode_bu_avx512(pivco_decoder_t *dec, const pivco_table_t *table,
-                           const uint8_t *in, size_t in_len,
-                           uint8_t *symbols, size_t *consumed);
-#endif
 
 /* Top-down (TD) decode entry points have been retired (2026-05-14).
  * BU is the production decoder on every platform.  TD implementations

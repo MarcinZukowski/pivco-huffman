@@ -60,7 +60,7 @@ typedef enum {
     PROF_WIRE_BITMAP_RAW,           /* marker==0: raw bitmap, pointer + advance */
     PROF_WIRE_BITMAP_FSE,           /* marker!=0: FSE-decompress bitmap body */
 
-    /* Encoder (pivco_encode_neon / encode_node_neon).  Mirrors
+    /* Encoder (pivco_encode / codec_encode_node).  Mirrors
      * the decode side: per-primitive timing of the work done inside a
      * node body (not the recursion itself), plus the per-block setup. */
     PROF_ENC_INIT,                  /* codes[]/lens[]/indices[] setup, per block */
@@ -76,8 +76,8 @@ typedef enum {
      * would double-count). */
     PROF_DECODE_NODE,
     PROF_DECODE_ENTRY,
-    PROF_ENC_NODE_VISIT,            /* count-only: calls to encode_node_neon */
-    PROF_ENC_ENTRY,                 /* count-only: calls to pivco_encode_neon */
+    PROF_ENC_NODE_VISIT,            /* count-only: calls to codec_encode_node */
+    PROF_ENC_ENTRY,                 /* count-only: calls to pivco_encode */
 
     /* File-codec layer (pivcohuf_file.c).  Wraps the entire file-level
      * pipeline so the CLI can show where time goes outside the

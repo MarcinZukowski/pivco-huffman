@@ -1,12 +1,11 @@
 /* pivco_prims_table.c — exports this compile's tables (prims/tables.h)
- * for the prims codec: the one its codec inlines, plus any defined only
- * for the prims codec.  Compiled once per backend and per codec variant,
- * with the same defines as that codec. */
+ * for the prims codec.  Compiled once per backend (and per variant, such
+ * as x86_avx2_intel) with that backend's defines and flags. */
 
 /* Makes prims/tables.h define every table of this compile, not only
  * prims_tab.  The extra tables (prims_tab_<name>) are run only by the
- * prims codec; the compile-time codec TUs leave this unset, so they
- * don't define static tables they never use. */
+ * prims codec; benches that include one backend leave this unset, so
+ * they don't define static tables they never use. */
 #define PIVCO_PRIMS_ALL_TABLES 1
 
 #include "pivco_huffman.h"

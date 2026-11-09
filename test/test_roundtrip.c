@@ -5,7 +5,9 @@ static void t_ctx_init(void) {
     if (!g_tenc) g_tenc = pivco_encoder_create();
     if (!g_tdec) g_tdec = pivco_decoder_create();
 }
-#include "pivco_huffman_primitives.h"  /* prim_histogram_chunk (arch-selected) */
+#define PIVCO_PRIMS_INDIRECT 1   /* prim_* through the table picked at runtime */
+#include "pivco_huffman_primitives.h"
+#include "pivco_prims.h"   /* pivco_prims_select: every table */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -26,6 +28,64 @@ static uint64_t xorshift64(uint64_t *state)
     printf("  FAIL: " msg "\n", ##__VA_ARGS__); \
     return 1; \
 } while (0)
+
+/* Decodes `enc` with the current table and checks it against symbols. */
+static int t_decode_check(const char *what, const pivco_table_t *table,
+                          const uint8_t *symbols, int n,
+                          const uint8_t *enc, size_t enc_len)
+{
+    uint8_t decoded[PIVCO_BLOCK_SIZE];
+    size_t consumed;
+    int rc = pivco_decode(g_tdec, table, enc, enc_len, decoded, &consumed);
+    if (rc != PIVCO_OK) FAIL("%s decode returned %d", what, rc);
+    for (int i = 0; i < n; i++) {
+        if (symbols[i] != decoded[i]) {
+            FAIL("%s mismatch at position %d: expected %d, got %d",
+                 what, i, symbols[i], decoded[i]);
+        }
+    }
+    if (consumed != enc_len)
+        FAIL("%s consumed %zu bytes, expected %zu", what, consumed, enc_len);
+    return 0;
+}
+
+/* Round-trips symbols with every table this CPU runs, and decodes each
+ * table's stream with the scalar table too (the reference).  Sets
+ * *scalar_len to the scalar table's stream size.  Leaves the scalar
+ * table selected; the caller restores the startup table. */
+static int t_roundtrip_tables(const pivco_table_t *table,
+                              const uint8_t *symbols, int n,
+                              size_t *scalar_len)
+{
+    uint8_t encoded[PIVCO_MAX_ENCODED_SIZE];
+    char what[64];
+    for (int t = 0; t < pivco_prims_table_count(); t++) {
+        const char *tab = pivco_prims_table_name(t);
+        if (pivco_prims_select(tab) != 0)
+            continue;
+        size_t enc_len;
+        int rc = pivco_encode(g_tenc, table, symbols, (size_t)n, encoded, &enc_len);
+        if (rc != PIVCO_OK) FAIL("%s encode returned %d", tab, rc);
+        if (!strcmp(tab, "scalar"))
+            *scalar_len = enc_len;
+        if (t_decode_check(tab, table, symbols, n, encoded, enc_len))
+            return 1;
+        if (pivco_prims_select("scalar") != 0) FAIL("no scalar table");
+        snprintf(what, sizeof what, "%s-enc / scalar-dec", tab);
+        if (t_decode_check(what, table, symbols, n, encoded, enc_len))
+            return 1;
+    }
+    return 0;
+}
+
+/* t_roundtrip_tables, then back to the startup table. */
+static int t_roundtrip(const pivco_table_t *table, const uint8_t *symbols,
+                       int n, size_t *scalar_len)
+{
+    int bad = t_roundtrip_tables(table, symbols, n, scalar_len);
+    if (pivco_prims_select(NULL) != 0) FAIL("startup table not restored");
+    return bad;
+}
 
 /* ---------- Test: build table and verify canonical codes ---------- */
 
@@ -96,26 +156,15 @@ static int test_single_symbol(void)
     uint8_t symbols[PIVCO_BLOCK_SIZE];
     memset(symbols, 42, sizeof(symbols));
 
-    /* PIVCO roundtrip */
-    uint8_t encoded[PIVCO_MAX_ENCODED_SIZE];
-    size_t enc_len;
-    int rc = pivco_encode_scalar(g_tenc, &table, symbols, PIVCO_BLOCK_SIZE, encoded, &enc_len);
-    if (rc != PIVCO_OK) FAIL("encode returned %d", rc);
-
-    uint8_t decoded[PIVCO_BLOCK_SIZE];
-    size_t consumed;
-    rc = pivco_decode_scalar(g_tdec, &table, encoded, enc_len, decoded, &consumed);
-    if (rc != PIVCO_OK) FAIL("decode returned %d", rc);
-
-    if (memcmp(symbols, decoded, PIVCO_BLOCK_SIZE) != 0) {
-        FAIL("PIVCO roundtrip mismatch");
-    }
+    /* PIVCO roundtrip, every table */
+    size_t enc_len = 0;
+    if (t_roundtrip(&table, symbols, PIVCO_BLOCK_SIZE, &enc_len)) return 1;
 
     /* Traditional roundtrip */
     pivco_build_traditional_table(&table);
     uint8_t trad_enc[PIVCO_BLOCK_SIZE * 2];
     size_t trad_len, trad_bits;
-    rc = trad_huffman_encode(symbols, PIVCO_BLOCK_SIZE, &table,
+    int rc = trad_huffman_encode(symbols, PIVCO_BLOCK_SIZE, &table,
                              trad_enc, &trad_len, &trad_bits);
     if (rc != PIVCO_OK) FAIL("trad encode returned %d", rc);
 
@@ -162,27 +211,9 @@ static int test_roundtrip_dist(const char *name, const uint64_t freq[PIVCO_MAX_S
         symbols[i] = (uint8_t)sym;
     }
 
-    /* PIVCO scalar roundtrip */
-    uint8_t encoded[PIVCO_MAX_ENCODED_SIZE];
-    size_t enc_len;
-    rc = pivco_encode_scalar(g_tenc, &table, symbols, PIVCO_BLOCK_SIZE, encoded, &enc_len);
-    if (rc != PIVCO_OK) FAIL("pivco encode returned %d", rc);
-
-    uint8_t decoded[PIVCO_BLOCK_SIZE];
-    size_t consumed;
-    rc = pivco_decode_scalar(g_tdec, &table, encoded, enc_len, decoded, &consumed);
-    if (rc != PIVCO_OK) FAIL("pivco decode returned %d", rc);
-
-    for (int i = 0; i < PIVCO_BLOCK_SIZE; i++) {
-        if (symbols[i] != decoded[i]) {
-            FAIL("pivco mismatch at position %d: expected %d, got %d",
-                 i, symbols[i], decoded[i]);
-        }
-    }
-
-    if (consumed != enc_len) {
-        FAIL("pivco consumed %zu bytes, expected %zu", consumed, enc_len);
-    }
+    /* PIVCO roundtrip, every table */
+    size_t enc_len = 0;
+    if (t_roundtrip(&table, symbols, PIVCO_BLOCK_SIZE, &enc_len)) return 1;
 
     /* Traditional roundtrip */
     pivco_build_traditional_table(&table);
@@ -203,72 +234,6 @@ static int test_roundtrip_dist(const char *name, const uint64_t freq[PIVCO_MAX_S
                  i, symbols[i], trad_dec[i]);
         }
     }
-
-#ifdef PIVCO_HAS_NEON
-    /* NEON encode + BU NEON decode roundtrip (the production path). */
-    uint8_t neon_enc[PIVCO_MAX_ENCODED_SIZE];
-    size_t neon_len;
-    rc = pivco_encode_neon(g_tenc, &table, symbols, PIVCO_BLOCK_SIZE, neon_enc, &neon_len);
-    if (rc != PIVCO_OK) FAIL("neon encode returned %d", rc);
-
-    {
-        uint8_t bu_dec[PIVCO_BLOCK_SIZE];
-        size_t bu_consumed;
-        rc = pivco_decode_bu_neon(g_tdec, &table, neon_enc, neon_len, bu_dec, &bu_consumed);
-        if (rc != PIVCO_OK) FAIL("bu_neon decode returned %d", rc);
-        for (int i = 0; i < PIVCO_BLOCK_SIZE; i++) {
-            if (symbols[i] != bu_dec[i]) {
-                FAIL("bu_neon mismatch at position %d: expected %d, got %d",
-                     i, symbols[i], bu_dec[i]);
-            }
-        }
-        if (bu_consumed != neon_len) {
-            FAIL("bu_neon consumed %zu bytes, expected %zu",
-                 bu_consumed, neon_len);
-        }
-    }
-
-    /* Cross-check: NEON-encoded stream against scalar decoder.
-     * Catches encoder bugs that NEON decode reads symmetrically. */
-    {
-        uint8_t cross_dec[PIVCO_BLOCK_SIZE];
-        size_t cross_consumed;
-        rc = pivco_decode_scalar(g_tdec, &table, neon_enc, neon_len, cross_dec, &cross_consumed);
-        if (rc != PIVCO_OK) FAIL("neon-enc -> scalar-dec rc=%d", rc);
-        for (int i = 0; i < PIVCO_BLOCK_SIZE; i++) {
-            if (symbols[i] != cross_dec[i]) {
-                FAIL("neon-enc / scalar-dec mismatch at %d: "
-                     "expected %d, got %d",
-                     i, symbols[i], cross_dec[i]);
-            }
-        }
-    }
-#endif
-
-#ifdef PIVCO_HAS_SSE4
-    /* SSE encode + BU SSE/AVX-512 decode roundtrip. */
-    {
-        uint8_t sse_enc[PIVCO_MAX_ENCODED_SIZE];
-        size_t sse_len;
-        rc = pivco_encode_x86(g_tenc, &table, symbols, PIVCO_BLOCK_SIZE, sse_enc, &sse_len);
-        if (rc != PIVCO_OK) FAIL("sse encode returned %d", rc);
-
-        uint8_t bu_dec[PIVCO_BLOCK_SIZE];
-        size_t bu_consumed;
-        rc = pivco_decode_bu_x86(g_tdec, &table, sse_enc, sse_len, bu_dec, &bu_consumed);
-        if (rc != PIVCO_OK) FAIL("bu_x86 decode returned %d", rc);
-        for (int i = 0; i < PIVCO_BLOCK_SIZE; i++) {
-            if (symbols[i] != bu_dec[i]) {
-                FAIL("bu_x86 mismatch at position %d: expected %d, got %d",
-                     i, symbols[i], bu_dec[i]);
-            }
-        }
-        if (bu_consumed != sse_len) {
-            FAIL("bu_x86 consumed %zu bytes, expected %zu",
-                 bu_consumed, sse_len);
-        }
-    }
-#endif
 
     printf("PASS (pivco=%zu B, trad=%zu B, ratio=%.2fx)\n",
            enc_len, trad_len, (double)enc_len / (double)trad_len);

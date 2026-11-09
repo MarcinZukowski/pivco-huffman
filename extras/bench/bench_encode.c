@@ -2,8 +2,8 @@
  * loop and 5-runs-drop-2 methodology but times the encoders only.
  *
  * Backends timed:
- *   pivco_s_e   pivco_encode_scalar
- *   pivco_e     pivco_encode           (backend-specific)
+ *   pivco_s_e   pivco_encode, scalar table
+ *   pivco_e     pivco_encode           (startup table)
  *   trad_4s_e   trad_huffman_encode_4s         (huf0-shape comparator)
  *   huf0_x2_e   HUF_compress                   (zstd huff0 4-stream)
  *   huf0_x1_e   HUF_compress1X                 (zstd huff0 1-stream)
@@ -13,6 +13,7 @@
  */
 #include "pivco_huffman.h"
 #include "bench_ctx.h"
+#include "pivco_prims.h"   /* pivco_prims_select: the scalar rows */
 #include "mem.h"
 #define HUF_STATIC_LINKING_ONLY
 #include "huf.h"
@@ -20,6 +21,24 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+
+/* The scalar table under the codec (the pivco_s rows), then back to the
+ * startup table. */
+static void encode_scalar(const pivco_table_t *table, const uint8_t *symbols,
+                          size_t n, uint8_t *out, size_t *out_len)
+{
+    pivco_prims_select("scalar");
+    pivco_encode(bench_enc_ctx(), table, symbols, n, out, out_len);
+    pivco_prims_select(NULL);
+}
+
+static void decode_scalar(const pivco_table_t *table, const uint8_t *in,
+                          size_t in_len, uint8_t *out, size_t *consumed)
+{
+    pivco_prims_select("scalar");
+    pivco_decode(bench_dec_ctx(), table, in, in_len, out, consumed);
+    pivco_prims_select(NULL);
+}
 
 extern void         bench_init(void);
 extern int          bench_num_distributions(void);
@@ -152,8 +171,8 @@ int main(int argc, char **argv)
             uint8_t *enc = (uint8_t *)malloc(PIVCO_MAX_ENCODED_SIZE);
             uint8_t *dec = (uint8_t *)malloc(BLK);
             size_t len, consumed;
-            pivco_encode_scalar(bench_enc_ctx(), table, symbols, BLK, enc, &len);
-            pivco_decode_scalar(bench_dec_ctx(), table, enc, len, dec, &consumed);
+            encode_scalar(table, symbols, BLK, enc, &len);
+            decode_scalar(table, enc, len, dec, &consumed);
             if (memcmp(symbols, dec, BLK) != 0) {
                 fprintf(stderr, "  %s: pivco_s encode roundtrip FAILED\n", name);
                 free(enc); free(dec); goto skip;
@@ -162,7 +181,7 @@ int main(int argc, char **argv)
             /* Cross-compare against scalar encoder's output. */
             uint8_t *enc_scalar = (uint8_t *)malloc(PIVCO_MAX_ENCODED_SIZE);
             size_t len_scalar;
-            pivco_encode_scalar(bench_enc_ctx(), table, symbols, BLK, enc_scalar, &len_scalar);
+            encode_scalar(table, symbols, BLK, enc_scalar, &len_scalar);
             if (len != len_scalar) {
                 fprintf(stderr, "  %s: enc len mismatch neon=%zu scalar=%zu\n",
                         name, len, len_scalar);
@@ -177,7 +196,7 @@ int main(int argc, char **argv)
                 }
             }
             free(enc_scalar);
-            pivco_decode_scalar(bench_dec_ctx(), table, enc, len, dec, &consumed);
+            decode_scalar(table, enc, len, dec, &consumed);
             if (memcmp(symbols, dec, BLK) != 0) {
                 fprintf(stderr, "  %s: pivco encode roundtrip FAILED\n", name);
                 free(enc); free(dec); goto skip;
@@ -204,12 +223,14 @@ int main(int argc, char **argv)
         double e_pivco_s = 0, e_pivco = 0, e_trad_4s = 0;
         double e_huf0_x1 = 0, e_huf0_x2 = 0;
 
+        pivco_prims_select("scalar");
         BENCH_ENC(e_pivco_s, {
             for (int b = 0; b < NBLOCKS; b++) {
                 size_t len;
-                pivco_encode_scalar(bench_enc_ctx(), table, symbols + (size_t)b * BLK, BLK, pivco_s_buf + (size_t)b * PIVCO_MAX_ENCODED_SIZE, &len);
+                pivco_encode(bench_enc_ctx(), table, symbols + (size_t)b * BLK, BLK, pivco_s_buf + (size_t)b * PIVCO_MAX_ENCODED_SIZE, &len);
             }
         }, "pivco_s");
+        pivco_prims_select(NULL);
 
         BENCH_ENC(e_pivco, {
             for (int b = 0; b < NBLOCKS; b++) {

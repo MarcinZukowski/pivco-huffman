@@ -35,7 +35,7 @@ cmake --build build
 ## Architecture
 
 - **Backends**: scalar, NEON (ARM), x86 (SSE4.1 / AVX2), AVX-512 VBMI2 (Intel).  SVE is disabled (svcompact at 128-bit isn't competitive with NEON TBL).
-- **Codec framework**: one `pivco_huffman_codec.c` compiled per backend as an OBJECT library, each pulling in `primitives_<backend>.h` (the only file with SIMD intrinsics).  `pivco_encode`/`pivco_decode` in `src/pivco_huffman.c` compile-time-dispatch to the best backend the build enabled (CMake detects the host tier).
+- **Codec framework**: one `pivco_huffman_codec.c`, compiled once, calls every primitive through a table (`src/prims/tables.h`).  Each backend compiles `pivco_prims_table.c` with its `primitives_<backend>.h` (the only files with SIMD intrinsics) and exports its tables.  The build compiles every SIMD tier the compiler supports; `pivco_encode`/`pivco_decode` in `src/pivco_huffman.c` dispatch at runtime by CPU tier, vendor and microarchitecture (`PIVCO_PRIMS=<table>` overrides).
 - **Block size**: 32K default, 16K on Apple Silicon (see `PIVCO_BLOCK_SIZE` in `include/pivco_huffman.h`)
 - **Wire format**: see `src/pivco_huffman_wire.h` for the canonical doc.  Post-order records: `[optional K_right:u16 LE at node entry][children's regions, larger-K child first][FSE marker:u8][bitmap or FSE payload]` — each bitmap sits where its merge consumes it.  Flat subtrees (D ≥ 2) skip the header and emit one N·D-bit packed region.
 - **Key data structures**:
@@ -75,8 +75,9 @@ from the most recent sweep tag.
 ## Key Files
 
 The codec is a single tree-walk + wire-format engine in
-`pivco_huffman_codec.c`, compiled once per backend (`PIVCO_BACKEND_*`)
-into an OBJECT library.  Each compile pulls in the matching
+`pivco_huffman_codec.c`, compiled once with `PIVCO_PRIMS_INDIRECT`: it
+calls each primitive through the table picked at startup.  Each backend
+compiles `src/pivco_prims_table.c`, which pulls in the matching
 `pivco_huffman_primitives_<backend>.h` via the router header
 `pivco_huffman_primitives.h`.  The unify-framework refactor landed in
 five phases ending 2026-05-14; before that, each backend had its own
@@ -87,8 +88,8 @@ five phases ending 2026-05-14; before that, each backend had its own
 - `src/joint_lengths.c` — joint code-length/flat-shape optimization: bends
   Huffman lengths toward fewer, larger flat subtrees under a guard
   (`pivco_effort_t` modes; encoder-side only, wire carries plain lengths)
-- `src/pivco_huffman_codec.c` — unified codec.  Compiled once per backend
-  with `-DPIVCO_BACKEND_{SCALAR,NEON,X86,AVX512}`.  Owns: tree walk
+- `src/pivco_huffman_codec.c` — unified codec.  Compiled once; calls
+  primitives through the runtime-picked table.  Owns: tree walk
   (encode + BU decode), wire-format I/O via `pivco_huffman_wire.h`,
   optional FSE attempt on the raw bitmap.  Does not include any SIMD.
 - `src/pivco_huffman_primitives.h` — router; selects the backend header

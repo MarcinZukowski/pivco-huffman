@@ -3,15 +3,16 @@
  *
  * A table's kernels need its backend's header and compile flags, so each
  * compile defines the one table its PIVCO_BACKEND_* and variant defines
- * select, as the static const prims_tab.  The codec TU calls through it
- * (prims/entries.h), and the compiler resolves and inlines every call;
- * pivco_prims_table.c exports it for the prims codec.  The prims codec
- * itself (PIVCO_PRIMS_INDIRECT) defines a table of trampolines: each slot
- * calls the same slot of g_pivco_prims, the table picked at runtime.
+ * select, as the static const prims_tab.  pivco_prims_table.c exports it
+ * for the codec.  A bench that includes one backend calls through it
+ * (prims/entries.h), and the compiler resolves and inlines every call.
+ * The codec itself (PIVCO_PRIMS_INDIRECT) defines a table of
+ * trampolines: each slot calls the same slot of g_pivco_prims, the
+ * table picked at runtime.
  *
  * A backend can define more tables with the same flags, for one
- * microarchitecture each (prims_tab_<name>).  Only the prims codec runs
- * them, so they are defined only where PIVCO_PRIMS_ALL_TABLES is set
+ * microarchitecture each (prims_tab_<name>).  Only the codec runs them,
+ * so they are defined only where PIVCO_PRIMS_ALL_TABLES is set
  * (pivco_prims_table.c).
  *
  * Kernels whose signature differs from their slot's get a slot_<slot>_
@@ -36,7 +37,7 @@
 #define PIVCO_PRIM_MERGE_OVERREAD PIVCO_PRIMS_MERGE_OVERREAD
 
 /* Trampolines: slot_<slot>_prims calls <slot> of g_pivco_prims, the
- * table pivco_codec_select() picked for this CPU (or PIVCO_PRIMS).
+ * table pivco_prims_select() picked for this CPU (or PIVCO_PRIMS).
  *
  * Why: they exist only so a specialized codec can still be built,
  * without the dispatch machinery.  The codec always calls prims_tab.
@@ -301,20 +302,13 @@ static const pivco_prims_t prims_tab = {
     .name                = "x86_avx2",
 #  endif
     .pack_nat            = pack_dN_avx2_x86,
-    /* A build with AVX-512 flags (the x86 codec of a non-dispatch
-     * AVX-512 build) gets the zmm 512-lane kernels. */
-#  if defined(__AVX512BW__) && defined(__AVX512VBMI__) && defined(__AVX512VL__)
-    .merge_v512          = vert512_merge_zmm,
-    .pack_v512           = vert512_pack_zmm,
-#  else
     .merge_v512          = vert512_merge_ymm,
-#    if defined(PIVCO_X86_INTEL)
+#  if defined(PIVCO_X86_INTEL)
     /* D=7 packs in ymm rows, as D=2..6 (Intel runs ymm ops whole). */
     .pack_v512           = vert512_pack_ymm_intel,
-#    else
+#  else
     /* D=7 packs walk 16-lane quarters (Zen splits ymm ops in two). */
     .pack_v512           = vert512_pack_ymm,
-#    endif
 #  endif
 #endif
 };

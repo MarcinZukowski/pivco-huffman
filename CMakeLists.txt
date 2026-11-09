@@ -57,10 +57,6 @@ add_compile_options(-Wall -Wextra -O3)
 # observable on x86 (see IDEAS.md "Profiling overhead is HUGE on x86").
 # Pass `-DPIVCO_PROF=ON` to cmake to enable.
 option(PIVCO_PROF "Enable per-primitive PROF_TIC/PROF_TOC instrumentation" OFF)
-# PIVCO_CODEC_DISPATCH: build every SIMD tier the compiler supports, as
-# per-tier and per-vendor codecs, and pick one at runtime from the CPU's
-# features and vendor (PIVCO_CODEC=<name> overrides).
-option(PIVCO_CODEC_DISPATCH "Runtime-dispatched codecs" OFF)
 if(PIVCO_PROF)
     add_compile_definitions(PIVCO_PROF=1)
     message(STATUS "PIVCO_PROF=1 — per-primitive prof timing enabled")
@@ -87,10 +83,9 @@ else()
     execute_process(COMMAND uname -m OUTPUT_VARIABLE TARGET_ARCH OUTPUT_STRIP_TRAILING_WHITESPACE)
 endif()
 
-# Core source files (backend-agnostic).  The per-backend codec object
-# libraries (defined after the SIMD-detection block below) compile
-# src/pivco_huffman_codec.c once per backend tier with the matching
-# PIVCO_BACKEND_* define and get linked into the pivco_huffman library.
+# Core source files (backend-agnostic).  The codec and the per-backend
+# primitive-table object libraries (defined after the SIMD-detection
+# block below) get linked into the pivco_huffman library.
 set(PIVCO_SOURCES
     src/huffman_table.c
     src/joint_lengths.c
@@ -166,117 +161,34 @@ elseif(TARGET_ARCH STREQUAL "x86_64" OR TARGET_ARCH STREQUAL "amd64")
         set(COMPILER_HAS_AVX512_VBMI2 OFF)
     endif()
     check_c_compiler_flag("-mavx2"        COMPILER_HAS_AVX2)
+    # The build host's AVX-512 support, only for the extras benches that
+    # are built for the host.
     if(COMPILER_HAS_AVX512_VBMI2)
         execute_process(COMMAND grep -c avx512_vbmi2 /proc/cpuinfo
                         OUTPUT_VARIABLE CPU_HAS_AVX512 OUTPUT_STRIP_TRAILING_WHITESPACE
                         ERROR_QUIET)
     endif()
-    option(PIVCO_DISABLE_AVX512 "Force the AVX2 tier even on AVX-512 VBMI2 hosts (A/B testing)" OFF)
-    if(PIVCO_DISABLE_AVX512)
-        set(CPU_HAS_AVX512 "0")
-    endif()
-    if(COMPILER_HAS_AVX2)
-        execute_process(COMMAND grep -c " avx2 " /proc/cpuinfo
-                        OUTPUT_VARIABLE CPU_HAS_AVX2 OUTPUT_STRIP_TRAILING_WHITESPACE
-                        ERROR_QUIET)
-    endif()
-    # Vendor-split kernel picks (all x86 tiers): zmm vertical D=3 merge
-    # (Intel srlv vs AMD multishift; c6i/c7i/c8i vs c7a/c8a, 2026-07-30)
-    # and AVX2 512-block D=7 pack (Intel ymm vs Zen 3 xmm quarters).
-    execute_process(COMMAND grep -m1 vendor_id /proc/cpuinfo
-                    OUTPUT_VARIABLE CPU_VENDOR OUTPUT_STRIP_TRAILING_WHITESPACE
-                    ERROR_QUIET)
-    if(CPU_VENDOR MATCHES "GenuineIntel" AND NOT PIVCO_CODEC_DISPATCH)
-        add_compile_definitions(PIVCO_X86_INTEL=1)
-    endif()
     set(PIVCO_AVX2_FLAGS -mavx2 -mbmi2 -msse4.1 -mpopcnt)
     set(PIVCO_AVX512_FLAGS -mavx512f -mavx512bw -mavx512vl -mavx512vbmi -mavx512vbmi2
                            -mavx512vpopcntdq -mgfni -mavx512bitalg ${PIVCO_AVX2_FLAGS})
-    if(PIVCO_CODEC_DISPATCH)
-        # The SSE4.1 floor for everything; AVX2 and AVX-512 flags only on
-        # their own codec and primitive-table objects.  The CPU is
-        # checked at runtime (pivco_huffman.c), not here.
-        message(STATUS "x86_64 runtime dispatch — SSE4.1 floor + every tier the compiler supports")
-        list(APPEND PIVCO_SOURCES
-            src/pivco_huffman_x86_tables.c)
-        add_compile_definitions(PIVCO_HAS_SSE4=1)
-        add_compile_options(-msse4.1 -mpopcnt)
-        if(COMPILER_HAS_AVX2)
-            set(PIVCO_TIER_AVX2 ON)
-            add_compile_definitions(PIVCO_BUILT_AVX2=1)
-        endif()
-        if(COMPILER_HAS_AVX512_VBMI2)
-            set(PIVCO_TIER_AVX512 ON)
-            add_compile_definitions(PIVCO_HAS_AVX512=1)
-        endif()
-    elseif(COMPILER_HAS_AVX512_VBMI2 AND CPU_HAS_AVX512 AND NOT CPU_HAS_AVX512 STREQUAL "0")
+    # The SSE4.1 floor for everything; AVX2 and AVX-512 flags only on
+    # their own codec and primitive-table objects.  The CPU is checked at
+    # runtime (pivco_huffman.c), not here.
+    message(STATUS "x86_64 runtime dispatch — SSE4.1 floor + every tier the compiler supports")
+    list(APPEND PIVCO_SOURCES
+        src/pivco_huffman_x86_tables.c)
+    add_compile_definitions(PIVCO_HAS_SSE4=1)
+    add_compile_options(-msse4.1 -mpopcnt)
+    if(COMPILER_HAS_AVX2)
+        set(PIVCO_TIER_AVX2 ON)
+        add_compile_definitions(PIVCO_BUILT_AVX2=1)
+    endif()
+    if(COMPILER_HAS_AVX512_VBMI2)
         set(PIVCO_TIER_AVX512 ON)
-        message(STATUS "x86_64 detected — enabling AVX-512 VBMI2 + AVX2 + SSE4.1")
-        list(APPEND PIVCO_SOURCES
-            src/pivco_huffman_x86_tables.c)
-        add_compile_definitions(PIVCO_HAS_AVX512=1 PIVCO_HAS_AVX2=1 PIVCO_HAS_SSE4=1)
-        # Every VBMI2 CPU (Icelake+, Zen4+) also has GFNI + BITALG; the
-        # AVX-512 histogram primitive needs them (PIVCO_AVX512_FLAGS).
-        add_compile_options(${PIVCO_AVX512_FLAGS})
-    elseif(COMPILER_HAS_AVX2 AND CPU_HAS_AVX2 AND NOT CPU_HAS_AVX2 STREQUAL "0")
-        message(STATUS "x86_64 detected — enabling AVX2 + BMI2 + SSE4.1")
-        list(APPEND PIVCO_SOURCES
-            src/pivco_huffman_x86_tables.c)
-        add_compile_definitions(PIVCO_HAS_AVX2=1 PIVCO_HAS_SSE4=1)
-        add_compile_options(-mavx2 -mbmi2 -msse4.1 -mpopcnt)
-    else()
-        message(STATUS "x86_64 detected — enabling SSE4.1 (+ POPCNT)")
-        list(APPEND PIVCO_SOURCES
-            src/pivco_huffman_x86_tables.c)
-        add_compile_definitions(PIVCO_HAS_SSE4=1)
-        add_compile_options(-msse4.1 -mpopcnt)
+        add_compile_definitions(PIVCO_HAS_AVX512=1)
     endif()
 else()
     message(STATUS "Architecture: ${TARGET_ARCH} — SIMD disabled")
-endif()
-
-# Per-backend codec object libraries.  Each compiles the SAME
-# src/pivco_huffman_codec.c with a different PIVCO_BACKEND_* define;
-# the codec includes pivco_huffman_primitives.h which routes to the
-# matching primitives_<backend>.h.  Defined AFTER the SIMD-detection
-# add_compile_options() calls so each object inherits -m<arch> flags
-# (otherwise PIVCO_BLOCK_SIZE auto-detection would fall to the 4096
-# scalar default on every non-arm64 host).
-#
-# Scalar is always built.  NEON is built on aarch64 hosts (Phase 3
-# cutover landed 2026-05-14).  x86 is built on x86_64 hosts with
-# SSE4.1 or better (Phase 4.3 cutover landed 2026-05-14, replacing
-# the legacy pivco_huffman_x86.c + pivco_huffman_bu_x86.c).  AVX-512
-# still builds from its legacy .c file until Phase 5.
-add_library(pivco_codec_scalar OBJECT src/pivco_huffman_codec.c)
-target_compile_definitions(pivco_codec_scalar PRIVATE PIVCO_BACKEND_SCALAR=1)
-target_include_directories(pivco_codec_scalar PRIVATE include)
-
-if(TARGET_ARCH STREQUAL "arm64" OR TARGET_ARCH STREQUAL "aarch64")
-    add_library(pivco_codec_neon OBJECT src/pivco_huffman_codec.c)
-    target_compile_definitions(pivco_codec_neon PRIVATE PIVCO_BACKEND_NEON=1)
-    target_include_directories(pivco_codec_neon PRIVATE include)
-endif()
-
-if(TARGET_ARCH STREQUAL "x86_64" OR TARGET_ARCH STREQUAL "amd64")
-    # pivco_codec_x86 covers SSE4.1 + AVX2 tiers (primitives_x86.h gates
-    # AVX2 fast paths via PIVCO_HAS_AVX2).  AVX-512 builds add codec_avx512
-    # below; the runtime dispatcher picks one or the other.  We don't fork
-    # codec_x86 itself into per-ISA flavors -- one OBJECT lib serves the
-    # SSE / AVX2 spectrum.
-    add_library(pivco_codec_x86 OBJECT src/pivco_huffman_codec.c)
-    target_compile_definitions(pivco_codec_x86 PRIVATE PIVCO_BACKEND_X86=1)
-    target_include_directories(pivco_codec_x86 PRIVATE include)
-endif()
-
-if(PIVCO_TIER_AVX512)
-    add_library(pivco_codec_avx512 OBJECT src/pivco_huffman_codec.c)
-    target_compile_definitions(pivco_codec_avx512 PRIVATE PIVCO_BACKEND_AVX512=1)
-    target_include_directories(pivco_codec_avx512 PRIVATE include)
-    if(PIVCO_CODEC_DISPATCH)
-        target_compile_options(pivco_codec_avx512 PRIVATE ${PIVCO_AVX512_FLAGS})
-        target_compile_definitions(pivco_codec_avx512 PRIVATE PIVCO_HAS_AVX2=1)
-    endif()
 endif()
 
 # huff0/FSE library (for baseline comparison)
@@ -293,77 +205,51 @@ add_library(huf0 ${HUF0_SOURCES})
 target_include_directories(huf0 PUBLIC ext/fse/lib)
 target_compile_options(huf0 PRIVATE -w)  # suppress warnings in external code
 
-# Library — backend-agnostic sources plus the per-backend codec objects.
-# The scalar codec is always linked.  NEON is linked on aarch64 hosts;
-# x86 (SSE / AVX2) is linked on x86_64 hosts; AVX-512 is additionally
-# linked on AVX-512 VBMI2 hosts (the dispatcher picks at runtime).
-set(PIVCO_CODEC_OBJECTS $<TARGET_OBJECTS:pivco_codec_scalar>)
-if(PIVCO_CODEC_DISPATCH)
-    add_compile_definitions(PIVCO_CODEC_DISPATCH=1)
-    # name|backend|tier (base, avx2, avx512)|extra defines (comma-separated)
-    set(PIVCO_CODEC_VARIANTS)
-    if(PIVCO_TIER_AVX2)
-        list(APPEND PIVCO_CODEC_VARIANTS "x86_avx2|X86|avx2|PIVCO_HAS_AVX2=1")
-        list(APPEND PIVCO_CODEC_VARIANTS "x86_avx2_intel|X86|avx2|PIVCO_HAS_AVX2=1,PIVCO_X86_INTEL=1")
-    endif()
-    foreach(v ${PIVCO_CODEC_VARIANTS})
-        string(REPLACE "|" ";" vl "${v}")
-        list(GET vl 0 vname)
-        list(GET vl 1 vback)
-        list(GET vl 2 vtier)
-        list(GET vl 3 vdefs)
-        string(REPLACE "," ";" vdefs "${vdefs}")
-        set(vflags)
-        if(vtier STREQUAL "avx2")
-            set(vflags ${PIVCO_AVX2_FLAGS})
-        elseif(vtier STREQUAL "avx512")
-            set(vflags ${PIVCO_AVX512_FLAGS})
-        endif()
-        add_library(pivco_codec_${vname} OBJECT src/pivco_huffman_codec.c)
-        target_compile_definitions(pivco_codec_${vname} PRIVATE
-            PIVCO_BACKEND_${vback}=1 PIVCO_CODEC_VARIANT=1
-            PIVCO_BACKEND_SUFFIX=${vname} ${vdefs})
-        target_compile_options(pivco_codec_${vname} PRIVATE ${vflags})
-        target_include_directories(pivco_codec_${vname} PRIVATE include)
-        list(APPEND PIVCO_CODEC_OBJECTS $<TARGET_OBJECTS:pivco_codec_${vname}>)
-        # The same primitives as a pivco_prims_t table for the prims codec.
-        add_library(pivco_prims_${vname} OBJECT src/pivco_prims_table.c)
-        target_compile_definitions(pivco_prims_${vname} PRIVATE
-            PIVCO_BACKEND_${vback}=1 PIVCO_BACKEND_SUFFIX=${vname} ${vdefs})
-        target_compile_options(pivco_prims_${vname} PRIVATE ${vflags})
-        target_include_directories(pivco_prims_${vname} PRIVATE include)
-        list(APPEND PIVCO_CODEC_OBJECTS $<TARGET_OBJECTS:pivco_prims_${vname}>)
-    endforeach()
-    foreach(b scalar neon x86 avx512)
-        if(TARGET pivco_codec_${b})
-            string(TOUPPER ${b} B)
-            add_library(pivco_prims_${b} OBJECT src/pivco_prims_table.c)
-            target_compile_definitions(pivco_prims_${b} PRIVATE PIVCO_BACKEND_${B}=1)
-            if(b STREQUAL "avx512")
-                target_compile_options(pivco_prims_${b} PRIVATE ${PIVCO_AVX512_FLAGS})
-                target_compile_definitions(pivco_prims_${b} PRIVATE PIVCO_HAS_AVX2=1)
-            endif()
-            target_include_directories(pivco_prims_${b} PRIVATE include)
-            list(APPEND PIVCO_CODEC_OBJECTS $<TARGET_OBJECTS:pivco_prims_${b}>)
-        endif()
-    endforeach()
-    # prims: the codec once more, calling every primitive through
-    # g_pivco_prims (src/pivco_prims.h) instead of inlining a backend.
-    add_library(pivco_codec_prims OBJECT src/pivco_huffman_codec.c)
-    target_compile_definitions(pivco_codec_prims PRIVATE
-        PIVCO_BACKEND_SCALAR=1 PIVCO_CODEC_VARIANT=1
-        PIVCO_BACKEND_SUFFIX=prims PIVCO_PRIMS_INDIRECT=1)
-    target_include_directories(pivco_codec_prims PRIVATE include)
-    list(APPEND PIVCO_CODEC_OBJECTS $<TARGET_OBJECTS:pivco_codec_prims>)
-endif()
+# The codec and the primitive tables.  The codec (pivco_huffman_codec.c)
+# is compiled once, at the build's floor, and calls every primitive
+# through the table picked at runtime (src/prims/tables.h).  Each backend
+# compiles pivco_prims_table.c once with its own flags and exports its
+# tables (the AVX-512 compile carries two).
+set(PIVCO_CODEC_OBJECTS)
+add_library(pivco_codec_prims OBJECT src/pivco_huffman_codec.c)
+target_compile_definitions(pivco_codec_prims PRIVATE
+    PIVCO_BACKEND_SUFFIX=prims PIVCO_PRIMS_INDIRECT=1)
+target_include_directories(pivco_codec_prims PRIVATE include)
+list(APPEND PIVCO_CODEC_OBJECTS $<TARGET_OBJECTS:pivco_codec_prims>)
+# name|backend|flags (base, avx2, avx512)|extra defines (comma-separated)
+set(PIVCO_TABLE_COMPILES "scalar|SCALAR|base|")
 if(TARGET_ARCH STREQUAL "arm64" OR TARGET_ARCH STREQUAL "aarch64")
-    list(APPEND PIVCO_CODEC_OBJECTS $<TARGET_OBJECTS:pivco_codec_neon>)
+    list(APPEND PIVCO_TABLE_COMPILES "neon|NEON|base|")
 elseif(TARGET_ARCH STREQUAL "x86_64" OR TARGET_ARCH STREQUAL "amd64")
-    list(APPEND PIVCO_CODEC_OBJECTS $<TARGET_OBJECTS:pivco_codec_x86>)
+    list(APPEND PIVCO_TABLE_COMPILES "x86|X86|base|")
+    if(PIVCO_TIER_AVX2)
+        list(APPEND PIVCO_TABLE_COMPILES "x86_avx2|X86|avx2|PIVCO_HAS_AVX2=1")
+        list(APPEND PIVCO_TABLE_COMPILES "x86_avx2_intel|X86|avx2|PIVCO_HAS_AVX2=1,PIVCO_X86_INTEL=1")
+    endif()
     if(PIVCO_TIER_AVX512)
-        list(APPEND PIVCO_CODEC_OBJECTS $<TARGET_OBJECTS:pivco_codec_avx512>)
+        list(APPEND PIVCO_TABLE_COMPILES "avx512|AVX512|avx512|PIVCO_HAS_AVX2=1")
     endif()
 endif()
+foreach(v ${PIVCO_TABLE_COMPILES})
+    string(REPLACE "|" ";" vl "${v}")
+    list(GET vl 0 vname)
+    list(GET vl 1 vback)
+    list(GET vl 2 vtier)
+    list(GET vl 3 vdefs)
+    string(REPLACE "," ";" vdefs "${vdefs}")
+    set(vflags)
+    if(vtier STREQUAL "avx2")
+        set(vflags ${PIVCO_AVX2_FLAGS})
+    elseif(vtier STREQUAL "avx512")
+        set(vflags ${PIVCO_AVX512_FLAGS})
+    endif()
+    add_library(pivco_prims_${vname} OBJECT src/pivco_prims_table.c)
+    target_compile_definitions(pivco_prims_${vname} PRIVATE
+        PIVCO_BACKEND_${vback}=1 PIVCO_BACKEND_SUFFIX=${vname} ${vdefs})
+    target_compile_options(pivco_prims_${vname} PRIVATE ${vflags})
+    target_include_directories(pivco_prims_${vname} PRIVATE include)
+    list(APPEND PIVCO_CODEC_OBJECTS $<TARGET_OBJECTS:pivco_prims_${vname}>)
+endforeach()
 add_library(pivco_huffman
     ${PIVCO_SOURCES}
     ${PIVCO_CODEC_OBJECTS}

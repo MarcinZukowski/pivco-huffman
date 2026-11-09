@@ -23,7 +23,7 @@ add_executable(pivco_huffman_bench
     ${CMAKE_SOURCE_DIR}/bench/bench_distributions.c
 )
 target_link_libraries(pivco_huffman_bench pivco_huffman huf0 m)
-target_include_directories(pivco_huffman_bench PRIVATE ${CMAKE_SOURCE_DIR}/ext/fse/lib ${CMAKE_SOURCE_DIR}/bench)
+target_include_directories(pivco_huffman_bench PRIVATE ${CMAKE_SOURCE_DIR}/ext/fse/lib ${CMAKE_SOURCE_DIR}/bench ${CMAKE_SOURCE_DIR}/src)
 
 # Independent (namespaced) top-down TD library, retired from the main
 # lib but resurrected as its own lib so the fair-bench can show the
@@ -107,10 +107,10 @@ if(UNIX AND NOT APPLE)
     # research binary non-PIE instead of rewriting them RIP-relative.
     target_link_options(pivco_bench_prim PRIVATE -no-pie)
 endif()
-# Dispatch builds compile at the SSE4.1 floor but still define
+# The build compiles at the SSE4.1 floor but still defines
 # PIVCO_HAS_AVX512; this bench calls the AVX-512 primitives directly, so
 # it gets that tier's flags and runs only on AVX-512 CPUs.
-if(PIVCO_CODEC_DISPATCH AND PIVCO_TIER_AVX512)
+if(PIVCO_TIER_AVX512)
     target_compile_options(pivco_bench_prim PRIVATE ${PIVCO_AVX512_FLAGS})
 endif()
 
