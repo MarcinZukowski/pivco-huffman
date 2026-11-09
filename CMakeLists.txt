@@ -159,6 +159,12 @@ elseif(TARGET_ARCH STREQUAL "x86_64" OR TARGET_ARCH STREQUAL "amd64")
     # compile in on those hosts too.
     include(CheckCCompilerFlag)
     check_c_compiler_flag("-mavx512vbmi2" COMPILER_HAS_AVX512_VBMI2)
+    # GFNI + BITALG are part of the AVX-512 floor (every VBMI2 CPU has them).
+    check_c_compiler_flag("-mgfni" COMPILER_HAS_GFNI)
+    check_c_compiler_flag("-mavx512bitalg" COMPILER_HAS_BITALG)
+    if(NOT COMPILER_HAS_GFNI OR NOT COMPILER_HAS_BITALG)
+        set(COMPILER_HAS_AVX512_VBMI2 OFF)
+    endif()
     check_c_compiler_flag("-mavx2"        COMPILER_HAS_AVX2)
     if(COMPILER_HAS_AVX512_VBMI2)
         execute_process(COMMAND grep -c avx512_vbmi2 /proc/cpuinfo
@@ -185,12 +191,7 @@ elseif(TARGET_ARCH STREQUAL "x86_64" OR TARGET_ARCH STREQUAL "amd64")
     endif()
     set(PIVCO_AVX2_FLAGS -mavx2 -mbmi2 -msse4.1 -mpopcnt)
     set(PIVCO_AVX512_FLAGS -mavx512f -mavx512bw -mavx512vl -mavx512vbmi -mavx512vbmi2
-                           -mavx512vpopcntdq ${PIVCO_AVX2_FLAGS})
-    check_c_compiler_flag("-mgfni" COMPILER_HAS_GFNI)
-    check_c_compiler_flag("-mavx512bitalg" COMPILER_HAS_BITALG)
-    if(COMPILER_HAS_GFNI AND COMPILER_HAS_BITALG)
-        list(APPEND PIVCO_AVX512_FLAGS -mgfni -mavx512bitalg)
-    endif()
+                           -mavx512vpopcntdq -mgfni -mavx512bitalg ${PIVCO_AVX2_FLAGS})
     if(PIVCO_CODEC_DISPATCH)
         # The SSE4.1 floor for everything; AVX2 and AVX-512 flags only on
         # their own codec and primitive-table objects.  The CPU is

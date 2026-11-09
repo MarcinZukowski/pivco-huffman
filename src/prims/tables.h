@@ -9,6 +9,11 @@
  * itself (PIVCO_PRIMS_INDIRECT) defines no table: it calls through
  * g_pivco_prims.
  *
+ * A backend can define more tables with the same flags, for one
+ * microarchitecture each (prims_tab_<name>).  Only the prims codec runs
+ * them, so they are defined only where PIVCO_PRIMS_ALL_TABLES is set
+ * (pivco_prims_table.c).
+ *
  * Kernels whose signature differs from their slot's get a slot_<slot>_
  * <backend> adapter next to their table.
  *
@@ -219,12 +224,7 @@ int slot_popcount_K_right_avx512(const uint8_t *bm, int K)
 static const pivco_prims_t prims_tab = {
     .name                = "avx512",
     .codec_init          = codec_init_avx512,
-    /* The positional histogram needs GFNI + BITALG compile support. */
-#if defined(__GFNI__) && defined(__AVX512BITALG__)
     .histogram_chunk     = histogram_chunk_avx512,
-#else
-    .histogram_chunk     = histogram_chunk_scalar,
-#endif
     .enc_init            = slot_enc_init_avx512,
     .enc_partition_full  = part_full_avx512,
     .enc_partition_right = part_right_avx512,
@@ -240,6 +240,30 @@ static const pivco_prims_t prims_tab = {
     .pack_v128           = vert_pack_x86v,
     .pack_nat            = pack_dN_avx512,
 };
+
+#if defined(PIVCO_PRIMS_ALL_TABLES)
+/* Zen 4 and Zen 5: the merges with the vpexpandb encoding pinned to
+ * disp8 and the c8a loop shapes (the _asm merges). */
+static const pivco_prims_t prims_tab_avx512_zen45 = {
+    .name                = "avx512_zen45",
+    .codec_init          = codec_init_avx512,
+    .histogram_chunk     = histogram_chunk_avx512,
+    .enc_init            = slot_enc_init_avx512,
+    .enc_partition_full  = part_full_avx512,
+    .enc_partition_right = part_right_avx512,
+    .enc_partition_none  = part_none_avx512,
+    .popcount_K_right    = slot_popcount_K_right_avx512,
+    .merge_cst_cst       = merge_cst_cst_avx512,
+    .merge_cst_vec       = merge_cst_vec_avx512_asm,
+    .merge_vec_vec       = merge_vec_vec_avx512_asm,
+    .merge_v512          = vert512_merge_zmm,
+    .merge_v128          = vert_merge_x86v,
+    .merge_nat           = merge_flat_avx512,
+    .pack_v512           = vert512_pack_zmm,
+    .pack_v128           = vert_pack_x86v,
+    .pack_nat            = pack_dN_avx512,
+};
+#endif
 
 #endif
 

@@ -5,9 +5,10 @@
  * Specialized names end in `_avx512`; the codec calls the aliases
  * `prim_*` defined at the bottom as always-inline wrappers.
  *
- * Floor: AVX-512 F + BW + VBMI + VBMI2 + VPOPCNTDQ.  Pivco's AVX-512
- * tier is built with all of these (-mavx512f -mavx512bw -mavx512vbmi
- * -mavx512vbmi2 -mavx512vpopcntdq via CMakeLists.txt), and the runtime
+ * Floor: AVX-512 F + BW + VBMI + VBMI2 + VPOPCNTDQ + GFNI + BITALG.
+ * Pivco's AVX-512 tier is built with all of these (-mavx512f -mavx512bw
+ * -mavx512vbmi -mavx512vbmi2 -mavx512vpopcntdq -mgfni -mavx512bitalg
+ * via CMakeLists.txt), and the runtime
  * dispatcher (pivco_huffman.c::resolve_impl) only routes to this
  * backend when /proc/cpuinfo advertises avx512_vbmi2.  The header errors
  * out if the macro contract isn't met -- catches misconfigured builds
@@ -49,8 +50,9 @@
 #if !defined(PIVCO_HAS_AVX512)
 #error "pivco_huffman_primitives_avx512.h requires PIVCO_HAS_AVX512"
 #endif
-#if !defined(__AVX512VBMI2__) || !defined(__AVX512VPOPCNTDQ__)
-#error "pivco_huffman_primitives_avx512.h requires AVX-512 VBMI2 + VPOPCNTDQ"
+#if !defined(__AVX512VBMI2__) || !defined(__AVX512VPOPCNTDQ__) \
+    || !defined(__GFNI__) || !defined(__AVX512BITALG__)
+#error "pivco_huffman_primitives_avx512.h requires AVX-512 VBMI2 + VPOPCNTDQ + GFNI + BITALG"
 #endif
 
 #include "pivco_huffman.h"
@@ -232,6 +234,118 @@ static inline void merge_cst_vec_avx512(const uint8_t *bm, int K,
         out[j] = mb ? right[rc++] : left_sym;
     }
     PROF_TOC(PROF_BU_MERGE_CST_VEC, K);
+}
+
+/* ---------- _asm merges: the best known c8a/Zen 5 forms, pinned ----------
+ *
+ * The compiler picks the vpexpandb encoding by register allocation: an
+ * r13/rbp-class base forces the 8-byte disp8 form, any other base gets
+ * the 7-byte no-disp form.  On Zen 5 the no-disp form costs 12-15% in
+ * these loops at identical byte positions (IDEAS: "Pin the merge
+ * vpexpandb encoding").  expand_d8_avx512 emits the expand as inline asm
+ * with the {disp8} pseudo-prefix, so the form no longer depends on the
+ * build.  The loop shapes are the issue-#11 winners on c8a: serial
+ * cursors 4x unrolled for cst_vec (vrb), popcount-prefix cursors for
+ * vec_vec (u4szt).  The avx512_zen45 table runs them on Zen 4 and Zen 5;
+ * the avx512 table keeps the plain C merges. */
+
+/* Merge-masked expand of base[idx..] into src under k, 8-byte disp8 form. */
+static inline __m512i expand_d8_avx512(__m512i src, __mmask64 k,
+                                       const uint8_t *base, ssize_t idx)
+{
+    __asm__("%{disp8%} vpexpandb (%[b],%[i],1), %[o]%{%[k]%}"
+            : [o] "+v"(src)
+            : [b] "r"(base), [i] "r"(idx), [k] "Yk"(k),
+              "m"(*(const uint8_t (*)[64])(base + idx)));
+    return src;
+}
+
+/* merge_cst_vec_avx512_asm — vrb: ssize_t cursors, separate bm cursor,
+ * 4 blocks per step with serial rc updates.  The < 64 tail goes to
+ * merge_cst_vec_avx512. */
+static inline void merge_cst_vec_avx512_asm(const uint8_t *bm, int K_,
+                                            uint8_t left_sym,
+                                            const uint8_t *right,
+                                            uint8_t *out)
+{
+    PROF_TIC();
+    ssize_t K = K_, rc = 0, j = 0, k = 0;
+    __m512i Lb = _mm512_set1_epi8((char)left_sym);
+#define CV_ASM_BLOCK(BOFF) do {                                             \
+        uint64_t m_;                                                        \
+        memcpy(&m_, bm + k + (BOFF), 8);                                    \
+        __m512i o_ = expand_d8_avx512(Lb, (__mmask64)m_, right, rc);        \
+        _mm512_storeu_si512((__m512i *)(out + j + (BOFF)*8), o_);           \
+        rc += __builtin_popcountll(m_);                                     \
+    } while (0)
+    for (; j <= K - 256; j += 256, k += 32) {
+        CV_ASM_BLOCK(0);
+        CV_ASM_BLOCK(8);
+        CV_ASM_BLOCK(16);
+        CV_ASM_BLOCK(24);
+    }
+    for (; j + 64 <= K; j += 64, k += 8) {
+        CV_ASM_BLOCK(0);
+    }
+#undef CV_ASM_BLOCK
+    PROF_TOC(PROF_BU_MERGE_CST_VEC, j);
+    if (j < K)
+        merge_cst_vec_avx512(bm + k, (int)(K - j), left_sym, right + rc,
+                             out + j);
+}
+
+/* merge_vec_vec_avx512_asm — u4szt: 4 blocks per step, each block's
+ * cursors from a popcount prefix instead of the previous block's
+ * update.  Both expands merge-masked (into a fresh zero, then into L).
+ * The < 64 tail goes to merge_vec_vec_avx512. */
+static inline void merge_vec_vec_avx512_asm(const uint8_t *bm, int K_,
+                                            const uint8_t *left,
+                                            const uint8_t *right,
+                                            uint8_t *out)
+{
+    PROF_TIC();
+    ssize_t K = K_, lc = 0, rc = 0, j = 0;
+    for (; j <= K - 256; j += 256) {
+        uint64_t m0, m1, m2, m3;
+        memcpy(&m0, bm + (j >> 3),      8);
+        memcpy(&m1, bm + (j >> 3) + 8,  8);
+        memcpy(&m2, bm + (j >> 3) + 16, 8);
+        memcpy(&m3, bm + (j >> 3) + 24, 8);
+        ssize_t c1 = __builtin_popcountll(m0);
+        ssize_t c2 = c1 + __builtin_popcountll(m1);
+        ssize_t c3 = c2 + __builtin_popcountll(m2);
+        __m512i zero = _mm512_setzero_si512();
+        __m512i L0 = expand_d8_avx512(zero, ~(__mmask64)m0, left, lc);
+        __m512i o0 = expand_d8_avx512(L0, (__mmask64)m0, right, rc);
+        __m512i L1 = expand_d8_avx512(zero, ~(__mmask64)m1, left, lc + 64 - c1);
+        __m512i o1 = expand_d8_avx512(L1, (__mmask64)m1, right, rc + c1);
+        __m512i L2 = expand_d8_avx512(zero, ~(__mmask64)m2, left, lc + 128 - c2);
+        __m512i o2 = expand_d8_avx512(L2, (__mmask64)m2, right, rc + c2);
+        __m512i L3 = expand_d8_avx512(zero, ~(__mmask64)m3, left, lc + 192 - c3);
+        __m512i o3 = expand_d8_avx512(L3, (__mmask64)m3, right, rc + c3);
+        _mm512_storeu_si512((__m512i *)(out + j),       o0);
+        _mm512_storeu_si512((__m512i *)(out + j + 64),  o1);
+        _mm512_storeu_si512((__m512i *)(out + j + 128), o2);
+        _mm512_storeu_si512((__m512i *)(out + j + 192), o3);
+        ssize_t nr = c3 + __builtin_popcountll(m3);
+        rc += nr;
+        lc += 256 - nr;
+    }
+    for (; j + 64 <= K; j += 64) {
+        uint64_t mask;
+        memcpy(&mask, bm + (j >> 3), 8);
+        __m512i zero = _mm512_setzero_si512();
+        __m512i L = expand_d8_avx512(zero, ~(__mmask64)mask, left, lc);
+        __m512i o = expand_d8_avx512(L, (__mmask64)mask, right, rc);
+        _mm512_storeu_si512((__m512i *)(out + j), o);
+        ssize_t nr = __builtin_popcountll(mask);
+        rc += nr;
+        lc += 64 - nr;
+    }
+    PROF_TOC(PROF_BU_MERGE_VEC_VEC, j);
+    if (j < K)
+        merge_vec_vec_avx512(bm + (j >> 3), (int)(K - j), left + lc,
+                             right + rc, out + j);
 }
 
 /* merge_cst_cst_avx512 — both inputs are constants.  Native AVX-512
@@ -716,13 +830,8 @@ static inline void pack_dN_avx512(uint8_t *out, const uint8_t *ranks,
  * promote 1-bit -> 3-bit -> 8-bit -> 16-bit -> 32-bit counters.
  * Input-shape independent by construction (~7.5 GB/s GNR, ~12-14 GB/s
  * Zen 5 with clang; gcc trails ~10-35%% on the FA chains).
- *
- * Needs GFNI + BITALG + VBMI2 on top of the backend baseline; without
- * the compile flags the table uses the shared scalar core instead.
  * ------------------------------------------------------------------------- */
 #include "pivco_huffman_hist_scalar.h"
-
-#if defined(__GFNI__) && defined(__AVX512BITALG__)
 
 #define HIST_FA(hh, ll, a, b, c) do {                              \
     __m512i _l = _mm512_ternarylogic_epi32((c), (b), (a), 0x96);   \
@@ -884,6 +993,5 @@ static inline void histogram_chunk_avx512(const uint8_t *in, size_t n,
 
     while (N) hist[ptr[--N]] += 1;
 }
-#endif /* __GFNI__ && __AVX512BITALG__ */
 
 #endif  /* PIVCO_HUFFMAN_PRIMITIVES_AVX512_H */

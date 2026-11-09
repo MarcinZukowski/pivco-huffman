@@ -104,11 +104,19 @@ static int pivco_cpu_tier(void)
 extern const pivco_prims_t *const pivco_prims_x86_avx2;
 extern const pivco_prims_t *const pivco_prims_x86_avx2_intel;
 #endif
-static const struct {
+#if defined(PIVCO_HAS_AVX512)
+extern const pivco_prims_t *const pivco_prims_avx512_zen45;
+#endif
+
+/* A primitive table: the SIMD tier it needs and where its exported
+ * pointer lives. */
+typedef struct {
     const char *name;
     int tier;
     const pivco_prims_t *const *prims;
-} pivco_prims_tables[] = {
+} pivco_prims_entry_t;
+
+static const pivco_prims_entry_t pivco_prims_tables[] = {
     { "scalar", PIVCO_TIER_BASE, &pivco_prims_scalar },
 #if defined(PIVCO_HAS_NEON)
     { "neon", PIVCO_TIER_BASE, &pivco_prims_neon },
@@ -122,6 +130,7 @@ static const struct {
 #endif
 #if defined(PIVCO_HAS_AVX512)
     { "avx512", PIVCO_TIER_AVX512, &pivco_prims_avx512 },
+    { "avx512_zen45", PIVCO_TIER_AVX512, &pivco_prims_avx512_zen45 },
 #endif
 };
 #define PIVCO_N_PRIMS_TABLES (int)(sizeof pivco_prims_tables / sizeof pivco_prims_tables[0])
@@ -201,11 +210,14 @@ static int pivco_find_codec(const char *name)
 }
 
 /* The best table this CPU runs: its highest built tier, refined by
- * vendor.  Codec and table names match, so it names the codec too. */
+ * vendor and microarchitecture. */
 static const char *pivco_default_name(int cpu_tier)
 {
     int intel = pivco_cpu()->vendor == PIVCO_VENDOR_INTEL;
+    pivco_uarch_t uarch = pivco_cpu()->uarch;
+    int zen45 = uarch == PIVCO_UARCH_ZEN4 || uarch == PIVCO_UARCH_ZEN5;
     const char *order[] = {
+        zen45 ? "avx512_zen45" : "avx512",
         "avx512",
         intel ? "x86_avx2_intel" : "x86_avx2",
         "x86",
@@ -220,28 +232,14 @@ static const char *pivco_default_name(int cpu_tier)
     return "scalar";
 }
 
-/* PIVCO_CODEC=<name> picks the codec, PIVCO_PRIMS=<name> the table the
- * prims codec calls through; both default to pivco_default_name().  A
+/* PIVCO_PRIMS=<name> picks the table, PIVCO_CODEC=<name> the codec.  The
+ * table defaults to pivco_default_name(); the codec to the one that
+ * inlines that table, or the prims codec when only it runs the table.  A
  * name the CPU can't run aborts. */
 __attribute__((constructor)) static void pivco_codec_select(void)
 {
     int cpu_tier = pivco_cpu_tier();
     PIVCO_CHECK(cpu_tier >= 0 && cpu_tier < PIVCO_TIER_COUNT);
-    const char *want = getenv("PIVCO_CODEC");
-    if (!want)
-        want = pivco_default_name(cpu_tier);
-    int c = pivco_find_codec(want);
-    if (c < 0) {
-        fprintf(stderr, "PIVCO_CODEC=%s: unknown or not built\n", want);
-        abort();
-    }
-    if (pivco_codecs[c].tier > cpu_tier) {
-        PIVCO_CHECK(pivco_codecs[c].tier < PIVCO_TIER_COUNT);
-        fprintf(stderr, "PIVCO_CODEC=%s needs %s; this CPU has %s\n", want,
-                pivco_tier_names[pivco_codecs[c].tier], pivco_tier_names[cpu_tier]);
-        abort();
-    }
-    pivco_codec_idx = c;
     const char *tab = getenv("PIVCO_PRIMS");
     if (!tab)
         tab = pivco_default_name(cpu_tier);
@@ -258,6 +256,21 @@ __attribute__((constructor)) static void pivco_codec_select(void)
     }
     g_pivco_prims = *pivco_prims_tables[t].prims;
     PIVCO_CHECK(g_pivco_prims != NULL);
+    const char *want = getenv("PIVCO_CODEC");
+    if (!want)
+        want = pivco_find_codec(tab) >= 0 ? tab : "prims";
+    int c = pivco_find_codec(want);
+    if (c < 0) {
+        fprintf(stderr, "PIVCO_CODEC=%s: unknown or not built\n", want);
+        abort();
+    }
+    if (pivco_codecs[c].tier > cpu_tier) {
+        PIVCO_CHECK(pivco_codecs[c].tier < PIVCO_TIER_COUNT);
+        fprintf(stderr, "PIVCO_CODEC=%s needs %s; this CPU has %s\n", want,
+                pivco_tier_names[pivco_codecs[c].tier], pivco_tier_names[cpu_tier]);
+        abort();
+    }
+    pivco_codec_idx = c;
 }
 #endif  /* PIVCO_CODEC_DISPATCH*/
 
