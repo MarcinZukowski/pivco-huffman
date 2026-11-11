@@ -33,11 +33,13 @@
  * stay built for the bench prim_variants that index them.  Idempotent
  * and cheap after the first call. */
 static void init_merge_tables(void);   /* two-table merge_vec_vec shuffles (below) */
+static void init_merge_bits_tab(void); /* merge_cst_cst_tbl_neon rows (below) */
 static inline void codec_init_neon(void)
 {
     init_compress_table();
     init_expand_table();
     init_merge_tables();
+    init_merge_bits_tab();
 }
 
 /* ---------- Decode primitives (bottom-up) ---------- */
@@ -323,6 +325,43 @@ static inline void merge_cst_cst_neon(const uint8_t *bm, int K,
         uint8x8_t shifted = vshl_u8(dup, vget_low_s8(shift_v));
         uint8x8_t idx     = vand_u8(shifted, vget_low_u8(one_v));
         vst1_u8(out + j, vtbl1_u8(vget_low_u8(c2s_vec), idx));
+    }
+    for (; j < K; j++) {
+        int mb = (bm[j >> 3] >> (j & 7)) & 1;
+        out[j] = mb ? right_sym : left_sym;
+    }
+    PROF_TOC(PROF_BU_MERGE_CST_CST, K);
+}
+
+/* merge_cst_cst_tbl_neon — same contract.  Each bm byte picks an 8-byte
+ * row of merge_bits_tab (0x00 / 0xFF per bit), and out = L ^ ((L ^ R) &
+ * bits): two table loads, an AND and an EOR per 16 bytes instead of the
+ * D=1 shuffle chain. */
+static uint8_t merge_bits_tab[256][8] __attribute__((aligned(64)));
+static void init_merge_bits_tab(void)
+{
+    for (int m = 0; m < 256; m++)
+        for (int i = 0; i < 8; i++)
+            merge_bits_tab[m][i] = ((m >> i) & 1) ? 0xFF : 0x00;
+}
+static inline void merge_cst_cst_tbl_neon(const uint8_t *bm, int K,
+                                          uint8_t left_sym, uint8_t right_sym,
+                                          uint8_t *out)
+{
+    PROF_TIC();
+    uint8x16_t vleft  = vdupq_n_u8(left_sym);
+    uint8x16_t vdelta = vdupq_n_u8(left_sym ^ right_sym);
+
+    int j = 0;
+    for (; j + 16 <= K; j += 16) {
+        uint8x16_t bits = vcombine_u8(vld1_u8(merge_bits_tab[bm[j >> 3]]),
+                                      vld1_u8(merge_bits_tab[bm[(j >> 3) + 1]]));
+        vst1q_u8(out + j, veorq_u8(vleft, vandq_u8(vdelta, bits)));
+    }
+    for (; j + 8 <= K; j += 8) {
+        uint8x8_t bits = vld1_u8(merge_bits_tab[bm[j >> 3]]);
+        vst1_u8(out + j, veor_u8(vget_low_u8(vleft),
+                                 vand_u8(vget_low_u8(vdelta), bits)));
     }
     for (; j < K; j++) {
         int mb = (bm[j >> 3] >> (j & 7)) & 1;

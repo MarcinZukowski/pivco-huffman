@@ -413,6 +413,16 @@ static void prim_merge_vv_aqrit(const ctx_t *c){
  *   tbl/blendtab use precomputed 256x8 LUTs (mask->bits / mask->blended out);
  *   vtblq/vtbl use vtst+vqtbl1 at 16- and 8-lane width; d1flat reuses the D=1
  *   flat-decode shape.  Originated in bench_prim.
+ *
+ *   blendtab bakes the bench's fixed symbol pair into its LUT; a production
+ *   form needs one 2 KB table per (left, right) pair.  Building it costs
+ *   ~20 ns on M4, 27-40 ns on Graviton 3-5 and ~80 ns on Graviton 2 (16 x 4 B
+ *   nibble rows, each 128 B block = 8 q regs of low halves OR the block's
+ *   high half, 128 q stores); copying one block then patching the high
+ *   halves with 4 B stores is 2x slower.  Built per call, it pays back over
+ *   production only on nodes above ~2.6K (V1), ~5K (N1), ~10K (V3) and ~31K
+ *   (V2) elements.  With the table cached per symbol pair it beats tbl by
+ *   7-33% on Graviton and ties it on Apple.
  * ========================================================================== */
 static uint8_t pv_mask_to_bits[256][8];
 static uint8_t pv_blend_tab[256][8] __attribute__((aligned(64)));

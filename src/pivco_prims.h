@@ -252,6 +252,7 @@ typedef struct {
 
 extern const pivco_prims_t pivco_prims_scalar;
 extern const pivco_prims_t pivco_prims_neon;
+extern const pivco_prims_t pivco_prims_neon_neoverse_v1;
 extern const pivco_prims_t pivco_prims_x86;
 extern const pivco_prims_t pivco_prims_avx512;
 

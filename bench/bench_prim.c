@@ -56,12 +56,22 @@
 #  include "pivco_prims.h"   /* prim_* through g_pivco_prims */
 #  if defined(__aarch64__)
 #    include "prims/neon.h"
+#    define BACKEND_CODEC_INIT codec_init_neon
 #  elif defined(__AVX512VBMI2__)
 #    include "prims/avx512.h"
+#    define BACKEND_CODEC_INIT codec_init_avx512
 #  else
 #    include "prims/x86.h"
+#    define BACKEND_CODEC_INIT codec_init_x86
 #  endif
 #  define BK pivco_prims_name()
+/* Builds the picked table's partition/merge tables, then the static copies
+ * the backend header above gives this file (the variants reuse them). */
+static void bench_codec_init(void)
+{
+    prim_codec_init();
+    BACKEND_CODEC_INIT();
+}
    /* Retired u16 (code_la) encode kernels (owned by ph-td; production encodes on
       u8 ranks).  Provides the u16enc_* rows + enc_mask8_codes_la_* used by
       the adapters below and by prims-partition.h.  Needs the backend header
@@ -772,7 +782,7 @@ int main(int argc, char **argv) {
     if (!any) for (int d=2;d<=MAXD;d++) want[d]=1;
 
 #if defined(HAVE_SIMD)
-    prim_codec_init();   /* build the backend's partition/merge tables */
+    bench_codec_init();
 #endif
     uint8_t  *bm = malloc(n+16), *codes = malloc(n+16), *out = malloc(n+16);
     uint8_t  *ref = malloc(n+16), *pack_out = malloc(n+16);

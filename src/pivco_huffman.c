@@ -115,6 +115,7 @@ static const pivco_prims_entry_t pivco_prims_tables[] = {
     { "scalar", PIVCO_TIER_BASE, &pivco_prims_scalar },
 #if defined(PIVCO_HAS_NEON)
     { "neon", PIVCO_TIER_BASE, &pivco_prims_neon },
+    { "neon_neoverse_v1", PIVCO_TIER_BASE, &pivco_prims_neon_neoverse_v1 },
 #endif
 #if defined(PIVCO_HAS_SSE4)
     { "x86", PIVCO_TIER_SSE4, &pivco_prims_x86 },
@@ -159,11 +160,13 @@ static const char *pivco_default_name(int cpu_tier)
     int intel = pivco_cpu()->vendor == PIVCO_VENDOR_INTEL;
     pivco_uarch_t uarch = pivco_cpu()->uarch;
     int zen45 = uarch == PIVCO_UARCH_ZEN4 || uarch == PIVCO_UARCH_ZEN5;
+    int neoverse_v1 = (uarch == PIVCO_UARCH_NEOVERSE_V1);
     const char *order[] = {
         zen45 ? "avx512_zen45" : "avx512",
         "avx512",
         intel ? "x86_avx2_intel" : "x86_avx2",
         "x86",
+        neoverse_v1 ? "neon_neoverse_v1" : "neon",
         "neon",
         "scalar",
     };
@@ -198,14 +201,14 @@ int pivco_prims_select(const char *name)
     return 0;
 }
 
-/* PIVCO_PRIMS=<name> picks the table; it defaults to
+/* PIVCO_PRIMS=<name> picks the table; unset or empty, it defaults to
  * pivco_default_name().  A name the CPU can't run aborts. */
 __attribute__((constructor)) static void pivco_prims_init(void)
 {
     int cpu_tier = pivco_cpu_tier();
     PIVCO_CHECK(cpu_tier >= 0 && cpu_tier < PIVCO_TIER_COUNT);
     const char *tab = getenv("PIVCO_PRIMS");
-    if (!tab)
+    if (!tab || !*tab)
         tab = pivco_default_name(cpu_tier);
     int t = pivco_find_prims(tab);
     if (t < 0) {

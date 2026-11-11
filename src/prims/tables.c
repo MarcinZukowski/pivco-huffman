@@ -123,6 +123,28 @@ const pivco_prims_t pivco_prims_neon = {
     .pack_nat            = pack_dN_neon,
 };
 
+const pivco_prims_t pivco_prims_neon_neoverse_v1 = {
+    .name                = "neon_neoverse_v1",
+    .codec_init          = codec_init_neon,
+    .histogram_chunk     = histogram_chunk_scalar,
+    .enc_init            = slot_enc_init_neon,
+    .enc_partition_full  = part_full_neon,
+    .enc_partition_right = slot_enc_partition_right_neon,
+    .enc_partition_none  = slot_enc_partition_none_neon,
+    .popcount_K_right    = slot_popcount_K_right_neon,
+    /* Two-constant merges from a bit-row table (Neoverse V1 runs it ~20%
+     * faster than the D=1 shuffle chain). */
+    .merge_cst_cst       = merge_cst_cst_tbl_neon,
+    .merge_cst_vec       = merge_cst_vec_neon,
+    .merge_vec_vec       = merge_vec_vec_neon,
+    .merge_v512          = vert512_merge_neon,
+    .merge_v128          = vert_merge_neon,
+    .merge_nat           = merge_flat_neon,
+    .pack_v512           = vert512_pack_neon,
+    .pack_v128           = vert_pack_neon,
+    .pack_nat            = pack_dN_neon,
+};
+
 #elif defined(PIVCO_BACKEND_X86)
 
 #include "x86.h"
