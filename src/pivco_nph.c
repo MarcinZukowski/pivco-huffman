@@ -7,8 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define PIVCO_PRIMS_INDIRECT 1   /* prim_* through the table picked at runtime */
-#include "pivco_huffman_primitives.h"
+#include "pivco_prims.h"
 
 size_t pivco_nph_write_lens(const uint8_t lens[PIVCO_MAX_SYMBOLS], uint8_t *out)
 {

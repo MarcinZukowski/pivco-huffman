@@ -1,7 +1,7 @@
 /* pivco_huffman_codec.c — unified encode + bottom-up decode.
  *
- * Compiled once, with PIVCO_PRIMS_INDIRECT: every prim_* goes through
- * the primitive table picked at runtime (prims/tables.h).  The per-node
+ * Compiled once: every prim_* goes through the primitive table picked
+ * at runtime (pivco_prims.h).  The per-node
  * SIMD work lives in the tables' kernels, in
  * pivco_huffman_primitives_<backend>.h.
  *
@@ -21,7 +21,7 @@
 #include "pivco_huffman_common.h"
 #include "pivco_huffman_wire.h"
 #include "node_memo.h"
-#include "pivco_huffman_primitives.h"
+#include "pivco_prims.h"
 #include "pivco_prof.h"
 #ifdef PIVCO_HAS_FSE
 #include "pivco_fse.h"
@@ -64,7 +64,7 @@ static uint8_t *decode_scratch_ensure(pivco_scratch_t *sc, size_t need)
  * merge therefore needs this much trailing slack inside the arena; the
  * caller's `symbols` buffer, which guarantees none, is only ever a
  * merge destination (writes are exact). */
-#define MERGE_OVERREAD ((size_t)PIVCO_PRIM_MERGE_OVERREAD)
+#define MERGE_OVERREAD ((size_t)PIVCO_PRIMS_MERGE_OVERREAD)
 
 /* K_right threshold KrT: a node with n < KrT carries no K_right header.
  * Its bitmap goes ahead of its children's regions instead, and the
@@ -79,7 +79,7 @@ static inline int krt_from_code(int c)
 }
 #define KRT_BITMAP_GOES_FIRST(n, krt) ((n) < (krt))
 
-_Static_assert(PIVCO_PRIM_MERGE_OVERREAD <= PIVCO_FLAT_FSE_SLACK,
+_Static_assert(PIVCO_PRIMS_MERGE_OVERREAD <= PIVCO_FLAT_FSE_SLACK,
                "wire_read_flat_region's slack must cover the merges' overread");
 
 /* Growable encode scratch arena, owned by the caller's pivco_encoder_t
@@ -182,14 +182,12 @@ extern uint64_t g_pivco_fse_attempt [PIVCO_FSE_STATS_SLOTS];
 extern uint64_t g_pivco_fse_bytes_in [PIVCO_FSE_STATS_SLOTS];
 extern uint64_t g_pivco_fse_bytes_out[PIVCO_FSE_STATS_SLOTS];
 
-/* ---------- Entry-point names ---------- */
+/* ---------- Entry points ---------- */
 
-#define CODEC_ENCODE_ENTRY PIVCO_BACKEND_FN(pivco_encode)
-#define CODEC_DECODE_ENTRY PIVCO_BACKEND_FN(pivco_decode_bu)
-int CODEC_ENCODE_ENTRY(pivco_encoder_t *enc_ctx, const pivco_table_t *table,
+int pivco_codec_encode(pivco_encoder_t *enc_ctx, const pivco_table_t *table,
                        const uint8_t *symbols, size_t n,
                        uint8_t *out, size_t *out_len);
-int CODEC_DECODE_ENTRY(pivco_decoder_t *dec_ctx, const pivco_table_t *table,
+int pivco_codec_decode(pivco_decoder_t *dec_ctx, const pivco_table_t *table,
                        const uint8_t *in, size_t in_len,
                        uint8_t *symbols, size_t *consumed);
 
@@ -272,7 +270,7 @@ static pivco_fse_status_t codec_dnph_compress(pivco_encoder_t *enc_ctx,
         return PIVCO_FSE_FALLBACK;
     size_t rec_len = pivco_nph_write_lens(nested->table.code_len, nested->out);
     size_t inner_len = 0;
-    if (CODEC_ENCODE_ENTRY(nested->enc, &nested->table, body, (size_t)nbytes,
+    if (pivco_codec_encode(nested->enc, &nested->table, body, (size_t)nbytes,
                            nested->out + rec_len, &inner_len) != PIVCO_OK)
         return PIVCO_FSE_FALLBACK;
     size_t len = rec_len + inner_len;
@@ -306,7 +304,7 @@ static pivco_fse_status_t codec_snph_compress(pivco_encoder_t *enc_ctx,
     }
     nested->out[0] = (uint8_t)t;
     size_t inner_len = 0;
-    if (CODEC_ENCODE_ENTRY(nested->enc, inner, src, (size_t)nbytes,
+    if (pivco_codec_encode(nested->enc, inner, src, (size_t)nbytes,
                            nested->out + 1, &inner_len) != PIVCO_OK)
         return PIVCO_FSE_FALLBACK;
     size_t len = 1 + inner_len;
@@ -864,7 +862,7 @@ static int read_marker_prefix(const uint8_t **p, const pivco_table_t *table,
     return krt;
 }
 
-int CODEC_ENCODE_ENTRY(pivco_encoder_t *enc_ctx, const pivco_table_t *table, const uint8_t *symbols, size_t n, uint8_t *out, size_t *out_len)
+int pivco_codec_encode(pivco_encoder_t *enc_ctx, const pivco_table_t *table, const uint8_t *symbols, size_t n, uint8_t *out, size_t *out_len)
 {
     if (!symbols || !table || !out || !out_len) return PIVCO_ERR_NULL;
     if (n == 0 || n > PIVCO_WIRE_MAX_N) return PIVCO_ERR_OVERFLOW;
@@ -967,7 +965,7 @@ static int codec_nph_decode_inner(pivco_nested_t *nested,
     const uint8_t *p = in;
     if (wire_read_block_n(&p) != nbytes) return 0;
     size_t consumed = 0;
-    if (CODEC_DECODE_ENTRY(nested->dec, inner_table, in, len, dst, &consumed) != PIVCO_OK)
+    if (pivco_codec_decode(nested->dec, inner_table, in, len, dst, &consumed) != PIVCO_OK)
         return 0;
     return consumed == len;
 }
@@ -1148,7 +1146,7 @@ static void codec_decode_subtree(pivco_decoder_t *dec_ctx,
     }
 }
 
-int CODEC_DECODE_ENTRY(pivco_decoder_t *dec_ctx, const pivco_table_t *table, const uint8_t *in, size_t in_len, uint8_t *symbols, size_t *consumed)
+int pivco_codec_decode(pivco_decoder_t *dec_ctx, const pivco_table_t *table, const uint8_t *in, size_t in_len, uint8_t *symbols, size_t *consumed)
 {
     if (!in || !table || !symbols || !consumed) return PIVCO_ERR_NULL;
     (void)in_len;

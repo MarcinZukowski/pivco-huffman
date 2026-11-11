@@ -207,13 +207,11 @@ target_compile_options(huf0 PRIVATE -w)  # suppress warnings in external code
 
 # The codec and the primitive tables.  The codec (pivco_huffman_codec.c)
 # is compiled once, at the build's floor, and calls every primitive
-# through the table picked at runtime (src/prims/tables.h).  Each backend
-# compiles pivco_prims_table.c once with its own flags and exports its
-# tables (the AVX-512 compile carries two).
+# through the table picked at runtime.  Each backend compiles
+# src/prims/tables.c once with its own flags and exports its tables (the
+# AVX-512 compile carries two).
 set(PIVCO_CODEC_OBJECTS)
 add_library(pivco_codec_prims OBJECT src/pivco_huffman_codec.c)
-target_compile_definitions(pivco_codec_prims PRIVATE
-    PIVCO_BACKEND_SUFFIX=prims PIVCO_PRIMS_INDIRECT=1)
 target_include_directories(pivco_codec_prims PRIVATE include)
 list(APPEND PIVCO_CODEC_OBJECTS $<TARGET_OBJECTS:pivco_codec_prims>)
 # name|backend|flags (base, avx2, avx512)|extra defines (comma-separated)
@@ -243,9 +241,9 @@ foreach(v ${PIVCO_TABLE_COMPILES})
     elseif(vtier STREQUAL "avx512")
         set(vflags ${PIVCO_AVX512_FLAGS})
     endif()
-    add_library(pivco_prims_${vname} OBJECT src/pivco_prims_table.c)
+    add_library(pivco_prims_${vname} OBJECT src/prims/tables.c)
     target_compile_definitions(pivco_prims_${vname} PRIVATE
-        PIVCO_BACKEND_${vback}=1 PIVCO_BACKEND_SUFFIX=${vname} ${vdefs})
+        PIVCO_BACKEND_${vback}=1 ${vdefs})
     target_compile_options(pivco_prims_${vname} PRIVATE ${vflags})
     target_include_directories(pivco_prims_${vname} PRIVATE include)
     list(APPEND PIVCO_CODEC_OBJECTS $<TARGET_OBJECTS:pivco_prims_${vname}>)

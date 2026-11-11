@@ -100,19 +100,18 @@ static int pivco_cpu_tier(void)
 }
 
 #if defined(PIVCO_BUILT_AVX2)
-extern const pivco_prims_t *const pivco_prims_x86_avx2;
-extern const pivco_prims_t *const pivco_prims_x86_avx2_intel;
+extern const pivco_prims_t pivco_prims_x86_avx2;
+extern const pivco_prims_t pivco_prims_x86_avx2_intel;
 #endif
 #if defined(PIVCO_HAS_AVX512)
-extern const pivco_prims_t *const pivco_prims_avx512_zen45;
+extern const pivco_prims_t pivco_prims_avx512_zen45;
 #endif
 
-/* A primitive table: the SIMD tier it needs and where its exported
- * pointer lives. */
+/* A primitive table and the SIMD tier it needs. */
 typedef struct {
     const char *name;
     int tier;
-    const pivco_prims_t *const *prims;
+    const pivco_prims_t *prims;
 } pivco_prims_entry_t;
 
 static const pivco_prims_entry_t pivco_prims_tables[] = {
@@ -135,11 +134,11 @@ static const pivco_prims_entry_t pivco_prims_tables[] = {
 #define PIVCO_N_PRIMS_TABLES (int)(sizeof pivco_prims_tables / sizeof pivco_prims_tables[0])
 const pivco_prims_t *g_pivco_prims;
 
-/* The codec (pivco_huffman_codec.c, compiled with PIVCO_PRIMS_INDIRECT). */
-int pivco_encode_prims(pivco_encoder_t *, const pivco_table_t *,
+/* The codec (pivco_huffman_codec.c). */
+int pivco_codec_encode(pivco_encoder_t *, const pivco_table_t *,
                        const uint8_t *, size_t, uint8_t *, size_t *);
-int pivco_decode_bu_prims(pivco_decoder_t *, const pivco_table_t *,
-                          const uint8_t *, size_t, uint8_t *, size_t *);
+int pivco_codec_decode(pivco_decoder_t *, const pivco_table_t *,
+                       const uint8_t *, size_t, uint8_t *, size_t *);
 
 const char *pivco_prims_name(void)
 {
@@ -198,8 +197,7 @@ int pivco_prims_select(const char *name)
     int t = name ? pivco_find_prims(name) : pivco_prims_startup;
     if (t < 0 || pivco_prims_tables[t].tier > pivco_cpu_tier())
         return -1;
-    g_pivco_prims = *pivco_prims_tables[t].prims;
-    PIVCO_CHECK(g_pivco_prims != NULL);
+    g_pivco_prims = pivco_prims_tables[t].prims;
     return 0;
 }
 
@@ -232,7 +230,7 @@ int pivco_encode(pivco_encoder_t *enc, const pivco_table_t *table,
                  uint8_t *out, size_t *out_len)
 {
     int rc;
-    rc = pivco_encode_prims(enc, table, symbols, n, out, out_len);
+    rc = pivco_codec_encode(enc, table, symbols, n, out, out_len);
     if (rc == PIVCO_OK) {
         enc->stats.blocks++;
         enc->stats.bytes_in += n;
@@ -246,7 +244,7 @@ int pivco_decode(pivco_decoder_t *dec, const pivco_table_t *table,
                  uint8_t *symbols, size_t *consumed)
 {
     int rc;
-    rc = pivco_decode_bu_prims(dec, table, in, in_len, symbols, consumed);
+    rc = pivco_codec_decode(dec, table, in, in_len, symbols, consumed);
     if (rc == PIVCO_OK) {
         dec->stats.blocks++;
         dec->stats.bytes_in += in_len;
@@ -274,8 +272,6 @@ const pivco_cfg_t pivco_cfg_default = {
 };
 
 #include "pivco_huffman_common.h"
-#define PIVCO_PRIMS_INDIRECT 1   /* prim_* through the table picked at runtime */
-#include "pivco_huffman_primitives.h"
 #include "pivco_nph.h"
 
 static pivco_scratch_t *scratch_create(int max_n)

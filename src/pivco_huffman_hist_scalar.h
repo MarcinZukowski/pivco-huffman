@@ -7,7 +7,7 @@
  * its own, see primitives_avx512.h).  Not a backend header itself: no
  * prim_* aliases here, specialized name only.
  *
- * Contract: see prim_histogram_chunk in pivco_primitives.h.
+ * Contract: see prim_histogram_chunk in pivco_prims.h.
  */
 #ifndef PIVCO_HUFFMAN_HIST_SCALAR_H
 #define PIVCO_HUFFMAN_HIST_SCALAR_H

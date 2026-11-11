@@ -5,9 +5,7 @@ static void t_ctx_init(void) {
     if (!g_tenc) g_tenc = pivco_encoder_create();
     if (!g_tdec) g_tdec = pivco_decoder_create();
 }
-#define PIVCO_PRIMS_INDIRECT 1   /* prim_* through the table picked at runtime */
-#include "pivco_huffman_primitives.h"
-#include "pivco_prims.h"   /* pivco_prims_select: every table */
+#include "pivco_prims.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

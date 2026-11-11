@@ -1,9 +1,9 @@
 /* pivco_huffman_primitives_avx512.h — AVX-512 VBMI2 primitive
  * implementations of the codec primitive interface (see
- * pivco_huffman_primitives.h).
+ * pivco_prims.h).
  *
- * Specialized names end in `_avx512`; the codec calls the aliases
- * `prim_*` defined at the bottom as always-inline wrappers.
+ * Specialized names end in `_avx512`; prims/tables.c binds them to
+ * the table slots the codec calls.
  *
  * Floor: AVX-512 F + BW + VBMI + VBMI2 + VPOPCNTDQ + GFNI + BITALG.
  * Pivco's AVX-512 tier is built with all of these (-mavx512f -mavx512bw
@@ -40,7 +40,7 @@
  *     vpmultishiftqb (D=3,5,6,7) or vpermb-stride + shift (D=2,4).  See
  *     pivco_huffman_avx512_pack.h.  D=8 via vpmovwb byte narrow.
  *
- * Internal header.  Included by pivco_huffman_primitives.h when
+ * Internal header.  Included by prims/tables.c when
  * PIVCO_BACKEND_AVX512 is defined.  Not part of the public API.
  */
 

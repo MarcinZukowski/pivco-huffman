@@ -1,9 +1,9 @@
 /* pivco_huffman_primitives_x86.h — x86 (SSE4.1 + optional AVX2) primitive
  * implementations of the codec primitive interface (see
- * pivco_huffman_primitives.h).
+ * pivco_prims.h).
  *
- * Specialized names end in `_x86`; the codec calls the aliases `prim_*`
- * defined at the bottom as always-inline wrappers.  Two implementation
+ * Specialized names end in `_x86`; prims/tables.c binds them to the
+ * table slots the codec calls.  Two implementation
  * tiers gated by PIVCO_HAS_AVX2: the AVX2 tier widens pack_dN to 64-bit
  * per-lane shifts via _mm256_sllv_epi64 (D=3/5/6/7) and gives flat
  * decode a 32-byte D=4 fast path.  The SSE4.1 floor handles D=2/4/8
@@ -18,7 +18,7 @@
  * on an AVX-512 host (with -mavx512vbmi2 enabled globally), it's
  * never reached at runtime there.
  *
- * Internal header.  Included by pivco_huffman_primitives.h when
+ * Internal header.  Included by prims/tables.c when
  * PIVCO_BACKEND_X86 is defined.  Not part of the public API.
  */
 

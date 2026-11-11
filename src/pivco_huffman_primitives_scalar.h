@@ -1,10 +1,10 @@
-/* pivco_primitives_scalar.h — scalar implementations of the
- * codec-primitive interface (see pivco_primitives.h).
+/* pivco_huffman_primitives_scalar.h — scalar implementations of the
+ * codec-primitive interface (see pivco_prims.h).
  *
- * Specialized names end in `_scalar`; the codec calls the aliases
- * `prim_*` defined at the bottom as always-inline wrappers.
+ * Specialized names end in `_scalar`; prims/tables.c binds them to
+ * the table slots the codec calls.
  *
- * Internal header.  Included by pivco_primitives.h when
+ * Internal header.  Included by prims/tables.c when
  * PIVCO_BACKEND_SCALAR is defined.  Not part of the public API.
  */
 

@@ -148,32 +148,4 @@ typedef struct {
 #define DECODE_SCRATCH_ALIGN ((uintptr_t)16384)   /* Apple page size */
 #define DECODE_SCRATCH_SHIFT (64 * 39)
 
-/* Per-backend function names: PIVCO_BACKEND_FN(f) is f_<backend>.  In
- * the per-backend codec build the backend is its PIVCO_BACKEND_*; in
- * every other file it is the one pivco_encode / pivco_decode dispatch
- * to.  Codec variants pass their own (-DPIVCO_BACKEND_SUFFIX=x86_avx2),
- * which is kept. */
-#ifndef PIVCO_BACKEND_SUFFIX
-#if defined(PIVCO_BACKEND_SCALAR)
-#  define PIVCO_BACKEND_SUFFIX scalar
-#elif defined(PIVCO_BACKEND_NEON)
-#  define PIVCO_BACKEND_SUFFIX neon
-#elif defined(PIVCO_BACKEND_X86)
-#  define PIVCO_BACKEND_SUFFIX x86
-#elif defined(PIVCO_BACKEND_AVX512)
-#  define PIVCO_BACKEND_SUFFIX avx512
-#elif defined(PIVCO_HAS_AVX512)
-#  define PIVCO_BACKEND_SUFFIX avx512
-#elif defined(PIVCO_HAS_NEON)
-#  define PIVCO_BACKEND_SUFFIX neon
-#elif defined(PIVCO_HAS_SSE4)
-#  define PIVCO_BACKEND_SUFFIX x86
-#else
-#  define PIVCO_BACKEND_SUFFIX scalar
-#endif
-#endif  /* PIVCO_BACKEND_SUFFIX */
-#define PIVCO_BACKEND_CAT_(f, b) f##_##b
-#define PIVCO_BACKEND_CAT(f, b)  PIVCO_BACKEND_CAT_(f, b)
-#define PIVCO_BACKEND_FN(f)      PIVCO_BACKEND_CAT(f, PIVCO_BACKEND_SUFFIX)
-
 #endif /* PIVCO_HUFFMAN_COMMON_H */

@@ -35,7 +35,7 @@ cmake --build build
 ## Architecture
 
 - **Backends**: scalar, NEON (ARM), x86 (SSE4.1 / AVX2), AVX-512 VBMI2 (Intel).  SVE is disabled (svcompact at 128-bit isn't competitive with NEON TBL).
-- **Codec framework**: one `pivco_huffman_codec.c`, compiled once, calls every primitive through a table (`src/prims/tables.h`).  Each backend compiles `pivco_prims_table.c` with its `primitives_<backend>.h` (the only files with SIMD intrinsics) and exports its tables.  The build compiles every SIMD tier the compiler supports; `pivco_encode`/`pivco_decode` in `src/pivco_huffman.c` dispatch at runtime by CPU tier, vendor and microarchitecture (`PIVCO_PRIMS=<table>` overrides).
+- **Codec framework**: one `pivco_huffman_codec.c`, compiled once, calls every primitive through a table (`src/pivco_prims.h`).  Each backend compiles `src/prims/tables.c` with its `primitives_<backend>.h` (the only files with SIMD intrinsics) and exports its tables.  The build compiles every SIMD tier the compiler supports; `pivco_encode`/`pivco_decode` in `src/pivco_huffman.c` dispatch at runtime by CPU tier, vendor and microarchitecture (`PIVCO_PRIMS=<table>` overrides).
 - **Block size**: 32K default, 16K on Apple Silicon (see `PIVCO_BLOCK_SIZE` in `include/pivco_huffman.h`)
 - **Wire format**: see `src/pivco_huffman_wire.h` for the canonical doc.  Post-order records: `[optional K_right:u16 LE at node entry][children's regions, larger-K child first][FSE marker:u8][bitmap or FSE payload]` — each bitmap sits where its merge consumes it.  Flat subtrees (D ≥ 2) skip the header and emit one N·D-bit packed region.
 - **Key data structures**:
@@ -75,11 +75,11 @@ from the most recent sweep tag.
 ## Key Files
 
 The codec is a single tree-walk + wire-format engine in
-`pivco_huffman_codec.c`, compiled once with `PIVCO_PRIMS_INDIRECT`: it
-calls each primitive through the table picked at startup.  Each backend
-compiles `src/pivco_prims_table.c`, which pulls in the matching
-`pivco_huffman_primitives_<backend>.h` via the router header
-`pivco_huffman_primitives.h`.  The unify-framework refactor landed in
+`pivco_huffman_codec.c`, compiled once: it calls each primitive through
+the table picked at startup (`src/pivco_prims.h`).  Each
+backend compiles `src/prims/tables.c`, which includes the matching
+`pivco_huffman_primitives_<backend>.h` and defines that backend's
+tables.  The unify-framework refactor landed in
 five phases ending 2026-05-14; before that, each backend had its own
 .c file with a duplicated tree walk -- now all four share one.
 
@@ -92,8 +92,9 @@ five phases ending 2026-05-14; before that, each backend had its own
   primitives through the runtime-picked table.  Owns: tree walk
   (encode + BU decode), wire-format I/O via `pivco_huffman_wire.h`,
   optional FSE attempt on the raw bitmap.  Does not include any SIMD.
-- `src/pivco_huffman_primitives.h` — router; selects the backend header
-  based on the `PIVCO_BACKEND_*` define
+- `src/pivco_prims.h` — the primitive interface the codec
+  calls (`pivco_prims_t`, `prim_*` through `g_pivco_prims`) and the
+  primitive contract
 - `src/pivco_huffman_primitives_scalar.h` — scalar primitive implementations
 - `src/pivco_huffman_primitives_neon.h` — NEON primitive implementations
 - `src/pivco_huffman_primitives_x86.h` — SSE4.1 + AVX2 primitive implementations

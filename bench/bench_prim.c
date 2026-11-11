@@ -27,14 +27,13 @@
 #include <string.h>
 #include <time.h>
 
-/* Backend select (matches the codec's per-tier OBJECT libs).  Compile with
- * -march=native: aarch64 -> NEON; x86 with AVX-512 VBMI2 -> AVX512; else SSE/
- * AVX2.  pack/merge/partition are benched via the production prim_* (exist on
- * every backend); the standalone unpack/scatter kernels are NEON-only. */
-/* The primitives router self-selects the backend from the build arch
- * (see pivco_huffman_primitives.h); this block only derives the local
- * HAVE_SIMD / BK conveniences and the PIVCO_HAS_* tier defines the
- * included research headers expect when built standalone. */
+/* The production prim_* rows run through the table picked at runtime
+ * (PIVCO_PRIMS=<table> picks another), exactly as the codec calls them.
+ * The research kernels (standalone unpack/scatter, the u16enc rows,
+ * prim_variants) are compiled into this bench, so it includes the backend
+ * header its compile flags allow: aarch64 -> NEON; x86 with AVX-512 VBMI2
+ * -> AVX512; else SSE/AVX2.  The PIVCO_HAS_* tier defines are the ones
+ * those headers expect. */
 #if defined(__aarch64__)
 #  define HAVE_SIMD 1
 #  define USE_NEON_KERNELS 1
@@ -54,14 +53,19 @@
 #include "pivco_huffman_vertical.h"
 #include "bench_canary.h"
 #if defined(HAVE_SIMD)
-#  include "pivco_huffman_primitives.h"   /* backend self-selected; BK below */
-#  define BK PIVCO_PRIM_BACKEND_NAME
-   /* prim_enc_* (u8 rank) / prim_merge_flat
-                                             (+ NEON flat_dN) */
+#  include "pivco_prims.h"   /* prim_* through g_pivco_prims */
+#  if defined(__aarch64__)
+#    include "pivco_huffman_primitives_neon.h"
+#  elif defined(__AVX512VBMI2__)
+#    include "pivco_huffman_primitives_avx512.h"
+#  else
+#    include "pivco_huffman_primitives_x86.h"
+#  endif
+#  define BK pivco_prims_name()
    /* Retired u16 (code_la) encode kernels (owned by ph-td; production encodes on
       u8 ranks).  Provides the u16enc_* rows + enc_mask8_codes_la_* used by
-      the adapters below and by prims-partition.h.  Needs the shared header above
-      first (compress_tab / *_pack.h helpers / PIVCO_PRIM_ALWAYS_INLINE). */
+      the adapters below and by prims-partition.h.  Needs the backend header
+      above first (compress_tab / *_pack.h helpers / PIVCO_PRIM_ALWAYS_INLINE). */
 #  include "pivco_huffman_u16enc.h"
 #endif
 #ifndef BK

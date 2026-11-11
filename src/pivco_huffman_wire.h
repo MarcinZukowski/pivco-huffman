@@ -276,7 +276,7 @@ static inline const uint8_t *wire_read_bitmap(const uint8_t **in_ptr,
 /* Slack allocated past an FSE-decoded flat region: the flat merges load
  * their source in full vectors, so they may read (never write) past the
  * region's end.  Comfortably above every backend's
- * PIVCO_PRIM_MERGE_OVERREAD (max 16); static-asserted in the codec. */
+ * PIVCO_PRIMS_MERGE_OVERREAD (16); static-asserted in the codec. */
 #define PIVCO_FLAT_FSE_SLACK 128
 
 /* Read a flat-subtree region: [marker][n*D packed bits] when marker == 0,

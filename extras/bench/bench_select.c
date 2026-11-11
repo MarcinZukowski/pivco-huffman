@@ -16,7 +16,7 @@
  */
 #include "pivco_huffman.h"
 #include "bench_ctx.h"
-#include "pivco_huffman_primitives.h"
+#include "pivco_prims.h"
 #include "pivco_huffman_wire.h"
 #include <stdio.h>
 #include <stdlib.h>

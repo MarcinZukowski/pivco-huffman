@@ -1,14 +1,11 @@
 /* pivco_huffman_primitives_neon.h — NEON implementations of the codec
- * primitive interface (see pivco_huffman_primitives.h).
+ * primitive interface (see pivco_prims.h).
  *
- * Specialized names end in `_neon`; the codec calls the aliases
- * `prim_*` defined at the bottom as always-inline wrappers.
+ * Specialized names end in `_neon`; prims/tables.c binds them to the
+ * table slots the codec calls.
  *
- * Internal header.  Included by pivco_huffman_primitives.h when
- * PIVCO_BACKEND_NEON is defined.  Also #included by the legacy
- * src/pivco_bu_neon.c during the Phase 3 transition (the
- * legacy file calls these primitives directly until step 3.8 retires
- * it).  Not part of the public API.
+ * Internal header.  Included by prims/tables.c when
+ * PIVCO_BACKEND_NEON is defined.  Not part of the public API.
  */
 
 #ifndef PIVCO_HUFFMAN_PRIMITIVES_NEON_H
