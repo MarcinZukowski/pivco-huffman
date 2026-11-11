@@ -25,6 +25,8 @@
 - [Pooled partial-byte tails](#pooled-partial-byte-tails-2026-10-11)
 - [Faster dHuf0: zstd's huf0 and a cheaper table setup](#faster-dhuf0-zstds-huf0-and-a-cheaper-table-setup-2026-10-20)
 - [Within-tier symbol order for shaking (wire change)](#within-tier-symbol-order-for-shaking-wire-change-2026-10-26)
+- [Aligned flat-region stores in the encoder](#aligned-flat-region-stores-in-the-encoder-2026-11-10)
+- [Kernel search tooling: address-exact asm harness](#kernel-search-tooling-address-exact-asm-harness-2026-11-10)
 
 **PHAZ**
 - [Context menu per code stream, chosen under a decode-cost class](#context-menu-per-code-stream-chosen-under-a-decode-cost-class-2026-10-04)
@@ -394,6 +396,49 @@ search it too.
 Shaking today, for scale (lengths only, M4, whole files,
 `pivcohuf c -e 0 -a --ans-k2 --shake N`): xml 0.98% at 50 steps,
 3.95% at 5000; x-ray 1.01% / 5.35%.
+
+### Aligned flat-region stores in the encoder, 2026-11-10
+The codec writes each flat region right after its record header, so
+the body lands misaligned (flat_M5 on c8i: body at 1/17/33/49 mod 64).
+Every 32 B store of the AVX2 512-lane pack then splits a cache line.
+- **Size of the lead** (c8i, AVX2 D=5 pack, ns per 32K block):
+  - in place, today: 847 (D=2..6 inlined) / 910 (out of line);
+  - into a 64 B-aligned scratch: ~593 for both, +~187 for the memcpy.
+  - So ~30% of the pack; even with the copy it is a net win.
+- **Side effect:** the split-store cost depends on gcc's schedule.  This
+  is why the #14 AVX2 compile merge moved encode on the off-host
+  pairs (x86_avx2 on c8i flat_M5 -2.5%, x86_avx2_intel on c6a
+  +1..7%), while each host's own table stayed within noise.  With
+  aligned output both schedules tie.
+- **Options**, no wire change:
+  - head peel: narrow stores up to the next 64 B boundary, aligned
+    32 B stores after;
+  - aligned staging + memcpy (measured above).
+- **Open:** E2E effect unmeasured (block encode barely moved in the
+  staging test); other backends and the decode side unchecked.
+- **Also:** the D=5 loop spills 9 masks to the stack; fewer live masks
+  may be worth as much.
+
+### Kernel search tooling: address-exact asm harness, 2026-11-10
+E2E moves a few % from codegen and placement alone, so kernel
+decisions need isolated kernel measurements.  What worked in the #14
+hunt, in order:
+1. PIVCO_PROF A/B in the codec, with flipped variants to separate
+   code structure from placement;
+2. calling the kernel twice per block in the codec (context vs
+   steady state);
+3. whole-process `perf stat` raw counters / calls (sampling is lossy
+   on EC2 VMs);
+4. an address-exact asm harness: extract the kernel from the build's
+   own `gcc -S` (same compiler and flags; c8i CMake uses gcc14),
+   one section per function, `--section-start` at the real addresses,
+   byte-verified against the binary; sweep output misalignment, data
+   offset mod 4K and stack depth;
+5. confirm in the codec (e.g. aligned staging).
+
+Always sweep output misalignment.  Open: move the extractor and
+harness (scratch today) into `bench/`, and use them for a systematic
+search over kernel variants.
 
 **PHAZ**
 

@@ -2,10 +2,11 @@
  * choice, binding each slot to a kernel.
  *
  * A table's kernels need its backend's header and compile flags, so
- * this file is compiled once per backend (and per variant, such as
- * x86_avx2_intel), defining the tables its PIVCO_BACKEND_* and variant
- * defines select.  A backend can define more than one table with the
- * same flags, for one microarchitecture each (pivco_prims_avx512_zen45).
+ * this file is compiled once per backend and SIMD tier (x86 and
+ * x86_avx2 are two compiles), defining the tables its PIVCO_BACKEND_*
+ * and tier defines select.  One compile can define more than one table,
+ * for one microarchitecture each (pivco_prims_x86_avx2_intel,
+ * pivco_prims_avx512_zen45).
  *
  * Kernels whose signature differs from their slot's get a slot_<slot>_
  * <backend> adapter next to their table.
@@ -148,11 +149,7 @@ int slot_popcount_K_right_x86(const uint8_t *bm, int K)
  * ~12 KB of text per TU; they are in git @ 87da7ed (see IDEAS.md). */
 #if !defined(PIVCO_HAS_AVX2)
 const pivco_prims_t pivco_prims_x86 = {
-#elif defined(PIVCO_X86_INTEL)
-const pivco_prims_t pivco_prims_x86_avx2_intel = {
-#else
-const pivco_prims_t pivco_prims_x86_avx2 = {
-#endif
+    .name                = "x86",
     .codec_init          = codec_init_x86,
     /* SSE4.1/AVX2 has no histogram win over the shared scalar core
      * (measured). */
@@ -168,29 +165,58 @@ const pivco_prims_t pivco_prims_x86_avx2 = {
     .merge_v128          = vert_merge_x86v,
     .merge_nat           = merge_flat_x86,
     .pack_v128           = vert_pack_x86v,
-#if !defined(PIVCO_HAS_AVX2)
-    .name                = "x86",
     /* The 512-lane blocks as four interleaved 16-lane quarters. */
     .merge_v512          = vert512_merge_x86v,
     .pack_v512           = vert512_pack_x86v,
     .pack_nat            = pack_dN_x86,
+};
 #else
-#  if defined(PIVCO_X86_INTEL)
-    .name                = "x86_avx2_intel",
-#  else
+const pivco_prims_t pivco_prims_x86_avx2 = {
     .name                = "x86_avx2",
-#  endif
+    .codec_init          = codec_init_x86,
+    /* SSE4.1/AVX2 has no histogram win over the shared scalar core
+     * (measured). */
+    .histogram_chunk     = histogram_chunk_scalar,
+    .enc_init            = enc_init_2tab_x86,
+    .enc_partition_full  = part_full_x86,
+    .enc_partition_right = slot_enc_partition_right_x86,
+    .enc_partition_none  = slot_enc_partition_none_x86,
+    .popcount_K_right    = slot_popcount_K_right_x86,
+    .merge_cst_cst       = merge_cst_cst_x86,
+    .merge_cst_vec       = merge_cst_vec_x86,
+    .merge_vec_vec       = merge_vec_vec_x86,
+    .merge_v128          = vert_merge_x86v,
+    .merge_nat           = merge_flat_x86,
+    .pack_v128           = vert_pack_x86v,
     .pack_nat            = pack_dN_avx2_x86,
     .merge_v512          = vert512_merge_ymm,
-#  if defined(PIVCO_X86_INTEL)
-    /* D=7 packs in ymm rows, as D=2..6 (Intel runs ymm ops whole). */
-    .pack_v512           = vert512_pack_ymm_intel,
-#  else
     /* D=7 packs walk 16-lane quarters (Zen splits ymm ops in two). */
     .pack_v512           = vert512_pack_ymm,
-#  endif
-#endif
 };
+
+const pivco_prims_t pivco_prims_x86_avx2_intel = {
+    .name                = "x86_avx2_intel",
+    .codec_init          = codec_init_x86,
+    /* SSE4.1/AVX2 has no histogram win over the shared scalar core
+     * (measured). */
+    .histogram_chunk     = histogram_chunk_scalar,
+    .enc_init            = enc_init_2tab_x86,
+    .enc_partition_full  = part_full_x86,
+    .enc_partition_right = slot_enc_partition_right_x86,
+    .enc_partition_none  = slot_enc_partition_none_x86,
+    .popcount_K_right    = slot_popcount_K_right_x86,
+    .merge_cst_cst       = merge_cst_cst_x86,
+    .merge_cst_vec       = merge_cst_vec_x86,
+    .merge_vec_vec       = merge_vec_vec_x86,
+    .merge_v128          = vert_merge_x86v,
+    .merge_nat           = merge_flat_x86,
+    .pack_v128           = vert_pack_x86v,
+    .pack_nat            = pack_dN_avx2_x86,
+    .merge_v512          = vert512_merge_ymm,
+    /* D=7 packs in ymm rows, as D=2..6 (Intel runs ymm ops whole). */
+    .pack_v512           = vert512_pack_ymm_intel,
+};
+#endif
 
 #elif defined(PIVCO_BACKEND_AVX512)
 

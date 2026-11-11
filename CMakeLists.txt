@@ -208,8 +208,8 @@ target_compile_options(huf0 PRIVATE -w)  # suppress warnings in external code
 # The codec and the primitive tables.  The codec (pivco_huffman_codec.c)
 # is compiled once, at the build's floor, and calls every primitive
 # through the table picked at runtime.  Each backend compiles
-# src/prims/tables.c once with its own flags and exports its tables (the
-# AVX-512 compile carries two).
+# src/prims/tables.c once per SIMD tier with that tier's flags and exports
+# its tables (the AVX2 and AVX-512 compiles carry two each).
 set(PIVCO_CODEC_OBJECTS)
 add_library(pivco_codec_prims OBJECT src/pivco_huffman_codec.c)
 target_include_directories(pivco_codec_prims PRIVATE include)
@@ -222,7 +222,6 @@ elseif(TARGET_ARCH STREQUAL "x86_64" OR TARGET_ARCH STREQUAL "amd64")
     list(APPEND PIVCO_TABLE_COMPILES "x86|X86|base|")
     if(PIVCO_TIER_AVX2)
         list(APPEND PIVCO_TABLE_COMPILES "x86_avx2|X86|avx2|PIVCO_HAS_AVX2=1")
-        list(APPEND PIVCO_TABLE_COMPILES "x86_avx2_intel|X86|avx2|PIVCO_HAS_AVX2=1,PIVCO_X86_INTEL=1")
     endif()
     if(PIVCO_TIER_AVX512)
         list(APPEND PIVCO_TABLE_COMPILES "avx512|AVX512|avx512|PIVCO_HAS_AVX2=1")
