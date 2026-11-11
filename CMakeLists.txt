@@ -161,11 +161,16 @@ elseif(TARGET_ARCH STREQUAL "x86_64" OR TARGET_ARCH STREQUAL "amd64")
         set(COMPILER_HAS_AVX512_VBMI2 OFF)
     endif()
     check_c_compiler_flag("-mavx2"        COMPILER_HAS_AVX2)
-    # The build host's AVX-512 support, only for the extras benches that
+    # The build host's AVX-512 and AVX2 support, only for the benches that
     # are built for the host.
     if(COMPILER_HAS_AVX512_VBMI2)
         execute_process(COMMAND grep -c avx512_vbmi2 /proc/cpuinfo
                         OUTPUT_VARIABLE CPU_HAS_AVX512 OUTPUT_STRIP_TRAILING_WHITESPACE
+                        ERROR_QUIET)
+    endif()
+    if(COMPILER_HAS_AVX2)
+        execute_process(COMMAND grep -c avx2 /proc/cpuinfo
+                        OUTPUT_VARIABLE CPU_HAS_AVX2 OUTPUT_STRIP_TRAILING_WHITESPACE
                         ERROR_QUIET)
     endif()
     set(PIVCO_AVX2_FLAGS -mavx2 -mbmi2 -msse4.1 -mpopcnt)

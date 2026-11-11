@@ -288,7 +288,7 @@ static void neon_scatter(const ctx_t *c) {
 }
 #endif /* USE_NEON_KERNELS */
 
-#if defined(PIVCO_HAS_AVX512)   /* standalone unpack: production avx512_flat helpers */
+#if defined(__AVX512VBMI2__)   /* standalone unpack: production avx512_flat helpers */
 /* Pure-unpack rows: each case is the matching merge_flat_dN_avx512 loop with
    the c2s vpermb removed -- codes are stored, not mapped.  Loop bounds (the
    128-slack wide loop, fast/safe 16-wide tails) are copied verbatim from
@@ -361,7 +361,7 @@ static void avx512_unpack(const ctx_t *c) {
     }
     for (; i < n; i++) cd[i] = (uint8_t)extract_D_bits_avx512(bm, i * c->D, c->D);
 }
-#endif /* PIVCO_HAS_AVX512 */
+#endif /* __AVX512VBMI2__ */
 
 #if defined(HAVE_SIMD)   /* pack/merge/partition: production prim_*, all backends */
 static void simd_merge_flat(const ctx_t *c){ prim_merge_flat_natural(c->out, c->n, c->bm, c->D, c->c2s); }
@@ -868,7 +868,7 @@ int main(int argc, char **argv) {
 #if defined(USE_NEON_KERNELS)
         if (d <= 7) reg(BK,ST_UNPACK, d,0,neon_unpack);
 #endif
-#if defined(PIVCO_HAS_AVX512)
+#if defined(__AVX512VBMI2__)
         if (d <= 7) reg(BK,ST_UNPACK, d,0,avx512_unpack);
 #endif
         reg("scalar",ST_SCATTER,d,0,p_scatter_scalar);

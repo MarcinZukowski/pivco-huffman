@@ -908,6 +908,9 @@ static void prim_merge_vv_sse_com128(const ctx_t *c){
  * loop bytes match production exactly (byte-verified on c3).
  * Production-side cure candidate: -falign-loops=32 (fleet A/A' pending).
  * ========================================================================== */
+/* The cores name the tables only in asm; this keeps them emitted. */
+__attribute__((used))
+static const void *const pv_cv_ivb_tables[] = { g_x86_merge_shuf0, g_x86_merge_shuf1 };
 __attribute__((naked,noinline,used))
 static long pv_cv_ivb_p0_core(uint8_t *out, const uint8_t *right,
                               const uint8_t *bm, long n, long left_sym)

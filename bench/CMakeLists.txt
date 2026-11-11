@@ -107,11 +107,13 @@ if(UNIX AND NOT APPLE)
     # research binary non-PIE instead of rewriting them RIP-relative.
     target_link_options(pivco_bench_prim PRIVATE -no-pie)
 endif()
-# The build compiles at the SSE4.1 floor but still defines
-# PIVCO_HAS_AVX512; this bench calls the AVX-512 primitives directly, so
-# it gets that tier's flags and runs only on AVX-512 CPUs.
-if(PIVCO_TIER_AVX512)
+# This bench calls the backend kernels directly, so it is built for the
+# build host's tier (AVX-512, AVX2 or the SSE4.1 floor) and runs only on
+# CPUs of that tier.
+if(PIVCO_TIER_AVX512 AND CPU_HAS_AVX512 AND NOT CPU_HAS_AVX512 STREQUAL "0")
     target_compile_options(pivco_bench_prim PRIVATE ${PIVCO_AVX512_FLAGS})
+elseif(PIVCO_TIER_AVX2 AND CPU_HAS_AVX2 AND NOT CPU_HAS_AVX2 STREQUAL "0")
+    target_compile_options(pivco_bench_prim PRIVATE ${PIVCO_AVX2_FLAGS})
 endif()
 
 # Optional Oodle reference comparison, consumed here by pivco_fair_bench and --

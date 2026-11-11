@@ -47,8 +47,8 @@ __attribute__((noinline))
 static void current_d3_unpack(uint8_t *out, const uint8_t *in, int n, int reps) {
     for (int r = 0; r < reps; r++)
         for (int i = 0; i + 16 <= n; i += 16) {
-            uint8x8_t lo = flat_d3_unpack(in + ((i      * 3) >> 3));
-            uint8x8_t hi = flat_d3_unpack(in + (((i + 8) * 3) >> 3));
+            uint8x8_t lo = flat_d3_unpack_safe(in + ((i      * 3) >> 3));
+            uint8x8_t hi = flat_d3_unpack_safe(in + (((i + 8) * 3) >> 3));
             vst1q_u8(out + i, vcombine_u8(lo, hi));
         }
 }
@@ -62,8 +62,8 @@ __attribute__((noinline))
 static void current_d5_unpack(uint8_t *out, const uint8_t *in, int n, int reps) {
     for (int r = 0; r < reps; r++)
         for (int i = 0; i + 16 <= n; i += 16) {
-            uint8x8_t lo = flat_d5_unpack(in + ((i      * 5) >> 3));
-            uint8x8_t hi = flat_d5_unpack(in + (((i + 8) * 5) >> 3));
+            uint8x8_t lo = flat_d5_unpack_safe(in + ((i      * 5) >> 3));
+            uint8x8_t hi = flat_d5_unpack_safe(in + (((i + 8) * 5) >> 3));
             vst1q_u8(out + i, vcombine_u8(lo, hi));
         }
 }
@@ -71,8 +71,8 @@ __attribute__((noinline))
 static void current_d6_unpack(uint8_t *out, const uint8_t *in, int n, int reps) {
     for (int r = 0; r < reps; r++)
         for (int i = 0; i + 16 <= n; i += 16) {
-            uint8x8_t lo = flat_d6_unpack(in + ((i      * 6) >> 3));
-            uint8x8_t hi = flat_d6_unpack(in + (((i + 8) * 6) >> 3));
+            uint8x8_t lo = flat_d6_unpack_safe(in + ((i      * 6) >> 3));
+            uint8x8_t hi = flat_d6_unpack_safe(in + (((i + 8) * 6) >> 3));
             vst1q_u8(out + i, vcombine_u8(lo, hi));
         }
 }
