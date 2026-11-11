@@ -2,8 +2,8 @@
  *
  * Internal header.  Each `flat_dN_unpack()` reads N D-bit codes from a
  * packed bitstream and returns them in NEON vector lanes (one byte per
- * code, value < 2^D).  Used by the production decoder
- * (pivco_huffman_neon.c) and the per-D microbench (bench/bench_micro.c).
+ * code, value < 2^D).  Used by the NEON primitives
+ * (pivco_huffman_primitives_neon.h) and the benches (bench_micro, bench_prim).
  *
  * All helpers + unpack tables live here so the two TUs share a single
  * source of truth without giving up inlining.  Tables are `static const`

@@ -693,7 +693,6 @@ static inline void init_avx512(uint8_t *ranks, int n,
     __m512i t_hi0 = _mm512_loadu_si512((const __m512i *)(s2r + 128));  /* entries [128:192) */
     __m512i t_hi1 = _mm512_loadu_si512((const __m512i *)(s2r + 192));  /* entries [192:256) */
 
-    PROF_TIC();
     int i = 0;
     for (; i + 64 <= n; i += 64) {
         __m512i c = _mm512_loadu_si512((const __m512i *)(sym + i));
@@ -704,7 +703,6 @@ static inline void init_avx512(uint8_t *ranks, int n,
                             _mm512_mask_blend_epi8(hib, lo, hi));
     }
     for (; i < n; i++) ranks[i] = s2r[sym[i]];
-    PROF_TOC(PROF_ENC_INIT, n);
 }
 
 /* full: both sides compacted (right -> tmp, left in place into ranks). */

@@ -9,12 +9,6 @@
  * ticks to ns.
  *
  * Disabled by default (zero cost).  Enable with -DPIVCO_PROF=1.
- *
- * Per-call-site partition loops in decode_node_neon /
- * decode_node_avx512 are extracted as named static functions that
- * each have their own counter, so the dump can attribute time per
- * exact call site (general partition vs one-leaf vs root etc.)
- * without conflating them.
  */
 #pragma once
 #include <stdint.h>
@@ -25,37 +19,15 @@ extern "C" {
 #endif
 
 typedef enum {
-    /* Per-call-site partition loops.  Element count = n elements
-     * processed by the loop on that invocation. */
-
-    /* decode_node_neon (interior recursion) — same names reused for
-     * decode_node_avx512 since they semantically do the same thing
-     * (just different SIMD width). */
-    PROF_NODE_FULL = 0,        /* general partition, both children non-leaf */
-    PROF_NODE_HALF_RIGHT,      /* half-partition right (skip_node = left) */
-    PROF_NODE_HALF_LEFT,       /* half-partition left  (skip_node = right) */
-
-    /* Root-level partition (entry function, identity-base indices). */
-    PROF_ROOT_FULL,
-    PROF_ROOT_HALF_RIGHT,
-    PROF_ROOT_HALF_LEFT,
-
-    /* Leaf primitives (timed). */
-    PROF_SCATTER_SYM,
-    PROF_SCATTER_BOTH_LEAVES,
-    PROF_FLAT_DECODE_SCATTER,
-    PROF_FLAT_DECODE_DIRECT,
-
-    /* Bottom-up decoder (pivco_bu_{neon,x86}.c) per-primitive
-     * timings.  Elements = bytes processed at this call. */
-    PROF_BU_MERGE_VEC_VEC,             /* general 2-buffer merge */
-    PROF_BU_MERGE_CST_VEC,  /* left side broadcast constant */
-    PROF_BU_MERGE_CST_CST,       /* BOTH_LEAVES / both-leaf collapse */
-    PROF_BU_MERGE_FLAT,            /* INTERNAL_FLAT direct-to-buffer */
+    /* Bottom-up decoder per-primitive timings (the SIMD backends'
+     * merge kernels).  Elements = bytes processed at this call. */
+    PROF_BU_MERGE_VEC_VEC = 0,      /* general 2-buffer merge */
+    PROF_BU_MERGE_CST_VEC,          /* left side broadcast constant */
+    PROF_BU_MERGE_CST_CST,          /* BOTH_LEAVES / both-leaf collapse */
+    PROF_BU_MERGE_FLAT,             /* INTERNAL_FLAT direct-to-buffer */
     PROF_BU_POPCOUNT_K,             /* compute K_right from bitmap */
-    PROF_BU_LEAF_MEMSET,            /* LEAF / SKIP: write K copies of sym */
 
-    /* Wire-format decode reads (shared TD/BU; charged per node). */
+    /* Wire-format decode reads (charged per node). */
     PROF_WIRE_KR,                   /* read K_right:u16 header */
     PROF_WIRE_BITMAP_RAW,           /* marker==0: raw bitmap, pointer + advance */
     PROF_WIRE_BITMAP_FSE,           /* marker!=0: FSE-decompress bitmap body */
@@ -63,41 +35,25 @@ typedef enum {
     /* Encoder (pivco_encode / codec_encode_node).  Mirrors
      * the decode side: per-primitive timing of the work done inside a
      * node body (not the recursion itself), plus the per-block setup. */
-    PROF_ENC_INIT,                  /* codes[]/lens[]/indices[] setup, per block */
-    PROF_ENC_NODE_FULL,             /* non-flat internal node: mask build + partition_8 */
-    PROF_ENC_FLAT,                  /* flat-subtree node: pack_D_bits */
-    PROF_ENC_FLAT_SIMD_ELEMS,       /* count-only: elems handled by SIMD path */
-    PROF_ENC_FLAT_TAIL_ELEMS,       /* count-only: elems handled by scalar tail */
-    PROF_ENC_REPACK_U8,             /* uint16→uint8 repack at u8-subtree dispatch */
-    PROF_ENC_NODE_FULL_U8,          /* uint8-path partition body (mirrors NODE_FULL) */
-    PROF_ENC_FLAT_U8,               /* uint8-path flat pack (mirrors ENC_FLAT) */
+    PROF_ENC_INIT,                  /* prim_enc_init: ranks[] setup, per block */
+    PROF_ENC_NODE_FULL,             /* non-flat internal node: prim_enc_partition_* */
+    PROF_ENC_FLAT,                  /* flat-subtree node: prim_enc_pack_dN */
+    PROF_ENC_FLAT_SIMD_ELEMS,       /* count-only: elems handled by SIMD path (u16enc) */
+    PROF_ENC_FLAT_TAIL_ELEMS,       /* count-only: elems handled by scalar tail (u16enc) */
 
     /* Recursion + entry call counts (count-only; recursive timing
      * would double-count). */
-    PROF_DECODE_NODE,
-    PROF_DECODE_ENTRY,
     PROF_ENC_NODE_VISIT,            /* count-only: calls to codec_encode_node */
-    PROF_ENC_ENTRY,                 /* count-only: calls to pivco_encode */
+    PROF_ENC_ENTRY,                 /* count-only: calls to pivco_codec_encode */
 
     /* File-codec layer (pivcohuf_file.c).  Wraps the entire file-level
      * pipeline so the CLI can show where time goes outside the
      * block-codec inner loops. */
-    PROF_FILE_HISTOGRAM,            /* per-input histogram scan (compress only) */
     PROF_FILE_BUILD_TABLE_REAL,     /* first build_table from real freqs (compress) */
     PROF_FILE_BUILD_TABLE_SYN,      /* second build_table from synth freqs (both) */
-    PROF_FILE_BODY_CSUM,            /* XXH32 over body (currently disabled) */
-    PROF_FILE_HDR,                  /* header parse / write */
-    PROF_FILE_PAD,                  /* trailing-block prep (memcpy + memset) */
     PROF_FILE_BLOCK_ENCODE,         /* per-block pivco_encode call */
     PROF_FILE_BLOCK_DECODE,         /* per-block pivco_decode call */
     PROF_FILE_BLOCK_PROLOGUE,       /* per-block length prefix + offset math */
-
-    /* FSE per-node entropy coding (v0.2 wire format). */
-    PROF_FSE_ENC,                   /* time spent in pivco_fse_compress, per node */
-    PROF_FSE_DEC,                   /* time spent in pivco_fse_decompress, per node */
-    PROF_FSE_HIT_COUNT,             /* count-only: nodes where FSE was actually emitted */
-    PROF_FSE_RAW_COUNT,             /* count-only: nodes that stayed raw (p<threshold or fallback) */
-    PROF_FSE_FALLBACK_COUNT,        /* count-only: FSE attempted but didn't beat raw */
 
     PROF_COUNT
 } pivco_prof_id_t;

@@ -4,8 +4,8 @@
  * `flat_dN_unpack_avx512()` (and the fast/safe pair for D ∈ {3,5,6})
  * reads N D-bit codes from a packed bitstream and returns them in a
  * 128-bit vector lane (one byte per code, value < 2^D).  Used by the
- * production decoder (pivco_huffman_avx512.c) and the per-D microbench
- * (bench/bench_micro.c).
+ * AVX-512 primitives (pivco_huffman_primitives_avx512.h) and the
+ * benches (bench_micro, bench_prim).
  *
  * Tables are folded into the helpers as `_mm_setr_epi8` constants so
  * each helper is fully self-contained.  All helpers are `static

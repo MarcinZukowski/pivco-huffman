@@ -776,7 +776,7 @@ __attribute__((noinline)) static void bench_both_leaves_scatter(uint8_t *symbols
  * ============================================================ */
 
 /* unpack() helpers + their tables come from pivco_huffman_neon_flat.h
- * (shared with src/pivco_huffman_neon.c — single source of truth). */
+ * (shared with src/pivco_huffman_primitives_neon.h — single source of truth). */
 
 /* ---- D=2: 4 packed bytes → 16 codes (uint8x16_t), 1 vqtbl1q_u8 ---- */
 __attribute__((noinline))

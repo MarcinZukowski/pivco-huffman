@@ -1,11 +1,11 @@
-/* pivco_hist_scalar.h — the shared scalar histogram core.
+/* pivco_huffman_hist_scalar.h — the shared scalar histogram core.
  *
  * Included by every backend primitives header; backends without their
- * own implementation alias prim_histogram_chunk to this (currently
+ * own implementation bind the histogram_chunk slot to this (currently
  * scalar, NEON and SSE4.1 — an 8-cursor u64-load variant measured on
  * par on M4/Graviton4/Zen3, so one portable core suffices; AVX-512 has
- * its own, see primitives_avx512.h).  Not a backend header itself: no
- * prim_* aliases here, specialized name only.
+ * its own, see primitives_avx512.h).  Not a backend header itself:
+ * specialized name only.
  *
  * Contract: see prim_histogram_chunk in pivco_prims.h.
  */

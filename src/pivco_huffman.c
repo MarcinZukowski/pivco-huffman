@@ -16,11 +16,8 @@ void pivco_check_fail(const char *expr, const char *file, int line)
 
 /* ---------- FSE per-table-id stats storage ----------
  *
- * Backend-neutral home for the FSE-encode instrumentation counters.
- * Defined here so codec.c (compiled per-backend) and any legacy
- * backend-specific .c files all link against the same storage; before
- * this lived in pivco_huffman_neon.c as static, which broke
- * pivco_bench_fse_table_use on x86 hosts where neon.c isn't compiled.
+ * Backend-neutral home for the FSE-encode instrumentation counters,
+ * which the codec updates and the benches read.
  *
  * Slot 0 of `commit` counts "FSE attempted but rejected" (codeword-cost
  * gate refused or the FSE library returned fallback).  Slots 1..25 of
