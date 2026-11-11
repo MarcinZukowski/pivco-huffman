@@ -1,6 +1,6 @@
-/* pivco_huffman_neon_pack.h — flat-subtree D-bit pack (NEON), D=5/6/7.
+/* neon_pack.h — flat-subtree D-bit pack (NEON), D=5/6/7.
  * D=2/3/4 stay on their per-D special cases in
- * pivco_huffman_primitives_neon.h (byte-aligned paired adds for D=2/4,
+ * neon.h (byte-aligned paired adds for D=2/4,
  * a converging-shift pack for D=3).
  *
  * Variable-shift "converging pyramid" pack, 16 codes per q-vector iter.
@@ -20,7 +20,7 @@
 #define PIVCO_HUFFMAN_NEON_PACK_H
 
 #ifndef __aarch64__
-#error "pivco_huffman_neon_pack.h requires aarch64 NEON"
+#error "neon_pack.h requires aarch64 NEON"
 #endif
 
 #include <arm_neon.h>

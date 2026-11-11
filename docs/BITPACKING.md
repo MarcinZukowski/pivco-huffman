@@ -67,12 +67,12 @@ engines full rows — uniform immediate shifts at every width.
 
 Kernels:
 
-- **NEON** (`primitives_neon.h`): merge = per-D column loads + uniform
+- **NEON** (`prims/neon.h`): merge = per-D column loads + uniform
   `vshl` + tbl map; pack = fully unrolled per D with `VSLI`/`VSRI`
   (one-op shift+insert; first touch per column is a plain move, no
   zero-init pass — safe because per-column contributions arrive at
   monotonically increasing offsets).
-- **x86** (`pivco_huffman_x86_vertical.h`, shared by the x86 and avx512
+- **x86** (`prims/x86_vertical.h`, shared by the x86 and avx512
   backends): xmm group cores walk 16-lane sub-blocks (both the 128
   blocks and the 512 quarters); AVX2 forms — two-128-blocks-per-ymm
   for the middle span, 32-lane half-rows for 512 blocks (contiguous

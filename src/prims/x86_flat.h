@@ -1,4 +1,4 @@
-/* pivco_huffman_x86_flat.h — flat-subtree D-bit code unpacker (SSE4.1).
+/* x86_flat.h — flat-subtree D-bit code unpacker (SSE4.1).
  *
  * One unpack helper per D in {2,3,4,5,6}.  All use ryg's PSHUFB+PMULLO
  * "multiply-as-shift" trick: gather two adjacent bytes per uint16 lane,
@@ -15,7 +15,7 @@
  * c5 (Cascade Lake), c5a (Zen 2, -43% to -53%), c6a (Zen 3, -25%).
  *
  * Internal header.  Used by the production decoder
- * (pivco_huffman_primitives_x86.h::merge_flat_x86_impl) and the
+ * (x86.h::merge_flat_x86_impl) and the
  * per-D microbench (bench/bench_micro.c).
  *
  * Not part of the public API.
@@ -25,7 +25,7 @@
 #define PIVCO_HUFFMAN_X86_FLAT_H
 
 #if !defined(__SSE4_1__)
-#error "pivco_huffman_x86_flat.h requires SSE4.1"
+#error "x86_flat.h requires SSE4.1"
 #endif
 
 #include <stdint.h>

@@ -8,7 +8,7 @@
 > The production decoder has been bottom-up since 2026-05-12
 > (`5828ddb` K_right wire format) and the source files referenced
 > here (`pivco_huffman_neon.c`) have been folded into
-> `pivco_huffman_codec.c` + `pivco_huffman_primitives_neon.h` as of
+> `pivco_huffman_codec.c` + `prims/neon.h` as of
 > the 2026-05-14 unify-framework refactor.  The per-function names
 > below no longer exist verbatim.  The section is retained because
 > the qualitative breakdown — partition body 41%, flat-subtree 24%,
@@ -80,8 +80,8 @@ into `decode_node_neon` at `-O2`.
 | `decode_node_neon`         | **11.8%** | `pivco_huffman_neon.c:754+` | recursion glue + leaf checks + recurse setup    |
 | `scatter_both_leaves`      |    9.9% | `pivco_huffman_neon.c:704+` | both-leaves stage fusion (sequential write)     |
 | `scatter_sym`              |    8.6% | `pivco_huffman_neon.c:660+` | leaf scatter (one child = leaf)                 |
-| `flat_d3_unpack`           |    4.1% | `pivco_huffman_neon_flat.h:71` | D=3 bit-unpack inside flat path                 |
-| `flat_d2_unpack`           |    3.9% | `pivco_huffman_neon_flat.h:44` | D=2 bit-unpack                                   |
+| `flat_d3_unpack`           |    4.1% | `prims/neon_flat.h:71` | D=3 bit-unpack inside flat path                 |
+| `flat_d2_unpack`           |    3.9% | `prims/neon_flat.h:44` | D=2 bit-unpack                                   |
 | `partition_8_right`        |    3.7% | `pivco_huffman_neon.c:638+` | half-partition (one side store, leaf-fusion)    |
 | `_platform_memset`         |    3.2% | (libsystem)            | phase-0 `prefill_sym` of most-frequent leaf       |
 | `pivco_huffman_decode_neon`|    0.5% | `pivco_huffman_neon.c:1061` | per-block wrapper (root partition setup)        |

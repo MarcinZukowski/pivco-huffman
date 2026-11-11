@@ -1,4 +1,4 @@
-/* pivco_huffman_avx512_pack.h — flat-subtree D-bit pack (AVX-512 VBMI2).
+/* avx512_pack.h — flat-subtree D-bit pack (AVX-512 VBMI2).
  *
  * 64 codes per zmm iter via byte-laid intermediate + vpmultishiftqb.
  *
@@ -42,7 +42,7 @@
 #define PIVCO_HUFFMAN_AVX512_PACK_H
 
 #if !defined(__AVX512BW__) || !defined(__AVX512VBMI__) || !defined(__AVX512VBMI2__)
-#error "pivco_huffman_avx512_pack.h requires AVX-512 BW + VBMI + VBMI2"
+#error "avx512_pack.h requires AVX-512 BW + VBMI + VBMI2"
 #endif
 
 #include <stdint.h>

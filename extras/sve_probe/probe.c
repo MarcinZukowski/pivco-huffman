@@ -27,7 +27,7 @@
 #include <string.h>
 #include <time.h>
 
-/* --- NEON D=5 unpack (lifted verbatim from pivco_huffman_neon_flat.h) --- */
+/* --- NEON D=5 unpack (lifted verbatim from prims/neon_flat.h) --- */
 
 static const uint8_t  flat_d5_shuf_tab[16] = {
     0,1, 0,1, 1,2, 1,2,    2,3, 2,3, 3,4, 3,4

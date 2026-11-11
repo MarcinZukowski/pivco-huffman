@@ -22,7 +22,7 @@
 
 #if defined(__aarch64__)
 
-/* Retired u16 D5/6/7 ryg pack (moved out of pivco_huffman_neon_pack.h).  Its
+/* Retired u16 D5/6/7 ryg pack (moved out of prims/neon_pack.h).  Its
  * per-lane compaction tables: the shared pivco_pack_compact_d{5,6}_neon
  * moved on with the u8 pyramid pack (lane offsets shifted by one), so the
  * u16 form keeps the layout it was written against here. */
@@ -446,7 +446,7 @@ static inline int u16pack_d4_neon(uint8_t *out, const uint16_t *codes_la,
     return i;
 }
 
-/* D=5/6/7 pack moved to pivco_huffman_neon_pack.h (ryg multiply-as-shift,
+/* D=5/6/7 pack moved to prims/neon_pack.h (ryg multiply-as-shift,
  * 16 codes/iter via byte-laid intermediate). */
 
 /* D=8: 16 codes -> 16 bytes.  Byte-aligned; one shift+AND pass. */
@@ -564,7 +564,7 @@ PIVCO_PRIM_ALWAYS_INLINE void u16enc_pack_dN(const uint16_t *codes_la,
 #if defined(__SSE4_1__) && !defined(__AVX512VBMI2__)
 
 #ifdef PIVCO_HAS_AVX2
-/* Retired u16 AVX2 ryg pack (moved out of pivco_huffman_avx2_pack.h; uses the
+/* Retired u16 AVX2 ryg pack (moved out of prims/avx2_pack.h; uses the
  * shared PIVCO_PACK_AVX2_COMPACT_D* macros still defined there).  Gated on
  * PIVCO_HAS_AVX2 to match where those macros (and the dispatcher below) live. */
 /* Load 32 left-aligned u16 codes, right-shift, narrow to one ymm of 32
@@ -793,7 +793,7 @@ int u16part_core_x86(uint16_t *codes_la, int n, int depth,
  * it well enough on AVX2 hosts that a hand-rolled vpermi2w / vpgatherq
  * version doesn't materially help (the LSU is the bottleneck either
  * way).  AVX-512 has an actual SIMD win via vpermi2w -- see
- * primitives_avx512.h. */
+ * prims/avx512.h. */
 static inline void u16init_x86(uint16_t *codes_la, int n,
                                   const uint8_t *symbols,
                                   const uint16_t *code_la_lut)
@@ -812,7 +812,7 @@ static inline void u16init_x86(uint16_t *codes_la, int n,
 
 /* AVX2 D=2,3,5,6,7: 32 codes per ymm iter via ryg's multiply-as-shift
  * pack (pmaddubsw + pmaddwd + psrlq + and/andn/or + vpshufb compact
- * + 2x movdqu).  Helpers live in pivco_huffman_avx2_pack.h.  Beats the
+ * + 2x movdqu).  Helpers live in prims/avx2_pack.h.  Beats the
  * prior sllv+reduce_add path by 3-3.5x on Zen 3 (c6a).  D=4 stays on
  * the SSE _mm_maddubs_epi16 "2 codes per byte" path which is intrinsically
  * cheap and beats v3 by ~20%. */
@@ -1016,7 +1016,7 @@ PIVCO_PRIM_ALWAYS_INLINE void u16enc_pack_dN(const uint16_t *codes_la,
 
 #if defined(__AVX512VBMI2__)
 
-/* Retired u16 AVX-512 pack (moved out of pivco_huffman_avx512_pack.h; uses the
+/* Retired u16 AVX-512 pack (moved out of prims/avx512_pack.h; uses the
  * shared pivco_pack_compact_d{5,6,7} tables still defined there). */
 /* Load 64 left-aligned u16 codes, right-shift to align code into low D
  * bits, narrow u16 -> u8, assemble into one zmm (1 code per byte).
@@ -1426,7 +1426,7 @@ static inline void u16init_avx512(uint16_t *codes_la, int n,
  *
  * D=2..7: 64 codes per zmm iter via byte-laid intermediate +
  * vpmultishiftqb (D=3,5,6,7) or vpermb-stride gather + shift (D=2,4).
- * See pivco_huffman_avx512_pack.h for the per-D helpers.
+ * See prims/avx512_pack.h for the per-D helpers.
  * D=8: byte-aligned, 32 codes per iter via vpmovwb narrow + store. */
 
 static inline int u16pack_d8_avx512(uint8_t *out, const uint16_t *codes_la,

@@ -2,7 +2,7 @@
  *
  * pivco_prims_t holds one slot per primitive.  prims/tables.c defines
  * the tables, one per kernel choice, binding each slot to a kernel from
- * pivco_huffman_primitives_<backend>.h.  g_pivco_prims is the table
+ * prims/<backend>.h.  g_pivco_prims is the table
  * picked at runtime, and each prim_* below calls its slot.  The
  * flat-region entries (prim_merge_flat, prim_enc_pack_dN) are built from
  * the three span slots: the 512-lane vertical blocks, the 128-lane

@@ -63,7 +63,7 @@ typedef enum {
     PROF_ENC_FLAT_TAIL_ELEMS,
 
     /* BU primitive slots — referenced by the shared (main-repo)
-     * pivco_huffman_primitives_neon.h that TD now includes.  TD never calls
+     * prims/neon.h that TD now includes.  TD never calls
      * the BU primitives, but the slot identifiers must exist to compile. */
     PROF_BU_POPCOUNT_K,
     PROF_BU_TREE_MERGE,

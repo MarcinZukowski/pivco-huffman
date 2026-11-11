@@ -21,7 +21,7 @@
 
 #if defined(PIVCO_BACKEND_SCALAR)
 
-#include "../pivco_huffman_primitives_scalar.h"
+#include "scalar.h"
 
 #define PIVCO_PRIM_MERGE_OVERREAD 1   /* byte loads */
 
@@ -75,7 +75,7 @@ const pivco_prims_t pivco_prims_scalar = {
 
 #elif defined(PIVCO_BACKEND_NEON)
 
-#include "../pivco_huffman_primitives_neon.h"
+#include "neon.h"
 
 #define PIVCO_PRIM_MERGE_OVERREAD 16  /* 16B vld1q at child cursors */
 
@@ -125,7 +125,7 @@ const pivco_prims_t pivco_prims_neon = {
 
 #elif defined(PIVCO_BACKEND_X86)
 
-#include "../pivco_huffman_primitives_x86.h"
+#include "x86.h"
 
 #define PIVCO_PRIM_MERGE_OVERREAD 16  /* 16B loadu at child cursors */
 
@@ -220,7 +220,7 @@ const pivco_prims_t pivco_prims_x86_avx2_intel = {
 
 #elif defined(PIVCO_BACKEND_AVX512)
 
-#include "../pivco_huffman_primitives_avx512.h"
+#include "avx512.h"
 
 #define PIVCO_PRIM_MERGE_OVERREAD 8   /* 8B expandloadu tail window */
 

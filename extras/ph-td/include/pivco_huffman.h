@@ -155,7 +155,7 @@ typedef struct {
 } pivco_huffman_table_t;
 
 /* Compat aliases: the main tree's shared headers (pivco_huffman_common.h,
- * pivco_huffman_primitives_*.h) use the short pivco_ names since the
+ * prims/*.h) use the short pivco_ names since the
  * 2026-07 prefix rename; this frozen snapshot keeps its long names and
  * maps them here for the shared-header TUs. */
 typedef pivco_huffman_table_t pivco_table_t;

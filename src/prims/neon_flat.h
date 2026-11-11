@@ -1,9 +1,9 @@
-/* pivco_huffman_neon_flat.h — flat-subtree D-bit code unpackers (NEON).
+/* neon_flat.h — flat-subtree D-bit code unpackers (NEON).
  *
  * Internal header.  Each `flat_dN_unpack()` reads N D-bit codes from a
  * packed bitstream and returns them in NEON vector lanes (one byte per
  * code, value < 2^D).  Used by the NEON primitives
- * (pivco_huffman_primitives_neon.h) and the benches (bench_micro, bench_prim).
+ * (neon.h) and the benches (bench_micro, bench_prim).
  *
  * All helpers + unpack tables live here so the two TUs share a single
  * source of truth without giving up inlining.  Tables are `static const`
@@ -17,7 +17,7 @@
 #define PIVCO_HUFFMAN_NEON_FLAT_H
 
 #ifndef __aarch64__
-#error "pivco_huffman_neon_flat.h requires aarch64 NEON"
+#error "neon_flat.h requires aarch64 NEON"
 #endif
 
 #include <arm_neon.h>
@@ -69,26 +69,6 @@ static inline uint8x8_t flat_d3_unpack_safe(const uint8_t *bm_ptr)
     bm_lo = vsetq_lane_u8(bm_ptr[0], bm_lo, 0);
     bm_lo = vsetq_lane_u8(bm_ptr[1], bm_lo, 1);
     bm_lo = vsetq_lane_u8(bm_ptr[2], bm_lo, 2);
-    uint8x16_t shuffled = vqtbl1q_u8(bm_lo, vld1q_u8(flat_d3_shuf_tab));
-    uint16x8_t w = vreinterpretq_u16_u8(shuffled);
-    uint16x8_t shifted = vshlq_u16(w, vld1q_s16(flat_d3_shift_tab));
-    uint16x8_t masked = vandq_u16(shifted, vdupq_n_u16(0x07));
-    return vmovn_u16(masked);
-}
-
-/* D=3 _fast: single 16-byte vector load.  Reads 13 bytes past the valid
- * 3-byte region — caller (merge_flat_dN_neon) bounds the loop so this
- * overread stays within the bm scratch region.  Same pattern as the
- * AVX-512 flat_d3_unpack_avx512_fast and x86 flat_d3_unpack_x86.
- *
- * The original byte-wise vsetq_lane_u8 chain was the v0.2 workaround
- * for a Neoverse-V2 store-forward stall on the previous
- * `memcpy(&packed, 5/6) + vsetq_lane_u64` form (which routed via the
- * stack).  A direct vld1q_u8 doesn't go through the stack at all and
- * doesn't reintroduce that pathology. */
-static inline uint8x8_t flat_d3_unpack_fast(const uint8_t *bm_ptr)
-{
-    uint8x16_t bm_lo = vld1q_u8(bm_ptr);
     uint8x16_t shuffled = vqtbl1q_u8(bm_lo, vld1q_u8(flat_d3_shuf_tab));
     uint16x8_t w = vreinterpretq_u16_u8(shuffled);
     uint16x8_t shifted = vshlq_u16(w, vld1q_s16(flat_d3_shift_tab));
@@ -156,17 +136,6 @@ static inline uint8x8_t flat_d5_unpack_safe(const uint8_t *bm_ptr)
     return vmovn_u16(masked);
 }
 
-/* D=5 _fast: single 16-byte vector load (overreads 11 bytes). */
-static inline uint8x8_t flat_d5_unpack_fast(const uint8_t *bm_ptr)
-{
-    uint8x16_t bm_lo = vld1q_u8(bm_ptr);
-    uint8x16_t shuffled = vqtbl1q_u8(bm_lo, vld1q_u8(flat_d5_shuf_tab));
-    uint16x8_t w = vreinterpretq_u16_u8(shuffled);
-    uint16x8_t shifted = vshlq_u16(w, vld1q_s16(flat_d5_shift_tab));
-    uint16x8_t masked = vandq_u16(shifted, vdupq_n_u16(0x1F));
-    return vmovn_u16(masked);
-}
-
 /* D=6 unpack: 3 bytes = 24 bits = 4 codes.  2 of 4 codes cross byte
  * boundaries (codes 1 and 2).  To produce 8 codes we process 6 bytes.
  * Lane layout:
@@ -193,17 +162,6 @@ static inline uint8x8_t flat_d6_unpack_safe(const uint8_t *bm_ptr)
     bm_lo = vsetq_lane_u8(bm_ptr[3], bm_lo, 3);
     bm_lo = vsetq_lane_u8(bm_ptr[4], bm_lo, 4);
     bm_lo = vsetq_lane_u8(bm_ptr[5], bm_lo, 5);
-    uint8x16_t shuffled = vqtbl1q_u8(bm_lo, vld1q_u8(flat_d6_shuf_tab));
-    uint16x8_t w = vreinterpretq_u16_u8(shuffled);
-    uint16x8_t shifted = vshlq_u16(w, vld1q_s16(flat_d6_shift_tab));
-    uint16x8_t masked = vandq_u16(shifted, vdupq_n_u16(0x3F));
-    return vmovn_u16(masked);
-}
-
-/* D=6 _fast: single 16-byte vector load (overreads 10 bytes). */
-static inline uint8x8_t flat_d6_unpack_fast(const uint8_t *bm_ptr)
-{
-    uint8x16_t bm_lo = vld1q_u8(bm_ptr);
     uint8x16_t shuffled = vqtbl1q_u8(bm_lo, vld1q_u8(flat_d6_shuf_tab));
     uint16x8_t w = vreinterpretq_u16_u8(shuffled);
     uint16x8_t shifted = vshlq_u16(w, vld1q_s16(flat_d6_shift_tab));

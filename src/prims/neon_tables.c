@@ -1,11 +1,11 @@
-/* pivco_huffman_neon_tables.c — runtime construction of shared NEON tables.
+/* neon_tables.c — runtime construction of shared NEON tables.
  *
  * Storage + init functions extracted from the legacy NEON .c files so
  * both the legacy code and the new codec.c-compiled-as-NEON object
- * library link against one copy.  See pivco_huffman_neon_tables.h for
+ * library link against one copy.  See neon_tables.h for
  * the contract. */
 
-#include "pivco_huffman_neon_tables.h"
+#include "neon_tables.h"
 
 /* ---------- Encoder partition: compress_tab[256][32] + compress_popcnt[256]
  *

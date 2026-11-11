@@ -1,4 +1,4 @@
-/* pivco_huffman_primitives_avx512.h — AVX-512 VBMI2 primitive
+/* avx512.h — AVX-512 VBMI2 primitive
  * implementations of the codec primitive interface (see
  * pivco_prims.h).
  *
@@ -33,12 +33,12 @@
  *     table this backend depends on; codec_init_avx512 inits it).
  *
  *   - merge_flat_avx512: D=2/3/4/5/6 vector unpacks via the
- *     shared pivco_huffman_avx512_flat.h helpers (D=5/6 use
+ *     shared avx512_flat.h helpers (D=5/6 use
  *     vpmultishiftqb / vpermb -- the AVX-512-only fast paths).
  *
  *   - pack_dN_avx512: D=2..7 via 64-codes-per-zmm byte-laid +
  *     vpmultishiftqb (D=3,5,6,7) or vpermb-stride + shift (D=2,4).  See
- *     pivco_huffman_avx512_pack.h.  D=8 via vpmovwb byte narrow.
+ *     avx512_pack.h.  D=8 via vpmovwb byte narrow.
  *
  * Internal header.  Included by prims/tables.c when
  * PIVCO_BACKEND_AVX512 is defined.  Not part of the public API.
@@ -48,19 +48,19 @@
 #define PIVCO_HUFFMAN_PRIMITIVES_AVX512_H
 
 #if !defined(PIVCO_HAS_AVX512)
-#error "pivco_huffman_primitives_avx512.h requires PIVCO_HAS_AVX512"
+#error "avx512.h requires PIVCO_HAS_AVX512"
 #endif
 #if !defined(__AVX512VBMI2__) || !defined(__AVX512VPOPCNTDQ__) \
     || !defined(__GFNI__) || !defined(__AVX512BITALG__)
-#error "pivco_huffman_primitives_avx512.h requires AVX-512 VBMI2 + VPOPCNTDQ + GFNI + BITALG"
+#error "avx512.h requires AVX-512 VBMI2 + VPOPCNTDQ + GFNI + BITALG"
 #endif
 
 #include "pivco_huffman.h"
-#include "pivco_huffman_common.h"
-#include "pivco_huffman_x86_tables.h"      /* expand_tab for BU tail */
-#include "pivco_huffman_avx512_flat.h"     /* flat_d{2,3,4,5,6}_unpack_avx512* */
-#include "pivco_huffman_x86_vertical.h"
-#include "pivco_huffman_avx512_pack.h"     /* pack_d{2..7}_avx512 — vpmultishiftqb */
+#include "../pivco_huffman_common.h"
+#include "x86_tables.h"      /* expand_tab for BU tail */
+#include "avx512_flat.h"     /* flat_d{2,3,4,5,6}_unpack_avx512* */
+#include "x86_vertical.h"
+#include "avx512_pack.h"     /* pack_d{2..7}_avx512 — vpmultishiftqb */
 #include "pivco_prof.h"
 
 #include <immintrin.h>
@@ -68,7 +68,7 @@
 #include <string.h>
 
 /* Backend lifecycle.  Only the BU merge SSE-stride tail needs a
- * runtime table (expand_tab in pivco_huffman_x86_tables.c).  AVX-512
+ * runtime table (expand_tab in x86_tables.c).  AVX-512
  * partition and encode are entirely table-free (vpcompressw is the
  * "table" -- it's hardware). */
 static inline void codec_init_avx512(void)
@@ -404,10 +404,10 @@ static inline uint32_t extract_D_bits_avx512(const uint8_t *in,
  * bits, looks up each D-bit code in c2s, writes the resulting bytes
  * to symbols[0..n).  merge_flat_avx512 is a switch
  * dispatcher to the per-D specialisation; structure mirrors the NEON
- * file at pivco_huffman_primitives_neon.h.
+ * file at neon.h.
  *
  * Per-D unpack helpers (flat_d{2,3,4,5,6,7}_unpack_avx512*) come from
- * pivco_huffman_avx512_flat.h. */
+ * avx512_flat.h. */
 
 /* D=2: c2s = 4 entries; codes < 4 use only low 2 bits so vpermb on a
  * 64-byte register whose first 4 bytes are c2s works.  Wide 64-at-a-time
@@ -638,7 +638,7 @@ static inline void merge_flat_d7_avx512(uint8_t *symbols, int n,
 /* D=8: a depth-8 flat region is the full 256-symbol alphabet at equal code
  * length, whose canonical c2s is the identity permutation -- the byte-aligned
  * codes ARE the symbols, so the whole decode is a memcpy.  See the derivation
- * at merge_flat_d8_neon in pivco_huffman_primitives_neon.h. */
+ * at merge_flat_d8_neon in neon.h. */
 static inline void merge_flat_d8_avx512(uint8_t *symbols, int n,
                                                   const uint8_t *bm,
                                                   const uint8_t *c2s)
@@ -777,7 +777,7 @@ static inline int part_none_avx512(uint8_t *ranks, int n, uint8_t thr, uint8_t *
 
 /* Flat pack, native u8: the local code (rank - base) is already a D-bit byte,
  * so we pack straight from u8 (no u16 widen + cvtepi16 narrow round-trip).
- * Per-D kernels in pivco_huffman_avx512_pack.h; scalar tail for the residual. */
+ * Per-D kernels in avx512_pack.h; scalar tail for the residual. */
 static inline void pack_dN_avx512(uint8_t *out, const uint8_t *ranks,
                                      int n, int D, uint8_t base)
 {
@@ -829,7 +829,7 @@ static inline void pack_dN_avx512(uint8_t *out, const uint8_t *ranks,
  * Input-shape independent by construction (~7.5 GB/s GNR, ~12-14 GB/s
  * Zen 5 with clang; gcc trails ~10-35%% on the FA chains).
  * ------------------------------------------------------------------------- */
-#include "pivco_huffman_hist_scalar.h"
+#include "../pivco_huffman_hist_scalar.h"
 
 #define HIST_FA(hh, ll, a, b, c) do {                              \
     __m512i _l = _mm512_ternarylogic_epi32((c), (b), (a), 0x96);   \

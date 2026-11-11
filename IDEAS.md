@@ -537,7 +537,7 @@ E2E fair A/B/C (c3/c4/c5/c5a/c6a, enc_pb, canary-clean): **naive → 2tab is the
 Older Intel (c3/c4/c5) and Zen 3 (c6a) trailed huf0_x2 by ~25–30% on text encode.  Partial progress: AVX2 pack_d{2,3,5,6,7} shipped (`a1aa6b9`, ryg multiply-as-shift) + 2x partition unroll (`83e23a0`).  Remaining angle: AVX2 partition_16 via two pshufb + concat, or 4-stream FastLanes pack (format change).  See rejected "AVX2 partition_16 stride" for the failed 2x unroll attempt.
 
 ### SSE/AVX2 D=7 flat-subtree path
-NEON and AVX-512 D=7 BU `merge_flat_d7_*` shipped (`7e4bc44`, `dcfaecc`); SSE/AVX2 still has no D=7 SIMD because pshufb is only 16-wide and the 128-entry c2s doesn't fit (see comment in `pivco_huffman_primitives_x86.h:536`).  Coverage: bell_s80 0%, zipfian 11.2%, flat_M7 already 1.43× vs huf0 on the SSE host.  Expected end-to-end win <2% on zipfian.  Low marginal EV — parked.
+NEON and AVX-512 D=7 BU `merge_flat_d7_*` shipped (`7e4bc44`, `dcfaecc`); SSE/AVX2 still has no D=7 SIMD because pshufb is only 16-wide and the 128-entry c2s doesn't fit (see comment in `prims/x86.h:536`).  Coverage: bell_s80 0%, zipfian 11.2%, flat_M7 already 1.43× vs huf0 on the SSE host.  Expected end-to-end win <2% on zipfian.  Low marginal EV — parked.
 
 ### x86 COM merge + partition (prefix-sum cursor decoupling), 2026-06-16
 The NEON COM64 merge (`5cccccc`) decouples per-chunk cursors via a popcount

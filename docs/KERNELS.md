@@ -6,8 +6,8 @@ Step-by-step traces of the SIMD micro-kernels that consume most of
 PIVCO-Huffman's decode time on Apple M4.  Each kernel section shows:
 
 - the source code (verbatim from
-  [`src/pivco_huffman_primitives_neon.h`](src/pivco_huffman_primitives_neon.h) /
-  [`src/pivco_huffman_neon_flat.h`](src/pivco_huffman_neon_flat.h)),
+  [`src/prims/neon.h`](src/prims/neon.h) /
+  [`src/prims/neon_flat.h`](src/prims/neon_flat.h)),
 - a worked example with concrete byte values,
 - the contents of every NEON register at each step.
 
@@ -15,7 +15,7 @@ Register contents are shown as `[a, b, c, ...]` with values in hex.
 "`--`" marks a don't-care lane (written but never read).
 
 Since the 2026-05-14 unify-framework refactor, every backend's
-primitives live in one header (`primitives_<backend>.h`) and the
+primitives live in one header (`src/prims/<backend>.h`) and the
 tree walk + wire-format I/O is shared across backends in
 `src/pivco_huffman_codec.c`.  Production decode is bottom-up (BU)
 via `tree_merge` since the 2026-05-12 K_right wire format
@@ -873,7 +873,7 @@ window + per-lane shift) but operate on more bytes per iteration:
 | 6 |          6 |          8 |       ~5   | 6-byte memcpy via stack buf           |
 
 The unpack sequences are in
-[`src/pivco_huffman_neon_flat.h`](src/pivco_huffman_neon_flat.h);
+[`src/prims/neon_flat.h`](src/prims/neon_flat.h);
 each is ~10 lines and reads exactly like `flat_d3_unpack` with
 different shuffle / shift constants.
 

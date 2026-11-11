@@ -22,7 +22,7 @@
 #include <string.h>
 #include <time.h>
 
-#include "../../src/pivco_huffman_neon_flat.h"
+#include "../../src/prims/neon_flat.h"
 
 #define BLOCK 1024
 #define BLOCKS 8

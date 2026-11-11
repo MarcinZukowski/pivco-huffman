@@ -35,11 +35,11 @@ cmake --build build
 ## Architecture
 
 - **Backends**: scalar, NEON (ARM), x86 (SSE4.1 / AVX2), AVX-512 VBMI2 (Intel).  SVE is disabled (svcompact at 128-bit isn't competitive with NEON TBL).
-- **Codec framework**: one `pivco_huffman_codec.c`, compiled once, calls every primitive through a table (`src/pivco_prims.h`).  Each backend compiles `src/prims/tables.c` with its `primitives_<backend>.h` (the only files with SIMD intrinsics) and exports its tables.  The build compiles every SIMD tier the compiler supports; `pivco_encode`/`pivco_decode` in `src/pivco_huffman.c` dispatch at runtime by CPU tier, vendor and microarchitecture (`PIVCO_PRIMS=<table>` overrides).
+- **Codec framework**: one `pivco_huffman_codec.c`, compiled once, calls every primitive through a table (`src/pivco_prims.h`).  Each backend compiles `src/prims/tables.c` with its `prims/<backend>.h` (the only files with SIMD intrinsics) and exports its tables.  The build compiles every SIMD tier the compiler supports; `pivco_encode`/`pivco_decode` in `src/pivco_huffman.c` dispatch at runtime by CPU tier, vendor and microarchitecture (`PIVCO_PRIMS=<table>` overrides).
 - **Block size**: 32K default, 16K on Apple Silicon (see `PIVCO_BLOCK_SIZE` in `include/pivco_huffman.h`)
 - **Wire format**: see `src/pivco_huffman_wire.h` for the canonical doc.  Post-order records: `[optional K_right:u16 LE at node entry][children's regions, larger-K child first][FSE marker:u8][bitmap or FSE payload]` — each bitmap sits where its merge consumes it.  Flat subtrees (D ≥ 2) skip the header and emit one N·D-bit packed region.
 - **Key data structures**:
-  - `compress_tab[256][32]` combined shuffle table (TBL/pshufb partition; per-arch in `pivco_huffman_{neon,x86}_tables.c`)
+  - `compress_tab[256][32]` combined shuffle table (TBL/pshufb partition; per-arch in `src/prims/{neon,x86}_tables.c`)
   - `expand_tab[256][8]` BU tree_merge shuffle table (same files)
   - `table->flat_depth[node]`, `table->flat_offset[node]`,
     `table->flat_code_to_sym[pool]` — per-table flat-subtree dispatch
@@ -78,7 +78,7 @@ The codec is a single tree-walk + wire-format engine in
 `pivco_huffman_codec.c`, compiled once: it calls each primitive through
 the table picked at startup (`src/pivco_prims.h`).  Each
 backend compiles `src/prims/tables.c`, which includes the matching
-`pivco_huffman_primitives_<backend>.h` and defines that backend's
+`src/prims/<backend>.h` and defines that backend's
 tables.  The unify-framework refactor landed in
 five phases ending 2026-05-14; before that, each backend had its own
 .c file with a duplicated tree walk -- now all four share one.
@@ -95,17 +95,17 @@ five phases ending 2026-05-14; before that, each backend had its own
 - `src/pivco_prims.h` — the primitive interface the codec
   calls (`pivco_prims_t`, `prim_*` through `g_pivco_prims`) and the
   primitive contract
-- `src/pivco_huffman_primitives_scalar.h` — scalar primitive implementations
-- `src/pivco_huffman_primitives_neon.h` — NEON primitive implementations
-- `src/pivco_huffman_primitives_x86.h` — SSE4.1 + AVX2 primitive implementations
-- `src/pivco_huffman_primitives_avx512.h` — AVX-512 VBMI2 primitive implementations
+- `src/prims/scalar.h` — scalar primitive implementations
+- `src/prims/neon.h` — NEON primitive implementations
+- `src/prims/x86.h` — SSE4.1 + AVX2 primitive implementations
+- `src/prims/avx512.h` — AVX-512 VBMI2 primitive implementations
 - `src/pivco_huffman_wire.h` — single source of truth for the per-node wire record (K_right + FSE marker + bitmap)
 - `src/pivco_k1.c` — the k=1 bit-context tANS candidate (wire id 52): 256-recipe catalog, 8-way interleaved decode, fast pricing gate based on statistics
-- `src/pivco_huffman_neon_tables.{c,h}` — shared NEON compress_tab + expand_tab
-- `src/pivco_huffman_x86_tables.{c,h}` — shared x86 compress_tab + expand_tab (used by codec_x86 + codec_avx512 BU SSE-tail)
-- `src/pivco_huffman_neon_flat.h` — D=2..6 NEON unpack helpers (shared with bench_micro)
-- `src/pivco_huffman_x86_flat.h` — D=4 SSE unpack helper
-- `src/pivco_huffman_avx512_flat.h` — D=2..6 AVX-512 VBMI2 unpack helpers
+- `src/prims/neon_tables.{c,h}` — shared NEON compress_tab + expand_tab
+- `src/prims/x86_tables.{c,h}` — shared x86 compress_tab + expand_tab (used by codec_x86 + codec_avx512 BU SSE-tail)
+- `src/prims/neon_flat.h` — D=2..6 NEON unpack helpers (shared with bench_micro)
+- `src/prims/x86_flat.h` — D=4 SSE unpack helper
+- `src/prims/avx512_flat.h` — D=2..6 AVX-512 VBMI2 unpack helpers
 - `extras/pivco_huffman_neon_prefix.c` — retired research prefix-radix backend (moved to extras 2026-05-14; BU on the standard 2-way wire format beat it on every dist/host)
 - `extras/legacy_td/README.md` — git-archaeology pointer for the retired top-down decoders
 - `bench/bench_main.c` — benchmark harness (4M × repeats methodology)

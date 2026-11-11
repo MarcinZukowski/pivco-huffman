@@ -1,4 +1,4 @@
-/* pivco_huffman_x86_tables.h — shared x86 (SSE4.1 / AVX2) lookup tables.
+/* x86_tables.h — shared x86 (SSE4.1 / AVX2) lookup tables.
  *
  * Two table families:
  *

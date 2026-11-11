@@ -1,4 +1,4 @@
-/* pivco_huffman_x86_vertical.h — vertical-128 flat kernels, SSE4.1.
+/* x86_vertical.h — vertical-128 flat kernels, SSE4.1.
  *
  * Shared by the x86 (SSE4.1/AVX2) and AVX-512 backends: the vertical
  * block layout is 16-lane-native (see pivco_huffman_vertical.h), so a
@@ -20,7 +20,7 @@
 
 #include <stdint.h>
 #include <smmintrin.h>
-#include "pivco_huffman_vertical.h"
+#include "../pivco_huffman_vertical.h"
 
 #define PIVCO_VERT_MERGE_X86_BODY(DV, MAPEXPR, BLK, O, CS, OS)                \
     do {                                                                       \

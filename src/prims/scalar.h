@@ -1,4 +1,4 @@
-/* pivco_huffman_primitives_scalar.h — scalar implementations of the
+/* scalar.h — scalar implementations of the
  * codec-primitive interface (see pivco_prims.h).
  *
  * Specialized names end in `_scalar`; prims/tables.c binds them to
@@ -12,7 +12,7 @@
 #define PIVCO_HUFFMAN_PRIMITIVES_SCALAR_H
 
 #include "pivco_huffman.h"
-#include "pivco_huffman_common.h"
+#include "../pivco_huffman_common.h"
 
 #include <stdint.h>
 #include <string.h>
@@ -160,6 +160,6 @@ static inline void merge_vec_vec_scalar(const uint8_t *bm, int K,
     }
 }
 
-#include "pivco_huffman_hist_scalar.h"   /* histogram_chunk_scalar */
+#include "../pivco_huffman_hist_scalar.h"   /* histogram_chunk_scalar */
 
 #endif  /* PIVCO_HUFFMAN_PRIMITIVES_SCALAR_H */

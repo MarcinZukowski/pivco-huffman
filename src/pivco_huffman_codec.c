@@ -3,7 +3,7 @@
  * Compiled once: every prim_* goes through the primitive table picked
  * at runtime (pivco_prims.h).  The per-node
  * SIMD work lives in the tables' kernels, in
- * pivco_huffman_primitives_<backend>.h.
+ * prims/<backend>.h.
  *
  * Two responsibilities only:
  *

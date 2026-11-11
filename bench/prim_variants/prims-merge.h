@@ -1209,11 +1209,11 @@ static void prim_merge_cv_unroll16(const ctx_t *c){ prim_merge_cv_unroll16_x86(c
  *   kernel unpacks 16 D-bit codes via the shared flat_d*_unpack_avx512
  *   helpers, then applies the c2s table: pshufb (D<=4), vpermb on an ymm/zmm
  *   c2s (D=5/6), or vpermi2b across two zmm tables (D=7).  Reuses the
- *   production flat unpack helpers via pivco_huffman_avx512_flat.h.
+ *   production flat unpack helpers via prims/avx512_flat.h.
  * ========================================================================== */
 #if defined(__AVX512VBMI2__) && defined(__AVX512VBMI__)
 #include <immintrin.h>
-#include "pivco_huffman_avx512_flat.h"  /* flat_d{2..7}_unpack_avx512* */
+#include "prims/avx512_flat.h"  /* flat_d{2..7}_unpack_avx512* */
 
 /* Extract D bits at bit_pos from in (D<=16) — scalar tail. */
 static inline uint32_t pv_extract_D_bits_avx512(const uint8_t *in, int bit_pos, int D) {
@@ -1346,7 +1346,7 @@ static void pv_merge_vec_vec_avx512_maskz(const uint8_t *bm, int K,
         int nr = __builtin_popcountll(mask);
         rc += nr; lc += (64 - nr);
     }
-    /* 2x-unrolled SSE stride-16: see primitives_x86.h. */
+    /* 2x-unrolled SSE stride-16: see prims/x86.h. */
     for (; j + 16 <= K; j += 16) {
         uint8_t m0 = bm[j >> 3];
         __m128i L0 = _mm_loadl_epi64((const __m128i *)(left + lc));
@@ -2130,7 +2130,7 @@ static void prim_merge_cst_vec_skewfuse(const ctx_t *c)
 
 /* ============================================================================
  * merge_flat : avx2-ymm — PROMOTED to production (merge_flat_d{5,6,7}_ymm_x86
- *   in pivco_huffman_primitives_x86.h, 2026-07-16); this row calls the
+ *   in prims/x86.h, 2026-07-16); this row calls the
  *   production ymm kernels directly (ymm blocks + scalar tail only, no
  *   128-bit mid-range) so it stays the isolated ymm measurement.
  * ========================================================================== */

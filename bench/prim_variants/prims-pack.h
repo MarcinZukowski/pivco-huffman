@@ -479,7 +479,7 @@ static void prim_pack_asof_f9974f5(const ctx_t *c) {
 
 /* ============================================================================
  * pack : pyramid-sse — 128-bit twin of the production AVX2 ryg/pyramid pack
- *   (pivco_huffman_avx2_pack.h).  16 codes per xmm iter: maddubs (2D-bit
+ *   (prims/avx2_pack.h).  16 codes per xmm iter: maddubs (2D-bit
  *   byte pairs) -> madd (4D-bit dword pairs) -> qword fuse (srlq +
  *   and/andn/or) -> pshufb compact -> one 16-byte store whose trailing
  *   junk (16 - 2D bytes) is overwritten by the next iter; the bench

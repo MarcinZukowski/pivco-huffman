@@ -37,7 +37,7 @@ static double now_sec(void)
     return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
 }
 
-/* Baseline D=2 unpack (verbatim copy from src/pivco_huffman_neon_flat.h). */
+/* Baseline D=2 unpack (verbatim copy from src/prims/neon_flat.h). */
 static const uint8_t flat_d2_dup_tab[16] = {
     0,0,0,0,  1,1,1,1,  2,2,2,2,  3,3,3,3
 };

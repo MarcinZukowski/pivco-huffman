@@ -1,10 +1,10 @@
-/* pivco_huffman_avx512_flat.h — flat-subtree D-bit code unpackers (AVX-512 VBMI2).
+/* avx512_flat.h — flat-subtree D-bit code unpackers (AVX-512 VBMI2).
  *
- * Internal header.  Mirrors src/pivco_huffman_neon_flat.h: each
+ * Internal header.  Mirrors src/prims/neon_flat.h: each
  * `flat_dN_unpack_avx512()` (and the fast/safe pair for D ∈ {3,5,6})
  * reads N D-bit codes from a packed bitstream and returns them in a
  * 128-bit vector lane (one byte per code, value < 2^D).  Used by the
- * AVX-512 primitives (pivco_huffman_primitives_avx512.h) and the
+ * AVX-512 primitives (avx512.h) and the
  * benches (bench_micro, bench_prim).
  *
  * Tables are folded into the helpers as `_mm_setr_epi8` constants so
@@ -25,7 +25,7 @@
 #define PIVCO_HUFFMAN_AVX512_FLAT_H
 
 #if !defined(__AVX512BW__) || !defined(__AVX512VBMI__) || !defined(__AVX512VBMI2__)
-#error "pivco_huffman_avx512_flat.h requires AVX-512 BW + VBMI + VBMI2"
+#error "avx512_flat.h requires AVX-512 BW + VBMI + VBMI2"
 #endif
 
 #include <stdint.h>
@@ -143,14 +143,6 @@ static inline __m512i flat_d2_unpack64_avx512_fast(const uint8_t *bm_ptr)
     return _mm512_and_si512(ms, _mm512_set1_epi8(0x03));
 }
 
-/* D=2 safe x4: 16-byte memcpy. */
-static inline __m512i flat_d2_unpack64_avx512_safe(const uint8_t *bm_ptr)
-{
-    uint8_t buf[32] = {0};
-    memcpy(buf, bm_ptr, 16);
-    return flat_d2_unpack64_avx512_fast(buf);
-}
-
 /* D=3 x4: 64 codes from 24 valid bm bytes via a 32-byte ymm load (lane 7
  * needs byte 28). */
 static inline __m512i flat_d3_unpack64_avx512_fast(const uint8_t *bm_ptr)
@@ -171,14 +163,6 @@ static inline __m512i flat_d3_unpack64_avx512_fast(const uint8_t *bm_ptr)
         (int64_t)0x15120F0C09060300LL);   /* {0,3,6,9,12,15,18,21} */
     __m512i ms = _mm512_multishift_epi64_epi8(ctrl, data);
     return _mm512_and_si512(ms, _mm512_set1_epi8(0x07));
-}
-
-/* D=3 safe x4: 24-byte memcpy. */
-static inline __m512i flat_d3_unpack64_avx512_safe(const uint8_t *bm_ptr)
-{
-    uint8_t buf[32] = {0};
-    memcpy(buf, bm_ptr, 24);
-    return flat_d3_unpack64_avx512_fast(buf);
 }
 
 /* D=4 x4: 64 codes from 32 valid bm bytes via a 32-byte ymm load.  Lane 7
@@ -203,14 +187,6 @@ static inline __m512i flat_d4_unpack64_avx512_fast(const uint8_t *bm_ptr)
         (int64_t)0x1C1814100C080400LL);
     __m512i ms = _mm512_multishift_epi64_epi8(ctrl, data);
     return _mm512_and_si512(ms, _mm512_set1_epi8(0x0F));
-}
-
-/* D=4 safe x4: 32-byte memcpy. */
-static inline __m512i flat_d4_unpack64_avx512_safe(const uint8_t *bm_ptr)
-{
-    uint8_t buf[32] = {0};
-    memcpy(buf, bm_ptr, 32);
-    return flat_d4_unpack64_avx512_fast(buf);
 }
 
 /* D=5 fast x4: 64 codes from 40 valid bm bytes in a single zmm chain.
@@ -242,14 +218,6 @@ static inline __m512i flat_d5_unpack64_avx512_fast(const uint8_t *bm_ptr)
     return _mm512_and_si512(ms, _mm512_set1_epi8(0x1F));
 }
 
-/* D=5 safe x4: 40-byte memcpy for the last chunk. */
-static inline __m512i flat_d5_unpack64_avx512_safe(const uint8_t *bm_ptr)
-{
-    uint8_t buf[64] = {0};
-    memcpy(buf, bm_ptr, 40);
-    return flat_d5_unpack64_avx512_fast(buf);
-}
-
 /* D=6 x4: 64 codes from 48 valid bm bytes via a 64-byte zmm load (lane 7
  * needs byte 49). */
 static inline __m512i flat_d6_unpack64_avx512_fast(const uint8_t *bm_ptr)
@@ -272,14 +240,6 @@ static inline __m512i flat_d6_unpack64_avx512_fast(const uint8_t *bm_ptr)
     return _mm512_and_si512(ms, _mm512_set1_epi8(0x3F));
 }
 
-/* D=6 safe x4: 48-byte memcpy. */
-static inline __m512i flat_d6_unpack64_avx512_safe(const uint8_t *bm_ptr)
-{
-    uint8_t buf[64] = {0};
-    memcpy(buf, bm_ptr, 48);
-    return flat_d6_unpack64_avx512_fast(buf);
-}
-
 /* D=7 x4: 64 codes from 56 valid bm bytes via a 64-byte zmm load (lane 7
  * needs byte 56). */
 static inline __m512i flat_d7_unpack64_avx512_fast(const uint8_t *bm_ptr)
@@ -300,14 +260,6 @@ static inline __m512i flat_d7_unpack64_avx512_fast(const uint8_t *bm_ptr)
         (int64_t)0x312A231C150E0700LL);
     __m512i ms = _mm512_multishift_epi64_epi8(ctrl, data);
     return _mm512_and_si512(ms, _mm512_set1_epi8(0x7F));
-}
-
-/* D=7 safe x4: 56-byte memcpy. */
-static inline __m512i flat_d7_unpack64_avx512_safe(const uint8_t *bm_ptr)
-{
-    uint8_t buf[64] = {0};
-    memcpy(buf, bm_ptr, 56);
-    return flat_d7_unpack64_avx512_fast(buf);
 }
 
 /* D=6 fast: 16 codes from 12 valid bytes, with a 16-byte load. */

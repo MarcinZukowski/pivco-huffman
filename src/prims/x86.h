@@ -1,4 +1,4 @@
-/* pivco_huffman_primitives_x86.h — x86 (SSE4.1 + optional AVX2) primitive
+/* x86.h — x86 (SSE4.1 + optional AVX2) primitive
  * implementations of the codec primitive interface (see
  * pivco_prims.h).
  *
@@ -26,16 +26,16 @@
 #define PIVCO_HUFFMAN_PRIMITIVES_X86_H
 
 #if !defined(PIVCO_HAS_SSE4)
-#error "pivco_huffman_primitives_x86.h requires PIVCO_HAS_SSE4"
+#error "x86.h requires PIVCO_HAS_SSE4"
 #endif
 
 #include "pivco_huffman.h"
-#include "pivco_huffman_common.h"
-#include "pivco_huffman_x86_tables.h"   /* compress_tab*, expand_tab* */
-#include "pivco_huffman_x86_flat.h"     /* flat_d{2,3,4,5,6}_unpack_x86 */
-#include "pivco_huffman_x86_vertical.h"
+#include "../pivco_huffman_common.h"
+#include "x86_tables.h"   /* compress_tab*, expand_tab* */
+#include "x86_flat.h"     /* flat_d{2,3,4,5,6}_unpack_x86 */
+#include "x86_vertical.h"
 #ifdef PIVCO_HAS_AVX2
-#include "pivco_huffman_avx2_pack.h"    /* pack_d{2,3,5,6,7}_avx2_x86 (ryg pack) */
+#include "avx2_pack.h"    /* pack_d{2,3,5,6,7}_avx2_x86 (ryg pack) */
 #endif
 #include "pivco_prof.h"
 
@@ -45,7 +45,7 @@
                                          * on SSE-only builds. */
 #include <stdint.h>
 #include <string.h>
-#include "pivco_check.h"
+#include "../pivco_check.h"
 
 /* Backend lifecycle.  Lazily build the compress_tab + expand_tab pre-
  * bake tables that the x86 partition / merge primitives index
@@ -846,7 +846,7 @@ static inline void merge_flat_d7_x86(uint8_t *symbols, int n,
 /* D=8: a depth-8 flat region is the full 256-symbol alphabet at equal code
  * length, whose canonical c2s is the identity permutation -- the byte-aligned
  * codes ARE the symbols, so the whole decode is a memcpy.  See the derivation
- * at merge_flat_d8_neon in pivco_huffman_primitives_neon.h. */
+ * at merge_flat_d8_neon in neon.h. */
 static inline void merge_flat_d8_x86(uint8_t *symbols, int n,
                                                 const uint8_t *bm,
                                                 const uint8_t *c2s)
@@ -949,13 +949,6 @@ static void x86_build_tabs(void)
         }
     }
     x86_tabs_ready = 1;
-}
-
-/* 8-bit mask of (rank > thr) for the 8 ranks in the low 8 lanes of `ids8`. */
-static inline uint8_t x86_mask8(__m128i ids8, __m128i thr1)
-{
-    __m128i ge = _mm_cmpeq_epi8(_mm_min_epu8(ids8, thr1), thr1);
-    return (uint8_t)_mm_movemask_epi8(ge);
 }
 
 /* Compact the 8 ranks in the low 8 lanes of `v` (chunk mask `m`): right ranks
@@ -1161,7 +1154,7 @@ static inline int pack_d8_sse_x86(uint8_t *out, const uint8_t *ranks, int n, uin
 }
 
 /* SSE4.1 D=3/5/6/7: 128-bit twin of the AVX2 ryg/pyramid pack (see
- * pivco_huffman_avx2_pack.h for the op-by-op story).  16 codes per xmm
+ * avx2_pack.h for the op-by-op story).  16 codes per xmm
  * iter: maddubs (2D-bit byte pairs) -> madd (4D-bit dword pairs) ->
  * qword fuse (srlq + and/andn/or) -> pshufb compact -> one 16-byte
  * store.  The store's trailing junk (16 - 2D bytes) is overwritten by
@@ -1271,7 +1264,7 @@ static inline void pack_dN_avx2_x86(uint8_t *out, const uint8_t *ranks,
 }
 #endif
 
-#include "pivco_huffman_hist_scalar.h"   /* histogram_chunk_scalar */
+#include "../pivco_huffman_hist_scalar.h"   /* histogram_chunk_scalar */
 
 /* enc_init 2tab no-OR gather: read 16 input symbols as 2x u64 (frees the load
  * ports for the dependent table loads) and merge each rank pair as

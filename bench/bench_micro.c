@@ -17,7 +17,7 @@
 
 #ifdef __aarch64__
 #include <arm_neon.h>
-#include "pivco_huffman_neon_flat.h"  /* flat_d{2..6}_unpack() + tables */
+#include "prims/neon_flat.h"  /* flat_d{2..6}_unpack() + tables */
 #define HAS_NEON 1
 #else
 #define HAS_NEON 0
@@ -25,7 +25,7 @@
 
 #if defined(__AVX512BW__) && defined(__AVX512VBMI__) && defined(__AVX512VBMI2__)
 #include <immintrin.h>
-#include "pivco_huffman_avx512_flat.h"  /* flat_d{2..6}_unpack_avx512* */
+#include "prims/avx512_flat.h"  /* flat_d{2..6}_unpack_avx512* */
 #define HAS_AVX512 1
 #else
 #define HAS_AVX512 0
@@ -33,7 +33,7 @@
 
 #if defined(__SSE4_1__)
 #include <smmintrin.h>
-#include "pivco_huffman_x86_flat.h"     /* flat_d4_unpack_x86 */
+#include "prims/x86_flat.h"     /* flat_d4_unpack_x86 */
 #define HAS_SSE4 1
 #else
 #define HAS_SSE4 0
@@ -775,8 +775,8 @@ __attribute__((noinline)) static void bench_both_leaves_scatter(uint8_t *symbols
  * scatter/partition floors above.
  * ============================================================ */
 
-/* unpack() helpers + their tables come from pivco_huffman_neon_flat.h
- * (shared with src/pivco_huffman_primitives_neon.h — single source of truth). */
+/* unpack() helpers + their tables come from prims/neon_flat.h
+ * (shared with src/prims/neon.h — single source of truth). */
 
 /* ---- D=2: 4 packed bytes → 16 codes (uint8x16_t), 1 vqtbl1q_u8 ---- */
 __attribute__((noinline))

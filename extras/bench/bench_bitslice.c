@@ -39,7 +39,7 @@ int main(void) {
 
 /* Pull in ph's actual D=2..6 flat-decode unpack helpers.  Self-contained
  * header (only needs BW + VBMI + VBMI2). */
-#include "pivco_huffman_avx512_flat.h"
+#include "prims/avx512_flat.h"
 
 static inline uint64_t now_ns(void) {
     struct timespec ts;
@@ -326,9 +326,9 @@ void dec_blend(int D, const uint8_t *bm, int n,
 
 /* ===========================================================
  * ph's actual SIMD flat-decode path (mirror of
- * flat_decode_direct_avx512_inner in pivco_huffman_primitives_avx512.h).
+ * flat_decode_direct_avx512_inner in prims/avx512.h).
  * Uses the shared flat_d{2..6}_unpack_avx512 helpers from
- * pivco_huffman_avx512_flat.h, then pshufb / vpermb / vpermw for c2s.
+ * prims/avx512_flat.h, then pshufb / vpermb / vpermw for c2s.
  * Reads classic LSB-packed bitmaps.
  * =========================================================== */
 

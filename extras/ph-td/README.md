@@ -22,7 +22,7 @@ remain local:
   index-scatter kernels).  Encode partition calls the shared
   `prim_enc_partition_full`.
 - `pivco_huffman_avx512.c` — self-contained AVX-512 TD decoder (uses the
-  shared `pivco_huffman_avx512_flat.h`).
+  shared `prims/avx512_flat.h`).
 - `pivco_huffman_naive.c` + `huffman_table.c` — the naive-tree build/decode
   baseline (no main-repo equivalent).
 - `include/pivco_huffman.h` — TD/naive public API + the table struct

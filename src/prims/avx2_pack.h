@@ -1,5 +1,5 @@
-/* pivco_huffman_avx2_pack.h — flat-subtree D-bit pack (AVX2 port of
- * ryg's multiply-as-shift pack).  Mirrors pivco_huffman_avx512_pack.h
+/* avx2_pack.h — flat-subtree D-bit pack (AVX2 port of
+ * ryg's multiply-as-shift pack).  Mirrors avx512_pack.h
  * for the x86 backend hosts that have AVX2 but not AVX-512 VBMI2.
  *
  * 32 codes per ymm iter via byte-laid intermediate:
@@ -21,7 +21,7 @@
 #define PIVCO_HUFFMAN_AVX2_PACK_H
 
 #if !defined(__AVX2__) || !defined(__SSE4_1__)
-#error "pivco_huffman_avx2_pack.h requires AVX2 + SSE4.1"
+#error "avx2_pack.h requires AVX2 + SSE4.1"
 #endif
 
 #include <stdint.h>

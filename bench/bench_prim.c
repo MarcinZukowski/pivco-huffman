@@ -55,11 +55,11 @@
 #if defined(HAVE_SIMD)
 #  include "pivco_prims.h"   /* prim_* through g_pivco_prims */
 #  if defined(__aarch64__)
-#    include "pivco_huffman_primitives_neon.h"
+#    include "prims/neon.h"
 #  elif defined(__AVX512VBMI2__)
-#    include "pivco_huffman_primitives_avx512.h"
+#    include "prims/avx512.h"
 #  else
-#    include "pivco_huffman_primitives_x86.h"
+#    include "prims/x86.h"
 #  endif
 #  define BK pivco_prims_name()
    /* Retired u16 (code_la) encode kernels (owned by ph-td; production encodes on
@@ -282,8 +282,8 @@ static void neon_scatter(const ctx_t *c) {
 /* Pure-unpack rows: each case is the matching merge_flat_dN_avx512 loop with
    the c2s vpermb removed -- codes are stored, not mapped.  Loop bounds (the
    128-slack wide loop, fast/safe 16-wide tails) are copied verbatim from
-   pivco_huffman_primitives_avx512.h so the bm over-read guarantees are
-   identical; the helpers themselves come from pivco_huffman_avx512_flat.h. */
+   prims/avx512.h so the bm over-read guarantees are
+   identical; the helpers themselves come from prims/avx512_flat.h. */
 static void avx512_unpack(const ctx_t *c) {
     int n = c->n, i = 0; uint8_t *cd = c->codes; const uint8_t *bm = c->bm;
     switch (c->D) {

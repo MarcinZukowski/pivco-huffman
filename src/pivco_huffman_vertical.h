@@ -37,7 +37,7 @@
  * nothing per-region goes on the wire.
  *
  * SIMD implementations live in the backend primitive headers (NEON) and
- * pivco_huffman_x86_vertical.h (SSE/AVX2/AVX-512); the scalar kernels
+ * prims/x86_vertical.h (SSE/AVX2/AVX-512); the scalar kernels
  * below are the reference + scalar-backend forms.
  */
 #ifndef PIVCO_HUFFMAN_VERTICAL_H

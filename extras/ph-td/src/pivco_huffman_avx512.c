@@ -6,7 +6,7 @@
 
 #ifdef PIVCO_HAS_AVX512
 #include <immintrin.h>
-#include "pivco_huffman_avx512_flat.h"
+#include "prims/avx512_flat.h"
 
 /* ---------- AVX-512 VBMI2 Partition ----------
  *
@@ -133,7 +133,7 @@ static inline uint32_t extract_D_bits_avx512(const uint8_t *in,
 }
 
 /* flat_d{2..6}_unpack_avx512* helpers + tables live in
- * pivco_huffman_avx512_flat.h (shared with bench/bench_micro.c). */
+ * prims/avx512_flat.h (shared with bench/bench_micro.c). */
 
 #define FLAT_UNPACK_SWITCH_IDX(dst_expr)                                 \
     int i = 0;                                                            \

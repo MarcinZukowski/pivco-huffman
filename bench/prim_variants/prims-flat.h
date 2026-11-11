@@ -4,7 +4,7 @@
  * (ST_MERGE_FLAT, per-D).  See prims.h for the contract + naming
  * (PV_ = constants/macros, pv_ = plumbing, prim_ = kernels); per-D rows use
  * PV_VARIANT_D.  Production flat unpack helpers (flat_dN_unpack[_safe]) from
- * src/pivco_huffman_neon_flat.h are in scope here.
+ * src/prims/neon_flat.h are in scope here.
  *
  * What's here vs deliberately omitted:
  *   fl_natural (D=2,4)  — row-major shift+mask unpack with vst4q/vst2q
@@ -225,6 +225,48 @@ static void prim_merge_flat_asof_d6(const ctx_t *c){
  * issue-#5 (dougallj, gist cf33841) kernels replaced it: separate flat_dN
  * unpack + vqtblN c2s scatter per 8/16 codes (d8: 256-entry vqtbl4+3x vqtbx4).
  * ========================================================================== */
+/* D=3 _fast: single 16-byte vector load.  Reads 13 bytes past the valid
+ * 3-byte region — caller (merge_flat_dN_neon) bounds the loop so this
+ * overread stays within the bm scratch region.  Same pattern as the
+ * AVX-512 flat_d3_unpack_avx512_fast and x86 flat_d3_unpack_x86.
+ *
+ * The original byte-wise vsetq_lane_u8 chain was the v0.2 workaround
+ * for a Neoverse-V2 store-forward stall on the previous
+ * `memcpy(&packed, 5/6) + vsetq_lane_u64` form (which routed via the
+ * stack).  A direct vld1q_u8 doesn't go through the stack at all and
+ * doesn't reintroduce that pathology. */
+static inline uint8x8_t flat_d3_unpack_fast(const uint8_t *bm_ptr)
+{
+    uint8x16_t bm_lo = vld1q_u8(bm_ptr);
+    uint8x16_t shuffled = vqtbl1q_u8(bm_lo, vld1q_u8(flat_d3_shuf_tab));
+    uint16x8_t w = vreinterpretq_u16_u8(shuffled);
+    uint16x8_t shifted = vshlq_u16(w, vld1q_s16(flat_d3_shift_tab));
+    uint16x8_t masked = vandq_u16(shifted, vdupq_n_u16(0x07));
+    return vmovn_u16(masked);
+}
+
+/* D=5 _fast: single 16-byte vector load (overreads 11 bytes). */
+static inline uint8x8_t flat_d5_unpack_fast(const uint8_t *bm_ptr)
+{
+    uint8x16_t bm_lo = vld1q_u8(bm_ptr);
+    uint8x16_t shuffled = vqtbl1q_u8(bm_lo, vld1q_u8(flat_d5_shuf_tab));
+    uint16x8_t w = vreinterpretq_u16_u8(shuffled);
+    uint16x8_t shifted = vshlq_u16(w, vld1q_s16(flat_d5_shift_tab));
+    uint16x8_t masked = vandq_u16(shifted, vdupq_n_u16(0x1F));
+    return vmovn_u16(masked);
+}
+
+/* D=6 _fast: single 16-byte vector load (overreads 10 bytes). */
+static inline uint8x8_t flat_d6_unpack_fast(const uint8_t *bm_ptr)
+{
+    uint8x16_t bm_lo = vld1q_u8(bm_ptr);
+    uint8x16_t shuffled = vqtbl1q_u8(bm_lo, vld1q_u8(flat_d6_shuf_tab));
+    uint16x8_t w = vreinterpretq_u16_u8(shuffled);
+    uint16x8_t shifted = vshlq_u16(w, vld1q_s16(flat_d6_shift_tab));
+    uint16x8_t masked = vandq_u16(shifted, vdupq_n_u16(0x3F));
+    return vmovn_u16(masked);
+}
+
 static void pv_mf_e96529e_d2(uint8_t *symbols, int n,
                                                 const uint8_t *bm,
                                                 const uint8_t *c2s)
@@ -687,7 +729,7 @@ static void pv_boncz_unpack_shuf_d6(const ctx_t *c) { boncz_unpack_shuf_d6(c->co
  * mul form was >= on every host (SSE lacks u16 variable shifts; even
  * NEON prefers the mul pipe).  Typedefs + PV_FN_CSIMD from prims.h. */
 #if defined(__SSE4_1__)
-#  include "pivco_huffman_x86_flat.h"   /* production ryg SSE unpack helpers */
+#  include "prims/x86_flat.h"   /* production ryg SSE unpack helpers */
 #  define PV_FN_SSE_RYG(f) (f)
 #else
 #  define PV_FN_SSE_RYG(f) NULL
@@ -1192,15 +1234,15 @@ static void pv_register_flat(void) {
     PV_VARIANT_D(ST_UNPACK, "csimd-ryg", 7, PV_ISA_SCALAR,
                  "portable rewrite of x86_flat.h ryg SSE", "mul-as-shift, GNU vector ext; 16 codes/16B window", 0, PV_FN_CSIMD(pv_csimd_ryg_d7));
     PV_VARIANT_D(ST_UNPACK, "sse-ryg", 2, PV_ISA_SSE4,
-                 "production pivco_huffman_x86_flat.h", "ryg SSE helpers driven as pure unpack (reference)", 0, PV_FN_SSE_RYG(pv_sse_ryg_d2));
+                 "production prims/x86_flat.h", "ryg SSE helpers driven as pure unpack (reference)", 0, PV_FN_SSE_RYG(pv_sse_ryg_d2));
     PV_VARIANT_D(ST_UNPACK, "sse-ryg", 3, PV_ISA_SSE4,
-                 "production pivco_huffman_x86_flat.h", "ryg SSE helpers driven as pure unpack (reference)", 0, PV_FN_SSE_RYG(pv_sse_ryg_d3));
+                 "production prims/x86_flat.h", "ryg SSE helpers driven as pure unpack (reference)", 0, PV_FN_SSE_RYG(pv_sse_ryg_d3));
     PV_VARIANT_D(ST_UNPACK, "sse-ryg", 4, PV_ISA_SSE4,
-                 "production pivco_huffman_x86_flat.h", "ryg SSE helpers driven as pure unpack (reference)", 0, PV_FN_SSE_RYG(pv_sse_ryg_d4));
+                 "production prims/x86_flat.h", "ryg SSE helpers driven as pure unpack (reference)", 0, PV_FN_SSE_RYG(pv_sse_ryg_d4));
     PV_VARIANT_D(ST_UNPACK, "sse-ryg", 5, PV_ISA_SSE4,
-                 "production pivco_huffman_x86_flat.h", "ryg SSE helpers driven as pure unpack (reference)", 0, PV_FN_SSE_RYG(pv_sse_ryg_d5));
+                 "production prims/x86_flat.h", "ryg SSE helpers driven as pure unpack (reference)", 0, PV_FN_SSE_RYG(pv_sse_ryg_d5));
     PV_VARIANT_D(ST_UNPACK, "sse-ryg", 6, PV_ISA_SSE4,
-                 "production pivco_huffman_x86_flat.h", "ryg SSE helpers driven as pure unpack (reference)", 0, PV_FN_SSE_RYG(pv_sse_ryg_d6));
+                 "production prims/x86_flat.h", "ryg SSE helpers driven as pure unpack (reference)", 0, PV_FN_SSE_RYG(pv_sse_ryg_d6));
     PV_VARIANT_D(ST_UNPACK, "csimd-boncz", 3, PV_ISA_SCALAR,
                  "duckdb#23313 (P. Boncz)", "ShuffleUnpackIter u8 arm, GNU vector ext; 8 vals/16B window", 0, PV_FN_CSIMD(pv_boncz_unpack_shuf_d3));
     PV_VARIANT_D(ST_UNPACK, "csimd-boncz", 5, PV_ISA_SCALAR,

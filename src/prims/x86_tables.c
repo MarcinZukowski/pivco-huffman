@@ -1,11 +1,11 @@
-/* pivco_huffman_x86_tables.c — runtime construction of shared x86 tables.
+/* x86_tables.c — runtime construction of shared x86 tables.
  *
  * Storage + init functions extracted from the legacy x86 .c files so
  * both the legacy code (until step 4 cutover) and the codec.c-compiled-
  * as-x86 object library link against one copy.  See header for the
  * contract. */
 
-#include "pivco_huffman_x86_tables.h"
+#include "x86_tables.h"
 
 /* ---------- Encoder partition: compress_tab[256][32] + compress_popcnt[256]
  *

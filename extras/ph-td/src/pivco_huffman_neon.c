@@ -61,7 +61,7 @@ extern int g_pivco_fse_root_n;
 
 #ifdef PIVCO_HAS_NEON
 #include <arm_neon.h>
-#include "pivco_huffman_neon_flat.h"
+#include "prims/neon_flat.h"
 
 /* ---------- uarch gate: D=5/D=6 flat-subtree TBL paths ----------
  *
@@ -84,10 +84,10 @@ extern int g_pivco_fse_root_n;
 #endif
 
 /* SIMD compress shuffle table + init function: storage and constructor
- * live in pivco_huffman_neon_tables.{c,h} so codec.c (compiled per-
+ * live in prims/neon_tables.{c,h} so codec.c (compiled per-
  * backend) can share the same runtime tables.  See the header for the
  * layout and the (mask -> shuf, popcount) semantics. */
-#include "pivco_huffman_neon_tables.h"
+#include "prims/neon_tables.h"
 
 /* Partition 8 uint16_t by an 8-bit mask.
    bit=1 → right_out, bit=0 → left_out.
@@ -242,7 +242,7 @@ static inline uint32_t extract_D_bits(const uint8_t *in, int bit_pos, int D)
     }
 
 /* flat_d{2,3,4,5,6}_unpack() and their tables live in
- * pivco_huffman_neon_flat.h (shared with bench/bench_micro.c). */
+ * prims/neon_flat.h (shared with bench/bench_micro.c). */
 
 /* Unpack n D-bit codes from bm, look up in c2s, scatter to
  * symbols[indices[i]].  Used by decode_node_neon. */
@@ -552,7 +552,7 @@ static inline void flat_decode_direct_neon(uint8_t *symbols, int n,
  * u16pack_dN_neon — were retired from the production codec (it encodes on u8 ranks
  * now), so TD owns them in pivco_huffman_u16enc.h, included after the shared
  * header (which still provides compress_tab / the *_pack.h helpers / the macros). */
-#include "pivco_huffman_primitives_neon.h"
+#include "prims/neon.h"
 #include "pivco_huffman_u16enc.h"
 static inline void pack_D_bits_dense(uint8_t *out, int n, int D, int depth,
                                       const uint16_t *codes_la)

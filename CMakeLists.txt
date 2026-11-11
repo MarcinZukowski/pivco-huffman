@@ -126,7 +126,7 @@ endif()
 if(TARGET_ARCH STREQUAL "arm64" OR TARGET_ARCH STREQUAL "aarch64")
     message(STATUS "ARM64 detected — enabling NEON")
     list(APPEND PIVCO_SOURCES
-        src/pivco_huffman_neon_tables.c)
+        src/prims/neon_tables.c)
     add_compile_definitions(PIVCO_HAS_NEON=1)
     # Note: an SVE backend existed (pivco_huffman_sve.c, removed 2026-08-14
     # -- see git history) but was disabled and stale (pre-unified-codec).
@@ -176,7 +176,7 @@ elseif(TARGET_ARCH STREQUAL "x86_64" OR TARGET_ARCH STREQUAL "amd64")
     # runtime (pivco_huffman.c), not here.
     message(STATUS "x86_64 runtime dispatch — SSE4.1 floor + every tier the compiler supports")
     list(APPEND PIVCO_SOURCES
-        src/pivco_huffman_x86_tables.c)
+        src/prims/x86_tables.c)
     add_compile_definitions(PIVCO_HAS_SSE4=1)
     add_compile_options(-msse4.1 -mpopcnt)
     if(COMPILER_HAS_AVX2)

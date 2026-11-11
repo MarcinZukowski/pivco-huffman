@@ -4,7 +4,7 @@
  * own implementation bind the histogram_chunk slot to this (currently
  * scalar, NEON and SSE4.1 — an 8-cursor u64-load variant measured on
  * par on M4/Graviton4/Zen3, so one portable core suffices; AVX-512 has
- * its own, see primitives_avx512.h).  Not a backend header itself:
+ * its own, see prims/avx512.h).  Not a backend header itself:
  * specialized name only.
  *
  * Contract: see prim_histogram_chunk in pivco_prims.h.

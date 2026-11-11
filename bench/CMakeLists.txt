@@ -42,7 +42,7 @@ set(PHTD_AVX512_SRC "")
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "arm64|aarch64")
     list(APPEND PHTD_SOURCES
         ${PHTD_DIR}/src/pivco_huffman_neon.c
-        ${CMAKE_SOURCE_DIR}/src/pivco_huffman_neon_tables.c)   # shared (was forked copy)
+        ${CMAKE_SOURCE_DIR}/src/prims/neon_tables.c)   # shared (was forked copy)
     set(PHTD_DEFS PIVCO_HAS_NEON=1)
     set(PHTD_SIMD_DEF PIVCO_HAS_NEON=1)
 elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64|AMD64")

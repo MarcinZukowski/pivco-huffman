@@ -76,7 +76,7 @@ add_compile_definitions(PIVCO_PROF=1)
 if(PH_TD_HAVE_NEON)
     list(APPEND PH_TD_SOURCES
         src/pivco_huffman_neon.c
-        ${CMAKE_CURRENT_SOURCE_DIR}/../../src/pivco_huffman_neon_tables.c)  # shared
+        ${CMAKE_CURRENT_SOURCE_DIR}/../../src/prims/neon_tables.c)  # shared
 endif()
 if(PH_TD_HAVE_AVX512)
     list(APPEND PH_TD_SOURCES

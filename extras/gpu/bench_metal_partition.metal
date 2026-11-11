@@ -71,7 +71,7 @@ kernel void empty_kernel(uint tid [[thread_position_in_grid]])
 // ============================================================
 // tree_merge_step — BU decoder's per-internal-node primitive.
 //
-// Faithful port of src/pivco_huffman_primitives_neon.h:tree_merge_neon
+// Faithful port of src/prims/neon.h:tree_merge_neon
 // (the CPU NEON kernel that ph spends most of its decode time in).
 //
 // Per output position i:

@@ -1065,6 +1065,13 @@ static inline uint64_t pv_popcnt_bytes_u64(uint64_t x) {
 }
 #endif
 
+/* 8-bit mask of (rank > thr) for the 8 ranks in the low 8 lanes of `ids8`. */
+static inline uint8_t x86_mask8(__m128i ids8, __m128i thr1)
+{
+    __m128i ge = _mm_cmpeq_epi8(_mm_min_epu8(ids8, thr1), thr1);
+    return (uint8_t)_mm_movemask_epi8(ge);
+}
+
 /* Self-contained 8-code partition-mask: left-shift each u16 by `depth` so the
  * partition bit (15-depth) lands in the MSB, signed-saturate-pack to bytes,
  * movemask -> 8-bit mask.  Local copy so the graveyard doesn't depend on the
@@ -1119,7 +1126,7 @@ static void prim_part_full_com(const ctx_t *c){
 /* u16-like: the per-8-chunk u8 rank partition (mirrors the u16 partition
  * shape) — one movemask + one storel per 8-rank chunk, 2x-unrolled — to A/B
  * against the shipped 16-wide + single-movemask part_full_x86.  Uses the
- * production x86 rank tables (x86_ctab_r/l, x86_pc8, x86_mask8); 8-byte storel
+ * production x86 rank tables (x86_ctab_r/l, x86_pc8) and x86_mask8; 8-byte storel
  * keeps the in-place left write off the next iter. */
 static void prim_part_u16like(const ctx_t *c) {
     uint8_t *ranks = c->ranks_work, *bm = c->bm, *tmp = c->tmp8;
@@ -1257,7 +1264,7 @@ static void prim_part_halftab(const ctx_t *c) {
  * tabA[m0] | tabB[pc0][m1] packs {left, forward, front} | {right, reversed,
  * back} (the two sides tile the 16 lanes, so the OR of two disjoint tables is
  * exact).  The p16rev kernel itself is now production (part_full_x86 in
- * pivco_huffman_primitives_x86.h, with its own copy of these tables), so only
+ * prims/x86.h, with its own copy of these tables), so only
  * the backward-store p16revback variant carries them here. */
 static uint8_t pv_x86p16rev_tabA[256][16]    __attribute__((aligned(16)));
 static uint8_t pv_x86p16rev_tabB[9][256][16] __attribute__((aligned(16)));
@@ -1413,7 +1420,7 @@ static void prim_part_p16rev_x86(const ctx_t *c) {
 /* asof-ae49fe1 — the stride-8 ctab8 one-sided (right) compaction that was
  * production part_core_x86 before the 16-wide right16 path was promoted
  * (ae49fe1 = last commit with it as production).  Frozen as the baseline;
- * reuses the production x86_ctab_r/x86_pc8/x86_mask8. */
+ * reuses the production x86_ctab_r/x86_pc8, and x86_mask8. */
 static void prim_part_right_asof_ae49fe1_x86(const ctx_t *c) {
     uint8_t *ranks = c->ranks_work, *bm = c->bm, *tmp = c->tmp8;
     int n = c->n; uint8_t thr = c->rank_thr;

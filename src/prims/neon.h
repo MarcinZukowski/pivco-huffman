@@ -1,4 +1,4 @@
-/* pivco_huffman_primitives_neon.h — NEON implementations of the codec
+/* neon.h — NEON implementations of the codec
  * primitive interface (see pivco_prims.h).
  *
  * Specialized names end in `_neon`; prims/tables.c binds them to the
@@ -12,14 +12,14 @@
 #define PIVCO_HUFFMAN_PRIMITIVES_NEON_H
 
 #if !defined(__aarch64__)
-#error "pivco_huffman_primitives_neon.h requires aarch64 NEON"
+#error "neon.h requires aarch64 NEON"
 #endif
 
 #include "pivco_huffman.h"
-#include "pivco_huffman_common.h"
-#include "pivco_huffman_neon_tables.h"   /* expand_tab*, compress_tab* */
-#include "pivco_huffman_neon_flat.h"     /* flat_d{2,3,4,5,6}_unpack */
-#include "pivco_huffman_neon_pack.h"     /* pack_d{5,6,7}_neon (variable-shift pack) */
+#include "../pivco_huffman_common.h"
+#include "neon_tables.h"   /* expand_tab*, compress_tab* */
+#include "neon_flat.h"     /* flat_d{2,3,4,5,6}_unpack */
+#include "neon_pack.h"     /* pack_d{5,6,7}_neon (variable-shift pack) */
 #include "pivco_prof.h"
 
 #include <arm_neon.h>
@@ -339,7 +339,7 @@ static inline void merge_cst_cst_neon(const uint8_t *bm, int K,
  *
  * One static-inline per supported D (2..8); merge_flat_neon
  * is a switch dispatcher.  The per-D unpack helpers
- * (flat_d{2,3,4,5,6,7}_unpack) come from pivco_huffman_neon_flat.h.
+ * (flat_d{2,3,4,5,6,7}_unpack) come from neon_flat.h.
  */
 
 /* Extract D bits at bit position `bit_pos` from `in`.  D <= 16.  Used
@@ -993,7 +993,7 @@ int part_core_neon(uint8_t *ranks, int n, uint8_t thr,
 /* Flat pack, native u8: the local code (rank - base) is already a D-bit value
  * in the low bits of each byte, so we pack straight from u8 — no u16 widen, no
  * round-trip.  Per-D byte kernels mirror the code_la packers (D5/6/7 reuse the
- * byte-laid backend from pivco_huffman_neon_pack.h via pack_d{5,6,7}). */
+ * byte-laid backend from neon_pack.h via pack_d{5,6,7}). */
 
 /* D=2: 16 ranks -> 4 bytes (4 ranks per byte, no byte crossings). */
 static inline int pack_d2_neon(uint8_t *out, const uint8_t *ranks, int n, uint8_t base)
@@ -1139,7 +1139,7 @@ static inline void pack_dN_neon(uint8_t *out, const uint8_t *ranks,
     if (bits_in_buf > 0) out[byte_idx] = (uint8_t)(buf & ((1u << bits_in_buf) - 1));
 }
 
-#include "pivco_huffman_hist_scalar.h"   /* histogram_chunk_scalar */
+#include "../pivco_huffman_hist_scalar.h"   /* histogram_chunk_scalar */
 
 /* ---------- vertical-128 flat kernels (see pivco_huffman_vertical.h) ----------
  *

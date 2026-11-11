@@ -1,4 +1,4 @@
-/* pivco_huffman_neon_tables.h — shared NEON lookup tables.
+/* neon_tables.h — shared NEON lookup tables.
  *
  * Two table families live here so both the legacy NEON .c files and
  * the codec.c-compiled-as-NEON object library can share one runtime

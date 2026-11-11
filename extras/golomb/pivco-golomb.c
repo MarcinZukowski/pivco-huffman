@@ -480,7 +480,7 @@ static uint8_t *g_pivco_child = NULL;
  *
  * Shuffle tables (expand_tab + expand_popcnt + expand_tab_pre) are
  * the same V4-strategy tables used by pivco-Huffman; the init code is
- * copied verbatim from src/pivco_huffman_neon_tables.c.
+ * copied verbatim from src/prims/neon_tables.c.
  */
 #if defined(__aarch64__) && defined(__ARM_NEON)
 #include <arm_neon.h>
@@ -517,7 +517,7 @@ static void init_expand_tables(void) {
  *   output[i] = bitmap[i] ? 0 : (child[idx++] + 1)   (all uint8)
  *
  * Bit convention: bit==0 -> vec (left), bit==1 -> cst (right) = 0xFF, +1 wraps to 0.
- * Adapted from merge_vec_cst_neon in src/pivco_huffman_primitives_neon.h.
+ * Adapted from merge_vec_cst_neon in src/prims/neon.h.
  */
 static void merge_vec_cst_plus1_neon(const uint8_t *bm, int K,
                                      const uint8_t *vec, uint8_t *out) {
@@ -615,7 +615,7 @@ static int decode_pivco_neon(const PivcoStream *s, uint8 *out, size_t n) {
  * ============================================================
  *
  * Stride-64 variant of the same merge_vec_cst_plus1 idea, lifted from
- * merge_vec_cst_avx512 in src/pivco_huffman_primitives_avx512.h.
+ * merge_vec_cst_avx512 in src/prims/avx512.h.
  *
  * Per 64 codes:
  *   - load 64 bm bits as a kmask
