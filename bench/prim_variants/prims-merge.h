@@ -2265,7 +2265,135 @@ PV_BIDIR_FN(prim_merge_cv_fwd64,    PV_MERGE_CV, 64,   0)
 PV_BIDIR_FN(prim_merge_cv_bidir64,  PV_MERGE_CV, 64,   1)
 #endif /* HAVE_SIMD */
 
+#if defined(USE_NEON_KERNELS) && defined(__APPLE__) && defined(__clang__)
+/* cssc: FEAT_CSSC (Apple M6+) scalar CNT on GPRs.  The production merges get
+ * the 16-lane chunk cursor offsets from a SIMD byte popcount (vcnt + 0x01..01
+ * multiply prefix + fmov back) and the tails from expand_popcnt lookups,
+ * because aarch64 had no GPR popcount.  Here both are plain
+ * __builtin_popcountll, which CSSC lowers to one scalar CNT.  Registered only
+ * when the host reports FEAT_CSSC. */
+#include <sys/sysctl.h>
+#define PV_HAS_CSSC 1
+static int pv_has_cssc(void)
+{
+    int v = 0;
+    size_t len = sizeof(v);
+    if (sysctlbyname("hw.optional.arm.FEAT_CSSC", &v, &len, NULL, 0) != 0) return 0;
+    return v;
+}
+__attribute__((target("cssc")))
+static void merge_vec_vec_cssc(const uint8_t *bm, int K, const uint8_t *left,
+                               const uint8_t *right, uint8_t *out)
+{
+    const uint8_t *l_list = left, *r_list = right;
+    intptr_t i = 0;
+    for (; i + 64 <= K; i += 64) {
+        uint64_t mask;
+        memcpy(&mask, bm + (i >> 3), 8);
+        intptr_t p0 = __builtin_popcountll(mask & 0xFFFFull);
+        intptr_t p1 = __builtin_popcountll(mask & 0xFFFFFFFFull);
+        intptr_t p2 = __builtin_popcountll(mask & 0xFFFFFFFFFFFFull);
+        intptr_t p3 = __builtin_popcountll(mask);
+        merge_neon_16B(out + i,      l_list,           r_list,      (intptr_t)mask,         g_merge_shuf0, g_merge_shuf1);
+        merge_neon_16B(out + i + 16, l_list + 16 - p0, r_list + p0, (intptr_t)(mask >> 16), g_merge_shuf0, g_merge_shuf1);
+        merge_neon_16B(out + i + 32, l_list + 32 - p1, r_list + p1, (intptr_t)(mask >> 32), g_merge_shuf0, g_merge_shuf1);
+        merge_neon_16B(out + i + 48, l_list + 48 - p2, r_list + p2, (intptr_t)(mask >> 48), g_merge_shuf0, g_merge_shuf1);
+        r_list += p3;
+        l_list += 64 - p3;
+    }
+    int j = (int)i;
+    for (; j + 16 <= K; j += 16) {
+        uint16_t m16;
+        memcpy(&m16, bm + (j >> 3), 2);
+        merge_neon_16B(out + j, l_list, r_list, (intptr_t)m16, g_merge_shuf0, g_merge_shuf1);
+        int pop = __builtin_popcount(m16);
+        r_list += pop;
+        l_list += 16 - pop;
+    }
+    if (j + 8 <= K) {
+        intptr_t m8 = bm[j >> 3];
+        merge_neon_8B_lo(out + j, l_list, r_list, m8, g_merge_shuf0, g_merge_shuf1);
+        int pop = __builtin_popcount((unsigned)m8);
+        r_list += pop;
+        l_list += 8 - pop;
+        j += 8;
+    }
+    int lc = (int)(l_list - left), rc = (int)(r_list - right);
+    for (; j < K; j++) {
+        int mb = (bm[j >> 3] >> (j & 7)) & 1;
+        out[j] = mb ? right[rc++] : left[lc++];
+    }
+}
+__attribute__((target("cssc")))
+static void merge_cst_vec_cssc(const uint8_t *bm, int K, uint8_t left_sym,
+                               const uint8_t *right, uint8_t *out)
+{
+    uint8x16_t Lb = vdupq_n_u8(left_sym);
+    const uint8_t *r_list = right;
+    intptr_t i = 0;
+    for (; i + 64 <= K; i += 64) {
+        uint64_t mask;
+        memcpy(&mask, bm + (i >> 3), 8);
+        intptr_t p0 = __builtin_popcountll(mask & 0xFFFFull);
+        intptr_t p1 = __builtin_popcountll(mask & 0xFFFFFFFFull);
+        intptr_t p2 = __builtin_popcountll(mask & 0xFFFFFFFFFFFFull);
+        intptr_t p3 = __builtin_popcountll(mask);
+#define _MCVC(off, rd, mk) do {                                                  \
+        int8x16_t s0 = vld1q_s8(&g_merge_shuf0[(((intptr_t)(mk)) << 4) & 0xff0]); \
+        int8x16_t s1 = vld1q_s8(&g_merge_shuf1[(((intptr_t)(mk)) >> 4) & 0xff0]); \
+        uint8x16_t sh = vreinterpretq_u8_s8(vabdq_s8(s0, s1));                    \
+        uint8x16x2_t src; src.val[0] = vld1q_u8(rd); src.val[1] = Lb;            \
+        vst1q_u8(out + i + (off), vqtbl2q_u8(src, sh));                          \
+    } while (0)
+        _MCVC(0,  r_list,      mask);
+        _MCVC(16, r_list + p0, mask >> 16);
+        _MCVC(32, r_list + p1, mask >> 32);
+        _MCVC(48, r_list + p2, mask >> 48);
+#undef _MCVC
+        r_list += p3;
+    }
+    int j = (int)i;
+    for (; j + 16 <= K; j += 16) {
+        uint16_t m16;
+        memcpy(&m16, bm + (j >> 3), 2);
+        int8x16_t s0 = vld1q_s8(&g_merge_shuf0[((intptr_t)m16 << 4) & 0xff0]);
+        int8x16_t s1 = vld1q_s8(&g_merge_shuf1[((intptr_t)m16 >> 4) & 0xff0]);
+        uint8x16_t sh = vreinterpretq_u8_s8(vabdq_s8(s0, s1));
+        uint8x16x2_t src; src.val[0] = vld1q_u8(r_list); src.val[1] = Lb;
+        vst1q_u8(out + j, vqtbl2q_u8(src, sh));
+        r_list += __builtin_popcount(m16);
+    }
+    if (j + 8 <= K) {
+        intptr_t m8 = bm[j >> 3];
+        int8x16_t s0 = vld1q_s8(&g_merge_shuf0[(m8 << 4) & 0xff0]);
+        int8x16_t s1 = vld1q_s8(&g_merge_shuf1[0]);
+        uint8x16_t sh = vreinterpretq_u8_s8(vabdq_s8(s0, s1));
+        uint8x16x2_t src;
+        src.val[0] = vcombine_u8(vld1_u8(r_list), vdup_n_u8(0));
+        src.val[1] = Lb;
+        vst1_u8(out + j, vget_low_u8(vqtbl2q_u8(src, sh)));
+        r_list += __builtin_popcount((unsigned)m8);
+        j += 8;
+    }
+    int rc = (int)(r_list - right);
+    for (; j < K; j++) {
+        int mb = (bm[j >> 3] >> (j & 7)) & 1;
+        out[j] = mb ? right[rc++] : left_sym;
+    }
+}
+static void prim_merge_vv_cssc(const ctx_t *c) { merge_vec_vec_cssc(c->bm, c->n, c->merge_left, c->merge_right, c->out); }
+static void prim_merge_cv_cssc(const ctx_t *c) { merge_cst_vec_cssc(c->bm, c->n, MERGE_LEFT_SYM, c->merge_right, c->out); }
+#endif /* USE_NEON_KERNELS && __APPLE__ && __clang__ */
+
 static void pv_register_merge(void) {
+#if defined(PV_HAS_CSSC)
+    if (pv_has_cssc()) {
+        PV_VARIANT(ST_MERGE_VEC_VEC, "cssc", PV_ISA_NEON, "M6 FEAT_CSSC",
+                   "production two-table merge with GPR CNT cursor offsets + CNT tails", 0, PV_FN_NEON(prim_merge_vv_cssc));
+        PV_VARIANT(ST_MERGE_CST_VEC, "cssc", PV_ISA_NEON, "M6 FEAT_CSSC",
+                   "production two-table cst_vec with GPR CNT cursor offsets + CNT tails", 0, PV_FN_NEON(prim_merge_cv_cssc));
+    }
+#endif
 #if defined(USE_NEON_KERNELS)
     pv_build_cc_tables();
 #endif

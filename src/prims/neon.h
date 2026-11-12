@@ -718,6 +718,157 @@ static inline void merge_flat_neon(uint8_t *out, int n,
 }
 
 
+#if defined(PIVCO_BUILT_NEON_LUT)
+/* ---------- FEAT_LUT + FEAT_CSSC kernels (Apple M6+) ----------
+ * LUTI2 / LUTI4 look up 2- / 4-bit fields, LSB-first (the natural
+ * layout's order), in a 4- / 16-entry table held in one register.
+ * CSSC adds a scalar CNT on general registers.  Each kernel carries
+ * the target attribute, so the rest of this file stays plain NEON;
+ * pivco_huffman.c picks the table only on CPUs that report both. */
+#define PIVCO_NEON_LUT_TARGET __attribute__((target("lut,cssc")))
+/* The store loops below are a few instructions long; on M6 one that
+ * straddles a 64-byte line runs at half speed (D=4: 0.0071 vs 0.0133
+ * ns/elem), so each starts on a line. */
+#define PIVCO_LOOP_ALIGN64 __attribute__((code_align(64)))
+
+/* popcount_K_right_lut_neon — same contract as popcount_K_right_neon.
+ * Below 512 bits, 8-byte words through CNT, then the last bytes; no
+ * read past bitmap_bytes(K).  From 512 bits on, the 64-byte vector loop
+ * is faster. */
+PIVCO_NEON_LUT_TARGET
+static inline int popcount_K_right_lut_neon(const uint8_t *bm, int K)
+{
+    if (K >= 512)
+        return popcount_K_right_neon(bm, bitmap_bytes(K), K);
+    PROF_TIC();
+    int full_bytes = K >> 3;
+    int partial_bits = K & 7;
+    int K_right = 0;
+    int b = 0;
+    for (; b + 8 <= full_bytes; b += 8) {
+        uint64_t w;
+        memcpy(&w, bm + b, 8);
+        K_right += __builtin_popcountll(w);
+    }
+    for (; b < full_bytes; b++)
+        K_right += __builtin_popcount(bm[b]);
+    if (partial_bits) {
+        uint8_t valid_mask = (uint8_t)((1u << partial_bits) - 1);
+        K_right += __builtin_popcount(bm[full_bytes] & valid_mask);
+    }
+    PROF_TOC(PROF_BU_POPCOUNT_K, K);
+    return K_right;
+}
+
+/* merge_cst_cst_lut_neon — same contract as merge_cst_cst_neon.  LUTI2.8H
+ * reads two bm bits per field and maps them to a halfword holding both
+ * output bytes: field (b0, b1) -> (b0 ? R : L) | (b1 ? R : L) << 8. */
+PIVCO_NEON_LUT_TARGET
+static inline void merge_cst_cst_lut_neon(const uint8_t *bm, int K,
+                                          uint8_t left_sym, uint8_t right_sym,
+                                          uint8_t *out)
+{
+    PROF_TIC();
+    const uint16_t pairs[8] = {
+        (uint16_t)(left_sym | (left_sym << 8)),
+        (uint16_t)(right_sym | (left_sym << 8)),
+        (uint16_t)(left_sym | (right_sym << 8)),
+        (uint16_t)(right_sym | (right_sym << 8)),
+        0, 0, 0, 0,
+    };
+    const uint16x8_t t = vld1q_u16(pairs);
+    int j = 0;
+    PIVCO_LOOP_ALIGN64
+    for (; j + 128 <= K; j += 128) {
+        uint8x16_t v = vld1q_u8(bm + (j >> 3));
+        vst1q_u16((uint16_t *)(out + j),       vluti2q_laneq_u16(t, v, 0));
+        vst1q_u16((uint16_t *)(out + j + 16),  vluti2q_laneq_u16(t, v, 1));
+        vst1q_u16((uint16_t *)(out + j + 32),  vluti2q_laneq_u16(t, v, 2));
+        vst1q_u16((uint16_t *)(out + j + 48),  vluti2q_laneq_u16(t, v, 3));
+        vst1q_u16((uint16_t *)(out + j + 64),  vluti2q_laneq_u16(t, v, 4));
+        vst1q_u16((uint16_t *)(out + j + 80),  vluti2q_laneq_u16(t, v, 5));
+        vst1q_u16((uint16_t *)(out + j + 96),  vluti2q_laneq_u16(t, v, 6));
+        vst1q_u16((uint16_t *)(out + j + 112), vluti2q_laneq_u16(t, v, 7));
+    }
+    for (; j + 16 <= K; j += 16) {
+        uint16_t w;
+        memcpy(&w, bm + (j >> 3), 2);
+        uint8x16_t v = vreinterpretq_u8_u16(vdupq_n_u16(w));
+        vst1q_u16((uint16_t *)(out + j), vluti2q_laneq_u16(t, v, 0));
+    }
+    for (; j < K; j++) {
+        int mb = (bm[j >> 3] >> (j & 7)) & 1;
+        out[j] = mb ? right_sym : left_sym;
+    }
+    PROF_TOC(PROF_BU_MERGE_CST_CST, K);
+}
+
+/* D=2: LUTI2.16B, 64 codes per 16 bm bytes.  No read past n*2 bits. */
+PIVCO_NEON_LUT_TARGET
+static inline void merge_flat_d2_lut_neon(uint8_t *out, int n, const uint8_t *bm,
+                                          const uint8_t *c2s)
+{
+    const uint8x16_t t = vld1q_u8(c2s);
+    int i = 0;
+    PIVCO_LOOP_ALIGN64
+    for (; i + 64 <= n; i += 64) {
+        uint8x16_t v = vld1q_u8(bm + (i >> 2));
+        vst1q_u8(out + i,      vluti2q_laneq_u8(t, v, 0));
+        vst1q_u8(out + i + 16, vluti2q_laneq_u8(t, v, 1));
+        vst1q_u8(out + i + 32, vluti2q_laneq_u8(t, v, 2));
+        vst1q_u8(out + i + 48, vluti2q_laneq_u8(t, v, 3));
+    }
+    for (; i + 16 <= n; i += 16) {
+        uint32_t w;
+        memcpy(&w, bm + (i >> 2), 4);
+        uint8x16_t v = vreinterpretq_u8_u32(vdupq_n_u32(w));
+        vst1q_u8(out + i, vluti2q_laneq_u8(t, v, 0));
+    }
+    for (; i < n; i++)
+        out[i] = c2s[(bm[i >> 2] >> ((i & 3) * 2)) & 3];
+}
+
+/* D=4: LUTI4.16B, 32 codes per 16 bm bytes.  No read past n*4 bits. */
+PIVCO_NEON_LUT_TARGET
+static inline void merge_flat_d4_lut_neon(uint8_t *out, int n, const uint8_t *bm,
+                                          const uint8_t *c2s)
+{
+    const uint8x16_t t = vld1q_u8(c2s);
+    int i = 0;
+    PIVCO_LOOP_ALIGN64
+    for (; i + 32 <= n; i += 32) {
+        uint8x16_t v = vld1q_u8(bm + (i >> 1));
+        vst1q_u8(out + i,      vluti4q_laneq_u8(t, v, 0));
+        vst1q_u8(out + i + 16, vluti4q_laneq_u8(t, v, 1));
+    }
+    for (; i + 16 <= n; i += 16) {
+        uint64_t w;
+        memcpy(&w, bm + (i >> 1), 8);
+        uint8x16_t v = vreinterpretq_u8_u64(vdupq_n_u64(w));
+        vst1q_u8(out + i, vluti4q_laneq_u8(t, v, 0));
+    }
+    for (; i < n; i++)
+        out[i] = c2s[(bm[i >> 1] >> ((i & 1) * 4)) & 15];
+}
+
+/* merge_flat_lut_neon — merge_flat_neon with LUTI for D=2 and D=4. */
+PIVCO_NEON_LUT_TARGET
+static inline void merge_flat_lut_neon(uint8_t *out, int n, const uint8_t *bm,
+                                       int D, const uint8_t *c2s)
+{
+    if (D != 2 && D != 4) {
+        merge_flat_neon(out, n, bm, D, c2s);
+        return;
+    }
+    PROF_TIC();
+    if (D == 2)
+        merge_flat_d2_lut_neon(out, n, bm, c2s);
+    else
+        merge_flat_d4_lut_neon(out, n, bm, c2s);
+    PROF_TOC(PROF_BU_MERGE_FLAT, n);
+}
+#endif /* PIVCO_BUILT_NEON_LUT */
+
 /* ---------- Encode primitives: rank-based encoding (8-bit in-order ranks) ----------
  * Partition 8-bit leaf ranks against a per-node threshold (split_rank).  A
  * u8 port of the code_la COM64 partition: masks64_neon builds the

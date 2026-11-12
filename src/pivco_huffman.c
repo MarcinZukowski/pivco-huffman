@@ -7,6 +7,11 @@
 #include "pivco_check.h"
 #include <stdio.h>
 #include <stdlib.h>
+#if defined(__APPLE__) && defined(__aarch64__)
+#include <sys/sysctl.h>
+#elif defined(__linux__) && defined(__aarch64__)
+#include <sys/auxv.h>
+#endif
 void pivco_check_fail(const char *expr, const char *file, int line)
 {
     fprintf(stderr, "PIVCO_CHECK failed: %s (%s:%d)\n", expr, file, line);
@@ -71,10 +76,13 @@ void pivco_fse_root_get(int idx, pivco_fse_root_event_t *out)
 #include "pivco_cpu.h"
 #include "pivco_prims.h"
 
-/* SIMD tiers, each a superset of the one below.  A primitive table runs
- * only on a CPU at or above its tier. */
-enum { PIVCO_TIER_BASE, PIVCO_TIER_SSE4, PIVCO_TIER_AVX2, PIVCO_TIER_AVX512, PIVCO_TIER_COUNT };
-static const char *const pivco_tier_names[] = { "base", "sse4.1", "avx2", "avx512-vbmi2" };
+/* SIMD tiers: the x86 ones, then the arm ones, each a superset of the
+ * one below on its architecture.  A primitive table runs only on a CPU
+ * at or above its tier. */
+enum { PIVCO_TIER_BASE, PIVCO_TIER_SSE4, PIVCO_TIER_AVX2, PIVCO_TIER_AVX512,
+       PIVCO_TIER_NEON_LUT, PIVCO_TIER_COUNT };
+static const char *const pivco_tier_names[] = { "base", "sse4.1", "avx2", "avx512-vbmi2",
+                                                "neon+lut+cssc" };
 _Static_assert(sizeof pivco_tier_names / sizeof pivco_tier_names[0] == PIVCO_TIER_COUNT,
                "one name per tier");
 
@@ -92,6 +100,21 @@ static int pivco_cpu_tier(void)
         return PIVCO_TIER_AVX2;
     if (__builtin_cpu_supports("sse4.1") && __builtin_cpu_supports("popcnt"))
         return PIVCO_TIER_SSE4;
+#elif defined(__APPLE__) && defined(__aarch64__)
+    int lut = 0;
+    int cssc = 0;
+    size_t len = sizeof lut;
+    if (sysctlbyname("hw.optional.arm.FEAT_LUT", &lut, &len, NULL, 0) != 0)
+        lut = 0;
+    len = sizeof cssc;
+    if (sysctlbyname("hw.optional.arm.FEAT_CSSC", &cssc, &len, NULL, 0) != 0)
+        cssc = 0;
+    if (lut && cssc)
+        return PIVCO_TIER_NEON_LUT;
+#elif defined(__linux__) && defined(__aarch64__) && defined(HWCAP2_LUT) && defined(HWCAP2_CSSC)
+    unsigned long hwcap2 = getauxval(AT_HWCAP2);
+    if ((hwcap2 & HWCAP2_LUT) && (hwcap2 & HWCAP2_CSSC))
+        return PIVCO_TIER_NEON_LUT;
 #endif
     return PIVCO_TIER_BASE;
 }
@@ -102,6 +125,9 @@ extern const pivco_prims_t pivco_prims_x86_avx2_intel;
 #endif
 #if defined(PIVCO_HAS_AVX512)
 extern const pivco_prims_t pivco_prims_avx512_zen45;
+#endif
+#if defined(PIVCO_BUILT_NEON_LUT)
+extern const pivco_prims_t pivco_prims_neon_lut;
 #endif
 
 /* A primitive table and the SIMD tier it needs. */
@@ -116,6 +142,9 @@ static const pivco_prims_entry_t pivco_prims_tables[] = {
 #if defined(PIVCO_HAS_NEON)
     { "neon", PIVCO_TIER_BASE, &pivco_prims_neon },
     { "neon_neoverse_v1", PIVCO_TIER_BASE, &pivco_prims_neon_neoverse_v1 },
+#endif
+#if defined(PIVCO_BUILT_NEON_LUT)
+    { "neon_lut", PIVCO_TIER_NEON_LUT, &pivco_prims_neon_lut },
 #endif
 #if defined(PIVCO_HAS_SSE4)
     { "x86", PIVCO_TIER_SSE4, &pivco_prims_x86 },
@@ -166,6 +195,7 @@ static const char *pivco_default_name(int cpu_tier)
         "avx512",
         intel ? "x86_avx2_intel" : "x86_avx2",
         "x86",
+        "neon_lut",
         neoverse_v1 ? "neon_neoverse_v1" : "neon",
         "neon",
         "scalar",

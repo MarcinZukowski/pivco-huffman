@@ -145,6 +145,30 @@ const pivco_prims_t pivco_prims_neon_neoverse_v1 = {
     .pack_nat            = pack_dN_neon,
 };
 
+#if defined(PIVCO_BUILT_NEON_LUT)
+/* FEAT_LUT + FEAT_CSSC (Apple M6+): LUTI for the two-constant merges and
+ * the natural-layout D=2/4 flat merges, CNT for short popcounts. */
+const pivco_prims_t pivco_prims_neon_lut = {
+    .name                = "neon_lut",
+    .codec_init          = codec_init_neon,
+    .histogram_chunk     = histogram_chunk_scalar,
+    .enc_init            = slot_enc_init_neon,
+    .enc_partition_full  = part_full_neon,
+    .enc_partition_right = slot_enc_partition_right_neon,
+    .enc_partition_none  = slot_enc_partition_none_neon,
+    .popcount_K_right    = popcount_K_right_lut_neon,
+    .merge_cst_cst       = merge_cst_cst_lut_neon,
+    .merge_cst_vec       = merge_cst_vec_neon,
+    .merge_vec_vec       = merge_vec_vec_neon,
+    .merge_v512          = vert512_merge_neon,
+    .merge_v128          = vert_merge_neon,
+    .merge_nat           = merge_flat_lut_neon,
+    .pack_v512           = vert512_pack_neon,
+    .pack_v128           = vert_pack_neon,
+    .pack_nat            = pack_dN_neon,
+};
+#endif
+
 #elif defined(PIVCO_BACKEND_X86)
 
 #include "x86.h"

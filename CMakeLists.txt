@@ -128,6 +128,18 @@ if(TARGET_ARCH STREQUAL "arm64" OR TARGET_ARCH STREQUAL "aarch64")
     list(APPEND PIVCO_SOURCES
         src/prims/neon_tables.c)
     add_compile_definitions(PIVCO_HAS_NEON=1)
+    # FEAT_LUT + FEAT_CSSC kernels (Apple M6+) carry per-function target
+    # attributes; built when the compiler knows them, picked at runtime.
+    include(CheckCSourceCompiles)
+    check_c_source_compiles("
+        #include <arm_neon.h>
+        __attribute__((target(\"lut,cssc\")))
+        uint8x16_t f(uint8x16_t t, uint8x16_t v, unsigned long long w)
+        { return vaddq_u8(vluti2q_laneq_u8(t, v, 0), vdupq_n_u8(__builtin_popcountll(w))); }
+        int main(void) { return 0; }" COMPILER_HAS_NEON_LUT)
+    if(COMPILER_HAS_NEON_LUT)
+        add_compile_definitions(PIVCO_BUILT_NEON_LUT=1)
+    endif()
     # Note: an SVE backend existed (pivco_huffman_sve.c, removed 2026-08-14
     # -- see git history) but was disabled and stale (pre-unified-codec).
     # Empirically confirmed loss vs NEON at

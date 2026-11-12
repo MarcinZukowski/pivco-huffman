@@ -1170,7 +1170,141 @@ static void merge_flat_d7_neon_asof_08f90b0(uint8_t *symbols, int n,
 static void pv_merge_flat_d7_asof_08f90b0(const ctx_t *c) { merge_flat_d7_neon_asof_08f90b0(c->out, c->n, c->bm, c->c2s); }
 #endif /* USE_NEON_KERNELS */
 
+#if defined(USE_NEON_KERNELS) && defined(PIVCO_BUILT_NEON_LUT) && defined(__APPLE__)
+/* luti-*: unrolled forms of the neon_lut table's FEAT_LUT (Apple M6+)
+ * kernels (issue #32), which also run their tails.  The plain forms are
+ * production: run bench_prim under PIVCO_PRIMS=neon_lut.  Registered
+ * only when the host reports FEAT_LUT. */
+#include <sys/sysctl.h>
+#define PV_HAS_LUTI 1
+static int pv_has_lut(void)
+{
+    int v = 0;
+    size_t len = sizeof(v);
+    if (sysctlbyname("hw.optional.arm.FEAT_LUT", &v, &len, NULL, 0) != 0) return 0;
+    return v;
+}
+/* Unrolled forms: U loads per iteration; X4 stores through st1 {4 regs}. */
+#define PV_LUTI_D2_BODY(o, b, v)                                  \
+    vst1q_u8((o),      vluti2q_laneq_u8(t, (v), 0));              \
+    vst1q_u8((o) + 16, vluti2q_laneq_u8(t, (v), 1));              \
+    vst1q_u8((o) + 32, vluti2q_laneq_u8(t, (v), 2));              \
+    vst1q_u8((o) + 48, vluti2q_laneq_u8(t, (v), 3));
+#define PV_LUTI_D4_BODY(o, b, v)                                  \
+    vst1q_u8((o),      vluti4q_laneq_u8(t, (v), 0));              \
+    vst1q_u8((o) + 16, vluti4q_laneq_u8(t, (v), 1));
+#define PV_LUTI_CC_BODY(o, b, v)                                                  \
+    {                                                                             \
+        vst1q_u16((uint16_t *)((o)),       vluti2q_laneq_u16(t, (v), 0));         \
+        vst1q_u16((uint16_t *)((o) + 16),  vluti2q_laneq_u16(t, (v), 1));         \
+        vst1q_u16((uint16_t *)((o) + 32),  vluti2q_laneq_u16(t, (v), 2));         \
+        vst1q_u16((uint16_t *)((o) + 48),  vluti2q_laneq_u16(t, (v), 3));         \
+        vst1q_u16((uint16_t *)((o) + 64),  vluti2q_laneq_u16(t, (v), 4));         \
+        vst1q_u16((uint16_t *)((o) + 80),  vluti2q_laneq_u16(t, (v), 5));         \
+        vst1q_u16((uint16_t *)((o) + 96),  vluti2q_laneq_u16(t, (v), 6));         \
+        vst1q_u16((uint16_t *)((o) + 112), vluti2q_laneq_u16(t, (v), 7));         \
+    }
+/* OUT = output symbols per 16 B load, SH = log2(output symbols per bm byte). */
+#define PV_LUTI_UNROLLED(NAME, TTYPE, TLOAD, BODY, OUT, SH, U, TAIL)              \
+__attribute__((target("lut")))                                                    \
+static void NAME(uint8_t *out, int n, const uint8_t *bm, const uint8_t *c2s)      \
+{                                                                                 \
+    const TTYPE t = TLOAD;                                                        \
+    int i = 0;                                                                    \
+    for (; i + (U) * (OUT) <= n; i += (U) * (OUT)) {                              \
+        uint8x16_t v[U];                                                          \
+        for (int u = 0; u < (U); u++) v[u] = vld1q_u8(bm + ((i + u * (OUT)) >> (SH))); \
+        for (int u = 0; u < (U); u++) { BODY(out + i + u * (OUT), bm, v[u]) }     \
+    }                                                                             \
+    TAIL(out + i, n - i, bm + (i >> (SH)), c2s);                                  \
+}
+static void pv_luti_tail_d2(uint8_t *o, int n, const uint8_t *b, const uint8_t *c) { merge_flat_d2_lut_neon(o, n, b, c); }
+static void pv_luti_tail_d4(uint8_t *o, int n, const uint8_t *b, const uint8_t *c) { merge_flat_d4_lut_neon(o, n, b, c); }
+static void pv_luti_tail_cc(uint8_t *o, int n, const uint8_t *b, const uint8_t *c) { merge_cst_cst_lut_neon(b, n, c[0], c[1], o); }
+PV_LUTI_UNROLLED(merge_flat_d2_luti_u2, uint8x16_t, vld1q_u8(c2s), PV_LUTI_D2_BODY, 64, 2, 2, pv_luti_tail_d2)
+PV_LUTI_UNROLLED(merge_flat_d2_luti_u4, uint8x16_t, vld1q_u8(c2s), PV_LUTI_D2_BODY, 64, 2, 4, pv_luti_tail_d2)
+PV_LUTI_UNROLLED(merge_flat_d4_luti_u2, uint8x16_t, vld1q_u8(c2s), PV_LUTI_D4_BODY, 32, 1, 2, pv_luti_tail_d4)
+PV_LUTI_UNROLLED(merge_flat_d4_luti_u4, uint8x16_t, vld1q_u8(c2s), PV_LUTI_D4_BODY, 32, 1, 4, pv_luti_tail_d4)
+static uint8_t pv_luti_cc_lr[2] = { MERGE_LEFT_SYM, MERGE_RIGHT_SYM };
+#define PV_LUTI_CC_T ({ const uint16_t tb_[8] = {                                          \
+        (uint16_t)(c2s[0] | (c2s[0] << 8)), (uint16_t)(c2s[1] | (c2s[0] << 8)),           \
+        (uint16_t)(c2s[0] | (c2s[1] << 8)), (uint16_t)(c2s[1] | (c2s[1] << 8)), 0, 0, 0, 0 }; \
+        vld1q_u16(tb_); })
+PV_LUTI_UNROLLED(merge_cc_luti_u2, uint16x8_t, PV_LUTI_CC_T, PV_LUTI_CC_BODY, 128, 3, 2, pv_luti_tail_cc)
+PV_LUTI_UNROLLED(merge_cc_luti_u4, uint16x8_t, PV_LUTI_CC_T, PV_LUTI_CC_BODY, 128, 3, 4, pv_luti_tail_cc)
+/* x4: four LUTI results per st1 {v0-v3} (64 B per store instruction). */
+__attribute__((target("lut")))
+static void merge_flat_d2_luti_x4(uint8_t *out, int n, const uint8_t *bm, const uint8_t *c2s)
+{
+    const uint8x16_t t = vld1q_u8(c2s);
+    int i = 0;
+    for (; i + 256 <= n; i += 256) {
+        uint8x16x4_t v = vld1q_u8_x4(bm + (i >> 2));
+        for (int u = 0; u < 4; u++) {
+            uint8x16x4_t o = {{ vluti2q_laneq_u8(t, v.val[u], 0), vluti2q_laneq_u8(t, v.val[u], 1),
+                                vluti2q_laneq_u8(t, v.val[u], 2), vluti2q_laneq_u8(t, v.val[u], 3) }};
+            vst1q_u8_x4(out + i + 64 * u, o);
+        }
+    }
+    merge_flat_d2_lut_neon(out + i, n - i, bm + (i >> 2), c2s);
+}
+__attribute__((target("lut")))
+static void merge_flat_d4_luti_x4(uint8_t *out, int n, const uint8_t *bm, const uint8_t *c2s)
+{
+    const uint8x16_t t = vld1q_u8(c2s);
+    int i = 0;
+    for (; i + 128 <= n; i += 128) {
+        uint8x16x4_t v = vld1q_u8_x4(bm + (i >> 1));
+        uint8x16x4_t o0 = {{ vluti4q_laneq_u8(t, v.val[0], 0), vluti4q_laneq_u8(t, v.val[0], 1),
+                             vluti4q_laneq_u8(t, v.val[1], 0), vluti4q_laneq_u8(t, v.val[1], 1) }};
+        uint8x16x4_t o1 = {{ vluti4q_laneq_u8(t, v.val[2], 0), vluti4q_laneq_u8(t, v.val[2], 1),
+                             vluti4q_laneq_u8(t, v.val[3], 0), vluti4q_laneq_u8(t, v.val[3], 1) }};
+        vst1q_u8_x4(out + i, o0);
+        vst1q_u8_x4(out + i + 64, o1);
+    }
+    merge_flat_d4_lut_neon(out + i, n - i, bm + (i >> 1), c2s);
+}
+__attribute__((target("lut")))
+static void merge_cc_luti_x4(uint8_t *out, int K, const uint8_t *bm, const uint8_t *c2s)
+{
+    const uint16x8_t t = PV_LUTI_CC_T;
+    int j = 0;
+    for (; j + 128 <= K; j += 128) {
+        uint8x16_t v = vld1q_u8(bm + (j >> 3));
+        uint8x16x4_t o0 = {{ vreinterpretq_u8_u16(vluti2q_laneq_u16(t, v, 0)), vreinterpretq_u8_u16(vluti2q_laneq_u16(t, v, 1)),
+                             vreinterpretq_u8_u16(vluti2q_laneq_u16(t, v, 2)), vreinterpretq_u8_u16(vluti2q_laneq_u16(t, v, 3)) }};
+        uint8x16x4_t o1 = {{ vreinterpretq_u8_u16(vluti2q_laneq_u16(t, v, 4)), vreinterpretq_u8_u16(vluti2q_laneq_u16(t, v, 5)),
+                             vreinterpretq_u8_u16(vluti2q_laneq_u16(t, v, 6)), vreinterpretq_u8_u16(vluti2q_laneq_u16(t, v, 7)) }};
+        vst1q_u8_x4(out + j, o0);
+        vst1q_u8_x4(out + j + 64, o1);
+    }
+    merge_cst_cst_lut_neon(bm + (j >> 3), K - j, c2s[0], c2s[1], out + j);
+}
+static void prim_mf_luti_u2_d2(const ctx_t *c) { merge_flat_d2_luti_u2(c->out, c->n, c->bm, c->c2s); }
+static void prim_mf_luti_u4_d2(const ctx_t *c) { merge_flat_d2_luti_u4(c->out, c->n, c->bm, c->c2s); }
+static void prim_mf_luti_x4_d2(const ctx_t *c) { merge_flat_d2_luti_x4(c->out, c->n, c->bm, c->c2s); }
+static void prim_mf_luti_u2_d4(const ctx_t *c) { merge_flat_d4_luti_u2(c->out, c->n, c->bm, c->c2s); }
+static void prim_mf_luti_u4_d4(const ctx_t *c) { merge_flat_d4_luti_u4(c->out, c->n, c->bm, c->c2s); }
+static void prim_mf_luti_x4_d4(const ctx_t *c) { merge_flat_d4_luti_x4(c->out, c->n, c->bm, c->c2s); }
+static void prim_merge_cc_luti_u2(const ctx_t *c) { merge_cc_luti_u2(c->out, c->n, c->bm, pv_luti_cc_lr); }
+static void prim_merge_cc_luti_u4(const ctx_t *c) { merge_cc_luti_u4(c->out, c->n, c->bm, pv_luti_cc_lr); }
+static void prim_merge_cc_luti_x4(const ctx_t *c) { merge_cc_luti_x4(c->out, c->n, c->bm, pv_luti_cc_lr); }
+#endif /* USE_NEON_KERNELS && PIVCO_BUILT_NEON_LUT && __APPLE__ */
+
 static void pv_register_flat(void) {
+#if defined(PV_HAS_LUTI)
+    if (pv_has_lut()) {
+        PV_VARIANT_D(ST_MERGE_FLAT, "luti-u2", 2, PV_ISA_NEON, "issue #32", "luti, 2 loads/iter", 0, PV_FN_NEON(prim_mf_luti_u2_d2));
+        PV_VARIANT_D(ST_MERGE_FLAT, "luti-u4", 2, PV_ISA_NEON, "issue #32", "luti, 4 loads/iter", 0, PV_FN_NEON(prim_mf_luti_u4_d2));
+        PV_VARIANT_D(ST_MERGE_FLAT, "luti-x4", 2, PV_ISA_NEON, "issue #32", "luti, ld1/st1 x4 multi-register", 0, PV_FN_NEON(prim_mf_luti_x4_d2));
+        PV_VARIANT_D(ST_MERGE_FLAT, "luti-u2", 4, PV_ISA_NEON, "issue #32", "luti, 2 loads/iter", 0, PV_FN_NEON(prim_mf_luti_u2_d4));
+        PV_VARIANT_D(ST_MERGE_FLAT, "luti-u4", 4, PV_ISA_NEON, "issue #32", "luti, 4 loads/iter", 0, PV_FN_NEON(prim_mf_luti_u4_d4));
+        PV_VARIANT_D(ST_MERGE_FLAT, "luti-x4", 4, PV_ISA_NEON, "issue #32", "luti, ld1/st1 x4 multi-register", 0, PV_FN_NEON(prim_mf_luti_x4_d4));
+        PV_VARIANT(ST_MERGE_CST_CST, "luti-u2", PV_ISA_NEON, "issue #32", "luti, 2 loads/iter", 0, PV_FN_NEON(prim_merge_cc_luti_u2));
+        PV_VARIANT(ST_MERGE_CST_CST, "luti-u4", PV_ISA_NEON, "issue #32", "luti, 4 loads/iter", 0, PV_FN_NEON(prim_merge_cc_luti_u4));
+        PV_VARIANT(ST_MERGE_CST_CST, "luti-x4", PV_ISA_NEON, "issue #32", "luti, st1 x4 multi-register", 0, PV_FN_NEON(prim_merge_cc_luti_x4));
+    }
+#endif
     PV_VARIANT_D(ST_UNPACK,     "fl_natural", 2, PV_ISA_NEON, "bench_unpack_fl_layout.c",
                  "row-major shift+mask + vst4q deinterleave (D|8 only)", 0, PV_FN_NEON(prim_flat_unpack_fl_natural_d2));
     PV_VARIANT_D(ST_UNPACK,     "fl_natural", 4, PV_ISA_NEON, "bench_unpack_fl_layout.c",

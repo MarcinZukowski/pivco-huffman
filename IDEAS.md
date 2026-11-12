@@ -74,6 +74,7 @@
 - [Profiling overhead caveat (documented)](#profiling-overhead-caveat-2026-05-11)
 
 **NEON**
+- [Apple M6 LUTI and CSSC table (neon_lut)](#apple-m6-luti-and-cssc-table-neon_lut-2026-11-12)
 - [BU tree_merge 2× unroll + SIMD popcount_K_right](#bu-tree_merge-2-unroll--simd-popcount_k_right-2026-05-10)
 - [NEON bu_tree_merge 16B loads + precomputed (nr0,m1) shuf](#neon-bu_tree_merge-16b-loads--precomputed-nr0m1-shuf-2026-05-11)
 - [Graviton4 NEON D=5/6 unpack store-forward stall fix](#graviton4-neon-d56-unpack-store-forward-stall-fix-2026-04-27)
@@ -743,6 +744,50 @@ The codec was hardcoded to BLK (8192/4096 on ARM-AVX-512/x86), and `pivcohuf_fil
 Documented, not a code change.  `PROF_TIC`/`TOC` overhead varies 60× across platforms: M4 ~0%, Zen 3 +11%, **c8i Granite Rapids +61.6%** on prose_pride (Granite Rapids RDTSC is the most serializing of any modern core).  Microbench predicts well except on aggressive-OOO cores (c8a 0.2× pred, c8g 0.25×, M4 0×).  Rules going forward: bench numbers from `pivco_huffman_bench` (no `-DPIVCO_PROF=1`) are the ONLY authoritative headline; prof output is RELATIVE only.  Subtract ~25–30 ns/call on c8i, ~15 ns on older Intel, ~10 ns on Zen 3 when comparing primitive ns/call.
 
 **NEON**
+
+### Apple M6 LUTI and CSSC table (neon_lut), 2026-11-12
+The M6 reports FEAT_LUT (`LUTI2`/`LUTI4`) and FEAT_CSSC (scalar `CNT`
+on GPRs); the M4 has neither (issue #32).  `neon_lut` is picked when
+the CPU reports both (`hw.optional.arm.FEAT_*`; `HWCAP2_*` on Linux).
+It changes four slots; the kernels carry `target("lut,cssc")`, so the
+rest of the NEON compile is unchanged:
+- `merge_cst_cst`: `LUTI2.8H` over (first, second) symbol pairs.
+- `merge_nat` D=2/4: `LUTI2.16B` / `LUTI4.16B`, which take fields
+  LSB-first, the natural layout's order.
+- `popcount_K_right` below 512 bits: 8-byte words through `CNT`.
+
+M6, ns/elem at n=32768, `neon` → `neon_lut`:
+- `merge_cst_cst`: 0.0166 → 0.0067.
+- natural D=2: 0.0121 → 0.0069; D=4: 0.0099 → 0.0071.
+- Vertical is 0.0069 / 0.0067: LUTI brings natural to vertical's
+  speed.  Both sit at M6's store limit (~145–150 GB/s); 2×/4× unrolls
+  don't help.
+
+The D=4 loop is 32 bytes.  Built where it straddled a 64-byte line,
+it ran 0.0133 (slower than `neon`); `code_align(64)` on the three
+store loops pins them to a line.
+
+End to end on m6, one binary, default vs `PIVCO_PRIMS=neon`, 10
+alternating runs, decode:
+- PH: dna_fasta +9.3%, english +5.4%, prose_pride +4.6% (min–max
+  ranges apart); the rest of the main set −0.1..+1.6%.
+- FSE: dna_fasta +5.2%, english +4.8%, prose_pride +4.6%; the rest
+  −0.3..+1.6%.
+- Encode within ±0.3%.
+
+Not taken:
+- No LUTI3/5.  A bit-plane D=3/5 form (LUTI over 2-bit and 1-bit
+  planes, ORed) runs 0.0133, between natural and vertical, and needs
+  a wire change.
+- CSSC cursor offsets in `merge_vec_vec` / `merge_cst_vec` (4 GPR
+  `CNT`s on the prefix-masked word): 2–4% at n ≥ 2048 in isolation;
+  not in the table yet.
+- A vector-accumulate popcount with a masked last chunk ("vt2") is
+  4.82 ns at K=255 on M6 and 5.36 on M4 (prod 9.59 / 10.33), with no
+  CSSC needed, but it reads up to 15 B past the bitmap.
+
+Bench variants: `bench_prim` `luti*` (flat, `merge_cst_cst`) and
+`cssc` (merges), registered only on hosts that report the feature.
 
 ### BU tree_merge 2× unroll + SIMD popcount_K_right, 2026-05-10
 First round of BU optimisation after the new BU decoder landed.  (1) Stride-16 unroll on `tree_merge` and `tree_merge_bcast_{left,right}` (TD had it for ages, BU was stride-8): -7% per call.  (2) SIMD `popcount_K_right` with 4-wide ILP — `bu_popcount_K` from 57 → 7.5 ns/call (7.6×), 29% → 5% of wall.  BU/TD ratio went from ~0.94× to **1.50×** on M4 prose_pride.  Commits `8f03fac`, `462db14`, `a962789`.
