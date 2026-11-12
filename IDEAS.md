@@ -19,7 +19,6 @@
 - [Golomb/Rice tier for very-high-skew nodes (p > 0.95)](#golombrice-tier-for-very-high-skew-nodes-p--095-2026-05-16-research)
 - [pivcohuf block-structured file format + tiny-input header](#pivcohuf-block-structured-file-format--tiny-input-header-2026-05-17-parked)
 - [Tree-walk node-size histogram → tiny-node fast paths](#tree-walk-node-size-histogram--tiny-node-fast-paths)
-- [FastLanes-style transposed bitpacking](#fastlanes-style-transposed-bitpacking-2026-04-27)
 - [LSB-first canonical codes](#lsb-first-canonical-codes-2026-05-12)
 - [Skew-specialized merge: per-word easy paths](#skew-specialized-merge-per-word-easy-paths-all-zero--all-ones-2026-07-01-parked)
 - [Pooled partial-byte tails](#pooled-partial-byte-tails-2026-10-11)
@@ -52,6 +51,7 @@
 ### DONE — shipped
 
 **General**
+- [FastLanes-style transposed bitpacking](#fastlanes-style-transposed-bitpacking-2026-04-27)
 - [Nibble table on the wide-cursor coder](#nibble-table-on-the-wide-cursor-coder-2026-09-17)
 - [k=2 bit-context table (wire id 53)](#k2-bit-context-table-wire-id-53-2026-09-16)
 - [Pre-order walk schedule instead of the explicit tree](#pre-order-walk-schedule-instead-of-the-explicit-tree-2026-09-16)
@@ -189,6 +189,20 @@ sidesteps every vertical kernel.  Pre-diet cost of vertical for scale:
 +23.5 KB codec_x86 TU / +22.1 KB codec_avx512 TU (~3.8K src lines);
 the diet removed ~1.5K lines, roughly half the text.
 
+Further open items (issue #28, `docs/BITPACKING.md`):
+- Per-CPU encode defaults (a) are now a small change on top of the
+  runtime-picked tables, but the layout is fixed at encode time: the
+  default would follow the encoding host, not the CPU that decodes.
+- AVX-512 vertical merges trail natural, which has hardware
+  `vpmultishiftqb`: SPR D=4 0.73x, Intel D>=5 0.86-0.99x.  Untried:
+  the FL-style two-zmm unroll for D=2..4.  A faster zmm form would
+  remove Intel's -0.7..-0.8% decode median, the one payer of the
+  hybrid default.
+- Bulk select (`bench_select`) on vertical regions: unmeasured.
+- Apple M6: LUTI (the `neon_lut` table) runs natural D=2/4 as fast as
+  vertical, so vertical gains nothing there at D=2/4; D=3/5/6/7 still
+  want it.
+
 ### Composed c2s tables for vertical D=2/4 steps, 2026-08-18
 Port the NEON natural-D=2 trick (TL[n]=c2s[n&3], TH[n]=c2s[(n>>2)&3]
 — fold the bit-extraction into prepped lookup tables so raw nibbles
@@ -286,9 +300,6 @@ Two design pieces worked out in detail: (a) replace the monolithic file with ind
 
 ### Tree-walk node-size histogram → tiny-node fast paths
 Codex item.  Recursive decoder calls `decode_node_*` per internal node; small-n nodes may have per-call overhead > partition work.  Instrumentation helper landed (`e54e2d5`), histogram analysis + tiny-node fast paths (`n ≤ 8 / ≤ 16`) still open.  Risk of skipping the analysis: dispatcher overhead wipes per-call savings, net negative on real text.
-
-### FastLanes-style transposed bitpacking, 2026-04-27
-Microbench (`bench_unpack_fl_layout.c`) shows FL-layout 2–22× faster than current `flat_dN_unpack` (G4 D=5/6 the extreme case).  End-to-end ceiling on real text ~5–6% (flat unpack is only ~7% of wall on prose_pride).  Costs: encoder rewrite (transpose bit-packing), 4 backends × 2 unpack styles, wire-format bump.  Bigger fish (partition 40% / scatter 18%) untouched by FL-layout.  See `docs/BITPACKING.md`.
 
 ### LSB-first canonical codes, 2026-05-12
 Bit-reversing canonical codes (root at bit 0) would let `code` replace `code_la` (-512 B table) but does NOT improve any hot operation: u8 subtree repack and partition kernels are symmetric.  Multi-day rewrite of every SIMD partition kernel for a marginal cleanup — not justified.  Logged so the question doesn't get re-derived.
@@ -535,7 +546,7 @@ E2E fair A/B/C (c3/c4/c5/c5a/c6a, enc_pb, canary-clean): **naive → 2tab is the
 **TODO — AVX2 in-register gather (the NEON-tbl analog).**  All the above are scalar merges because SSE/AVX2 has no full 256-entry byte shuffle.  NEON does the whole gather in-register with `vqtbl4 + 3×vqtbx4` (256-entry table across four 64-byte groups).  x86 options to investigate: (a) `pshufb`/`vpshufb` is only a 16-entry per-128-bit-lane table, so a 256-LUT needs a 16-way decomposition — one sub-table per high nibble, `pshufb` on the low nibble, select by comparing the high nibble — ~16 shuffles + blends per 16 bytes (probably too many ops to beat 2tab, but unmeasured); (b) `vpgatherdd` is a true memory gather but microcoded/slow on most uarches (Haswell/Zen bad, Skylake mediocre) and byte-granularity wastes it.  The clean 256-byte permute (`vpermb`/`vpermi2b`) is AVX-512 VBMI only — already the avx512 backend's path.  Low expected payoff, but the pshufb-decomposition gather is the one untried SIMD avenue for the SSE/AVX2 tier.
 
 ### SSE/AVX2 enc_node_full gap vs huf0 on text, 2026-05-12, partial
-Older Intel (c3/c4/c5) and Zen 3 (c6a) trailed huf0_x2 by ~25–30% on text encode.  Partial progress: AVX2 pack_d{2,3,5,6,7} shipped (`a1aa6b9`, ryg multiply-as-shift) + 2x partition unroll (`83e23a0`).  Remaining angle: AVX2 partition_16 via two pshufb + concat, or 4-stream FastLanes pack (format change).  See rejected "AVX2 partition_16 stride" for the failed 2x unroll attempt.
+Older Intel (c3/c4/c5) and Zen 3 (c6a) trailed huf0_x2 by ~25–30% on text encode.  Partial progress: AVX2 pack_d{2,3,5,6,7} shipped (`a1aa6b9`, ryg multiply-as-shift) + 2x partition unroll (`83e23a0`).  Remaining angle: AVX2 partition_16 via two pshufb + concat.  The FastLanes-style pack angle shipped as the vertical layouts (`2657584`: AVX2-tier pack 1.1–3.3×).  See rejected "AVX2 partition_16 stride" for the failed 2x unroll attempt.
 
 ### SSE/AVX2 D=7 flat-subtree path
 NEON and AVX-512 D=7 BU `merge_flat_d7_*` shipped (`7e4bc44`, `dcfaecc`); SSE/AVX2 still has no D=7 SIMD because pshufb is only 16-wide and the 128-entry c2s doesn't fit (see comment in `prims/x86.h:536`).  Coverage: bell_s80 0%, zipfian 11.2%, flat_M7 already 1.43× vs huf0 on the SSE host.  Expected end-to-end win <2% on zipfian.  Low marginal EV — parked.
@@ -635,6 +646,9 @@ RVV maps well: `vcompress` = partition, `vrgather` = TBL, **`vsuxei8` = native i
 ## DONE
 
 **General**
+
+### FastLanes-style transposed bitpacking, 2026-04-27
+Microbench (`bench_unpack_fl_layout.c`) showed FL-layout 2–22× faster than the then-current `flat_dN_unpack` (G4 D=5/6 the extreme case), with an end-to-end ceiling on real text of ~5–6%.  Shipped in adapted form as the vertical flat layouts (`2657584`, wire v0.9, issue #28); follow-ups under "Vertical flat regions".  The bench's `flat_dX` column now measures the `_safe` tail helpers, not production's natural merges, so its speedups overstate the gap.
 
 ### Nibble table on the wide-cursor coder, 2026-09-17
 id 51's bitstream is now the static path's wide-cursor layout (eight
