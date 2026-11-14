@@ -1038,15 +1038,15 @@ static inline const uint8_t *codec_read_bitmap(pivco_decoder_t *dec_ctx,
     return wire_read_bitmap(in_ptr, n, scratch, marker);
 }
 
-static void codec_decode_subtree(pivco_decoder_t *dec_ctx,
-                                   const pivco_table_t *table,
-                                   int rec_idx, int K,
-                                   uint8_t *out, uint8_t *tmp,
-                                   const uint8_t **in_ptr,
-                                   const uint8_t *node_markers,
-                                   int krt)
+static int codec_decode_subtree(pivco_decoder_t *dec_ctx,
+                                  const pivco_table_t *table,
+                                  int rec_idx, int K,
+                                  uint8_t *out, uint8_t *tmp,
+                                  const uint8_t **in_ptr,
+                                  const uint8_t *node_markers,
+                                  int krt)
 {
-    if (K == 0) return;
+    if (K == 0) return PIVCO_OK;
 
     const pivco_sched_rec_t *rec = &table->dec.sched[rec_idx];
     const uint8_t *r2s = table->dec.rank_to_sym;
@@ -1060,14 +1060,14 @@ static void codec_decode_subtree(pivco_decoder_t *dec_ctx,
         int fse_coded = 0;
         const uint8_t *bm = wire_read_flat_region(in_ptr, total_bytes,
                                                    &owned, &fse_coded);
-        if (!bm) return;   /* allocation failure; caller sees short output */
+        if (PIVCO_UNLIKELY(!bm)) return PIVCO_ERR_NULL;   /* allocation failure */
         const uint8_t *c2s = &r2s[rec->param];
         /* An FSE-coded region is always natural-packed, whatever the
          * table's configured layout (see codec_fse_try). */
         if (fse_coded) prim_merge_flat_natural(out, K, bm, D, c2s);
         else           prim_merge_flat(out, K, bm, D, c2s, table->flat_layout);
         free(owned);
-        return;
+        return PIVCO_OK;
     }
 
     case PIVCO_SCHED_BOTH_LEAVES: {
@@ -1075,7 +1075,7 @@ static void codec_decode_subtree(pivco_decoder_t *dec_ctx,
         uint8_t bm_scratch[(size_t)bitmap_bytes(K) + 16];
         const uint8_t *bm = codec_read_bitmap(dec_ctx, table, in_ptr, K, bm_scratch, node_markers[rec_idx]);
         prim_merge_cst_cst(bm, K, r2s[rec->param], r2s[rec->param + 1], out);
-        return;
+        return PIVCO_OK;
     }
 
     case PIVCO_SCHED_LEAF_LEFT: {
@@ -1091,16 +1091,20 @@ static void codec_decode_subtree(pivco_decoder_t *dec_ctx,
             K_right = prim_popcount_K_right(bm, K);
         } else {
             K_right = wire_read_kr_header(table, (int16_t)rec_idx, in_ptr);
+            if (PIVCO_UNLIKELY(K_right > K))
+                return PIVCO_ERR_CORRUPT;
         }
         uint8_t *right_buf = out + (K - K_right);
-        codec_decode_subtree(dec_ctx, table, rec_idx + 1, K_right,
-                              right_buf, tmp, in_ptr, node_markers, krt);
+        int rc = codec_decode_subtree(dec_ctx, table, rec_idx + 1, K_right,
+                                       right_buf, tmp, in_ptr, node_markers, krt);
+        if (PIVCO_UNLIKELY(rc != PIVCO_OK))
+            return rc;
 
         uint8_t bm_scratch[(size_t)(KRT_BITMAP_GOES_FIRST(K, krt) ? 0 : bitmap_bytes(K)) + 16];
         if (!KRT_BITMAP_GOES_FIRST(K, krt))
             bm = codec_read_bitmap(dec_ctx, table, in_ptr, K, bm_scratch, node_markers[rec_idx]);
         prim_merge_cst_vec(bm, K, r2s[rec->param], right_buf, out);
-        return;
+        return PIVCO_OK;
     }
 
     case PIVCO_SCHED_FULL:
@@ -1116,6 +1120,8 @@ static void codec_decode_subtree(pivco_decoder_t *dec_ctx,
             K_right = prim_popcount_K_right(bm, K);
         } else {
             K_right = wire_read_kr_header(table, (int16_t)rec_idx, in_ptr);
+            if (PIVCO_UNLIKELY(K_right > K))
+                return PIVCO_ERR_CORRUPT;
         }
         int K_left  = K - K_right;
         int left  = rec_idx + 1;
@@ -1124,24 +1130,32 @@ static void codec_decode_subtree(pivco_decoder_t *dec_ctx,
         if (K_right > K_left) {
             right_buf = out + K_left;            /* larger, in place    */
             left_buf  = tmp;                     /* smaller, ping-pong  */
-            codec_decode_subtree(dec_ctx, table, right, K_right,
-                                  right_buf, tmp, in_ptr, node_markers, krt);
-            codec_decode_subtree(dec_ctx, table, left,  K_left,
-                                  left_buf,  out, in_ptr, node_markers, krt);
+            int rc = codec_decode_subtree(dec_ctx, table, right, K_right,
+                                           right_buf, tmp, in_ptr, node_markers, krt);
+            if (PIVCO_UNLIKELY(rc != PIVCO_OK))
+                return rc;
+            rc = codec_decode_subtree(dec_ctx, table, left,  K_left,
+                                       left_buf,  out, in_ptr, node_markers, krt);
+            if (PIVCO_UNLIKELY(rc != PIVCO_OK))
+                return rc;
         } else {
             left_buf  = out + K_right;           /* larger, in place    */
             right_buf = tmp;                     /* smaller, ping-pong  */
-            codec_decode_subtree(dec_ctx, table, left,  K_left,
-                                  left_buf,  tmp, in_ptr, node_markers, krt);
-            codec_decode_subtree(dec_ctx, table, right, K_right,
-                                  right_buf, out, in_ptr, node_markers, krt);
+            int rc = codec_decode_subtree(dec_ctx, table, left,  K_left,
+                                           left_buf,  tmp, in_ptr, node_markers, krt);
+            if (PIVCO_UNLIKELY(rc != PIVCO_OK))
+                return rc;
+            rc = codec_decode_subtree(dec_ctx, table, right, K_right,
+                                       right_buf, out, in_ptr, node_markers, krt);
+            if (PIVCO_UNLIKELY(rc != PIVCO_OK))
+                return rc;
         }
 
         uint8_t bm_scratch[(size_t)(KRT_BITMAP_GOES_FIRST(K, krt) ? 0 : bitmap_bytes(K)) + 16];
         if (!KRT_BITMAP_GOES_FIRST(K, krt))
             bm = codec_read_bitmap(dec_ctx, table, in_ptr, K, bm_scratch, node_markers[rec_idx]);
         prim_merge_vec_vec(bm, K, left_buf, right_buf, out);
-        return;
+        return PIVCO_OK;
     }
     }
 }
@@ -1215,7 +1229,7 @@ int pivco_codec_decode(pivco_decoder_t *dec_ctx, const pivco_table_t *table, con
      * that figure is not a safe allocation target.  Against invalid
      * data (a bitmap popcount disagreeing with the declared child
      * counts) the floor is 2·N plus kernel-overtouch pad: with splits
-     * bounded (0 <= KR <= K — not currently checked), every recursive
+     * bounded (0 <= KR <= K, checked where KR is read), every recursive
      * (out, tmp) placement satisfies out + 2K <= 2·N and tmp + K <=
      * 2·N as arena offsets, which caps hostile cursor excursions too. */
     size_t need = (size_t)N * (PIVCO_MAX_CODE_LEN + 2) + MERGE_OVERREAD;
@@ -1232,11 +1246,15 @@ int pivco_codec_decode(pivco_decoder_t *dec_ctx, const pivco_table_t *table, con
             K_right = prim_popcount_K_right(bm, N);
         } else {
             K_right = wire_read_kr_header(table, 0, &ptr);
+            if (PIVCO_UNLIKELY(K_right > N))
+                return PIVCO_ERR_CORRUPT;
         }
         uint8_t *scratch = decode_scratch_ensure((pivco_scratch_t *)dec_ctx->internal, need);
         if (!scratch) return PIVCO_ERR_NULL;
-        codec_decode_subtree(dec_ctx, table, 1, K_right,
-                              scratch, scratch + K_right, &ptr, node_markers, krt);
+        int rc = codec_decode_subtree(dec_ctx, table, 1, K_right,
+                                      scratch, scratch + K_right, &ptr, node_markers, krt);
+        if (PIVCO_UNLIKELY(rc != PIVCO_OK))
+            return rc;
 
         uint8_t bm_scratch[(size_t)(KRT_BITMAP_GOES_FIRST(N, krt) ? 0 : bitmap_bytes(N)) + 16];
         if (!KRT_BITMAP_GOES_FIRST(N, krt))
@@ -1262,6 +1280,8 @@ int pivco_codec_decode(pivco_decoder_t *dec_ctx, const pivco_table_t *table, con
         K_right = prim_popcount_K_right(bm, N);
     } else {
         K_right = wire_read_kr_header(table, 0, &ptr);
+        if (PIVCO_UNLIKELY(K_right > N))
+            return PIVCO_ERR_CORRUPT;
     }
     int K_left  = N - K_right;
     int left  = 1;
@@ -1273,17 +1293,25 @@ int pivco_codec_decode(pivco_decoder_t *dec_ctx, const pivco_table_t *table, con
     if (K_right > K_left) {                  /* right larger -> first on the wire */
         buf_right = scratch;
         buf_left  = scratch + K_right;
-        codec_decode_subtree(dec_ctx, table, right, K_right,
-                              buf_right, /*tmp=*/buf_left, &ptr, node_markers, krt);
-        codec_decode_subtree(dec_ctx, table, left,  K_left,
-                              buf_left,  /*tmp=*/scratch + N, &ptr, node_markers, krt);
+        int rc = codec_decode_subtree(dec_ctx, table, right, K_right,
+                                      buf_right, /*tmp=*/buf_left, &ptr, node_markers, krt);
+        if (PIVCO_UNLIKELY(rc != PIVCO_OK))
+            return rc;
+        rc = codec_decode_subtree(dec_ctx, table, left,  K_left,
+                                  buf_left,  /*tmp=*/scratch + N, &ptr, node_markers, krt);
+        if (PIVCO_UNLIKELY(rc != PIVCO_OK))
+            return rc;
     } else {
         buf_left  = scratch;
         buf_right = scratch + K_left;
-        codec_decode_subtree(dec_ctx, table, left,  K_left,
-                              buf_left,  /*tmp=*/buf_right, &ptr, node_markers, krt);
-        codec_decode_subtree(dec_ctx, table, right, K_right,
-                              buf_right, /*tmp=*/scratch + N, &ptr, node_markers, krt);
+        int rc = codec_decode_subtree(dec_ctx, table, left,  K_left,
+                                      buf_left,  /*tmp=*/buf_right, &ptr, node_markers, krt);
+        if (PIVCO_UNLIKELY(rc != PIVCO_OK))
+            return rc;
+        rc = codec_decode_subtree(dec_ctx, table, right, K_right,
+                                  buf_right, /*tmp=*/scratch + N, &ptr, node_markers, krt);
+        if (PIVCO_UNLIKELY(rc != PIVCO_OK))
+            return rc;
     }
 
     uint8_t bm_scratch[(size_t)(KRT_BITMAP_GOES_FIRST(N, krt) ? 0 : bitmap_bytes(N)) + 16];

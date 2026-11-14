@@ -680,6 +680,86 @@ static int test_krt(void)
 }
 
 
+/* Decodes a copy of enc with the u16 at `off` set to `v`; returns the
+ * decode's result. */
+static int t_decode_with_u16(const pivco_table_t *table, const uint8_t *enc,
+                             size_t enc_len, size_t off, uint16_t v)
+{
+    uint8_t bad[PIVCO_MAX_ENCODED_SIZE];
+    uint8_t decoded[PIVCO_BLOCK_SIZE];
+    size_t consumed;
+    memcpy(bad, enc, enc_len);
+    memcpy(bad + off, &v, 2);
+    return pivco_decode(g_tdec, table, bad, enc_len, decoded, &consumed);
+}
+
+/* A stored K_right larger than its node is rejected as corrupt, at the
+ * root and one level down.  FSE off and krt 0, so the block is
+ * [N:u16][marker prefix][root K_right:u16][larger child's record...]
+ * and the larger child, when internal, starts with its own K_right. */
+static int test_corrupt_kr(void)
+{
+    printf("[test_corrupt_kr] ");
+
+    uint64_t freq[PIVCO_MAX_SYMBOLS];
+    make_english(freq);
+    uint64_t total = 0;
+    for (int i = 0; i < PIVCO_MAX_SYMBOLS; i++) total += freq[i];
+    pivco_cfg_t cfg = pivco_cfg_default;
+    cfg.fse_enabled = 0;
+    cfg.krt = 0;
+    pivco_table_t table;
+    int rc = pivco_build_table(&cfg, freq, &table);
+    if (rc != PIVCO_OK) FAIL("build_table returned %d", rc);
+    const pivco_sched_rec_t *root = &table.dec.sched[0];
+    if (pivco_sched_kind(root) != PIVCO_SCHED_FULL)
+        FAIL("english root is not a FULL node");
+
+    uint8_t symbols[PIVCO_BLOCK_SIZE];
+    uint64_t rng = 0xC0EEC0EEC0EEC0EEULL;
+    for (int i = 0; i < PIVCO_BLOCK_SIZE; i++) {
+        uint64_t r = xorshift64(&rng) % total;
+        uint64_t cum = 0;
+        int sym;
+        for (sym = 0; sym < PIVCO_MAX_SYMBOLS; sym++) {
+            cum += freq[sym];
+            if (r < cum) break;
+        }
+        symbols[i] = (uint8_t)sym;
+    }
+    uint8_t encoded[PIVCO_MAX_ENCODED_SIZE];
+    size_t enc_len;
+    rc = pivco_encode(g_tenc, &table, symbols, PIVCO_BLOCK_SIZE, encoded, &enc_len);
+    if (rc != PIVCO_OK) FAIL("encode returned %d", rc);
+    if (t_decode_check("intact", &table, symbols, PIVCO_BLOCK_SIZE, encoded, enc_len))
+        return 1;
+
+    const int N = PIVCO_BLOCK_SIZE;
+    size_t root_off = 2 + (table.mk_count ? 1 : 0);
+    uint16_t root_kr;
+    memcpy(&root_kr, encoded + root_off, 2);
+    if (root_kr == 0 || root_kr >= N)
+        FAIL("root K_right %u at offset %zu is not a split of %d", root_kr, root_off, N);
+    rc = t_decode_with_u16(&table, encoded, enc_len, root_off, (uint16_t)(N + 1));
+    if (rc != PIVCO_ERR_CORRUPT)
+        FAIL("root K_right %d > N: decode returned %d, want CORRUPT", N + 1, rc);
+
+    int K_left = N - root_kr;
+    int larger = root_kr > K_left ? root->right : 1;
+    int K_larger = root_kr > K_left ? root_kr : K_left;
+    pivco_sched_kind_t kind = pivco_sched_kind(&table.dec.sched[larger]);
+    if (kind != PIVCO_SCHED_FULL && kind != PIVCO_SCHED_LEAF_LEFT)
+        FAIL("english root's larger child has no K_right header");
+    rc = t_decode_with_u16(&table, encoded, enc_len, root_off + 2,
+                           (uint16_t)(K_larger + 1));
+    if (rc != PIVCO_ERR_CORRUPT)
+        FAIL("child K_right %d > K %d: decode returned %d, want CORRUPT",
+             K_larger + 1, K_larger, rc);
+
+    printf("PASS\n");
+    return 0;
+}
+
 /* ---- histogram primitive: dispatched vs naive, edges + alignment ---- */
 static int test_histogram(void)
 {
@@ -740,6 +820,7 @@ int test_roundtrip_all(void)
     failures += test_joint_lengths();
     failures += test_flat_layouts();
     failures += test_krt();
+    failures += test_corrupt_kr();
     failures += test_histogram();
 
     uint64_t freq[PIVCO_MAX_SYMBOLS];

@@ -23,6 +23,10 @@ void pivco_check_fail(const char *expr, const char *file, int line);
             pivco_check_fail(#cond, __FILE__, __LINE__);                 \
     } while (0)
 
+/* PIVCO_UNLIKELY(cond): the branch hint for recoverable error paths
+ * (corrupt input, allocation failure) -- the test stays, laid out cold. */
+#define PIVCO_UNLIKELY(cond) __builtin_expect(!!(cond), 0)
+
 #ifdef NDEBUG
 #define PIVCO_CHECK_DEBUG(cond) ((void)0)
 #else
