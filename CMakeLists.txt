@@ -276,6 +276,10 @@ if(UNIX AND NOT APPLE)
     # and must add -lm at their final link -- TurboBench already does.
     target_link_libraries(pivco_huffman PUBLIC m)
 endif()
+# pivco_fse.c and pivco_k1.c use pthread_once(); glibc before 2.34 keeps
+# it in libpthread.
+find_package(Threads REQUIRED)
+target_link_libraries(pivco_huffman PUBLIC Threads::Threads)
 
 # Relocatable, drop-in object with the vendored FiniteStateEntropy symbols
 # localized (FSE_*/HUF_*/HIST_*/g_debuglevel, plus XXH/ERR/BIT/POOL/ZSTD
