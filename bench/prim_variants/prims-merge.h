@@ -1213,134 +1213,109 @@ static inline void prim_merge_cv_unroll16_x86(const uint8_t *bm, int K,
 static void prim_merge_cv_unroll16(const ctx_t *c){ prim_merge_cv_unroll16_x86(c->bm, c->n, MERGE_LEFT_SYM, c->merge_right, c->out); }
 
 /* ============================================================================
- * merge_vec_vec / merge_cst_vec : u4 — production two-table merge, main loop
- *   unrolled 4x with the serial cursor (AVX2: 4 x 32 = 128 codes/iter, SSE4.1:
- *   4 x 16 = 64).  The residual goes to the production kernel.  Same step
- *   bodies as merge_{vec,cst}_vec_x86.
+ * merge_vec_vec / merge_cst_vec : asof-07025b4 — the two-table x86 merge
+ *   before the 4-step main loop: one step per iteration (AVX2 32 codes,
+ *   SSE4.1 16).
  * ========================================================================== */
+static void pv_merge_vv_x86_07025b4(const uint8_t *bm, int K,
+                                      const uint8_t *left,
+                                      const uint8_t *right,
+                                      uint8_t *out)
+{
+    int lc = 0, rc = 0, j = 0;
 #if defined(__AVX2__)
-#  define PV_U4_STEP 32
-__attribute__((always_inline))
-static inline void pv_u4_vv_step(const uint8_t *bm, int j, const uint8_t *left,
-                                 const uint8_t *right, uint8_t *out,
-                                 int *lc, int *rc)
-{
-    const __m256i ones = _mm256_set1_epi8(-1), zeros = _mm256_setzero_si256();
-    uint32_t mask;
-    memcpy(&mask, bm + (j >> 3), 4);
-    unsigned m0 = mask & 0xff, m1 = (mask >> 8) & 0xff,
-             m2 = (mask >> 16) & 0xff, m3 = (mask >> 24) & 0xff;
-    __m256i vShuf02 = x86_merge_load_halves(g_x86_merge_shuf0[m0], g_x86_merge_shuf0[m2]);
-    __m256i vShuf1  = x86_merge_bcastq(g_x86_merge_shuf1[m1]);
-    __m256i vShuf3  = x86_merge_bcastq(g_x86_merge_shuf1[m3]);
-    __asm__("" : "+x"(vShuf1)); __asm__("" : "+x"(vShuf3));   /* dodge llvm#203132 */
-    __m256i vShuf13  = _mm256_blend_epi32(vShuf1, vShuf3, 0xf0);
-    __m256i vShuf13M = _mm256_blend_epi32(zeros, vShuf13, 0xcc);
-    __m256i vShuf    = _mm256_add_epi8(vShuf02, vShuf13M);
-    int lo_pop = _mm_popcnt_u32(mask & 0xffff);
-    __m256i vR = x86_merge_load_halves(right + *rc, right + *rc + lo_pop);
-    __m256i vL = x86_merge_load_halves(left  + *lc, left  + *lc + 16 - lo_pop);
-    __m256i rr = _mm256_shuffle_epi8(vR, vShuf);
-    __m256i rl = _mm256_shuffle_epi8(vL, _mm256_xor_si256(vShuf, ones));
-    _mm256_storeu_si256((__m256i *)(out + j), _mm256_or_si256(rl, rr));
-    int pr = _mm_popcnt_u32(mask);
-    *rc += pr;
-    *lc += 32 - pr;
-}
-__attribute__((always_inline))
-static inline void pv_u4_cv_step(const uint8_t *bm, int j, __m256i vLb,
-                                 const uint8_t *right, uint8_t *out, int *rc)
-{
-    const __m256i ones = _mm256_set1_epi8(-1), zeros = _mm256_setzero_si256();
-    uint32_t mask;
-    memcpy(&mask, bm + (j >> 3), 4);
-    unsigned m0 = mask & 0xff, m1 = (mask >> 8) & 0xff,
-             m2 = (mask >> 16) & 0xff, m3 = (mask >> 24) & 0xff;
-    __m256i vShuf02 = x86_merge_load_halves(g_x86_merge_shuf0[m0], g_x86_merge_shuf0[m2]);
-    __m256i vShuf1  = x86_merge_bcastq(g_x86_merge_shuf1[m1]);
-    __m256i vShuf3  = x86_merge_bcastq(g_x86_merge_shuf1[m3]);
-    __asm__("" : "+x"(vShuf1)); __asm__("" : "+x"(vShuf3));
-    __m256i vShuf13  = _mm256_blend_epi32(vShuf1, vShuf3, 0xf0);
-    __m256i vShuf13M = _mm256_blend_epi32(zeros, vShuf13, 0xcc);
-    __m256i vShuf    = _mm256_add_epi8(vShuf02, vShuf13M);
-    int lo_pop = _mm_popcnt_u32(mask & 0xffff);
-    __m256i vR = x86_merge_load_halves(right + *rc, right + *rc + lo_pop);
-    __m256i rr = _mm256_shuffle_epi8(vR,  vShuf);
-    __m256i rl = _mm256_shuffle_epi8(vLb, _mm256_xor_si256(vShuf, ones));
-    _mm256_storeu_si256((__m256i *)(out + j), _mm256_or_si256(rl, rr));
-    *rc += _mm_popcnt_u32(mask);
-}
-#  define PV_U4_CV_LB_T __m256i
-#  define PV_U4_CV_LB(sym) _mm256_set1_epi8((char)(sym))
-#else
-#  define PV_U4_STEP 16
-__attribute__((always_inline))
-static inline void pv_u4_vv_step(const uint8_t *bm, int j, const uint8_t *left,
-                                 const uint8_t *right, uint8_t *out,
-                                 int *lc, int *rc)
-{
-    const __m128i ones = _mm_set1_epi8(-1);
-    unsigned lo = bm[j >> 3], hi = bm[(j >> 3) + 1];
-    __m128i shuf0 = _mm_load_si128((const __m128i *)g_x86_merge_shuf0[lo]);
-    __m128i shuf1 = _mm_slli_si128(_mm_loadl_epi64((const __m128i *)g_x86_merge_shuf1[hi]), 8);
-    __m128i merged = _mm_add_epi8(shuf0, shuf1);
-    __m128i R16 = _mm_loadu_si128((const __m128i *)(right + *rc));
-    __m128i L16 = _mm_loadu_si128((const __m128i *)(left  + *lc));
-    __m128i rr = _mm_shuffle_epi8(R16, merged);
-    __m128i rl = _mm_shuffle_epi8(L16, _mm_xor_si128(merged, ones));
-    _mm_storeu_si128((__m128i *)(out + j), _mm_or_si128(rr, rl));
-    int pr = __builtin_popcount(lo) + __builtin_popcount(hi);
-    *rc += pr;
-    *lc += 16 - pr;
-}
-__attribute__((always_inline))
-static inline void pv_u4_cv_step(const uint8_t *bm, int j, __m128i Lb,
-                                 const uint8_t *right, uint8_t *out, int *rc)
-{
-    const __m128i ones = _mm_set1_epi8(-1);
-    unsigned lo = bm[j >> 3], hi = bm[(j >> 3) + 1];
-    __m128i shuf0 = _mm_load_si128((const __m128i *)g_x86_merge_shuf0[lo]);
-    __m128i shuf1 = _mm_slli_si128(_mm_loadl_epi64((const __m128i *)g_x86_merge_shuf1[hi]), 8);
-    __m128i merged = _mm_add_epi8(shuf0, shuf1);
-    __m128i R16 = _mm_loadu_si128((const __m128i *)(right + *rc));
-    __m128i rr = _mm_shuffle_epi8(R16, merged);
-    __m128i rl = _mm_shuffle_epi8(Lb, _mm_xor_si128(merged, ones));
-    _mm_storeu_si128((__m128i *)(out + j), _mm_or_si128(rr, rl));
-    *rc += __builtin_popcount(lo) + __builtin_popcount(hi);
-}
-#  define PV_U4_CV_LB_T __m128i
-#  define PV_U4_CV_LB(sym) _mm_set1_epi8((char)(sym))
+    {
+        const __m256i ones = _mm256_set1_epi8(-1), zeros = _mm256_setzero_si256();
+        for (; j + 32 <= K; j += 32) {
+            uint32_t mask; memcpy(&mask, bm + (j >> 3), 4);
+            unsigned m0 = mask & 0xff, m1 = (mask >> 8) & 0xff,
+                     m2 = (mask >> 16) & 0xff, m3 = (mask >> 24) & 0xff;
+            __m256i vShuf02 = x86_merge_load_halves(g_x86_merge_shuf0[m0], g_x86_merge_shuf0[m2]);
+            __m256i vShuf1  = x86_merge_bcastq(g_x86_merge_shuf1[m1]);
+            __m256i vShuf3  = x86_merge_bcastq(g_x86_merge_shuf1[m3]);
+            __asm__("" : "+x"(vShuf1)); __asm__("" : "+x"(vShuf3));   /* dodge llvm#203132 */
+            __m256i vShuf13  = _mm256_blend_epi32(vShuf1, vShuf3, 0xf0);
+            __m256i vShuf13M = _mm256_blend_epi32(zeros, vShuf13, 0xcc);
+            __m256i vShuf    = _mm256_add_epi8(vShuf02, vShuf13M);
+            int lo_pop = _mm_popcnt_u32(mask & 0xffff);
+            __m256i vR = x86_merge_load_halves(right + rc, right + rc + lo_pop);
+            __m256i vL = x86_merge_load_halves(left  + lc, left  + lc + 16 - lo_pop);
+            __m256i rr = _mm256_shuffle_epi8(vR, vShuf);
+            __m256i rl = _mm256_shuffle_epi8(vL, _mm256_xor_si256(vShuf, ones));
+            _mm256_storeu_si256((__m256i *)(out + j), _mm256_or_si256(rl, rr));
+            int pr = _mm_popcnt_u32(mask);
+            rc += pr; lc += 32 - pr;
+        }
+    }
 #endif
-static void prim_merge_vv_u4_x86(const uint8_t *bm, int K, const uint8_t *left,
-                                 const uint8_t *right, uint8_t *out)
-{
-    int lc = 0;
-    int rc = 0;
-    int j = 0;
-    for (; j + 4 * PV_U4_STEP <= K; j += 4 * PV_U4_STEP) {
-        pv_u4_vv_step(bm, j,                  left, right, out, &lc, &rc);
-        pv_u4_vv_step(bm, j + PV_U4_STEP,     left, right, out, &lc, &rc);
-        pv_u4_vv_step(bm, j + 2 * PV_U4_STEP, left, right, out, &lc, &rc);
-        pv_u4_vv_step(bm, j + 3 * PV_U4_STEP, left, right, out, &lc, &rc);
+    {
+        const __m128i ones = _mm_set1_epi8(-1);
+        for (; j + 16 <= K; j += 16) {
+            unsigned lo = bm[j >> 3], hi = bm[(j >> 3) + 1];
+            __m128i shuf0 = _mm_load_si128((const __m128i *)g_x86_merge_shuf0[lo]);
+            __m128i shuf1 = _mm_slli_si128(_mm_loadl_epi64((const __m128i *)g_x86_merge_shuf1[hi]), 8);
+            __m128i merged = _mm_add_epi8(shuf0, shuf1);
+            __m128i R16 = _mm_loadu_si128((const __m128i *)(right + rc));
+            __m128i L16 = _mm_loadu_si128((const __m128i *)(left  + lc));
+            __m128i rr = _mm_shuffle_epi8(R16, merged);
+            __m128i rl = _mm_shuffle_epi8(L16, _mm_xor_si128(merged, ones));
+            _mm_storeu_si128((__m128i *)(out + j), _mm_or_si128(rr, rl));
+            int pr = __builtin_popcount(lo) + __builtin_popcount(hi);
+            rc += pr; lc += 16 - pr;
+        }
     }
-    merge_vec_vec_x86(bm + (j >> 3), K - j, left + lc, right + rc, out + j);
-}
-static void prim_merge_cv_u4_x86(const uint8_t *bm, int K, uint8_t left_sym,
-                                 const uint8_t *right, uint8_t *out)
-{
-    int rc = 0;
-    int j = 0;
-    const PV_U4_CV_LB_T Lb = PV_U4_CV_LB(left_sym);
-    for (; j + 4 * PV_U4_STEP <= K; j += 4 * PV_U4_STEP) {
-        pv_u4_cv_step(bm, j,                  Lb, right, out, &rc);
-        pv_u4_cv_step(bm, j + PV_U4_STEP,     Lb, right, out, &rc);
-        pv_u4_cv_step(bm, j + 2 * PV_U4_STEP, Lb, right, out, &rc);
-        pv_u4_cv_step(bm, j + 3 * PV_U4_STEP, Lb, right, out, &rc);
+    for (; j < K; j++) {
+        int mb = (bm[j >> 3] >> (j & 7)) & 1;
+        out[j] = mb ? right[rc++] : left[lc++];
     }
-    merge_cst_vec_x86(bm + (j >> 3), K - j, left_sym, right + rc, out + j);
 }
-static void prim_merge_vv_u4(const ctx_t *c){ prim_merge_vv_u4_x86(c->bm, c->n, c->merge_left, c->merge_right, c->out); }
-static void prim_merge_cv_u4(const ctx_t *c){ prim_merge_cv_u4_x86(c->bm, c->n, MERGE_LEFT_SYM, c->merge_right, c->out); }
+static void pv_merge_cv_x86_07025b4(const uint8_t *bm, int K,
+                                      uint8_t left_sym,
+                                      const uint8_t *right,
+                                      uint8_t *out)
+{
+    int rc = 0, j = 0;
+#if defined(__AVX2__)
+    {
+        const __m256i ones = _mm256_set1_epi8(-1), zeros = _mm256_setzero_si256();
+        const __m256i vLb = _mm256_set1_epi8((char)left_sym);
+        for (; j + 32 <= K; j += 32) {
+            uint32_t mask; memcpy(&mask, bm + (j >> 3), 4);
+            unsigned m0=mask&0xff, m1=(mask>>8)&0xff, m2=(mask>>16)&0xff, m3=(mask>>24)&0xff;
+            __m256i vShuf02 = x86_merge_load_halves(g_x86_merge_shuf0[m0], g_x86_merge_shuf0[m2]);
+            __m256i vShuf1  = x86_merge_bcastq(g_x86_merge_shuf1[m1]);
+            __m256i vShuf3  = x86_merge_bcastq(g_x86_merge_shuf1[m3]);
+            __asm__("" : "+x"(vShuf1)); __asm__("" : "+x"(vShuf3));
+            __m256i vShuf13  = _mm256_blend_epi32(vShuf1, vShuf3, 0xf0);
+            __m256i vShuf13M = _mm256_blend_epi32(zeros, vShuf13, 0xcc);
+            __m256i vShuf    = _mm256_add_epi8(vShuf02, vShuf13M);
+            int lo_pop = _mm_popcnt_u32(mask & 0xffff);
+            __m256i vR = x86_merge_load_halves(right + rc, right + rc + lo_pop);
+            __m256i rr = _mm256_shuffle_epi8(vR,  vShuf);
+            __m256i rl = _mm256_shuffle_epi8(vLb, _mm256_xor_si256(vShuf, ones));
+            _mm256_storeu_si256((__m256i *)(out + j), _mm256_or_si256(rl, rr));
+            rc += _mm_popcnt_u32(mask);
+        }
+    }
+#endif
+    {
+        const __m128i ones = _mm_set1_epi8(-1), Lb = _mm_set1_epi8((char)left_sym);
+        for (; j + 16 <= K; j += 16) {
+            unsigned lo = bm[j >> 3], hi = bm[(j >> 3) + 1];
+            __m128i shuf0 = _mm_load_si128((const __m128i *)g_x86_merge_shuf0[lo]);
+            __m128i shuf1 = _mm_slli_si128(_mm_loadl_epi64((const __m128i *)g_x86_merge_shuf1[hi]), 8);
+            __m128i merged = _mm_add_epi8(shuf0, shuf1);
+            __m128i R16 = _mm_loadu_si128((const __m128i *)(right + rc));
+            __m128i rr = _mm_shuffle_epi8(R16, merged);
+            __m128i rl = _mm_shuffle_epi8(Lb, _mm_xor_si128(merged, ones));
+            _mm_storeu_si128((__m128i *)(out + j), _mm_or_si128(rr, rl));
+            rc += __builtin_popcount(lo) + __builtin_popcount(hi);
+        }
+    }
+    for (; j < K; j++) { int mb = (bm[j >> 3] >> (j & 7)) & 1; out[j] = mb ? right[rc++] : left_sym; }
+}
+static void prim_merge_vv_07025b4(const ctx_t *c){ pv_merge_vv_x86_07025b4(c->bm, c->n, c->merge_left, c->merge_right, c->out); }
+static void prim_merge_cv_07025b4(const ctx_t *c){ pv_merge_cv_x86_07025b4(c->bm, c->n, MERGE_LEFT_SYM, c->merge_right, c->out); }
 
 
 #endif /* __SSE4_1__ */
@@ -2642,12 +2617,12 @@ static void pv_register_merge(void) {
     PV_VARIANT(ST_MERGE_VEC_VEC, "unroll16",       PV_ISA_SSE4, "asof-d24c0eb (prior production)",
                "2x-unrolled stride-16 expand_tab merge; production before the two-table merge", 0,
                PV_FN_SSE(prim_merge_vv_unroll16));
-    PV_VARIANT(ST_MERGE_VEC_VEC, "u4",             PV_ISA_SSE4, "x86 merge unroll study (2026-11)",
-               "production two-table merge, main loop 4x unrolled, serial cursor (AVX2 4x32, SSE4.1 4x16)", 0,
-               PV_FN_SSE(prim_merge_vv_u4));
-    PV_VARIANT(ST_MERGE_CST_VEC, "u4",             PV_ISA_SSE4, "x86 merge unroll study (2026-11)",
-               "production two-table merge, main loop 4x unrolled, serial cursor (AVX2 4x32, SSE4.1 4x16)", 0,
-               PV_FN_SSE(prim_merge_cv_u4));
+    PV_VARIANT(ST_MERGE_VEC_VEC, "asof-07025b4",   PV_ISA_SSE4, "07025b4 (prior production)",
+               "two-table merge, one step per iteration (AVX2 32, SSE4.1 16); production before the 4-step main loop", 0,
+               PV_FN_SSE(prim_merge_vv_07025b4));
+    PV_VARIANT(ST_MERGE_CST_VEC, "asof-07025b4",   PV_ISA_SSE4, "07025b4 (prior production)",
+               "two-table merge, one step per iteration (AVX2 32, SSE4.1 16); production before the 4-step main loop", 0,
+               PV_FN_SSE(prim_merge_cv_07025b4));
 #if defined(HAVE_SIMD)
     /* bidir — production prim_* on pieces, front and back at once */
     PV_VARIANT(ST_MERGE_VEC_VEC, "fwd64",    PV_ISA_BUILD, "bidirectional-merge study (2026-10)",
