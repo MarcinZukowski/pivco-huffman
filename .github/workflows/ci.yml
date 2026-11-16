@@ -25,9 +25,9 @@ jobs:
           submodules: recursive
       - name: Compiler default target
         run: |
-          cc --version | head -1
-          cc -Q --help=target 2>/dev/null | grep -E '^ +-march=' || true
-          echo | cc -dM -E - | grep -E '__(SSE4_2|AVX2|AVX512F)__' || true
+          "${CC:-cc}" --version | head -1
+          "${CC:-cc}" -Q --help=target 2>/dev/null | grep -E '^ +-march=' || true
+          echo | "${CC:-cc}" -dM -E - | grep -E '__(SSE4_2|AVX2|AVX512F)__' || true
       - name: Configure
         run: cmake -B build -DCMAKE_BUILD_TYPE=Release
       - name: Build
