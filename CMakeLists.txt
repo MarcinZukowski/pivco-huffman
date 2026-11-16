@@ -190,12 +190,14 @@ elseif(TARGET_ARCH STREQUAL "x86_64" OR TARGET_ARCH STREQUAL "amd64")
                            -mavx512vpopcntdq -mgfni -mavx512bitalg ${PIVCO_AVX2_FLAGS})
     # The SSE4.1 floor for everything; AVX2 and AVX-512 flags only on
     # their own codec and primitive-table objects.  The CPU is checked at
-    # runtime (pivco_huffman.c), not here.
+    # runtime (pivco_huffman.c), not here.  -march=x86-64-v2 pins the floor
+    # when the compiler defaults higher (Ubuntu 26.04 GCC: x86-64-v3);
+    # -mtune=generic keeps clang from tuning every object for x86-64-v2.
     message(STATUS "x86_64 runtime dispatch — SSE4.1 floor + every tier the compiler supports")
     list(APPEND PIVCO_SOURCES
         src/prims/x86_tables.c)
     add_compile_definitions(PIVCO_HAS_SSE4=1)
-    add_compile_options(-msse4.1 -mpopcnt)
+    add_compile_options(-march=x86-64-v2 -mtune=generic -msse4.1 -mpopcnt)
     if(COMPILER_HAS_AVX2)
         set(PIVCO_TIER_AVX2 ON)
         add_compile_definitions(PIVCO_BUILT_AVX2=1)
