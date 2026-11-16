@@ -246,8 +246,9 @@ static inline void merge_cst_vec_avx512(const uint8_t *bm, int K,
  * with the {disp8} pseudo-prefix, so the form no longer depends on the
  * build.  The loop shapes are the issue-#11 winners on c8a: serial
  * cursors 4x unrolled for cst_vec (vrb), popcount-prefix cursors for
- * vec_vec (u4szt).  The avx512_zen45 table runs them on Zen 4 and Zen 5;
- * the avx512 table keeps the plain C merges. */
+ * vec_vec (u4szt).  The avx512_zen45 table runs them on Zen 4 and Zen 5,
+ * avx512_spr_gnr runs merge_vec_vec_avx512_asm on Sapphire and Granite
+ * Rapids; the avx512 table keeps the plain C merges. */
 
 /* Merge-masked expand of base[idx..] into src under k, 8-byte disp8 form. */
 static inline __m512i expand_d8_avx512(__m512i src, __mmask64 k,

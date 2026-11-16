@@ -6,7 +6,7 @@
  * x86_avx2 are two compiles), defining the tables its PIVCO_BACKEND_*
  * and tier defines select.  One compile can define more than one table,
  * for one microarchitecture each (pivco_prims_x86_avx2_intel,
- * pivco_prims_avx512_zen45).
+ * pivco_prims_avx512_zen45, pivco_prims_avx512_spr_gnr).
  *
  * Kernels whose signature differs from their slot's get a slot_<slot>_
  * <backend> adapter next to their table.
@@ -316,6 +316,28 @@ const pivco_prims_t pivco_prims_avx512_zen45 = {
     .popcount_K_right    = slot_popcount_K_right_avx512,
     .merge_cst_cst       = merge_cst_cst_avx512,
     .merge_cst_vec       = merge_cst_vec_avx512_asm,
+    .merge_vec_vec       = merge_vec_vec_avx512_asm,
+    .merge_v512          = vert512_merge_zmm,
+    .merge_v128          = vert_merge_x86v,
+    .merge_nat           = merge_flat_avx512,
+    .pack_v512           = vert512_pack_zmm,
+    .pack_v128           = vert_pack_x86v,
+    .pack_nat            = pack_dN_avx512,
+};
+
+/* Sapphire Rapids and Granite Rapids: the _asm merge_vec_vec only.  The
+ * _asm merge_cst_vec loses calgary_pic decode on Intel (-5% on c8i). */
+const pivco_prims_t pivco_prims_avx512_spr_gnr = {
+    .name                = "avx512_spr_gnr",
+    .codec_init          = codec_init_avx512,
+    .histogram_chunk     = histogram_chunk_avx512,
+    .enc_init            = slot_enc_init_avx512,
+    .enc_partition_full  = part_full_avx512,
+    .enc_partition_right = part_right_avx512,
+    .enc_partition_none  = part_none_avx512,
+    .popcount_K_right    = slot_popcount_K_right_avx512,
+    .merge_cst_cst       = merge_cst_cst_avx512,
+    .merge_cst_vec       = merge_cst_vec_avx512,
     .merge_vec_vec       = merge_vec_vec_avx512_asm,
     .merge_v512          = vert512_merge_zmm,
     .merge_v128          = vert_merge_x86v,

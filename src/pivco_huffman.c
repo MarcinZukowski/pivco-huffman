@@ -125,6 +125,7 @@ extern const pivco_prims_t pivco_prims_x86_avx2_intel;
 #endif
 #if defined(PIVCO_HAS_AVX512)
 extern const pivco_prims_t pivco_prims_avx512_zen45;
+extern const pivco_prims_t pivco_prims_avx512_spr_gnr;
 #endif
 #if defined(PIVCO_BUILT_NEON_LUT)
 extern const pivco_prims_t pivco_prims_neon_lut;
@@ -156,6 +157,7 @@ static const pivco_prims_entry_t pivco_prims_tables[] = {
 #if defined(PIVCO_HAS_AVX512)
     { "avx512", PIVCO_TIER_AVX512, &pivco_prims_avx512 },
     { "avx512_zen45", PIVCO_TIER_AVX512, &pivco_prims_avx512_zen45 },
+    { "avx512_spr_gnr", PIVCO_TIER_AVX512, &pivco_prims_avx512_spr_gnr },
 #endif
 };
 #define PIVCO_N_PRIMS_TABLES (int)(sizeof pivco_prims_tables / sizeof pivco_prims_tables[0])
@@ -188,10 +190,12 @@ static const char *pivco_default_name(int cpu_tier)
 {
     int intel = pivco_cpu()->vendor == PIVCO_VENDOR_INTEL;
     pivco_uarch_t uarch = pivco_cpu()->uarch;
-    int zen45 = uarch == PIVCO_UARCH_ZEN4 || uarch == PIVCO_UARCH_ZEN5;
+    int zen45 = (uarch == PIVCO_UARCH_ZEN4 || uarch == PIVCO_UARCH_ZEN5);
+    int spr_gnr = (uarch == PIVCO_UARCH_SAPPHIRERAPIDS
+                   || uarch == PIVCO_UARCH_GRANITERAPIDS);
     int neoverse_v1 = (uarch == PIVCO_UARCH_NEOVERSE_V1);
     const char *order[] = {
-        zen45 ? "avx512_zen45" : "avx512",
+        zen45 ? "avx512_zen45" : (spr_gnr ? "avx512_spr_gnr" : "avx512"),
         "avx512",
         intel ? "x86_avx2_intel" : "x86_avx2",
         "x86",
